@@ -61,6 +61,21 @@ void sendPlayerMessage(const ChatMessageType acType, const String acContent, Pla
 
 void OverlayService::HandleChatMessage(const PacketEvent<SendChatMessageRequest>& acMessage) const noexcept
 {
+    const auto& chatMessage = acMessage.Packet.ChatMessage;
+    constexpr std::string_view cCodexCommand = "!codex";
+    if (chatMessage.compare(0, cCodexCommand.size(), cCodexCommand) == 0 &&
+        (chatMessage.size() == cCodexCommand.size() || chatMessage[cCodexCommand.size()] == ' '))
+    {
+        auto report = chatMessage.substr(cCodexCommand.size());
+        if (!report.empty() && report.front() == ' ')
+            report.erase(0, 1);
+        if (report.empty())
+            report = "manual in-game marker";
+
+        m_world.GetDiagnosticsService().RecordPlayerMessage(*acMessage.pPlayer, report);
+        return;
+    }
+
     auto [canceled, reason] = m_world.GetScriptService().HandleChatMessage(*acMessage.pPlayer->GetCharacter(), acMessage.Packet.ChatMessage);
     if (canceled)
         return;

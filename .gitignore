@@ -54,6 +54,7 @@ Code/ui/.vscode/*
 
 npm-debug.log
 .pnpm-debug.log
+runtime/
 
 Code/protocol/cpp/*.h
 Code/protocol/cpp/*.cc
