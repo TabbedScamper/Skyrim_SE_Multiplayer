@@ -181,6 +181,7 @@ void SteamLobbyService::JoinFriend(const uint64_t aSteamId) noexcept
         ShowMessage("That friend is not currently in a joinable Skyrim SE Multiplayer lobby.");
         return;
     }
+    spdlog::info("Steam friend join resolved friend {} to lobby {} (current {})", aSteamId, game.LobbyId, m_lobbyId);
     if (game.LobbyId == m_lobbyId)
         return;
     m_world.GetTransport().Close();
@@ -243,6 +244,10 @@ void SteamLobbyService::OnUpdate(const UpdateEvent&) noexcept
 
 void SteamLobbyService::PumpCallbacks() noexcept
 {
+    // World::Update does not reliably run on the title screen. This queue is
+    // also drained by PollMainMenuOptions, unlike the gameplay RunnerService.
+    m_titleScreenTasks.Drain();
+
     if (!m_autoHostAttempted && GetTickCount64() > 2000)
     {
         m_autoHostAttempted = true;
@@ -279,6 +284,41 @@ void SteamLobbyService::PumpCallbacks() noexcept
         CompleteCreate();
     else
         CompleteJoin();
+}
+
+void SteamLobbyService::QueueHostSession() noexcept
+{
+    m_titleScreenTasks.Add([this]() { HostSession(); });
+}
+
+void SteamLobbyService::QueueJoinSession(String aLobbyId) noexcept
+{
+    m_titleScreenTasks.Add([this, lobbyId = std::move(aLobbyId)]() { JoinSession(lobbyId); });
+}
+
+void SteamLobbyService::QueueLeaveSession() noexcept
+{
+    m_titleScreenTasks.Add([this]() { LeaveSession(); });
+}
+
+void SteamLobbyService::QueueJoinFriend(const uint64_t aSteamId) noexcept
+{
+    m_titleScreenTasks.Add([this, aSteamId]() { JoinFriend(aSteamId); });
+}
+
+void SteamLobbyService::QueueInviteFriend() noexcept
+{
+    m_titleScreenTasks.Add([this]() { InviteFriend(); });
+}
+
+void SteamLobbyService::QueueRefreshLobbyState() noexcept
+{
+    m_titleScreenTasks.Add([this]() { RefreshLobbyState(); });
+}
+
+void SteamLobbyService::QueueConnectJoinedSession(String aPassword) noexcept
+{
+    m_titleScreenTasks.Add([this, password = std::move(aPassword)]() { ConnectJoinedSession(password); });
 }
 
 void SteamLobbyService::OnConnected(const ConnectedEvent&) noexcept

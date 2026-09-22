@@ -1,5 +1,7 @@
 #pragma once
 
+#include <TiltedCore/TaskQueue.hpp>
+
 #include <Events/UpdateEvent.h>
 #include <Events/ConnectedEvent.h>
 
@@ -21,6 +23,17 @@ struct SteamLobbyService
     void ConnectJoinedSession(const String& acPassword) noexcept;
     void LeaveSession() noexcept;
     void PumpCallbacks() noexcept;
+
+    // CEF title-screen events arrive outside the gameplay update loop. Queue
+    // them here so PollMainMenuOptions can execute them on Skyrim's main
+    // thread while it pumps Steam callbacks.
+    void QueueHostSession() noexcept;
+    void QueueJoinSession(String aLobbyId) noexcept;
+    void QueueLeaveSession() noexcept;
+    void QueueJoinFriend(uint64_t aSteamId) noexcept;
+    void QueueInviteFriend() noexcept;
+    void QueueRefreshLobbyState() noexcept;
+    void QueueConnectJoinedSession(String aPassword) noexcept;
 
 private:
     enum class PendingOperation
@@ -61,4 +74,5 @@ private:
     HANDLE m_serverProcess{};
     HANDLE m_serverThread{};
     HANDLE m_serverJob{};
+    TiltedPhoques::TaskQueue m_titleScreenTasks;
 };

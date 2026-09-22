@@ -95,21 +95,20 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
         else if (eventName == "toggleDebugUI")
             ProcessToggleDebugUI();
         else if (eventName == "hostSteamSession")
-            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().HostSession(); });
+            World::Get().GetSteamLobbyService().QueueHostSession();
         else if (eventName == "joinSteamSession")
         {
             const auto lobbyId = eventArgs->GetString(0).ToString();
-            World::Get().GetRunner().Queue(
-                [lobbyId]() { World::Get().GetSteamLobbyService().JoinSession(lobbyId.c_str()); });
+            World::Get().GetSteamLobbyService().QueueJoinSession(lobbyId.c_str());
         }
         else if (eventName == "leaveSteamSession")
-            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().LeaveSession(); });
+            World::Get().GetSteamLobbyService().QueueLeaveSession();
         else if (eventName == "joinSteamFriend")
         {
             try
             {
                 const auto steamId = std::stoull(eventArgs->GetString(0).ToString());
-                World::Get().GetRunner().Queue([steamId]() { World::Get().GetSteamLobbyService().JoinFriend(steamId); });
+                World::Get().GetSteamLobbyService().QueueJoinFriend(steamId);
             }
             catch (...)
             {
@@ -117,9 +116,9 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             }
         }
         else if (eventName == "inviteSteamFriend")
-            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().InviteFriend(); });
+            World::Get().GetSteamLobbyService().QueueInviteFriend();
         else if (eventName == "refreshSteamLobby")
-            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().RefreshLobbyState(); });
+            World::Get().GetSteamLobbyService().QueueRefreshLobbyState();
         else if (eventName == "setSteamSessionAccess")
         {
             const bool open = eventArgs->GetBool(0);
@@ -129,8 +128,7 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
         else if (eventName == "connectJoinedSteamSession")
         {
             const String password = eventArgs->GetString(0).ToString().c_str();
-            World::Get().GetRunner().Queue(
-                [password]() { World::Get().GetSteamLobbyService().ConnectJoinedSession(password); });
+            World::Get().GetSteamLobbyService().QueueConnectJoinedSession(password);
         }
         else if (eventName == "requestGameSettings")
             World::Get().GetGameSettingsService().QueueRequestSettings();
