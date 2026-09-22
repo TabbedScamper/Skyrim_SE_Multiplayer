@@ -259,6 +259,15 @@ void TransportService::OnUpdate()
     SendAuthenticationRequest();
 }
 
+void TransportService::PumpMainMenu() noexcept
+{
+    // World::Update is dormant on parts of the title screen, but main-menu
+    // hosting still needs socket progress and completion of the asynchronous
+    // deployment scan before it can authenticate.
+    Update();
+    OnUpdate();
+}
+
 void TransportService::HandleUpdate(const UpdateEvent& acEvent) noexcept
 {
     Update();

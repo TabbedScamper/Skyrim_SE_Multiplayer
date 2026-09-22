@@ -20,6 +20,7 @@ struct SteamLobbyService
     void ApplyPartySettings(bool aOpen, bool aPasswordProtected) noexcept;
     void ConnectJoinedSession(const String& acPassword) noexcept;
     void LeaveSession() noexcept;
+    void PumpCallbacks() noexcept;
 
 private:
     enum class PendingOperation

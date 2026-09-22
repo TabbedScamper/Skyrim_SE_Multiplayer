@@ -162,6 +162,11 @@ void OpenCoopLobby()
 {
     spdlog::info("Opening Skyrim SE Multiplayer co-op lobby from the native main menu");
     auto& world = World::Get();
+    // Main-menu frames do not reliably emit the gameplay UpdateEvent used by
+    // SteamLobbyService's background auto-host fallback. Starting here keeps
+    // the UI's "Creating your private session" promise and is idempotent when
+    // the player reopens the panel.
+    world.GetSteamLobbyService().HostSession();
     auto& overlay = world.GetOverlayService();
     overlay.SetActive(true);
     if (auto* pApp = overlay.GetOverlayApp())
@@ -233,6 +238,12 @@ void PollMainMenuOptions(IMenu* apMainMenu) noexcept
 
     s_pMainMenuMovie = pMovie;
     ApplyMainMenuVisibility();
+
+    // World::Update is gameplay-driven and may be dormant on the title
+    // screen. Steam lobby create/join completion still requires
+    // SteamAPI_RunCallbacks, so pump it from the main menu's live movie poll.
+    World::Get().GetSteamLobbyService().PumpCallbacks();
+    World::Get().GetTransport().PumpMainMenu();
 
     auto* pWindow = BSGraphics::GetMainWindow();
     if (pWindow && pWindow->pSwapChain)

@@ -599,6 +599,16 @@ the first compatible complete deployment in the campaign manifest.
   to friends-only only after the host selects Open. `SetLobbyType` is owner-only;
   the game server independently enforces that only its party leader can change
   the replicated access/password state.
+- The same `LobbyCreated_t` reference defines the actionable failure results:
+  generic failure, timeout, rate limiting, access denied when the Steam app is
+  not configured for lobbies or the account lacks access, and no backend
+  connection. The client logs the raw `EResult` and lobby ID so live tests can
+  distinguish an ABI/layout bug from an App ID entitlement limitation.
+- [Valve's Steam API initialization reference](https://partner.steamgames.com/doc/api/steam_api)
+  requires `SteamAPI_Init` to succeed before any Steamworks interface is used.
+  Loading `steam_api64.dll`, setting `SteamAppId`, and obtaining interface
+  pointers is not sufficient; live testing returned `k_EResultNoConnection`
+  until this missing initialization path was identified.
 - The same reference documents lobby metadata as owner-written, member-readable
   key/value data. Lobby metadata contains only `has_password=0|1`; the secret is
   never advertised. The actual password is checked by the Skyrim Together
@@ -617,6 +627,11 @@ the first compatible complete deployment in the campaign manifest.
   protocol. Current lobby connections still use the host's advertised LAN
   endpoint. A relay adapter must be implemented and exercised separately before
   Internet play can be described as NAT-independent or relay-backed.
+- [CEF process result codes](https://cef-builds.spotifycdn.com/docs/148.0/cef__types_8h.html)
+  define exit code 38 as `CEF_RESULT_CODE_NORMAL_EXIT_AUTO_DE_ELEVATED`.
+  Interactive two-PC test launch tasks must therefore use the logged-in user's
+  limited token; an elevated scheduled task can leave the native game alive
+  without the CEF lobby/options overlay.
 
 ## Windows two-rig test access
 
@@ -631,6 +646,34 @@ the first compatible complete deployment in the campaign manifest.
   on the [official release](https://github.com/PowerShell/Win32-OpenSSH/releases/tag/10.0.0.0p2-Preview),
   stops only stale OpenSSH services/processes, and preserves an existing install
   directory before replacement.
+
+## Plugin activation and light-plugin load order
+
+- The upstream [TiltedEvolution source](https://github.com/tiltedphoques/TiltedEvolution)
+  treats Skyrim's in-memory compile indices as the authority for whether a
+  plugin is loaded. Live testing confirmed that `standardId == 0xFF` correctly
+  exposed disabled multiplayer ESPs even though their files existed on disk.
+  The deployment helper now enables the two required entries in `plugins.txt`,
+  sets `bEnableFileSelection=1`, and backs up both user files before editing.
+- Skyrim's regular and small/light plugins occupy separate compile-index pools;
+  this is also visible in the reverse-engineered
+  [CommonLibSSE-NG project](https://github.com/CharmedBaryon/CommonLibSSE-NG).
+  `SkyrimTogetherQuestPatches.esp` has the TES4 `0x200` light flag despite its
+  `.esp` extension. The original server loader inferred type only from the last
+  filename character, so it assigned the wrong pool and ID. `loadorder.txt`
+  now accepts a backward-compatible `light:` prefix, and the deployment helper
+  derives that prefix from each enabled plugin's TES4 header.
+
+## CEF message ownership
+
+- CEF's [`CefListValue::SetList`](https://cef-builds.spotifycdn.com/docs/121.3/classCefListValue.html)
+  transfers ownership when the supplied list is not already owned and
+  invalidates that reference. Its
+  [`CefFrame::SendProcessMessage`](https://cef-builds.spotifycdn.com/docs/139.0/classCefFrame.html)
+  similarly transfers the process-message contents. A live title-screen join
+  reused one argument list for `partyInfo` and `coopLobbyState`; the second send
+  dereferenced the invalidated CEF wrapper. `OverlayApp::ExecuteAsync` now
+  inserts a writable `Copy()` so callers may safely reuse their payload.
 
 ## Multiplayer state flight recorder
 

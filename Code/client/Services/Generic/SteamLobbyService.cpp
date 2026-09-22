@@ -14,6 +14,7 @@ template <class T> T LoadSteamFunction(HMODULE aModule, const char* acName) noex
 }
 
 using GetInterface = void*(__cdecl*)();
+using InitializeSteam = bool(__cdecl*)();
 using RunCallbacks = void(__cdecl*)();
 using CreateLobby = uint64_t(__cdecl*)(void*, int, int);
 using JoinLobby = uint64_t(__cdecl*)(void*, uint64_t);
@@ -90,6 +91,18 @@ bool SteamLobbyService::Initialize() noexcept
         return false;
     }
 
+    // The immersive launcher loads Steam's binaries and supplies the App ID,
+    // but Skyrim Together historically never initialized the client API
+    // because its direct-connect path did not need Steam interfaces. Lobby
+    // matchmaking does: Valve requires SteamAPI_Init to succeed before any
+    // ISteam* call.
+    const auto initializeSteam = LoadSteamFunction<InitializeSteam>(m_steamModule, "SteamAPI_Init");
+    if (!initializeSteam || !initializeSteam())
+    {
+        ShowMessage("Steam could not initialize. Make sure Steam is running and logged in.");
+        return false;
+    }
+
     const auto getMatchmaking = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamMatchmaking_v009");
     const auto getUtils = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamUtils_v010");
     auto getFriends = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamFriends_v017");
@@ -110,6 +123,11 @@ void SteamLobbyService::HostSession() noexcept
 {
     if (!Initialize() || m_pending != PendingOperation::None)
         return;
+    if (m_lobbyId)
+    {
+        PublishLobbyState();
+        return;
+    }
 
     const auto createLobby = LoadSteamFunction<CreateLobby>(m_steamModule, "SteamAPI_ISteamMatchmaking_CreateLobby");
     if (!createLobby || !StartLocalServer())
@@ -220,6 +238,11 @@ void SteamLobbyService::ConnectJoinedSession(const String& acPassword) noexcept
 
 void SteamLobbyService::OnUpdate(const UpdateEvent&) noexcept
 {
+    PumpCallbacks();
+}
+
+void SteamLobbyService::PumpCallbacks() noexcept
+{
     if (!m_autoHostAttempted && GetTickCount64() > 2000)
     {
         m_autoHostAttempted = true;
@@ -274,10 +297,13 @@ void SteamLobbyService::CompleteCreate() noexcept
     const auto getResult = LoadSteamFunction<GetApiCallResult>(m_steamModule, "SteamAPI_ISteamUtils_GetAPICallResult");
     LobbyCreatedResult result{};
     bool failed = false;
-    if (!getResult || !getResult(m_utils, m_apiCall, &result, sizeof(result), 513, &failed) || failed ||
+    const bool received = getResult && getResult(m_utils, m_apiCall, &result, sizeof(result), 513, &failed);
+    spdlog::info("Steam LobbyCreated_t: received={}, ioFailed={}, result={}, lobbyId={}", received, failed, result.Result, result.LobbyId);
+    if (!received || failed ||
         result.Result != 1 || !result.LobbyId)
     {
-        ShowMessage("Steam could not create the lobby.");
+        const auto message = fmt::format("Steam could not create the lobby (result {}).", result.Result);
+        ShowMessage(message.c_str());
     }
     else
     {
@@ -311,7 +337,9 @@ void SteamLobbyService::CompleteJoin() noexcept
     const auto getResult = LoadSteamFunction<GetApiCallResult>(m_steamModule, "SteamAPI_ISteamUtils_GetAPICallResult");
     LobbyEnterResult result{};
     bool failed = false;
-    if (!getResult || !getResult(m_utils, m_apiCall, &result, sizeof(result), 504, &failed) || failed ||
+    const bool received = getResult && getResult(m_utils, m_apiCall, &result, sizeof(result), 504, &failed);
+    spdlog::info("Steam LobbyEnter_t: received={}, ioFailed={}, response={}, lobbyId={}", received, failed, result.EnterResponse, result.LobbyId);
+    if (!received || failed ||
         result.EnterResponse != 1 || !result.LobbyId)
     {
         ShowMessage("Steam could not join the lobby.");

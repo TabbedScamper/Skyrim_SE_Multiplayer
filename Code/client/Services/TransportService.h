@@ -36,6 +36,7 @@ struct TransportService : Client
     void OnConnected() override;
     void OnDisconnected(EDisconnectReason aReason) override;
     void OnUpdate() override;
+    void PumpMainMenu() noexcept;
 
     [[nodiscard]] bool IsOnline() const noexcept { return m_connected; }
     void SetServerPassword(const std::string& acPassword) noexcept { m_serverPassword = acPassword; }

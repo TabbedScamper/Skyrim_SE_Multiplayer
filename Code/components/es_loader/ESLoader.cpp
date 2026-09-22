@@ -76,10 +76,30 @@ bool ESLoader::LoadLoadOrder()
         if (line.empty() || line[0] == '#')
             continue;
 
+        // Skyrim allows an ESP/ESM to carry the TES4 light-plugin flag. The
+        // filename extension alone therefore cannot describe the runtime load
+        // order. loadorder.txt may prefix those entries with "light:" so the
+        // dedicated server assigns the same FE index as the game.
+        constexpr std::string_view lightPrefix = "light:";
+        const bool explicitlyLite = line.size() > lightPrefix.size() &&
+                                    std::equal(lightPrefix.begin(), lightPrefix.end(), line.begin(), [](const char aLeft, const char aRight)
+                                    { return std::tolower(static_cast<unsigned char>(aLeft)) == std::tolower(static_cast<unsigned char>(aRight)); });
+        if (explicitlyLite)
+            line.erase(0, lightPrefix.size());
+
         PluginData plugin;
         plugin.m_filename = line;
 
         char extensionType = line.back();
+
+        if (explicitlyLite)
+        {
+            plugin.m_liteId = liteId;
+            liteId += 0x0001;
+            plugin.m_isLite = true;
+            m_loadOrder.push_back(plugin);
+            continue;
+        }
 
         switch (extensionType)
         {
