@@ -46,8 +46,9 @@ const snapshotExpression = `(() => {
       label: host.querySelector('.dropdown-selected')?.textContent?.trim() ?? null
     };
   });
-  const inputs = [...document.querySelectorAll('app-settings input')].map(input => ({
+  const inputs = [...document.querySelectorAll('input')].map(input => ({
     id: input.id || null,
+    context: input.closest('app-settings') ? 'settings' : input.closest('.coop-lobby') ? 'coop-lobby' : 'other',
     type: input.type,
     value: input.value,
     checked: input.checked,
@@ -57,7 +58,7 @@ const snapshotExpression = `(() => {
     url: location.href,
     title: document.title,
     settingsVisible: !!document.querySelector('app-settings'),
-    active: active ? { tag: active.tagName, id: active.id || null } : null,
+    active: active ? { tag: active.tagName, id: active.id || null, text: active.textContent?.trim() || null } : null,
     dropdowns,
     inputs,
     bodySize: { width: document.body.clientWidth, height: document.body.clientHeight }
