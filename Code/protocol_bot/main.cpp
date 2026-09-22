@@ -235,6 +235,55 @@ int main(int argc, char** argv)
     const std::string scenario = argc > 2 ? argv[2] : "join";
     const bool useSyntheticManifest = argc > 3 && std::string_view(argv[3]) == "synthetic-plugin";
 
+    if (scenario == "distributed-host" || scenario == "distributed-follower")
+    {
+        const bool isHost = scenario == "distributed-host";
+        ProtocolBot bot(isHost ? "PhysicalRigHost" : "PhysicalRigFollower", useSyntheticManifest);
+        if (!bot.Connect(endpoint) || !PumpUntil({&bot}, [&] { return bot.Authenticated; }, 10s))
+        {
+            PrintResult(scenario.c_str(), false, "physical-rig client did not authenticate");
+            return 1;
+        }
+
+        if (isHost)
+        {
+            PartyCreateRequest createParty{};
+            bot.SendMessage(createParty);
+            if (!PumpUntil({&bot}, [&] { return bot.PartySize == 1 && bot.IsLeader; }, 5s))
+            {
+                PrintResult(scenario.c_str(), false, "host did not create the physical-rig party");
+                return 1;
+            }
+        }
+
+        if (!PumpUntil({&bot}, [&] { return bot.PartySize == 2; }, 30s))
+        {
+            PrintResult(scenario.c_str(), false, "two physical-rig clients did not converge in one party");
+            return 1;
+        }
+
+        PartyReadyRequest ready;
+        ready.Ready = true;
+        bot.SendMessage(ready);
+        if (isHost)
+        {
+            if (!PumpUntil({&bot}, [&] { return bot.ReadyCount == 2; }, 15s))
+            {
+                PrintResult(scenario.c_str(), false, "host did not observe both physical rigs ready");
+                return 1;
+            }
+            PartyStartRequest start;
+            start.Mode = PartyStartRequest::kNew;
+            start.Launch = true;
+            bot.SendMessage(start);
+        }
+
+        const bool started = PumpUntil({&bot}, [&] { return bot.SessionState == 1 && bot.StartEpoch > 0; }, 15s);
+        PrintResult(scenario.c_str(), started,
+            started ? "physical-rig client reached the authoritative shared start epoch" : "physical-rig client did not reach shared start");
+        return started ? 0 : 1;
+    }
+
     ProtocolBot leader("HeadlessLeader", useSyntheticManifest);
     ProtocolBot follower(
         "HeadlessFollower", useSyntheticManifest, scenario == "mod-mismatch" ? 0x5B : 0x5A, scenario == "deployment-mismatch" ? 0x6B : 0x6A);

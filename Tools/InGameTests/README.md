@@ -37,3 +37,19 @@ localhost DevTools endpoint on port 8384. The current smoke suite covers:
 
 The workstation must remain logged in and unlocked. OS input injection cannot
 operate on the secure or locked desktop.
+
+## Physical two-PC protocol test
+
+`Run-TwoPcProtocolTest.ps1` runs without Skyrim or an interactive desktop. It
+starts the real server on the primary PC, runs one production-protocol bot on
+each physical rig, and requires both machines to converge on the same party,
+ready barrier, session state, and nonzero start epoch. With `-EnableModCheck`,
+both clients also authenticate with the same synthetic content fingerprint.
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Tools\InGameTests\Run-TwoPcProtocolTest.ps1 -EnableModCheck
+```
+
+The second PC must be reachable through the LAN-only SSH pairing. This test
+validates the real cross-machine transport and protocol, but not Steam overlay,
+Scaleform, rendering, input, audio, physics, or Skyrim engine behavior.
