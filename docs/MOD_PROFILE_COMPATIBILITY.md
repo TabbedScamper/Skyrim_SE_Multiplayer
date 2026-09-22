@@ -64,6 +64,14 @@ optimization, not an anti-cheat boundary. A campaign server pins the complete ro
 slots and rejects incomplete scans or mismatched layers. The server never copies
 or redistributes mod files.
 
+Runtime-generated Skyrim Together directories (`backups`, `cache`,
+`debug-feedback`, and `logs`) are excluded from the effective Data root. Their
+contents do not affect gameplay and differ normally between PCs; including them
+would make an F10 report or a local rollback backup falsely block the next join.
+Legacy backup locations, `.bak`/`.pre-*` files, optional crash-report helpers,
+and the host-only `STServer.ini` are excluded for the same reason. Client-side
+gameplay configuration, including cell-respawn overrides, remains strict.
+
 This proves byte-identical effective inputs, but it does not yet say which MO2
 mod supplied a winning loose file or which BSA member wins at runtime. That
 provenance is the next repair-UX frontier. Runtime files outside `Data` (the game

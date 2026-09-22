@@ -99,6 +99,12 @@ bool ShouldSkip(const std::string_view acPath) noexcept
 {
     return acPath.empty() || acPath.starts_with(".git/") || EndsWith(acPath, ".log") || EndsWith(acPath, ".tmp") || EndsWith(acPath, ".dmp") ||
            EndsWith(acPath, ".sqlite3") || EndsWith(acPath, ".sqlite3-wal") || EndsWith(acPath, ".sqlite3-shm") ||
+           EndsWith(acPath, ".bak") || acPath.starts_with("skyrimsemultiplayerbackups/") ||
+           acPath.starts_with("skyrimtogetherreborn/backups/") || acPath.starts_with("skyrimtogetherreborn/cache/") ||
+           acPath.starts_with("skyrimtogetherreborn/debug-feedback/") || acPath.starts_with("skyrimtogetherreborn/logs/") ||
+           acPath == "skyrimtogetherreborn/config/stserver.ini" ||
+           acPath == "skyrimtogetherreborn/crashpad_handler.exe" || acPath == "skyrimtogetherreborn/crashpad_wer.dll" ||
+           (acPath.starts_with("skyrimtogetherreborn/") && acPath.find(".pre-") != std::string_view::npos) ||
            acPath == "skyrimsemultiplayer.plugins.manifest";
 }
 

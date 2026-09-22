@@ -46,13 +46,23 @@ TEST_CASE("Effective Data deployment fingerprints are deterministic and cached",
     tree.Write("Meshes/Actors/Character/Behaviors/Graph.hkx", "behavior");
     tree.Write("Textures/Example.dds", "asset");
     tree.Write("ignored.log", "ephemeral");
+    tree.Write("SkyrimTogetherReborn/backups/old-client.exe", "ephemeral-backup");
+    tree.Write("SkyrimTogetherReborn/cache/browser.bin", "ephemeral-cache");
+    tree.Write("SkyrimTogetherReborn/debug-feedback/feedback.bmp", "ephemeral-report");
+    tree.Write("SkyrimTogetherReborn/logs/session.txt", "ephemeral-log-sidecar");
+    tree.Write("SkyrimSEMultiplayerBackups/old-menu/startmenu.swf", "ephemeral-backup");
+    tree.Write("SkyrimTogetherReborn/config/STServer.ini", "machine-role-specific");
+    tree.Write("SkyrimTogetherReborn/config/STServer.ini.bak", "ephemeral-backup");
+    tree.Write("SkyrimTogetherReborn/crashpad_handler.exe", "optional-diagnostics");
+    tree.Write("SkyrimTogetherReborn/crashpad_wer.dll", "optional-diagnostics");
+    tree.Write("SkyrimTogetherReborn/SkyrimTogether.pre-update.exe", "ephemeral-backup");
     const auto cache = tree.Path.parent_path() / (tree.Path.filename().string() + ".cache");
 
     const auto first = DeploymentScanner::Scan(tree.Path, cache);
     REQUIRE(first.Manifest.Complete);
     REQUIRE(first.Manifest.AllFiles.FileCount == 7);
     REQUIRE(first.HashedFiles == 7);
-    REQUIRE(first.SkippedFiles == 1);
+    REQUIRE(first.SkippedFiles == 11);
     for (const auto& layer : first.Manifest.Layers)
         REQUIRE(layer.FileCount == 1);
 
