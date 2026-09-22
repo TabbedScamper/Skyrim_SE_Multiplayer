@@ -24,6 +24,13 @@ function questMap(snapshot) {
   return new Map((snapshot.quests ?? []).map((quest) => [quest.editorId, quest]));
 }
 
+function entityMap(snapshot) {
+  return new Map((snapshot.networkEntities ?? []).map((entity) => [
+    entity.networkId ? `net-${entity.networkId}` : `form-${entity.formId}`,
+    entity,
+  ]));
+}
+
 export function compareSnapshots(leaderInput, followerInput) {
   const leader = unwrapSnapshot(leaderInput);
   const follower = unwrapSnapshot(followerInput);
@@ -33,6 +40,8 @@ export function compareSnapshots(leaderInput, followerInput) {
   addDifference(differences, "session.inParty", leader.session?.inParty, follower.session?.inParty);
   addDifference(differences, "session.leaderPlayerId", leader.session?.leaderPlayerId, follower.session?.leaderPlayerId);
   addDifference(differences, "session.memberCount", leader.session?.memberCount, follower.session?.memberCount);
+  for (const field of ["campaignId", "campaignRevision", "authorityEpoch"])
+    addDifference(differences, `session.${field}`, leader.session?.[field], follower.session?.[field]);
 
   for (const field of ["cellId", "worldspaceId", "dead", "bleedingOut"])
     addDifference(differences, `player.${field}`, leader.player?.[field], follower.player?.[field]);
@@ -40,6 +49,27 @@ export function compareSnapshots(leaderInput, followerInput) {
     addDifference(differences, `player.${field}`, leader.player?.[field], follower.player?.[field], "warning");
 
   addDifference(differences, "menus", leader.menus ?? [], follower.menus ?? [], "warning");
+  for (const field of ["loading", "dialogue"])
+    addDifference(differences, `ui.${field}`, leader.ui?.[field], follower.ui?.[field]);
+  for (const field of ["menuOpen", "speakerFormId"])
+    addDifference(differences, `dialogue.${field}`, leader.dialogue?.[field], follower.dialogue?.[field]);
+  for (const field of ["centerGrid", "currentGrid", "interiorCellId"])
+    addDifference(differences, `world.${field}`, leader.world?.[field], follower.world?.[field], "warning");
+
+  const leaderEntities = entityMap(leader);
+  const followerEntities = entityMap(follower);
+  for (const entityKey of new Set([...leaderEntities.keys(), ...followerEntities.keys()])) {
+    const left = leaderEntities.get(entityKey);
+    const right = followerEntities.get(entityKey);
+    if (!left || !right) {
+      differences.push({ path: `networkEntities.${entityKey}`, severity: "error", leader: left ?? null, follower: right ?? null });
+      continue;
+    }
+    for (const field of ["playerId", "networkId", "ownershipEpoch", "waitingFor3D", "waitingForAssignment"])
+      addDifference(differences, `networkEntities.${entityKey}.${field}`, left[field], right[field]);
+    for (const field of ["animationQueued", "animationReplayQueued"])
+      addDifference(differences, `networkEntities.${entityKey}.${field}`, left[field], right[field], "warning");
+  }
 
   const leaderQuests = questMap(leader);
   const followerQuests = questMap(follower);

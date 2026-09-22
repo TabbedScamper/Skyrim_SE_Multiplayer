@@ -6,8 +6,11 @@
 #include <World.h>
 
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
+#include <Games/ActorExtension.h>
+#include <Games/Misc/MenuTopicManager.h>
 #include <Games/Skyrim/Interface/UI.h>
 #include <Games/Skyrim/PlayerCharacter.h>
+#include <Games/Skyrim/Forms/ActorValueInfo.h>
 #include <Games/Skyrim/Forms/TESQuest.h>
 #include <Games/Skyrim/Forms/TESObjectCELL.h>
 #include <Games/Skyrim/Forms/TESWorldSpace.h>
@@ -19,6 +22,7 @@
 #include <Services/PartyService.h>
 #include <Services/TransportService.h>
 #include <Services/QuestService.h>
+#include <Components.h>
 #include <OverlayApp.hpp>
 #include <OverlayRenderHandler.hpp>
 
@@ -236,9 +240,12 @@ void GameTestService::OnGameThread() noexcept
         const auto& transport = m_world.GetTransport();
         snapshot += fmt::format(
             ",\"session\":{{\"online\":{},\"localPlayerId\":{},\"inParty\":{},\"leader\":{},"
-            "\"leaderPlayerId\":{},\"memberCount\":{}}}",
+            "\"leaderPlayerId\":{},\"memberCount\":{},\"campaignId\":\"{}\","
+            "\"campaignRevision\":{},\"authorityEpoch\":{}}}",
             JsonBool(transport.IsOnline()), transport.GetLocalPlayerId(), JsonBool(party.IsInParty()),
-            JsonBool(party.IsLeader()), party.GetLeaderPlayerId(), party.GetPartyMembers().size());
+            JsonBool(party.IsLeader()), party.GetLeaderPlayerId(), party.GetPartyMembers().size(),
+            EscapeJson(transport.GetCampaignId().c_str()), transport.GetCampaignRevision(),
+            transport.GetAuthorityEpoch());
 
         if (auto* pPlayer = PlayerCharacter::Get())
         {
@@ -248,15 +255,35 @@ void GameTestService::OnGameThread() noexcept
             snapshot += fmt::format(
                 ",\"player\":{{\"present\":true,\"formId\":{},\"cellId\":{},\"worldspaceId\":{},"
                 "\"position\":[{},{},{}],\"rotation\":[{},{},{}],\"dead\":{},\"bleedingOut\":{},"
-                "\"inCombat\":{},\"weaponDrawn\":{},\"dialogueHandle\":{},\"combatHandle\":{},"
-                "\"packageFormId\":{},\"actorStateFlags1\":{},\"actorStateFlags2\":{}}}",
+                "\"inCombat\":{},\"weaponDrawn\":{},\"weaponFullyDrawn\":{},\"dialogueHandle\":{},"
+                "\"combatHandle\":{},\"killerHandle\":{},\"packageFormId\":{},\"movementType\":{},"
+                "\"health\":{},\"magicka\":{},\"stamina\":{},\"speed\":{},"
+                "\"actorStateFlags1\":{},\"actorStateFlags2\":{}}}",
                 pPlayer->formID, pCell ? pCell->formID : 0, pWorldspace ? pWorldspace->formID : 0,
                 pPlayer->position.x, pPlayer->position.y, pPlayer->position.z,
                 pPlayer->rotation.x, pPlayer->rotation.y, pPlayer->rotation.z,
                 JsonBool(pPlayer->IsDead()), JsonBool(pPlayer->actorState.IsBleedingOut()),
                 JsonBool(pPlayer->IsInCombat()), JsonBool(pPlayer->actorState.IsWeaponDrawn()),
-                pPlayer->dialogueHandle, pPlayer->combatHandle, pPackage ? pPackage->formID : 0,
+                JsonBool(pPlayer->actorState.IsWeaponFullyDrawn()), pPlayer->dialogueHandle,
+                pPlayer->combatHandle, pPlayer->killerHandle, pPackage ? pPackage->formID : 0,
+                pPlayer->currentProcess ? pPlayer->currentProcess->movementType : -1,
+                pPlayer->GetActorValue(ActorValueInfo::kHealth),
+                pPlayer->GetActorValue(ActorValueInfo::kMagicka),
+                pPlayer->GetActorValue(ActorValueInfo::kStamina), pPlayer->GetSpeed(),
                 pPlayer->actorState.flags1, pPlayer->actorState.flags2);
+
+            if (const auto* pExtension = pPlayer->GetExtension())
+            {
+                const auto& action = pExtension->LatestAnimation;
+                snapshot += fmt::format(
+                    ",\"playerAnimation\":{{\"graphReady\":{},\"graphDescriptor\":{},"
+                    "\"reconciliationStage\":{},\"tick\":{},\"actionId\":{},\"targetId\":{},"
+                    "\"idleId\":{},\"type\":{},\"state1\":{},\"state2\":{},\"event\":\"{}\"}}",
+                    JsonBool(pPlayer->animationGraphHolder.IsReady()), pExtension->GraphDescriptorHash,
+                    static_cast<uint32_t>(pExtension->Reconciliation), action.Tick, action.ActionId,
+                    action.TargetId, action.IdleId, action.Type, action.State1, action.State2,
+                    EscapeJson(action.EventName.c_str()));
+            }
         }
         else
             snapshot += ",\"player\":{\"present\":false}";
@@ -267,7 +294,8 @@ void GameTestService::OnGameThread() noexcept
                 ",\"controls\":{{\"present\":true,\"blocked\":{},\"movement\":{},\"look\":{},"
                 "\"sprint\":{},\"readyWeapon\":{},\"activate\":{},\"jump\":{},\"shout\":{},"
                 "\"attackBlock\":{},\"sneak\":{},\"togglePov\":{},\"autoMove\":{},"
-                "\"running\":{},\"povScriptMode\":{},\"remapMode\":{}}}",
+                "\"running\":{},\"povScriptMode\":{},\"remapMode\":{},"
+                "\"moveInput\":[{},{}],\"lookInput\":[{},{}]}}",
                 JsonBool(pControls->bBlockPlayerInput), JsonBool(HandlerEnabled(pControls->pMovementHandler)),
                 JsonBool(HandlerEnabled(pControls->pLookHandler)), JsonBool(HandlerEnabled(pControls->pSprintHandler)),
                 JsonBool(HandlerEnabled(pControls->pReadyWeaponHandler)), JsonBool(HandlerEnabled(pControls->pActivateHandler)),
@@ -275,7 +303,9 @@ void GameTestService::OnGameThread() noexcept
                 JsonBool(HandlerEnabled(pControls->attackBlockHandler)), JsonBool(HandlerEnabled(pControls->sneakHandler)),
                 JsonBool(HandlerEnabled(pControls->togglePOVHandler)), JsonBool(pControls->Data.bAutoMove),
                 JsonBool(pControls->Data.bRunning), JsonBool(pControls->Data.povScriptMode),
-                JsonBool(pControls->Data.remapMode));
+                JsonBool(pControls->Data.remapMode), pControls->Data.MoveInputVec.x,
+                pControls->Data.MoveInputVec.y, pControls->Data.LookInputVec.x,
+                pControls->Data.LookInputVec.y);
         }
         else
             snapshot += ",\"controls\":{\"present\":false}";
@@ -283,9 +313,9 @@ void GameTestService::OnGameThread() noexcept
         if (auto* pCamera = PlayerCamera::Get())
         {
             snapshot += fmt::format(
-                ",\"camera\":{{\"present\":true,\"firstPerson\":{},\"state\":{},"
+                ",\"camera\":{{\"present\":true,\"firstPerson\":{},\"hasState\":{},"
                 "\"position\":[{},{},{}],\"rotation\":[{},{}],\"zoom\":{}}}",
-                JsonBool(pCamera->IsFirstPerson()), reinterpret_cast<uintptr_t>(pCamera->state),
+                JsonBool(pCamera->IsFirstPerson()), JsonBool(pCamera->state != nullptr),
                 pCamera->pos.x, pCamera->pos.y, pCamera->pos.z, pCamera->rotX, pCamera->rotZ, pCamera->zoom);
         }
         else
@@ -307,6 +337,103 @@ void GameTestService::OnGameThread() noexcept
                 snapshot += fmt::format("\"{}\"", EscapeJson(pName->AsAscii()));
                 firstMenu = false;
             }
+        }
+        snapshot += ']';
+
+        if (auto* pUI = UI::Get())
+        {
+            snapshot += fmt::format(
+                ",\"ui\":{{\"loading\":{},\"dialogue\":{},\"pausesGame\":{},\"allowSaving\":{},"
+                "\"disablePauseMenu\":{},\"modal\":{},\"visible\":{},\"closingAllMenus\":{},"
+                "\"dontHideCursor\":{}}}",
+                JsonBool(pUI->GetMenuOpen(BSFixedString("Loading Menu"))),
+                JsonBool(pUI->GetMenuOpen(BSFixedString("Dialogue Menu"))), pUI->numPausesGame,
+                pUI->numAllowSaving, pUI->numDisablePauseMenu, JsonBool(pUI->modal),
+                JsonBool(pUI->menuSystemVisible), JsonBool(pUI->closingAllMenus),
+                pUI->numDontHideCursorWhenTopmost);
+        }
+        else
+            snapshot += ",\"ui\":{\"present\":false}";
+
+        if (auto* pDialogue = MenuTopicManager::Get())
+        {
+            const auto* pSpeaker = TESObjectREFR::GetByHandle(pDialogue->speaker.handle.iBits);
+            snapshot += fmt::format(
+                ",\"dialogue\":{{\"menuOpen\":{},\"speakerHandle\":{},\"speakerFormId\":{},"
+                "\"hasOptions\":{}}}",
+                JsonBool(pDialogue->menuOpen), pDialogue->speaker.handle.iBits,
+                pSpeaker ? pSpeaker->formID : 0,
+                JsonBool(pDialogue->pOptions != nullptr));
+        }
+        else
+            snapshot += ",\"dialogue\":{\"present\":false}";
+
+        if (auto* pTes = TES::Get())
+        {
+            snapshot += fmt::format(
+                ",\"world\":{{\"centerGrid\":[{},{}],\"currentGrid\":[{},{}],"
+                "\"interiorCellId\":{}}}",
+                pTes->centerGridX, pTes->centerGridY, pTes->currentGridX, pTes->currentGridY,
+                pTes->interiorCell ? pTes->interiorCell->formID : 0);
+        }
+        if (auto* pProcesses = ProcessLists::Get())
+        {
+            snapshot += fmt::format(
+                ",\"actorProcessing\":{{\"highCount\":{},\"highHandles\":{},"
+                "\"middleHighHandles\":{},\"middleLowHandles\":{},\"lowHandles\":{}}}",
+                pProcesses->numberHighActors, pProcesses->highActorHandleArray.length,
+                pProcesses->middleHighActorHandleArray.length, pProcesses->middleLowActorHandleArray.length,
+                pProcesses->lowActorHandleArray.length);
+        }
+
+        if (const auto* pWindow = BSGraphics::GetMainWindow(); pWindow && pWindow->hWnd)
+        {
+            RECT client{};
+            RECT window{};
+            RECT clip{};
+            GetClientRect(pWindow->hWnd, &client);
+            GetWindowRect(pWindow->hWnd, &window);
+            const bool cursorClipped = GetClipCursor(&clip) != FALSE &&
+                (clip.left != 0 || clip.top != 0 || clip.right != GetSystemMetrics(SM_CXSCREEN) ||
+                    clip.bottom != GetSystemMetrics(SM_CYSCREEN));
+            snapshot += fmt::format(
+                ",\"window\":{{\"foreground\":{},\"minimized\":{},\"visible\":{},"
+                "\"client\":[{},{}],\"rect\":[{},{},{},{}],\"cursorClipped\":{}}}",
+                JsonBool(GetForegroundWindow() == pWindow->hWnd), JsonBool(IsIconic(pWindow->hWnd) != FALSE),
+                JsonBool(IsWindowVisible(pWindow->hWnd) != FALSE), client.right - client.left,
+                client.bottom - client.top, window.left, window.top, window.right, window.bottom,
+                JsonBool(cursorClipped));
+        }
+
+        snapshot += ",\"networkEntities\":[";
+        bool firstEntity = true;
+        size_t emittedEntities = 0;
+        const auto entityView = m_world.view<FormIdComponent>();
+        for (const auto entity : entityView)
+        {
+            if (emittedEntities++ >= 256)
+                break;
+            const auto& form = entityView.get<FormIdComponent>(entity);
+            const auto* pLocal = m_world.try_get<LocalComponent>(entity);
+            const auto* pRemote = m_world.try_get<RemoteComponent>(entity);
+            const auto* pNetworkPlayer = m_world.try_get<PlayerComponent>(entity);
+            const auto* pLocalAnimation = m_world.try_get<LocalAnimationComponent>(entity);
+            const auto* pRemoteAnimation = m_world.try_get<RemoteAnimationComponent>(entity);
+            if (!firstEntity)
+                snapshot += ',';
+            firstEntity = false;
+            snapshot += fmt::format(
+                "{{\"formId\":{},\"playerId\":{},\"authority\":\"{}\",\"networkId\":{},"
+                "\"ownershipEpoch\":{},\"waitingFor3D\":{},\"waitingForAssignment\":{},"
+                "\"animationQueued\":{},\"animationReplayQueued\":{}}}",
+                form.Id, pNetworkPlayer ? pNetworkPlayer->Id : 0,
+                pLocal ? "local" : (pRemote ? "remote" : "unassigned"),
+                pLocal ? pLocal->Id : (pRemote ? pRemote->Id : 0),
+                pLocal ? pLocal->OwnershipEpoch : (pRemote ? pRemote->OwnershipEpoch : 0),
+                JsonBool(m_world.all_of<WaitingFor3D>(entity)),
+                JsonBool(m_world.all_of<WaitingForAssignmentComponent>(entity)),
+                pLocalAnimation ? pLocalAnimation->Actions.size() : 0,
+                pRemoteAnimation ? pRemoteAnimation->TimePoints.size() : 0);
         }
         snapshot += ']';
 

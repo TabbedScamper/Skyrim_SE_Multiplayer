@@ -30,6 +30,7 @@ test("MCP server exposes the diagnostics toolset", async () => {
       "list_bug_markers",
       "mark_bug",
       "player_messages",
+      "pull_follower_capture",
       "recent_errors",
       "recent_events",
       "record_client_timeline",

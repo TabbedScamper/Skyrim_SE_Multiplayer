@@ -21,6 +21,7 @@ import {
 } from "./native-client.mjs";
 import { compareSnapshotFiles } from "./snapshot-diff.mjs";
 import { runProtocolTests } from "./protocol-tests.mjs";
+import { pullLatestFollowerCapture } from "./remote-client.mjs";
 
 const server = new McpServer(
   { name: "skyrim-seamless-diagnostics", version: "0.1.0" },
@@ -146,6 +147,17 @@ server.registerTool(
   },
   async ({ leader_path, follower_path }) =>
     result(await compareSnapshotFiles(leader_path, follower_path)),
+);
+
+server.registerTool(
+  "pull_follower_capture",
+  {
+    description:
+      "Read the follower PC's newest F10 screenshot, note, and game-state bundle over pinned key-based SSH and mirror it into the local diagnostics workspace.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true },
+  },
+  async () => result(await pullLatestFollowerCapture()),
 );
 
 server.registerTool(

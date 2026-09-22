@@ -46,6 +46,9 @@ a Codex conversation. Keep a Codex session open while live iteration is needed.
 - `compare_client_snapshots` compares leader/follower `.game.json` artifacts
   semantically and flags party, cell, lifecycle, menu, and watched-quest
   divergence while ignoring expected per-client identity differences.
+- `pull_follower_capture` retrieves the follower PC's newest F10 screenshot,
+  note, and state JSON over pinned key-based SSH, then mirrors the bundle under
+  `runtime/diagnostics/follower-captures` for inspection and comparison.
 - `run_protocol_tests` launches an isolated dedicated server and two headless
   production-protocol clients. It currently checks join/party convergence and
   audits whether a follower can improperly author quest progress.

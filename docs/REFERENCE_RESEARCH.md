@@ -631,3 +631,38 @@ the first compatible complete deployment in the campaign manifest.
   on the [official release](https://github.com/PowerShell/Win32-OpenSSH/releases/tag/10.0.0.0p2-Preview),
   stops only stale OpenSSH services/processes, and preserves an existing install
   directory before replacement.
+
+## Multiplayer state flight recorder
+
+- [SKSE64's plugin messaging API](https://github.com/ianpatt/skse64/blob/master/skse64/PluginAPI.h)
+  defines explicit pre-load, post-load, save, new-game, input-loaded, and
+  data-loaded lifecycle messages. This confirms that save/load transitions
+  should ultimately be recorded as events rather than inferred only from a
+  frame sample. The current recorder uses snapshot age and UI loading state;
+  wiring the SKSE lifecycle journal remains a follow-up.
+- [SKSE64's game-event declarations](https://github.com/ianpatt/skse64/blob/master/skse64/GameEvents.h)
+  expose load, combat, death, object-load, cell-load, and related dispatchers.
+  They support an eventual bounded event journal for transitions that may fall
+  between 100 ms samples. We do not walk event-dispatcher internals or retain
+  raw engine pointers in diagnostic output.
+- [CommonLibSSE-NG](https://github.com/alandtse/CommonLibSSE-NG/tree/ng)
+  documents executable-version-aware reverse-engineered types and limited
+  out-of-process unit testing. It supports the project's approach of sampling
+  known typed fields on Skyrim's game thread instead of attempting an unsafe
+  whole-process memory dump. This repository's pinned reverse-engineered types
+  remain the build authority for offsets.
+- The project's own `MenuTopicManager`, `SubtitleManager`, `ActorExtension`,
+  animation components, and local/remote ownership components are the closest
+  primary source for its multiplayer semantics. The recorder therefore emits
+  dialogue speaker handles, action-pipeline state, campaign/authority epochs,
+  and bounded entity ownership data. Pointer addresses are deliberately not
+  treated as comparable state across two processes because ASLR and object
+  lifetime make them misleading.
+
+Implemented direction: game-thread snapshots act as a bounded state flight
+recorder. They cover session/campaign authority, lifecycle/UI/loading state,
+window focus and cursor clipping, player vitals/movement/dialogue/animation,
+world-grid and actor-processing summaries, quests, and multiplayer entity
+ownership. F10 stores the snapshot beside the screenshot and player note. A
+read-only SSH retrieval tool mirrors the follower's newest bundle into the
+local diagnostics workspace for semantic comparison.

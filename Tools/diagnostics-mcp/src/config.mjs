@@ -22,6 +22,24 @@ export const nativePipe =
   process.env.SKYRIM_DIAGNOSTICS_PIPE ??
   "\\\\.\\pipe\\SkyrimSEMultiplayer.Test";
 
+export const followerSshHost =
+  process.env.SKYRIM_FOLLOWER_SSH_HOST ?? "eflem@192.168.50.103";
+export const followerSshKey = path.resolve(
+  process.env.SKYRIM_FOLLOWER_SSH_KEY ??
+    path.join(projectRoot, "runtime", "remote-access", "eriana_deploy_ed25519"),
+);
+export const followerKnownHosts = path.resolve(
+  process.env.SKYRIM_FOLLOWER_KNOWN_HOSTS ??
+    path.join(projectRoot, "runtime", "remote-access", "known_hosts"),
+);
+export const followerCaptureDirectory =
+  process.env.SKYRIM_FOLLOWER_CAPTURE_DIR ??
+  "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Skyrim Special Edition\\Data\\SkyrimTogetherReborn\\debug-feedback";
+export const followerMirrorDirectory = path.join(
+  runtimeDirectory,
+  "follower-captures",
+);
+
 export const configuredLogs = [
   { source: "server", path: path.join(logDirectory, "STServerOut.log") },
   { source: "leader", path: path.join(logDirectory, "tp_client.log") },

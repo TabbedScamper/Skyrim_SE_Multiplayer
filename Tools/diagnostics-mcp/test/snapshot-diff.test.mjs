@@ -25,3 +25,17 @@ test("snapshot comparison identifies quest and lifecycle divergence", () => {
   assert.ok(comparison.differences.some((entry) => entry.path === "player.dead"));
   assert.ok(comparison.differences.some((entry) => entry.path === "quests.MQ101.currentStage"));
 });
+
+test("snapshot comparison identifies campaign and entity authority divergence", () => {
+  const leader = snapshot({ leader: true });
+  const follower = snapshot({ leader: false });
+  leader.session.campaignId = follower.session.campaignId = "campaign-a";
+  leader.session.campaignRevision = 9;
+  follower.session.campaignRevision = 8;
+  leader.networkEntities = [{ formId: 20, playerId: 0, networkId: 77, ownershipEpoch: 4, waitingFor3D: false, waitingForAssignment: false }];
+  follower.networkEntities = [{ formId: 20, playerId: 0, networkId: 77, ownershipEpoch: 3, waitingFor3D: false, waitingForAssignment: false }];
+  const comparison = compareSnapshots(leader, follower);
+  assert.equal(comparison.synchronized, false);
+  assert.ok(comparison.differences.some((entry) => entry.path === "session.campaignRevision"));
+  assert.ok(comparison.differences.some((entry) => entry.path === "networkEntities.net-77.ownershipEpoch"));
+});
