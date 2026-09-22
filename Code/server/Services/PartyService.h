@@ -13,6 +13,9 @@ struct NotifyPartyInfo;
 struct PartyCreateRequest;
 struct PartyChangeLeaderRequest;
 struct PartyKickRequest;
+struct PartyReadyRequest;
+struct PartyStartRequest;
+struct PartySessionSettingsRequest;
 
 /**
  * @brief Manages every party in the server.
@@ -23,7 +26,14 @@ struct PartyService
     {
         uint32_t LeaderPlayerId;
         Vector<Player*> Members;
+        Vector<uint32_t> ReadyPlayerIds;
         GameId CachedWeather{};
+        uint8_t CampaignMode{};
+        uint8_t SessionState{};
+        uint64_t StartEpoch{};
+        String CheckpointId{};
+        bool LobbyOpen{};
+        bool PasswordProtected{};
     };
 
     PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept;
@@ -46,6 +56,9 @@ protected:
     void OnPartyCreate(const PacketEvent<PartyCreateRequest>& acPacket) noexcept;
     void OnPartyChangeLeader(const PacketEvent<PartyChangeLeaderRequest>& acPacket) noexcept;
     void OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) noexcept;
+    void OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) noexcept;
+    void OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept;
+    void OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept;
     void RemovePlayerFromParty(Player* apPlayer) noexcept;
 
     void BroadcastPlayerList(Player* apPlayer = nullptr) const noexcept;
@@ -67,6 +80,11 @@ private:
     entt::scoped_connection m_partyCreateConnection;
     entt::scoped_connection m_partyChangeLeaderConnection;
     entt::scoped_connection m_partyKickConnection;
+    entt::scoped_connection m_partyReadyConnection;
+    entt::scoped_connection m_partyStartConnection;
+    entt::scoped_connection m_partySessionSettingsConnection;
+
+    uint64_t m_nextStartEpoch{1};
 
     void SendPartyJoinedEvent(Party& aParty, Player* aPlayer) noexcept;
 };

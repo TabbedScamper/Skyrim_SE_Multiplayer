@@ -76,6 +76,20 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             uint32_t aPlayerId = eventArgs->GetInt(0);
             World::Get().GetPartyService().ChangePartyLeader(aPlayerId);
         }
+        else if (eventName == "setPartyReady")
+            World::Get().GetPartyService().SetReady(eventArgs->GetBool(0));
+        else if (eventName == "selectSharedCampaign")
+        {
+            const auto mode = static_cast<uint8_t>(eventArgs->GetInt(0));
+            const String checkpoint = eventArgs->GetString(1).ToString().c_str();
+            World::Get().GetPartyService().SelectCampaign(mode, checkpoint);
+        }
+        else if (eventName == "startTogether")
+        {
+            const auto mode = static_cast<uint8_t>(eventArgs->GetInt(0));
+            const String checkpoint = eventArgs->GetString(1).ToString().c_str();
+            World::Get().GetPartyService().StartTogether(mode, checkpoint);
+        }
         else if (eventName == "teleportToPlayer")
             ProcessTeleportMessage(eventArgs);
         else if (eventName == "toggleDebugUI")
@@ -90,6 +104,34 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
         }
         else if (eventName == "leaveSteamSession")
             World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().LeaveSession(); });
+        else if (eventName == "joinSteamFriend")
+        {
+            try
+            {
+                const auto steamId = std::stoull(eventArgs->GetString(0).ToString());
+                World::Get().GetRunner().Queue([steamId]() { World::Get().GetSteamLobbyService().JoinFriend(steamId); });
+            }
+            catch (...)
+            {
+                spdlog::warn("Rejected invalid Steam friend id from UI");
+            }
+        }
+        else if (eventName == "inviteSteamFriend")
+            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().InviteFriend(); });
+        else if (eventName == "refreshSteamLobby")
+            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().RefreshLobbyState(); });
+        else if (eventName == "setSteamSessionAccess")
+        {
+            const bool open = eventArgs->GetBool(0);
+            const String password = eventArgs->GetString(1).ToString().c_str();
+            World::Get().GetPartyService().SetSessionSettings(open, password);
+        }
+        else if (eventName == "connectJoinedSteamSession")
+        {
+            const String password = eventArgs->GetString(0).ToString().c_str();
+            World::Get().GetRunner().Queue(
+                [password]() { World::Get().GetSteamLobbyService().ConnectJoinedSession(password); });
+        }
         else if (eventName == "requestGameSettings")
             World::Get().GetGameSettingsService().QueueRequestSettings();
         else if (eventName == "previewGameSetting")
@@ -138,6 +180,8 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             World::Get().GetGameSettingsService().RecordDebugFeedback(looksRight, note);
         }
         else if (eventName == "openTitleOptions")
+            SetUIVisible(true);
+        else if (eventName == "openTitleLobby")
             SetUIVisible(true);
         else if (eventName == "deactivate")
             SetUIVisible(false);

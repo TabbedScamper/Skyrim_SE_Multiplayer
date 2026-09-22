@@ -1,6 +1,7 @@
 #include <Services/PartyService.h>
 
 #include <Services/TransportService.h>
+#include <Services/SteamLobbyService.h>
 
 #include <Events/UpdateEvent.h>
 #include <Events/DisconnectedEvent.h>
@@ -18,10 +19,14 @@
 #include <Messages/PartyCreateRequest.h>
 #include <Messages/PartyChangeLeaderRequest.h>
 #include <Messages/PartyKickRequest.h>
+#include <Messages/PartyReadyRequest.h>
+#include <Messages/PartyStartRequest.h>
+#include <Messages/PartySessionSettingsRequest.h>
 
 #include <OverlayApp.hpp>
 
 #include <Forms/TESGlobal.h>
+#include <Games/Skyrim/Interface/MainMenuIntegration.h>
 
 PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransportService) noexcept
     : m_world(aWorld)
@@ -80,6 +85,40 @@ void PartyService::ChangePartyLeader(const uint32_t aPlayerId) const noexcept
     m_transport.Send(changeMessage);
 }
 
+void PartyService::SetReady(const bool aReady) const noexcept
+{
+    PartyReadyRequest request;
+    request.Ready = aReady;
+    m_transport.Send(request);
+}
+
+void PartyService::SelectCampaign(const uint8_t aMode, const String& acCheckpointId) const noexcept
+{
+    PartyStartRequest request;
+    request.Mode = aMode;
+    request.CheckpointId = acCheckpointId;
+    m_transport.Send(request);
+}
+
+void PartyService::StartTogether(const uint8_t aMode, const String& acCheckpointId) const noexcept
+{
+    PartyStartRequest request;
+    request.Mode = aMode;
+    request.Launch = true;
+    request.CheckpointId = acCheckpointId;
+    m_transport.Send(request);
+}
+
+void PartyService::SetSessionSettings(const bool aOpen, const String& acPassword) const noexcept
+{
+    if (!m_isLeader)
+        return;
+    PartySessionSettingsRequest request;
+    request.Open = aOpen;
+    request.Password = acPassword;
+    m_transport.Send(request);
+}
+
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
     const auto cCurrentTick = m_transport.GetClock().GetCurrentTick();
@@ -117,6 +156,11 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
         m_isLeader = acPartyInfo.IsLeader;
         m_leaderPlayerId = acPartyInfo.LeaderPlayerId;
         m_partyMembers = acPartyInfo.PlayerIds;
+        m_readyPlayers = acPartyInfo.ReadyPlayerIds;
+        m_campaignMode = acPartyInfo.CampaignMode;
+        const auto previousSessionState = m_sessionState;
+        m_sessionState = acPartyInfo.SessionState;
+        m_startEpoch = acPartyInfo.StartEpoch;
 
         // TODO: this can be done a bit prettier
         if (m_isLeader)
@@ -133,8 +177,22 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
 
         pArguments->SetList(0, pPlayerIds);
         pArguments->SetInt(1, acPartyInfo.LeaderPlayerId);
+        auto pReadyIds = CefListValue::Create();
+        for (int i = 0; i < m_readyPlayers.size(); ++i)
+            pReadyIds->SetInt(i, m_readyPlayers[i]);
+        pArguments->SetList(2, pReadyIds);
+        pArguments->SetInt(3, acPartyInfo.CampaignMode);
+        pArguments->SetInt(4, acPartyInfo.SessionState);
+        pArguments->SetString(5, std::to_string(acPartyInfo.StartEpoch));
+        pArguments->SetString(6, acPartyInfo.CheckpointId.c_str());
+        pArguments->SetBool(7, acPartyInfo.LobbyOpen);
+        pArguments->SetBool(8, acPartyInfo.PasswordProtected);
 
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("partyInfo", pArguments);
+        m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("coopLobbyState", pArguments);
+        m_world.GetSteamLobbyService().ApplyPartySettings(acPartyInfo.LobbyOpen, acPartyInfo.PasswordProtected);
+        if (previousSessionState == 0 && m_sessionState == 1)
+            LaunchSharedCampaignFromMainMenu(m_campaignMode);
     }
 }
 
@@ -176,4 +234,8 @@ void PartyService::DestroyParty() noexcept
     m_isLeader = false;
     m_leaderPlayerId = -1;
     m_partyMembers.clear();
+    m_readyPlayers.clear();
+    m_campaignMode = 0;
+    m_sessionState = 0;
+    m_startEpoch = 0;
 }

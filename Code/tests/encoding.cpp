@@ -63,6 +63,23 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         auto pRequest = CastUnique<PartyAcceptInviteRequest>(std::move(pMessage));
         REQUIRE(pRequest->InviterId == request.InviterId);
     }
+
+    {
+        PartySessionSettingsRequest request;
+        request.Open = true;
+        request.Password = "dragonborn";
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pRequest = CastUnique<PartySessionSettingsRequest>(std::move(pMessage));
+        REQUIRE(pRequest->Open);
+        REQUIRE(pRequest->Password == request.Password);
+    }
 }
 
 TEST_CASE("Static structures", "[encoding.static]")

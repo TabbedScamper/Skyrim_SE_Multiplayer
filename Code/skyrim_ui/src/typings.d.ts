@@ -89,6 +89,15 @@ declare namespace SkyrimTogetherTypes {
   type DummyDataCallback = (data: Array<number>) => void;
 
   type PartyInfoCallback = (playerIds: Array<number>, leaderId: number) => void;
+  type CoopLobbyStateCallback = (
+    playerIds: Array<number>, leaderId: number, readyPlayerIds: Array<number>, campaignMode: number,
+    sessionState: number, startEpoch: string, checkpointId: string, lobbyOpen: boolean, passwordProtected: boolean,
+  ) => void;
+  type SteamLobbyStateCallback = (
+    lobbyId: string, ownerId: string, memberIds: string[], memberNames: string[], friendIds: string[], friendNames: string[],
+    open: boolean, passwordProtected: boolean, waitingForPassword: boolean, isHost: boolean,
+  ) => void;
+  type DeploymentScanStateCallback = (complete: boolean, fileCount: number, hashed: number, cached: number, errors: number) => void;
 
   type PartyCreatedCallback = () => void;
 
@@ -220,6 +229,10 @@ interface SkyrimTogether {
   on(event: 'dummyData', callback: SkyrimTogetherTypes.DummyDataCallback): void;
 
   on(event: 'partyInfo', callback: SkyrimTogetherTypes.PartyInfoCallback): void;
+  on(event: 'coopLobbyState', callback: SkyrimTogetherTypes.CoopLobbyStateCallback): void;
+  on(event: 'showTitleLobby', callback: SkyrimTogetherTypes.VoidCallback): void;
+  on(event: 'steamLobbyState', callback: SkyrimTogetherTypes.SteamLobbyStateCallback): void;
+  on(event: 'deploymentScanState', callback: SkyrimTogetherTypes.DeploymentScanStateCallback): void;
 
   on(
     event: 'partyCreated',
@@ -261,6 +274,9 @@ interface SkyrimTogether {
   off(event: 'enterTitleScreen', callback?: SkyrimTogetherTypes.TitleScreenCallback): void;
   off(event: 'exitTitleScreen', callback?: SkyrimTogetherTypes.TitleScreenCallback): void;
   off(event: 'showTitleOptions', callback?: SkyrimTogetherTypes.VoidCallback): void;
+  off(event: 'showTitleLobby', callback?: SkyrimTogetherTypes.VoidCallback): void;
+  off(event: 'steamLobbyState', callback?: SkyrimTogetherTypes.SteamLobbyStateCallback): void;
+  off(event: 'deploymentScanState', callback?: SkyrimTogetherTypes.DeploymentScanStateCallback): void;
 
   /** Add listener to when the player open/close a game menu. */
   off(
@@ -355,6 +371,7 @@ interface SkyrimTogether {
     event: 'partyInfo',
     callback?: SkyrimTogetherTypes.PartyInfoCallback,
   ): void;
+  off(event: 'coopLobbyState', callback?: SkyrimTogetherTypes.CoopLobbyStateCallback): void;
 
   off(
     event: 'partyCreated',
@@ -427,11 +444,27 @@ interface SkyrimTogether {
    */
   launchParty(): void;
 
+  setPartyReady(ready: boolean): void;
+
+  selectSharedCampaign(mode: number, checkpointId: string): void;
+
+  startTogether(mode: number, checkpointId: string): void;
+
   hostSteamSession(): void;
 
   joinSteamSession(lobbyId: string): void;
 
   leaveSteamSession(): void;
+
+  joinSteamFriend(steamId: string): void;
+
+  inviteSteamFriend(): void;
+
+  refreshSteamLobby(): void;
+
+  setSteamSessionAccess(open: boolean, password: string): void;
+
+  connectJoinedSteamSession(password: string): void;
 
   requestGameSettings(): void;
 
@@ -446,6 +479,8 @@ interface SkyrimTogether {
   resetGameSettings(): void;
 
   openTitleOptions(): void;
+
+  openTitleLobby(): void;
 
   submitDebugFeedback(looksRight: boolean, note: string): void;
 

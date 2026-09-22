@@ -53,6 +53,9 @@ enum ClientOpcode : unsigned char
     kRequestSetWaypoint,
     kRequestRemoveWaypoint,
     kSetTimeCommandRequest,
+    kPartyReadyRequest,
+    kPartyStartRequest,
+    kPartySessionSettingsRequest,
     kClientOpcodeMax
 };
 

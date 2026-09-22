@@ -589,3 +589,31 @@ effective in-process `Data` namespace asynchronously, caches SHA-256 results by
 normalized path/backing-file identity/size/write time, and creates deterministic whole-tree and
 semantic-layer roots. Authentication carries the roots, and the server freezes
 the first compatible complete deployment in the campaign manifest.
+
+## Steam lobby discovery and transport
+
+- [Valve's ISteamMatchmaking reference](https://partner.steamgames.com/doc/api/isteammatchmaking)
+  defines private lobbies as invite-only (`k_ELobbyTypePrivate = 0`) and
+  friends-only lobbies as visible/joinable to friends (`k_ELobbyTypeFriendsOnly
+  = 1`). The client therefore auto-creates an invite-only lobby and changes it
+  to friends-only only after the host selects Open. `SetLobbyType` is owner-only;
+  the game server independently enforces that only its party leader can change
+  the replicated access/password state.
+- The same reference documents lobby metadata as owner-written, member-readable
+  key/value data. Lobby metadata contains only `has_password=0|1`; the secret is
+  never advertised. The actual password is checked by the Skyrim Together
+  authentication path and capped at 64 characters. Friend results are filtered
+  by Steam App ID and joined lobbies must carry this project's marker and exact
+  build before their endpoint is used.
+- [Valve's lobby matchmaking guide](https://partner.steamgames.com/doc/features/multiplayer/matchmaking)
+  documents friend-lobby discovery, lobby ownership, the overlay invitation UI,
+  and `GameLobbyJoinRequested_t`. Friend discovery and the invitation dialog are
+  adopted. Automatic runtime invite acceptance remains a follow-up because this
+  project dynamically loads the flat Steam ABI and does not yet safely register
+  Steam callbacks.
+- [Steam Datagram Relay](https://partner.steamgames.com/doc/features/multiplayer/steamdatagramrelay)
+  and Valve's [GameNetworkingSockets P2P reference](https://github.com/ValveSoftware/GameNetworkingSockets/blob/master/README_P2P.md)
+  confirm that lobby discovery does not itself relay the existing UDP game
+  protocol. Current lobby connections still use the host's advertised LAN
+  endpoint. A relay adapter must be implemented and exercised separately before
+  Internet play can be described as NAT-independent or relay-backed.

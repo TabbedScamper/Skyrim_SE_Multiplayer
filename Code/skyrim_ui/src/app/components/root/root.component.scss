@@ -94,6 +94,10 @@
       width: clamp(48rem, 28vw, 68rem);
       font-size: clamp(1rem, 1.4vh, 1.4rem);
     }
+    > app-popup[data-popup='coopLobby'] > app-window {
+      max-width: none;
+      background: transparent;
+    }
   }
 }
 

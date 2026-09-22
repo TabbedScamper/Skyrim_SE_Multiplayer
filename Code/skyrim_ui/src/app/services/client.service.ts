@@ -7,6 +7,8 @@ import { PartyInfo } from '../models/party-info';
 import { Player } from '../models/player';
 import { DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
 import { ChatService } from './chat.service';
+import { CoopLobbyState } from '../models/coop-lobby-state';
+import { SteamLobbyState } from '../models/steam-lobby-state';
 import { ErrorEvents, ErrorService } from './error.service';
 import { LoadingService } from './loading.service';
 
@@ -25,6 +27,10 @@ export class ClientService implements OnDestroy {
   public inGameStateChange = new BehaviorSubject(!environment.game);
   public titleScreenStateChange = new BehaviorSubject(false);
   public titleOptionsRequested = new Subject<void>();
+  public titleLobbyRequested = new Subject<void>();
+  public coopLobbyStateChange = new ReplaySubject<CoopLobbyState>(1);
+  public steamLobbyStateChange = new ReplaySubject<SteamLobbyState>(1);
+  public deploymentScanStateChange = new ReplaySubject<{ complete: boolean; fileCount: number; hashed: number; cached: number; errors: number }>(1);
 
   /** Opening/close menu change. */
   public openingMenuChange = new BehaviorSubject(false);
@@ -134,6 +140,13 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('enterTitleScreen', () => this.zone.run(() => this.titleScreenStateChange.next(true)));
     skyrimtogether.on('exitTitleScreen', () => this.zone.run(() => this.titleScreenStateChange.next(false)));
     skyrimtogether.on('showTitleOptions', () => this.zone.run(() => this.titleOptionsRequested.next()));
+    skyrimtogether.on('showTitleLobby', () => this.zone.run(() => this.titleLobbyRequested.next()));
+    skyrimtogether.on('coopLobbyState', (playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected) =>
+      this.zone.run(() => this.coopLobbyStateChange.next({ playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected })));
+    skyrimtogether.on('steamLobbyState', (lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost) =>
+      this.zone.run(() => this.steamLobbyStateChange.next({ lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost })));
+    skyrimtogether.on('deploymentScanState', (complete, fileCount, hashed, cached, errors) =>
+      this.zone.run(() => this.deploymentScanStateChange.next({ complete, fileCount, hashed, cached, errors })));
     skyrimtogether.on('openingMenu', this.onOpeningMenu.bind(this));
     skyrimtogether.on('connect', this.onConnect.bind(this));
     skyrimtogether.on('disconnect', this.onDisconnect.bind(this));
@@ -189,6 +202,10 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('enterTitleScreen');
     skyrimtogether.off('exitTitleScreen');
     skyrimtogether.off('showTitleOptions');
+    skyrimtogether.off('showTitleLobby');
+    skyrimtogether.off('coopLobbyState');
+    skyrimtogether.off('steamLobbyState');
+    skyrimtogether.off('deploymentScanState');
     skyrimtogether.off('openingMenu');
     skyrimtogether.off('connect');
     skyrimtogether.off('disconnect');
@@ -244,6 +261,26 @@ export class ClientService implements OnDestroy {
     skyrimtogether.leaveSteamSession();
   }
 
+  public joinSteamFriend(steamId: string): void {
+    skyrimtogether.joinSteamFriend(steamId);
+  }
+
+  public inviteSteamFriend(): void {
+    skyrimtogether.inviteSteamFriend();
+  }
+
+  public refreshSteamLobby(): void {
+    skyrimtogether.refreshSteamLobby();
+  }
+
+  public setSteamSessionAccess(open: boolean, password = ''): void {
+    skyrimtogether.setSteamSessionAccess(open, password);
+  }
+
+  public connectJoinedSteamSession(password = ''): void {
+    skyrimtogether.connectJoinedSteamSession(password);
+  }
+
   public requestGameSettings(): void {
     skyrimtogether.requestGameSettings();
   }
@@ -275,6 +312,22 @@ export class ClientService implements OnDestroy {
 
   public openTitleOptions(): void {
     skyrimtogether.openTitleOptions();
+  }
+
+  public openTitleLobby(): void {
+    skyrimtogether.openTitleLobby();
+  }
+
+  public setPartyReady(ready: boolean): void {
+    skyrimtogether.setPartyReady(ready);
+  }
+
+  public selectSharedCampaign(mode: number, checkpointId = ''): void {
+    skyrimtogether.selectSharedCampaign(mode, checkpointId);
+  }
+
+  public startTogether(mode: number, checkpointId = ''): void {
+    skyrimtogether.startTogether(mode, checkpointId);
   }
 
   public submitDebugFeedback(looksRight: boolean, note = ''): void {

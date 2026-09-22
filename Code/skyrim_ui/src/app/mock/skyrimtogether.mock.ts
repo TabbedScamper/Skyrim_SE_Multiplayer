@@ -152,6 +152,18 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
 
   leaveSteamSession(): void {}
 
+  joinSteamFriend(_steamId: string): void {}
+
+  inviteSteamFriend(): void {}
+
+  refreshSteamLobby(): void {
+    this.emit('steamLobbyState', '', '', [], [], [], [], false, false, false, false);
+  }
+
+  setSteamSessionAccess(_open: boolean, _password: string): void {}
+
+  connectJoinedSteamSession(_password: string): void {}
+
   requestGameSettings(): void {
     this.emit('gameSettings', 1, 0, 1920, 1080, true, 1, 1, 0.8, 0.8, 1,
       1, 0.0125, 0.6667, false, true, true, true, true,
@@ -180,6 +192,16 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
     this.active = true;
     this.emit('activate');
   }
+
+  openTitleLobby(): void {
+    this.emit('showTitleLobby');
+  }
+
+  setPartyReady(_ready: boolean): void {}
+
+  selectSharedCampaign(_mode: number, _checkpointId: string): void {}
+
+  startTogether(_mode: number, _checkpointId: string): void {}
 
   createPartyInvite(playerId: number): void {
     playerStore.update(updateEntities(playerId, { invited: true }));

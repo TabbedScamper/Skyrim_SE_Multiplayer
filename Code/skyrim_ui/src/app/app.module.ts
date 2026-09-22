@@ -30,6 +30,7 @@ import { RootComponent } from './components/root/root.component';
 import { ServerListComponent } from './components/server-list/server-list.component';
 import { SettingsComponent } from './components/settings/settings.component';
 import { ToggleComponent } from './components/toggle/toggle.component';
+import { TitleCoopLobbyComponent } from './components/title-coop-lobby/title-coop-lobby.component';
 import { WindowComponent } from './components/window/window.component';
 import { HealthDirective } from './directives/health.directive';
 import { RadioDirective } from './directives/radio.directive';
@@ -71,6 +72,7 @@ import { TranslocoRootModule } from './transloco-root.module';
     ServerListComponent,
     SettingsComponent,
     ToggleComponent,
+    TitleCoopLobbyComponent,
     WindowComponent,
 
     CheckboxDirective,

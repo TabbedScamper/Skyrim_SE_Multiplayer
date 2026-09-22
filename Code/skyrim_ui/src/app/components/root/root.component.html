@@ -24,6 +24,9 @@
     <app-popup *ngIf="(view$ | async) === RootView.SETTINGS" data-popup="settings">
       <app-settings (done)="closeView()"></app-settings>
     </app-popup>
+    <app-popup *ngIf="(view$ | async) === RootView.COOP_LOBBY" data-popup="coopLobby">
+      <app-title-coop-lobby (done)="closeView()"></app-title-coop-lobby>
+    </app-popup>
   </div>
 </ng-container>
 

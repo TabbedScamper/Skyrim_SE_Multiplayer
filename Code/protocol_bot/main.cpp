@@ -22,6 +22,9 @@
 #include <Messages/NotifyPartyJoined.h>
 #include <Messages/NotifyQuestUpdate.h>
 #include <Messages/PartyCreateRequest.h>
+#include <Messages/PartyReadyRequest.h>
+#include <Messages/PartyStartRequest.h>
+#include <Messages/PartySessionSettingsRequest.h>
 #include <Messages/RequestQuestUpdate.h>
 #include <Messages/ServerMessageFactory.h>
 
@@ -44,11 +47,13 @@ namespace
 struct ProtocolBot final : TiltedPhoques::Client
 {
     explicit ProtocolBot(
-        std::string aName, const bool aUseSyntheticManifest = false, const uint8_t aSyntheticPluginHashByte = 0x5A, const uint8_t aSyntheticDeploymentHashByte = 0x6A)
+        std::string aName, const bool aUseSyntheticManifest = false, const uint8_t aSyntheticPluginHashByte = 0x5A,
+        const uint8_t aSyntheticDeploymentHashByte = 0x6A, std::string aPassword = {})
         : Name(std::move(aName))
         , UseSyntheticManifest(aUseSyntheticManifest)
         , SyntheticPluginHashByte(aSyntheticPluginHashByte)
         , SyntheticDeploymentHashByte(aSyntheticDeploymentHashByte)
+        , Password(std::move(aPassword))
     {
     }
 
@@ -74,6 +79,7 @@ struct ProtocolBot final : TiltedPhoques::Client
         AuthenticationRequest request{};
         request.Version = BUILD_COMMIT;
         request.Username = Name;
+        request.Token = Password;
         request.Level = 1;
         request.PlayerTime.TimeScale = 20.f;
         if (UseSyntheticManifest)
@@ -149,6 +155,12 @@ struct ProtocolBot final : TiltedPhoques::Client
             IsLeader = info.IsLeader;
             LeaderPlayerId = info.LeaderPlayerId;
             PartySize = info.PlayerIds.size();
+            ReadyCount = info.ReadyPlayerIds.size();
+            CampaignMode = info.CampaignMode;
+            SessionState = info.SessionState;
+            StartEpoch = info.StartEpoch;
+            LobbyOpen = info.LobbyOpen;
+            PasswordProtected = info.PasswordProtected;
             break;
         }
         case NotifyQuestUpdate::Opcode:
@@ -166,6 +178,7 @@ struct ProtocolBot final : TiltedPhoques::Client
     }
 
     std::string Name;
+    std::string Password;
     bool UseSyntheticManifest{};
     uint8_t SyntheticPluginHashByte{};
     uint8_t SyntheticDeploymentHashByte{};
@@ -183,6 +196,12 @@ struct ProtocolBot final : TiltedPhoques::Client
     uint64_t AuthorityEpoch{};
     uint32_t LeaderPlayerId{};
     size_t PartySize{};
+    size_t ReadyCount{};
+    uint8_t CampaignMode{};
+    uint8_t SessionState{};
+    uint64_t StartEpoch{};
+    bool LobbyOpen{};
+    bool PasswordProtected{};
     uint16_t LastQuestStage{};
     uint64_t LastQuestTransactionId{};
     uint64_t LastQuestRevision{};
@@ -266,6 +285,91 @@ int main(int argc, char** argv)
     {
         PrintResult(scenario.c_str(), false, "two-player auto-party state did not converge");
         return 1;
+    }
+
+    if (scenario == "lobby-ready-barrier")
+    {
+        PartyReadyRequest ready;
+        ready.Ready = true;
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] { return leader.ReadyCount == 2 && follower.ReadyCount == 2; }, 5s))
+        {
+            PrintResult("lobby-ready-barrier", false, "server did not converge both ready states");
+            return 1;
+        }
+
+        PartyStartRequest unauthorized;
+        unauthorized.Mode = PartyStartRequest::kContinue;
+        unauthorized.Launch = true;
+        unauthorized.CheckpointId = "forbidden-follower-checkpoint";
+        follower.SendMessage(unauthorized);
+
+        PartyStartRequest selection;
+        selection.Mode = PartyStartRequest::kNew;
+        leader.SendMessage(selection);
+        if (!PumpUntil(
+                {&leader, &follower},
+                [&] { return leader.CampaignMode == PartyStartRequest::kNew && follower.CampaignMode == PartyStartRequest::kNew && leader.SessionState == 0 && follower.SessionState == 0; }, 5s))
+        {
+            PrintResult("lobby-ready-barrier", false, "follower could launch or campaign selection did not converge");
+            return 1;
+        }
+
+        selection.Launch = true;
+        leader.SendMessage(selection);
+        const bool started = PumpUntil(
+            {&leader, &follower},
+            [&] { return leader.SessionState == 1 && follower.SessionState == 1 && leader.StartEpoch > 0 && leader.StartEpoch == follower.StartEpoch; }, 5s);
+        PrintResult(
+            "lobby-ready-barrier", started,
+            started ? "server enforced host-only launch and released both ready clients on one start epoch" : "ready clients did not converge on one start epoch");
+        return started ? 0 : 1;
+    }
+
+    if (scenario == "session-access-authority")
+    {
+        PartySessionSettingsRequest settings;
+        settings.Open = true;
+        settings.Password = "headless-secret";
+        leader.SendMessage(settings);
+        if (!PumpUntil({&leader, &follower}, [&] { return leader.LobbyOpen && follower.LobbyOpen && leader.PasswordProtected && follower.PasswordProtected; }, 5s))
+        {
+            PrintResult("session-access-authority", false, "leader settings did not converge");
+            return 1;
+        }
+
+        ProtocolBot wrongPassword("WrongPassword", useSyntheticManifest, 0x5A, 0x6A, "wrong");
+        if (!wrongPassword.Connect(endpoint) || !PumpUntil({&leader, &follower, &wrongPassword},
+                [&] { return wrongPassword.AuthenticationType == AuthenticationResponse::ResponseType::kWrongPassword; }, 5s))
+        {
+            PrintResult("session-access-authority", false, "server did not reject an incorrect session password");
+            return 1;
+        }
+        wrongPassword.Close();
+
+        ProtocolBot correctPassword("CorrectPassword", useSyntheticManifest, 0x5A, 0x6A, "headless-secret");
+        if (!correctPassword.Connect(endpoint) || !PumpUntil({&leader, &follower, &correctPassword}, [&] { return correctPassword.Authenticated; }, 5s))
+        {
+            PrintResult("session-access-authority", false, "server did not accept the correct session password");
+            return 1;
+        }
+        correctPassword.Close();
+
+        settings.Open = false;
+        settings.Password.clear();
+        follower.SendMessage(settings);
+        std::this_thread::sleep_for(100ms);
+        leader.Update();
+        follower.Update();
+        const bool rejectedFollower = leader.LobbyOpen && follower.LobbyOpen && leader.PasswordProtected && follower.PasswordProtected;
+
+        leader.SendMessage(settings); // restore the shared test server for following scenarios
+        const bool reset = PumpUntil({&leader, &follower}, [&] { return !leader.LobbyOpen && !follower.LobbyOpen && !leader.PasswordProtected && !follower.PasswordProtected; }, 5s);
+        const bool passed = rejectedFollower && reset;
+        PrintResult("session-access-authority", passed,
+            passed ? "host-only access changes converged; wrong password was rejected and correct password accepted" : "session access authority or password enforcement failed");
+        return passed ? 0 : 1;
     }
 
     if (scenario == "join")

@@ -1,0 +1,30 @@
+@import 'env';
+@import 'functions/mod';
+
+.coop-lobby {
+  width: clamp(52rem, 48vw, 76rem);
+  color: mod($-color-background, 0.92);
+  padding: 2.4rem 3rem;
+  background: linear-gradient(110deg, rgba(5, 8, 10, .96), rgba(18, 22, 24, .91));
+  border: 1px solid rgba(210, 220, 220, .42);
+  box-shadow: 0 0 4rem #000;
+  text-shadow: 0 1px 2px #000;
+}
+
+header { text-align: center; border-bottom: 1px solid rgba(255,255,255,.24); margin-bottom: 1.5rem; }
+h1 { margin: 0; letter-spacing: .22em; font-weight: 400; }
+header p, h2 { letter-spacing: .14em; text-transform: uppercase; color: #bfc8c8; }
+button, input { min-height: 3.2rem; }
+.entry-grid, .campaign, .friend-list, .party-options { display: grid; gap: .8rem; }
+.party-options { margin: 1rem 0; padding: 1rem; border: 1px solid rgba(255,255,255,.15); }
+.status-row { display: grid; grid-template-columns: 1fr 2fr; gap: .5rem 1rem; margin-bottom: 1rem; }
+.roster { display: grid; gap: .6rem; margin: 1rem 0; }
+.member { display: grid; grid-template-columns: 1fr auto auto; gap: 1rem; padding: 1rem; background: rgba(255,255,255,.06); border-left: 2px solid #687272; }
+.member.empty, .muted { color: #8c9696; font-style: italic; }
+.actions { display: flex; gap: .8rem; margin-top: 1.5rem; }
+.actions button { flex: 1; }
+.ok { color: #a9d8ae; }
+.selected { color: white; border-color: #d8e0df; background: rgba(190,210,210,.16); }
+.back { display: block; margin: 1.6rem auto 0; min-width: 12rem; }
+details { padding: .8rem; border-top: 1px solid rgba(255,255,255,.15); }
+summary { cursor: pointer; margin-bottom: .6rem; }

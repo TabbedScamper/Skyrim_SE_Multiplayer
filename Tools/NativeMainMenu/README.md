@@ -1,8 +1,9 @@
 # Native Skyrim main-menu integration
 
 `Patch-NativeMainMenu.ps1` derives a patched `interface\startmenu.swf` from the
-user's own installed copy of Skyrim. It adds the selectable `OPTIONS` entry that
-calls the multiplayer client's `SkyrimSeamlessOptions` Scaleform callback. It
+user's own installed copy of Skyrim. It adds selectable `CO-OP` and `OPTIONS`
+entries. `CO-OP` opens the title-screen shared-campaign lobby; `OPTIONS` opens
+the multiplayer client's live settings overlay. It
 also adds a lightweight `Stage.visibleRect` watcher to the existing Start Menu
 instance. When the renderer changes size, the watcher reruns Skyrim's original
 bottom-right, bottom-left, and top-left anchor operations without closing or

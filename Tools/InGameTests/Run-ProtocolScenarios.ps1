@@ -110,6 +110,14 @@ try {
     $handoffExitCode = $LASTEXITCODE
     $handoff = $handoffOutput | ConvertFrom-Json
 
+    $lobbyOutput = & $botPath "127.0.0.1:$Port" lobby-ready-barrier $botManifestArgument
+    $lobbyExitCode = $LASTEXITCODE
+    $lobby = $lobbyOutput | ConvertFrom-Json
+
+    $accessOutput = & $botPath "127.0.0.1:$Port" session-access-authority $botManifestArgument
+    $accessExitCode = $LASTEXITCODE
+    $access = $accessOutput | ConvertFrom-Json
+
     $reconnectOutput = & $botPath "127.0.0.1:$Port" follower-reconnect $botManifestArgument
     $reconnectExitCode = $LASTEXITCODE
     $reconnect = $reconnectOutput | ConvertFrom-Json
@@ -120,11 +128,13 @@ try {
 
     $summary = [pscustomobject]@{
         passed = $joinExitCode -eq 0 -and $handoffExitCode -eq 0 -and $reconnectExitCode -eq 0 -and `
-            $modMismatchExitCode -eq 0 -and $deploymentMismatchExitCode -eq 0 -and `
+            $modMismatchExitCode -eq 0 -and $deploymentMismatchExitCode -eq 0 -and $lobbyExitCode -eq 0 -and $accessExitCode -eq 0 -and `
             ($authorityExitCode -eq 0 -or (-not $FailOnKnownGaps -and $authorityExitCode -eq 2))
         join = $join
         modMismatch = $modMismatch
         deploymentMismatch = $deploymentMismatch
+        lobbyReadyBarrier = $lobby
+        sessionAccessAuthority = $access
         leaderHandoff = $handoff
         followerReconnect = $reconnect
         questAuthority = $authority

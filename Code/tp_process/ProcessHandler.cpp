@@ -34,6 +34,11 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     CreateFunction("hostSteamSession");
     CreateFunction("joinSteamSession");
     CreateFunction("leaveSteamSession");
+    CreateFunction("joinSteamFriend");
+    CreateFunction("inviteSteamFriend");
+    CreateFunction("refreshSteamLobby");
+    CreateFunction("setSteamSessionAccess");
+    CreateFunction("connectJoinedSteamSession");
     CreateFunction("requestGameSettings");
     CreateFunction("previewGameSetting");
     CreateFunction("confirmDisplaySettings");
@@ -42,6 +47,10 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     CreateFunction("resetGameSettings");
     CreateFunction("submitDebugFeedback");
     CreateFunction("openTitleOptions");
+    CreateFunction("openTitleLobby");
+    CreateFunction("setPartyReady");
+    CreateFunction("selectSharedCampaign");
+    CreateFunction("startTogether");
 }
 
 void ProcessHandler::OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context)

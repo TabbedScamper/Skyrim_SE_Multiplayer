@@ -35,6 +35,10 @@ struct PartyService
     void AcceptInvite(const uint32_t aInviterId) const noexcept;
     void KickPartyMember(const uint32_t aPlayerId) const noexcept;
     void ChangePartyLeader(const uint32_t aPlayerId) const noexcept;
+    void SetReady(bool aReady) const noexcept;
+    void SelectCampaign(uint8_t aMode, const String& acCheckpointId = {}) const noexcept;
+    void StartTogether(uint8_t aMode, const String& acCheckpointId = {}) const noexcept;
+    void SetSessionSettings(bool aOpen, const String& acPassword) const noexcept;
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
@@ -56,6 +60,10 @@ private:
     bool m_isLeader = false;
     uint32_t m_leaderPlayerId{};
     Vector<uint32_t> m_partyMembers;
+    Vector<uint32_t> m_readyPlayers;
+    uint8_t m_campaignMode{};
+    uint8_t m_sessionState{};
+    uint64_t m_startEpoch{};
 
     World& m_world;
     TransportService& m_transport;

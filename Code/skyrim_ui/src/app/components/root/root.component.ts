@@ -75,6 +75,9 @@ export class RootComponent implements OnInit {
     this.client.titleOptionsRequested
       .pipe(takeUntil(this.destroy$))
       .subscribe(() => this.setView(View.SETTINGS));
+    this.client.titleLobbyRequested
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.setView(View.COOP_LOBBY));
     this.client.debugPrompt
       .pipe(takeUntil(this.destroy$))
       .subscribe(payload => {

@@ -215,6 +215,14 @@ bool GameServer::IsPublicServer() const noexcept
     return bAnnounceServer;
 }
 
+void GameServer::SetSessionPassword(const String& acPassword) noexcept
+{
+    sPassword = acPassword.c_str();
+    m_isPasswordProtected = !acPassword.empty();
+    UpdateInfo();
+    spdlog::info("Session password protection {}", m_isPasswordProtected ? "enabled" : "disabled");
+}
+
 bool GameServer::AllowsAutoPartyJoin() const noexcept
 {
     return bAutoPartyJoin && !IsPublicServer();

@@ -4,6 +4,7 @@
 #include <Services/OverlayService.h>
 #include <Services/TransportService.h>
 #include <World.h>
+#include <OverlayApp.hpp>
 
 namespace
 {
@@ -18,9 +19,29 @@ using CreateLobby = uint64_t(__cdecl*)(void*, int, int);
 using JoinLobby = uint64_t(__cdecl*)(void*, uint64_t);
 using LeaveLobby = void(__cdecl*)(void*, uint64_t);
 using SetLobbyData = bool(__cdecl*)(void*, uint64_t, const char*, const char*);
+using SetLobbyType = bool(__cdecl*)(void*, uint64_t, int);
 using GetLobbyData = const char*(__cdecl*)(void*, uint64_t, const char*);
 using IsApiCallCompleted = bool(__cdecl*)(void*, uint64_t, bool*);
 using GetApiCallResult = bool(__cdecl*)(void*, uint64_t, void*, int, int, bool*);
+using GetLobbyOwner = uint64_t(__cdecl*)(void*, uint64_t);
+using GetNumLobbyMembers = int(__cdecl*)(void*, uint64_t);
+using GetLobbyMemberByIndex = uint64_t(__cdecl*)(void*, uint64_t, int);
+using GetFriendCount = int(__cdecl*)(void*, int);
+using GetFriendByIndex = uint64_t(__cdecl*)(void*, int, int);
+using GetFriendPersonaName = const char*(__cdecl*)(void*, uint64_t);
+using GetFriendGamePlayed = bool(__cdecl*)(void*, uint64_t, void*);
+using ActivateGameOverlayInviteDialog = void(__cdecl*)(void*, uint64_t);
+using GetAppId = uint32_t(__cdecl*)(void*);
+
+struct FriendGameInfo
+{
+    uint64_t GameId{};
+    uint32_t GameIp{};
+    uint16_t GamePort{};
+    uint16_t QueryPort{};
+    uint64_t LobbyId{};
+};
+static_assert(sizeof(FriendGameInfo) == 24);
 
 struct LobbyCreatedResult
 {
@@ -42,6 +63,7 @@ struct LobbyEnterResult
 SteamLobbyService::SteamLobbyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
     , m_updateConnection(aDispatcher.sink<UpdateEvent>().connect<&SteamLobbyService::OnUpdate>(this))
+    , m_connectedConnection(aDispatcher.sink<ConnectedEvent>().connect<&SteamLobbyService::OnConnected>(this))
 {
 }
 
@@ -70,9 +92,13 @@ bool SteamLobbyService::Initialize() noexcept
 
     const auto getMatchmaking = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamMatchmaking_v009");
     const auto getUtils = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamUtils_v010");
+    auto getFriends = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamFriends_v017");
+    if (!getFriends)
+        getFriends = LoadSteamFunction<GetInterface>(m_steamModule, "SteamAPI_SteamFriends_v016");
     m_matchmaking = getMatchmaking ? getMatchmaking() : nullptr;
     m_utils = getUtils ? getUtils() : nullptr;
-    if (!m_matchmaking || !m_utils)
+    m_friends = getFriends ? getFriends() : nullptr;
+    if (!m_matchmaking || !m_utils || !m_friends)
     {
         ShowMessage("Steam matchmaking could not be initialized.");
         return false;
@@ -89,7 +115,7 @@ void SteamLobbyService::HostSession() noexcept
     if (!createLobby || !StartLocalServer())
         return;
 
-    m_apiCall = createLobby(m_matchmaking, 1, 2); // friends-only, two players
+    m_apiCall = createLobby(m_matchmaking, 0, 2); // private/invite-only by default
     if (!m_apiCall)
     {
         ShowMessage("Steam refused to create the session.");
@@ -126,14 +152,92 @@ void SteamLobbyService::JoinSession(const String& acLobbyId) noexcept
     ShowMessage("Joining Skyrim SE Multiplayer session...");
 }
 
+void SteamLobbyService::JoinFriend(const uint64_t aSteamId) noexcept
+{
+    if (!Initialize())
+        return;
+    const auto getFriendGamePlayed = LoadSteamFunction<GetFriendGamePlayed>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendGamePlayed");
+    FriendGameInfo game{};
+    if (!getFriendGamePlayed || !getFriendGamePlayed(m_friends, aSteamId, &game) || !game.LobbyId)
+    {
+        ShowMessage("That friend is not currently in a joinable Skyrim SE Multiplayer lobby.");
+        return;
+    }
+    if (game.LobbyId == m_lobbyId)
+        return;
+    m_world.GetTransport().Close();
+    LeaveSession();
+    StopLocalServer();
+    JoinSession(std::to_string(game.LobbyId).c_str());
+}
+
+void SteamLobbyService::InviteFriend() noexcept
+{
+    if (!Initialize() || !m_lobbyId)
+    {
+        ShowMessage("Create or join a lobby before inviting a friend.");
+        return;
+    }
+    const auto activate = LoadSteamFunction<ActivateGameOverlayInviteDialog>(m_steamModule, "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog");
+    if (activate)
+        activate(m_friends, m_lobbyId);
+    else
+        ShowMessage("Steam's friend invitation dialog is unavailable.");
+}
+
+void SteamLobbyService::RefreshLobbyState() noexcept
+{
+    if (Initialize())
+        PublishLobbyState();
+}
+
+void SteamLobbyService::ApplyPartySettings(const bool aOpen, const bool aPasswordProtected) noexcept
+{
+    if (!m_isHost || !m_lobbyId || !Initialize())
+        return;
+    m_lobbyOpen = aOpen;
+    m_passwordProtected = aOpen && aPasswordProtected;
+    const auto setType = LoadSteamFunction<SetLobbyType>(m_steamModule, "SteamAPI_ISteamMatchmaking_SetLobbyType");
+    const auto setData = LoadSteamFunction<SetLobbyData>(m_steamModule, "SteamAPI_ISteamMatchmaking_SetLobbyData");
+    if (setType)
+        setType(m_matchmaking, m_lobbyId, m_lobbyOpen ? 1 : 0); // friends-only when open, invite-only when private
+    if (setData)
+    {
+        setData(m_matchmaking, m_lobbyId, "visibility", m_lobbyOpen ? "open" : "private");
+        setData(m_matchmaking, m_lobbyId, "has_password", m_passwordProtected ? "1" : "0");
+    }
+    PublishLobbyState();
+}
+
+void SteamLobbyService::ConnectJoinedSession(const String& acPassword) noexcept
+{
+    if (!m_lobbyId || m_isHost || m_joinEndpoint.empty())
+        return;
+    m_world.GetTransport().SetServerPassword(acPassword.c_str());
+    m_world.GetTransport().Connect(m_joinEndpoint.c_str());
+    PublishLobbyState();
+}
+
 void SteamLobbyService::OnUpdate(const UpdateEvent&) noexcept
 {
-    if (m_pending == PendingOperation::None || !m_apiCall)
-        return;
-
+    if (!m_autoHostAttempted && GetTickCount64() > 2000)
+    {
+        m_autoHostAttempted = true;
+        HostSession();
+    }
     const auto runCallbacks = LoadSteamFunction<RunCallbacks>(m_steamModule, "SteamAPI_RunCallbacks");
     if (runCallbacks)
         runCallbacks();
+
+    const auto now = GetTickCount64();
+    if (now >= m_nextLobbyRefresh)
+    {
+        m_nextLobbyRefresh = now + 1000;
+        PublishLobbyState();
+    }
+
+    if (m_pending == PendingOperation::None || !m_apiCall)
+        return;
 
     const auto isCompleted = LoadSteamFunction<IsApiCallCompleted>(m_steamModule, "SteamAPI_ISteamUtils_IsAPICallCompleted");
     bool failed = false;
@@ -154,6 +258,17 @@ void SteamLobbyService::OnUpdate(const UpdateEvent&) noexcept
         CompleteJoin();
 }
 
+void SteamLobbyService::OnConnected(const ConnectedEvent&) noexcept
+{
+    if (!m_isHost && m_waitingForPassword)
+    {
+        m_waitingForPassword = false;
+        PublishLobbyState();
+    }
+    if (m_lobbyId && m_isHost && !m_world.GetPartyService().IsInParty())
+        m_world.GetPartyService().CreateParty();
+}
+
 void SteamLobbyService::CompleteCreate() noexcept
 {
     const auto getResult = LoadSteamFunction<GetApiCallResult>(m_steamModule, "SteamAPI_ISteamUtils_GetAPICallResult");
@@ -167,6 +282,7 @@ void SteamLobbyService::CompleteCreate() noexcept
     else
     {
         m_lobbyId = result.LobbyId;
+        m_isHost = true;
         const auto setData = LoadSteamFunction<SetLobbyData>(m_steamModule, "SteamAPI_ISteamMatchmaking_SetLobbyData");
         const auto endpoint = GetLanEndpoint();
         if (setData)
@@ -174,16 +290,20 @@ void SteamLobbyService::CompleteCreate() noexcept
             setData(m_matchmaking, m_lobbyId, "skyrim_se_multiplayer", "1");
             setData(m_matchmaking, m_lobbyId, "server_address", endpoint.c_str());
             setData(m_matchmaking, m_lobbyId, "build", BUILD_COMMIT);
+            setData(m_matchmaking, m_lobbyId, "visibility", "private");
+            setData(m_matchmaking, m_lobbyId, "has_password", "0");
         }
 
         const auto readyMessage = "Session ready. Lobby ID: " + std::to_string(m_lobbyId);
         ShowMessage(readyMessage.c_str());
         m_world.GetTransport().SetServerPassword("");
         m_world.GetTransport().Connect("127.0.0.1:10578");
+        PublishLobbyState();
     }
 
     m_pending = PendingOperation::None;
     m_apiCall = 0;
+    PublishLobbyState();
 }
 
 void SteamLobbyService::CompleteJoin() noexcept
@@ -199,20 +319,97 @@ void SteamLobbyService::CompleteJoin() noexcept
     else
     {
         m_lobbyId = result.LobbyId;
+        m_isHost = false;
         const auto getData = LoadSteamFunction<GetLobbyData>(m_steamModule, "SteamAPI_ISteamMatchmaking_GetLobbyData");
+        const char* pMarker = getData ? getData(m_matchmaking, m_lobbyId, "skyrim_se_multiplayer") : nullptr;
+        const char* pBuild = getData ? getData(m_matchmaking, m_lobbyId, "build") : nullptr;
         const char* pEndpoint = getData ? getData(m_matchmaking, m_lobbyId, "server_address") : nullptr;
-        if (!pEndpoint || !*pEndpoint)
+        if (!pMarker || strcmp(pMarker, "1") != 0 || !pBuild || strcmp(pBuild, BUILD_COMMIT) != 0)
+        {
+            ShowMessage("That friend's session is not a compatible Skyrim SE Multiplayer build.");
+            LeaveSession();
+        }
+        else if (!pEndpoint || !*pEndpoint)
             ShowMessage("The host has not published a server endpoint.");
         else
         {
-            ShowMessage("Steam lobby joined. Connecting to host...");
-            m_world.GetTransport().SetServerPassword("");
-            m_world.GetTransport().Connect(pEndpoint);
+            m_joinEndpoint = pEndpoint;
+            const char* pHasPassword = getData(m_matchmaking, m_lobbyId, "has_password");
+            m_passwordProtected = pHasPassword && strcmp(pHasPassword, "1") == 0;
+            const char* pVisibility = getData(m_matchmaking, m_lobbyId, "visibility");
+            m_lobbyOpen = pVisibility && strcmp(pVisibility, "open") == 0;
+            m_waitingForPassword = m_passwordProtected;
+            if (m_waitingForPassword)
+                ShowMessage("Session joined. Enter its password to connect.");
+            else
+            {
+                ShowMessage("Steam lobby joined. Connecting to host...");
+                ConnectJoinedSession({});
+            }
+            PublishLobbyState();
         }
     }
 
     m_pending = PendingOperation::None;
     m_apiCall = 0;
+    PublishLobbyState();
+}
+
+void SteamLobbyService::PublishLobbyState() noexcept
+{
+    if (!m_steamModule || !m_matchmaking || !m_friends)
+        return;
+    const auto getOwner = LoadSteamFunction<GetLobbyOwner>(m_steamModule, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+    const auto getMemberCount = LoadSteamFunction<GetNumLobbyMembers>(m_steamModule, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers");
+    const auto getMember = LoadSteamFunction<GetLobbyMemberByIndex>(m_steamModule, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex");
+    const auto getFriendCount = LoadSteamFunction<GetFriendCount>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendCount");
+    const auto getFriend = LoadSteamFunction<GetFriendByIndex>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendByIndex");
+    const auto getName = LoadSteamFunction<GetFriendPersonaName>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+    const auto getGame = LoadSteamFunction<GetFriendGamePlayed>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendGamePlayed");
+    const auto getAppId = LoadSteamFunction<GetAppId>(m_steamModule, "SteamAPI_ISteamUtils_GetAppID");
+    if (!getOwner || !getMemberCount || !getMember || !getFriendCount || !getFriend || !getName || !getGame || !getAppId)
+        return;
+
+    auto arguments = CefListValue::Create();
+    arguments->SetString(0, std::to_string(m_lobbyId));
+    arguments->SetString(1, std::to_string(m_lobbyId ? getOwner(m_matchmaking, m_lobbyId) : 0));
+    auto memberIds = CefListValue::Create();
+    auto memberNames = CefListValue::Create();
+    const int memberCount = m_lobbyId ? getMemberCount(m_matchmaking, m_lobbyId) : 0;
+    for (int i = 0; i < memberCount; ++i)
+    {
+        const auto id = getMember(m_matchmaking, m_lobbyId, i);
+        memberIds->SetString(i, std::to_string(id));
+        const char* pName = getName(m_friends, id);
+        memberNames->SetString(i, pName ? pName : "Steam player");
+    }
+    arguments->SetList(2, memberIds);
+    arguments->SetList(3, memberNames);
+
+    auto friendIds = CefListValue::Create();
+    auto friendNames = CefListValue::Create();
+    int joinableCount = 0;
+    constexpr int kImmediateFriends = 0x04;
+    const int friendCount = getFriendCount(m_friends, kImmediateFriends);
+    for (int i = 0; i < friendCount; ++i)
+    {
+        const auto id = getFriend(m_friends, i, kImmediateFriends);
+        FriendGameInfo game{};
+        if (!getGame(m_friends, id, &game) || !game.LobbyId || (game.GameId & 0xFFFFFFu) != getAppId(m_utils))
+            continue;
+        friendIds->SetString(joinableCount, std::to_string(id));
+        const char* pName = getName(m_friends, id);
+        friendNames->SetString(joinableCount, pName ? pName : "Steam friend");
+        ++joinableCount;
+    }
+    arguments->SetList(4, friendIds);
+    arguments->SetList(5, friendNames);
+    arguments->SetBool(6, m_lobbyOpen);
+    arguments->SetBool(7, m_passwordProtected);
+    arguments->SetBool(8, m_waitingForPassword);
+    arguments->SetBool(9, m_isHost);
+    if (auto* pApp = m_world.GetOverlayService().GetOverlayApp())
+        pApp->ExecuteAsync("steamLobbyState", arguments);
 }
 
 void SteamLobbyService::LeaveSession() noexcept
@@ -224,8 +421,22 @@ void SteamLobbyService::LeaveSession() noexcept
             leaveLobby(m_matchmaking, m_lobbyId);
     }
     m_lobbyId = 0;
+    m_isHost = false;
+    m_lobbyOpen = false;
+    m_passwordProtected = false;
+    m_waitingForPassword = false;
+    m_joinEndpoint.clear();
     m_pending = PendingOperation::None;
     m_apiCall = 0;
+    PublishLobbyState();
+}
+
+void SteamLobbyService::StopLocalServer() noexcept
+{
+    if (m_serverProcess && WaitForSingleObject(m_serverProcess, 0) == WAIT_TIMEOUT)
+        TerminateProcess(m_serverProcess, 0);
+    if (m_serverProcess)
+        WaitForSingleObject(m_serverProcess, 3000);
 }
 
 bool SteamLobbyService::StartLocalServer() noexcept

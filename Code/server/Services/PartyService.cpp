@@ -17,6 +17,9 @@
 #include <Messages/PartyCreateRequest.h>
 #include <Messages/PartyChangeLeaderRequest.h>
 #include <Messages/PartyKickRequest.h>
+#include <Messages/PartyReadyRequest.h>
+#include <Messages/PartyStartRequest.h>
+#include <Messages/PartySessionSettingsRequest.h>
 #include <Messages/NotifyPlayerJoined.h>
 
 PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
@@ -30,6 +33,9 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyCreateConnection(aDispatcher.sink<PacketEvent<PartyCreateRequest>>().connect<&PartyService::OnPartyCreate>(this))
     , m_partyChangeLeaderConnection(aDispatcher.sink<PacketEvent<PartyChangeLeaderRequest>>().connect<&PartyService::OnPartyChangeLeader>(this))
     , m_partyKickConnection(aDispatcher.sink<PacketEvent<PartyKickRequest>>().connect<&PartyService::OnPartyKick>(this))
+    , m_partyReadyConnection(aDispatcher.sink<PacketEvent<PartyReadyRequest>>().connect<&PartyService::OnPartyReady>(this))
+    , m_partyStartConnection(aDispatcher.sink<PacketEvent<PartyStartRequest>>().connect<&PartyService::OnPartyStart>(this))
+    , m_partySessionSettingsConnection(aDispatcher.sink<PacketEvent<PartySessionSettingsRequest>>().connect<&PartyService::OnPartySessionSettings>(this))
 {
 }
 
@@ -195,6 +201,70 @@ void PartyService::OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) no
     }
 }
 
+void PartyService::OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) noexcept
+{
+    auto* const pPlayer = acPacket.pPlayer;
+    auto* const pParty = GetPlayerParty(pPlayer);
+    if (!pParty || pParty->SessionState != 0)
+        return;
+
+    auto& ready = pParty->ReadyPlayerIds;
+    const auto found = std::find(ready.begin(), ready.end(), pPlayer->GetId());
+    if (acPacket.Packet.Ready && found == ready.end())
+        ready.push_back(pPlayer->GetId());
+    else if (!acPacket.Packet.Ready && found != ready.end())
+        ready.erase(found);
+    BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
+void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept
+{
+    auto* const pPlayer = acPacket.pPlayer;
+    auto* const pParty = GetPlayerParty(pPlayer);
+    if (!pParty || pParty->LeaderPlayerId != pPlayer->GetId() || pParty->SessionState != 0)
+        return;
+
+    const auto& request = acPacket.Packet;
+    if (request.Mode != PartyStartRequest::kNew && request.Mode != PartyStartRequest::kContinue)
+        return;
+
+    pParty->CampaignMode = request.Mode;
+    pParty->CheckpointId = request.Mode == PartyStartRequest::kContinue ? request.CheckpointId : String{};
+    if (request.Launch)
+    {
+        const bool allReady = pParty->Members.size() >= 2 && pParty->ReadyPlayerIds.size() == pParty->Members.size() &&
+                              std::all_of(pParty->Members.begin(), pParty->Members.end(), [&](const Player* apMember) {
+                                  return std::find(pParty->ReadyPlayerIds.begin(), pParty->ReadyPlayerIds.end(), apMember->GetId()) != pParty->ReadyPlayerIds.end();
+                              });
+        if (!allReady)
+        {
+            spdlog::warn("[PartyService]: Leader {} attempted to start before every member was ready", pPlayer->GetId());
+            BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+            return;
+        }
+        pParty->SessionState = 1;
+        pParty->StartEpoch = m_nextStartEpoch++;
+    }
+    BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
+void PartyService::OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept
+{
+    auto* const pPlayer = acPacket.pPlayer;
+    auto* const pParty = GetPlayerParty(pPlayer);
+    if (!pParty || pParty->LeaderPlayerId != pPlayer->GetId())
+        return;
+
+    const auto& request = acPacket.Packet;
+    if (request.Password.size() > 64)
+        return;
+
+    pParty->LobbyOpen = request.Open;
+    pParty->PasswordProtected = request.Open && !request.Password.empty();
+    GameServer::Get()->SetSessionPassword(pParty->PasswordProtected ? request.Password : String{});
+    BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
 void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
 {
     BroadcastPlayerList();
@@ -222,6 +292,9 @@ void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
                 Party& party = m_parties[*playerPartyComponent.JoinedPartyId];
 
                 party.Members.push_back(acEvent.pPlayer);
+                party.ReadyPlayerIds.clear();
+                party.SessionState = 0;
+                party.StartEpoch = 0;
                 acEvent.pPlayer->GetParty().JoinedPartyId = *playerPartyComponent.JoinedPartyId;
 
                 SendPartyJoinedEvent(party, acEvent.pPlayer);
@@ -325,6 +398,9 @@ void PartyService::OnPartyAcceptInvite(const PacketEvent<PartyAcceptInviteReques
         }
 
         party.Members.push_back(pSelf);
+        party.ReadyPlayerIds.clear();
+        party.SessionState = 0;
+        party.StartEpoch = 0;
         selfPartyComponent.JoinedPartyId = partyId;
 
         spdlog::debug("[PartyService]: Added invitee to party, sending events");
@@ -357,6 +433,9 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
         auto& members = party.Members;
 
         members.erase(std::find(std::begin(members), std::end(members), apPlayer));
+        party.ReadyPlayerIds.clear();
+        party.SessionState = 0;
+        party.StartEpoch = 0;
 
         if (members.empty())
         {
@@ -416,6 +495,13 @@ void PartyService::BroadcastPartyInfo(uint32_t aPartyId) const noexcept
 
     NotifyPartyInfo message;
     message.LeaderPlayerId = party.LeaderPlayerId;
+    message.ReadyPlayerIds = party.ReadyPlayerIds;
+    message.CampaignMode = party.CampaignMode;
+    message.SessionState = party.SessionState;
+    message.StartEpoch = party.StartEpoch;
+    message.CheckpointId = party.CheckpointId;
+    message.LobbyOpen = party.LobbyOpen;
+    message.PasswordProtected = party.PasswordProtected;
 
     for (auto pPlayer : members)
     {

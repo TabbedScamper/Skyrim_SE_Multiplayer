@@ -66,6 +66,7 @@ struct GameServer final : Server
 
     bool IsRunning() const noexcept { return !m_requestStop; }
     bool IsPasswordProtected() const noexcept { return m_isPasswordProtected; }
+    void SetSessionPassword(const String& acPassword) noexcept;
     [[nodiscard]] bool IsPublicServer() const noexcept;
     [[nodiscard]] bool AllowsAutoPartyJoin() const noexcept;
 

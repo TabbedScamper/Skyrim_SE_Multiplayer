@@ -158,6 +158,17 @@ void OpenOptions()
     world.GetGameSettingsService().QueueRequestSettings();
 }
 
+void OpenCoopLobby()
+{
+    spdlog::info("Opening Skyrim SE Multiplayer co-op lobby from the native main menu");
+    auto& world = World::Get();
+    auto& overlay = world.GetOverlayService();
+    overlay.SetActive(true);
+    if (auto* pApp = overlay.GetOverlayApp())
+        pApp->ExecuteAsync("showTitleLobby");
+    world.GetSteamLobbyService().RefreshLobbyState();
+}
+
 bool IsReadableMemory(const void* apMemory, size_t aSize)
 {
     if (!apMemory || !aSize)
@@ -232,23 +243,43 @@ void PollMainMenuOptions(IMenu* apMainMenu) noexcept
                 static_cast<int32_t>(swapDesc.BufferDesc.Height));
     }
 
-    ScaleformValue request{};
     const auto getVariable = reinterpret_cast<TGetVariable*>(pVtable[0x11]);
-    if (!getVariable(pMovie, &request, "_root.SkyrimSeamlessOptionsRequested") ||
-        (request.Type & 0x0F) != 3 || request.Value.Number == 0.0)
-        return;
-
-    ScaleformValue cleared{};
-    cleared.Value.Number = 0.0;
     const auto setVariable = reinterpret_cast<TSetVariable*>(pVtable[0x10]);
-    setVariable(pMovie, "_root.SkyrimSeamlessOptionsRequested", cleared, 0);
-    OpenOptions();
+    const auto consumeRequest = [&](const char* acVariable)
+    {
+        ScaleformValue request{};
+        if (!getVariable(pMovie, &request, acVariable) || (request.Type & 0x0F) != 3 || request.Value.Number == 0.0)
+            return false;
+        ScaleformValue cleared{};
+        cleared.Value.Number = 0.0;
+        setVariable(pMovie, acVariable, cleared, 0);
+        return true;
+    };
+
+    if (consumeRequest("_root.SkyrimSeamlessOptionsRequested"))
+        OpenOptions();
+    else if (consumeRequest("_root.SkyrimSeamlessCoopRequested"))
+        OpenCoopLobby();
 }
 
 void SetMainMenuOverlayActive(bool aActive) noexcept
 {
     s_mainMenuOverlayActive = aActive;
     ApplyMainMenuVisibility();
+}
+
+void LaunchSharedCampaignFromMainMenu(const uint8_t aCampaignMode) noexcept
+{
+    if (!s_pMainMenuMovie || (aCampaignMode != 1 && aCampaignMode != 2))
+        return;
+    auto* pVtable = *reinterpret_cast<uintptr_t**>(s_pMainMenuMovie);
+    if (!pVtable)
+        return;
+    ScaleformValue mode{};
+    mode.Value.Number = aCampaignMode;
+    const auto setVariable = reinterpret_cast<TSetVariable*>(pVtable[0x10]);
+    if (setVariable(s_pMainMenuMovie, "_root.SkyrimSeamlessLaunchMode", mode, 0))
+        spdlog::info("Queued shared campaign launch from main menu (mode {})", aCampaignMode);
 }
 
 void SetMainMenuMouseState(float aX, float aY) noexcept

@@ -24,6 +24,7 @@
 
 #include <ScriptExtender.h>
 #include <Services/DiscordService.h>
+#include <OverlayApp.hpp>
 
 // #include <imgui_internal.h>
 
@@ -165,14 +166,14 @@ void TransportService::SendAuthenticationRequest()
     // null if discord is not active
     // TODO: think about user opt out
     request.DiscordId = m_world.ctx().at<DiscordService>().GetUser().id;
-    auto* pNpc = Cast<TESNPC>(pPlayer->baseForm);
+    auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
     if (pNpc)
     {
         request.Username = pNpc->fullName.value.AsAscii();
     }
     else
     {
-        request.Username = "Some dragon boi";
+        request.Username = pPlayer ? "Some dragon boi" : "Main Menu Player";
     }
 
     auto* const cpModManager = ModManager::Get();
@@ -194,12 +195,18 @@ void TransportService::SendAuthenticationRequest()
     }
 
     auto& modSystem = m_world.GetModSystem();
-    if (pPlayer->GetWorldSpace())
-        modSystem.GetServerModId(pPlayer->GetWorldSpace()->formID, request.WorldSpaceId);
-
-    modSystem.GetServerModId(pPlayer->parentCell->formID, request.CellId);
-
-    request.Level = pPlayer->GetLevel();
+    if (pPlayer)
+    {
+        if (pPlayer->GetWorldSpace())
+            modSystem.GetServerModId(pPlayer->GetWorldSpace()->formID, request.WorldSpaceId);
+        if (pPlayer->parentCell)
+            modSystem.GetServerModId(pPlayer->parentCell->formID, request.CellId);
+        request.Level = pPlayer->GetLevel();
+    }
+    else
+    {
+        request.Level = 1;
+    }
 
     auto* pGameTime = TimeData::Get();
     request.PlayerTime.TimeScale = pGameTime->TimeScale->f;
@@ -234,6 +241,16 @@ void TransportService::OnUpdate()
         scan.SkippedFiles, scan.Errors.size());
     for (const auto& error : scan.Errors)
         spdlog::error("Effective Data scan: {}", error);
+    if (auto* pApp = m_world.GetOverlayService().GetOverlayApp())
+    {
+        auto arguments = CefListValue::Create();
+        arguments->SetBool(0, scan.Manifest.Complete);
+        arguments->SetInt(1, static_cast<int>(scan.Manifest.AllFiles.FileCount));
+        arguments->SetInt(2, static_cast<int>(scan.HashedFiles));
+        arguments->SetInt(3, static_cast<int>(scan.CachedFiles));
+        arguments->SetInt(4, static_cast<int>(scan.Errors.size()));
+        pApp->ExecuteAsync("deploymentScanState", arguments);
+    }
     SendAuthenticationRequest();
 }
 

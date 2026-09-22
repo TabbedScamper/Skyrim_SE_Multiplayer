@@ -67,7 +67,7 @@ $startMenuScript = Join-Path $scriptsRoot '__Packages\StartMenu.as'
 $text = [IO.File]::ReadAllText($startMenuScript)
 $text = Assert-Replace $text `
     '   static var OUNCE_DATA_TRANSFER_INDEX = 12;' `
-    "   static var OUNCE_DATA_TRANSFER_INDEX = 12;`r`n   static var SKYRIM_SEAMLESS_OPTIONS_INDEX = 13;`r`n   var SkyrimSeamlessStageWidth = -1;`r`n   var SkyrimSeamlessStageHeight = -1;" `
+    "   static var OUNCE_DATA_TRANSFER_INDEX = 12;`r`n   static var SKYRIM_SEAMLESS_COOP_INDEX = 13;`r`n   static var SKYRIM_SEAMLESS_OPTIONS_INDEX = 14;`r`n   var SkyrimSeamlessStageWidth = -1;`r`n   var SkyrimSeamlessStageHeight = -1;" `
     'menu index declaration'
 $text = Assert-Replace $text `
     '      this.onEnterFrame = null;' `
@@ -95,6 +95,16 @@ $afterLayout = @'
    }
    function SkyrimSeamlessWatchLayout()
    {
+      if(_root.SkyrimSeamlessLaunchMode == 1)
+      {
+         _root.SkyrimSeamlessLaunchMode = 0;
+         gfx.io.GameDelegate.call("NEW",[]);
+      }
+      else if(_root.SkyrimSeamlessLaunchMode == 2)
+      {
+         _root.SkyrimSeamlessLaunchMode = 0;
+         gfx.io.GameDelegate.call("CONTINUE",[]);
+      }
       if(this.SkyrimSeamlessStageWidth != Stage.visibleRect.width || this.SkyrimSeamlessStageHeight != Stage.visibleRect.height)
       {
          this.SkyrimSeamlessRefreshLayout();
@@ -112,11 +122,11 @@ $text = Assert-Replace $text `
     'idempotent live Stage.visibleRect reflow'
 $text = Assert-Replace $text `
     '      this.MainList.entryList.push({text:"$CREDITS",index:StartMenu.CREDITS_INDEX,disabled:false,showIcon:false});' `
-    "      this.MainList.entryList.push({text:`"OPTIONS`",index:StartMenu.SKYRIM_SEAMLESS_OPTIONS_INDEX,disabled:false,showIcon:false});`r`n      this.MainList.entryList.push({text:`"`$CREDITS`",index:StartMenu.CREDITS_INDEX,disabled:false,showIcon:false});" `
+    "      this.MainList.entryList.push({text:`"CO-OP`",index:StartMenu.SKYRIM_SEAMLESS_COOP_INDEX,disabled:false,showIcon:false});`r`n      this.MainList.entryList.push({text:`"OPTIONS`",index:StartMenu.SKYRIM_SEAMLESS_OPTIONS_INDEX,disabled:false,showIcon:false});`r`n      this.MainList.entryList.push({text:`"`$CREDITS`",index:StartMenu.CREDITS_INDEX,disabled:false,showIcon:false});" `
     'main menu entry list'
 $text = Assert-Replace $text `
     '            default:' `
-    "            case StartMenu.SKYRIM_SEAMLESS_OPTIONS_INDEX:`r`n               _root.SkyrimSeamlessOptionsRequested = 1;`r`n               gfx.io.GameDelegate.call(`"SkyrimSeamlessOptions`",[]);`r`n               gfx.io.GameDelegate.call(`"PlaySound`",[`"UIMenuOK`"]);`r`n               return;`r`n            default:" `
+    "            case StartMenu.SKYRIM_SEAMLESS_COOP_INDEX:`r`n               _root.SkyrimSeamlessCoopRequested = 1;`r`n               gfx.io.GameDelegate.call(`"PlaySound`",[`"UIMenuOK`"]);`r`n               return;`r`n            case StartMenu.SKYRIM_SEAMLESS_OPTIONS_INDEX:`r`n               _root.SkyrimSeamlessOptionsRequested = 1;`r`n               gfx.io.GameDelegate.call(`"SkyrimSeamlessOptions`",[]);`r`n               gfx.io.GameDelegate.call(`"PlaySound`",[`"UIMenuOK`"]);`r`n               return;`r`n            default:" `
     'main menu selection handler'
 [IO.File]::WriteAllText($startMenuScript, $text, [Text.UTF8Encoding]::new($false))
 
@@ -132,6 +142,6 @@ if (Test-Path -LiteralPath $destination) {
 Copy-Item -LiteralPath $output -Destination $destination -Force
 
 $outputHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
-Write-Host "Installed native OPTIONS menu: $destination"
+Write-Host "Installed native CO-OP and OPTIONS menu: $destination"
 Write-Host "Patched SHA-256: $outputHash"
 Write-Host "Backup directory: $backupDir"
