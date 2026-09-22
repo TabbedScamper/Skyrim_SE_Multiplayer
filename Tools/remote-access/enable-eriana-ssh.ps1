@@ -5,6 +5,20 @@ $targetUser = 'eflem'
 $publicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO+hkE8aSFgUlMjAkV8SgtYzcmYQ9uznHGrlFdNv0gaM skyrim-se-multiplayer@MASON-OFFICE'
 
 if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+    # A partially removed MSI can leave ssh-agent running from Program Files,
+    # which locks that directory and makes both MSI repair and ZIP fallback
+    # fail. Stop only OpenSSH-owned services/processes before repairing it.
+    foreach ($serviceName in @('sshd', 'ssh-agent')) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -ne 'Stopped') {
+            Stop-Service -Name $serviceName -Force -ErrorAction Stop
+            $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(10))
+        }
+    }
+    foreach ($processName in @('sshd', 'ssh-agent', 'ssh-shellhost')) {
+        Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+    }
+
     # Windows Capability installation can hang when its optional-feature source
     # is unavailable. Use Microsoft's signed standalone server MSI instead and
     # verify the release hash published by Microsoft before executing it.
@@ -19,10 +33,60 @@ if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
     }
 
     $installer = Start-Process -FilePath 'msiexec.exe' `
-        -ArgumentList @('/i', "`"$msiPath`"", 'ADDLOCAL=Server', '/qn', '/norestart') `
+        -ArgumentList @('/i', "`"$msiPath`"", 'ADDLOCAL=Server', '/qn', '/norestart', '/L*v', "`"$env:TEMP\OpenSSH-MSI.log`"") `
         -Wait -PassThru
     if ($installer.ExitCode -notin @(0, 3010)) {
-        throw "OpenSSH MSI installation failed with exit code $($installer.ExitCode)."
+        Write-Warning "OpenSSH MSI returned $($installer.ExitCode); using Microsoft's documented ZIP installer fallback. MSI log: $env:TEMP\OpenSSH-MSI.log"
+
+        $zipUrl = 'https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64.zip'
+        $expectedZipHash = '23f50f3458c4c5d0b12217c6a5ddfde0137210a30fa870e98b29827f7b43aba5'
+        $zipPath = Join-Path $env:TEMP 'OpenSSH-Win64.zip'
+        $extractRoot = Join-Path $env:TEMP 'SkyrimSEMultiplayer-OpenSSH'
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+        $actualZipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualZipHash -ne $expectedZipHash) {
+            throw "OpenSSH ZIP hash mismatch. Expected $expectedZipHash, received $actualZipHash."
+        }
+
+        if (Test-Path -LiteralPath $extractRoot) {
+            $resolvedExtractRoot = (Resolve-Path -LiteralPath $extractRoot).Path
+            $expectedExtractRoot = [IO.Path]::GetFullPath((Join-Path $env:TEMP 'SkyrimSEMultiplayer-OpenSSH'))
+            if ($resolvedExtractRoot -ne $expectedExtractRoot) { throw "Refusing to replace unexpected extraction path: $resolvedExtractRoot" }
+            Remove-Item -LiteralPath $resolvedExtractRoot -Recurse -Force
+        }
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+
+        $archiveDirectory = Join-Path $extractRoot 'OpenSSH-Win64'
+        $installDirectory = Join-Path $env:ProgramFiles 'OpenSSH'
+        if (-not (Test-Path -LiteralPath (Join-Path $archiveDirectory 'install-sshd.ps1'))) {
+            throw 'The verified OpenSSH archive did not contain install-sshd.ps1.'
+        }
+        if (Test-Path -LiteralPath $installDirectory) {
+            $resolvedInstall = (Resolve-Path -LiteralPath $installDirectory).Path
+            $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'OpenSSH'))
+            if ($resolvedInstall -ne $expectedInstall) { throw "Refusing to move unexpected OpenSSH path: $resolvedInstall" }
+            $backupDirectory = "$expectedInstall.backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            $moveDeadline = (Get-Date).AddSeconds(10)
+            do {
+                try {
+                    Move-Item -LiteralPath $resolvedInstall -Destination $backupDirectory -ErrorAction Stop
+                    $moved = $true
+                }
+                catch [IO.IOException] {
+                    Start-Sleep -Milliseconds 500
+                }
+            } while (-not $moved -and (Get-Date) -lt $moveDeadline)
+            if (-not $moved) {
+                throw "OpenSSH remains locked after its services were stopped. Close any Explorer window or terminal opened in $resolvedInstall and rerun this script."
+            }
+            Write-Host "Preserved the previous OpenSSH directory at $backupDirectory"
+        }
+        New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+        Copy-Item -Path (Join-Path $archiveDirectory '*') -Destination $installDirectory -Recurse -Force
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDirectory 'install-sshd.ps1')
+        if ($LASTEXITCODE -ne 0 -or -not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+            throw "The verified OpenSSH ZIP installer did not create the sshd service. MSI log: $env:TEMP\OpenSSH-MSI.log"
+        }
     }
 }
 

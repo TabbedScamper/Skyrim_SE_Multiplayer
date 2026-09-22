@@ -82,19 +82,32 @@ try {
     $hostError = Join-Path $artifactDirectory 'host.stderr.log'
     $hostBot = Start-Process -FilePath $botPath -ArgumentList @("127.0.0.1:$Port", 'distributed-host', $manifestArgument) `
         -RedirectStandardOutput $hostOutput -RedirectStandardError $hostError -WindowStyle Hidden -PassThru
+    # Force Windows PowerShell to retain the native process handle; otherwise
+    # ExitCode can remain null when output is redirected.
+    $null = $hostBot.Handle
     Start-Sleep -Milliseconds 750
 
-    $remoteOutput = & ssh @sshOptions "${RemoteUser}@${RemoteHost}" `
-        "& '$remoteBot' '${HostAddress}:$Port' 'distributed-follower' '$manifestArgument'"
+    # Windows OpenSSH uses cmd.exe unless a different DefaultShell is
+    # configured. Use a command line accepted by cmd rather than PowerShell's
+    # call operator so a stock second rig can run the bot.
+    $remoteCommand = "`"$remoteBot`" `"${HostAddress}:$Port`" distributed-follower $manifestArgument"
+    $remoteOutput = & ssh @sshOptions "${RemoteUser}@${RemoteHost}" $remoteCommand
     $remoteExit = $LASTEXITCODE
     $remoteOutput | Set-Content -LiteralPath (Join-Path $artifactDirectory 'follower.json') -Encoding UTF8
     $hostBot.WaitForExit(45000) | Out-Null
     if (-not $hostBot.HasExited) { throw 'Host protocol bot timed out.' }
+    # Complete asynchronous stdout/stderr draining and refresh ExitCode after
+    # the timed wait. Without this, Windows PowerShell can leave ExitCode null.
+    $hostBot.WaitForExit()
+    $hostBot.Refresh()
+    $hostExitCode = $hostBot.ExitCode
 
     $hostResult = Get-Content -LiteralPath $hostOutput -Raw | ConvertFrom-Json
     $followerResult = ($remoteOutput -join "`n") | ConvertFrom-Json
     $summary = [pscustomobject]@{
-        passed = $hostBot.ExitCode -eq 0 -and $remoteExit -eq 0 -and $hostResult.passed -and $followerResult.passed
+        passed = $hostExitCode -eq 0 -and $remoteExit -eq 0 -and $hostResult.passed -and $followerResult.passed
+        hostExitCode = $hostExitCode
+        followerExitCode = $remoteExit
         host = $hostResult
         follower = $followerResult
         artifactDirectory = $artifactDirectory

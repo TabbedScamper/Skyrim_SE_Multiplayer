@@ -617,3 +617,17 @@ the first compatible complete deployment in the campaign manifest.
   protocol. Current lobby connections still use the host's advertised LAN
   endpoint. A relay adapter must be implemented and exercised separately before
   Internet play can be described as NAT-independent or relay-backed.
+
+## Windows two-rig test access
+
+- [Microsoft's OpenSSH Server guide](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)
+  remains the preferred Windows capability/service configuration reference.
+  The second rig's optional capability source was unavailable and its prior MSI
+  registration returned error 1603, so the project does not repeatedly invoke
+  the hanging capability installation path.
+- The official [Win32-OpenSSH ZIP installation guide](https://github.com/PowerShell/Win32-OpenSSH/wiki/Install-Win32-OpenSSH)
+  documents extracting the release and running `install-sshd.ps1`. The repair
+  script uses this as a fallback, verifies the ZIP against the SHA-256 published
+  on the [official release](https://github.com/PowerShell/Win32-OpenSSH/releases/tag/10.0.0.0p2-Preview),
+  stops only stale OpenSSH services/processes, and preserves an existing install
+  directory before replacement.

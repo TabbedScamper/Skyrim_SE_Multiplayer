@@ -279,6 +279,18 @@ int main(int argc, char** argv)
         }
 
         const bool started = PumpUntil({&bot}, [&] { return bot.SessionState == 1 && bot.StartEpoch > 0; }, 15s);
+        // Keep the authoritative host connected long enough for the remote
+        // machine to consume the start broadcast. A real Skyrim process stays
+        // alive here; exiting immediately resets the party during teardown.
+        if (started && isHost)
+        {
+            const auto lingerUntil = std::chrono::steady_clock::now() + 2s;
+            while (std::chrono::steady_clock::now() < lingerUntil)
+            {
+                bot.Update();
+                std::this_thread::sleep_for(1ms);
+            }
+        }
         PrintResult(scenario.c_str(), started,
             started ? "physical-rig client reached the authoritative shared start epoch" : "physical-rig client did not reach shared start");
         return started ? 0 : 1;
