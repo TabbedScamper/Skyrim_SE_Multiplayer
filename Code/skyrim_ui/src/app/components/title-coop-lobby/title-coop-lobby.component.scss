@@ -3,6 +3,12 @@
 
 .coop-lobby {
   width: clamp(52rem, 48vw, 76rem);
+  max-width: calc(100vw - 4rem);
+  max-height: calc(100vh - 4rem);
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   color: mod($-color-background, 0.92);
   padding: 2.4rem 3rem;
   background: linear-gradient(110deg, rgba(5, 8, 10, .96), rgba(18, 22, 24, .91));
@@ -14,7 +20,7 @@
 header { text-align: center; border-bottom: 1px solid rgba(255,255,255,.24); margin-bottom: 1.5rem; }
 h1 { margin: 0; letter-spacing: .22em; font-weight: 400; }
 header p, h2 { letter-spacing: .14em; text-transform: uppercase; color: #bfc8c8; }
-button, input { min-height: 3.2rem; }
+button, input:not([type='checkbox']) { min-height: 3.2rem; }
 button:focus, input:focus, summary:focus {
   outline: 2px solid #eef5f4;
   outline-offset: 2px;
@@ -24,6 +30,19 @@ button:focus, input:focus, summary:focus {
 }
 .entry-grid, .campaign, .friend-list, .party-options { display: grid; gap: .8rem; }
 .party-options { margin: 1rem 0; padding: 1rem; border: 1px solid rgba(255,255,255,.15); }
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  min-height: 3.2rem;
+  cursor: pointer;
+}
+.checkbox-row input {
+  flex: 0 0 auto;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin: 0;
+}
 .status-row { display: grid; grid-template-columns: 1fr 2fr; gap: .5rem 1rem; margin-bottom: 1rem; }
 .roster { display: grid; gap: .6rem; margin: 1rem 0; }
 .member { display: grid; grid-template-columns: 1fr auto auto; gap: 1rem; padding: 1rem; background: rgba(255,255,255,.06); border-left: 2px solid #687272; }
@@ -35,3 +54,14 @@ button:focus, input:focus, summary:focus {
 .back { display: block; margin: 1.6rem auto 0; min-width: 12rem; }
 details { padding: .8rem; border-top: 1px solid rgba(255,255,255,.15); }
 summary { cursor: pointer; margin-bottom: .6rem; }
+
+@media (max-height: 1100px) {
+  .coop-lobby { padding: 1.4rem 2rem; }
+  header { margin-bottom: .8rem; }
+  header p { margin: .4rem 0 .8rem; }
+  .roster { margin: .6rem 0; }
+  .member { padding: .65rem .8rem; }
+  .party-options { margin: .6rem 0; padding: .7rem; }
+  .actions { margin-top: .8rem; }
+  .back { margin-top: .8rem; }
+}

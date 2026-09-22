@@ -45,10 +45,9 @@
 
     <section *ngIf="steam.isHost && isLeader()" class="party-options">
       <h2>Party Options</h2>
-      <label><input type="checkbox" [(ngModel)]="sessionOpen" /> Open to Steam friends</label>
+      <label class="checkbox-row"><input type="checkbox" [(ngModel)]="sessionOpen" (ngModelChange)="queuePartyOptionsSave()" /> <span>Open to Steam friends</span></label>
       <p class="muted">Private is invite-only. Open sessions appear in your friends' Join list.</p>
-      <input *ngIf="sessionOpen" type="password" [(ngModel)]="sessionPassword" maxlength="64" placeholder="Optional session password" />
-      <button (click)="savePartyOptions()">Apply Party Options</button>
+      <input *ngIf="sessionOpen" type="password" [(ngModel)]="sessionPassword" (ngModelChange)="queuePartyOptionsSave()" maxlength="64" placeholder="Optional session password" />
     </section>
 
     <section class="campaign">

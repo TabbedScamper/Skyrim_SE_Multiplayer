@@ -26,6 +26,8 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   public scan = { complete: false, fileCount: 0, hashed: 0, cached: 0, errors: 0 };
 
   private readonly destroy$ = new Subject<void>();
+  private partyOptionsDirty = false;
+  private partyOptionsTimer?: number;
 
   public constructor(public readonly client: ClientService, private readonly sound: SoundService) {}
 
@@ -33,7 +35,12 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
     this.client.connectionStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.connected = value);
     this.client.steamLobbyStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => {
       this.steam = value;
-      this.sessionOpen = value.open;
+      if (!this.partyOptionsDirty) {
+        this.sessionOpen = value.open;
+      } else if (value.open === this.sessionOpen) {
+        // The native lobby has acknowledged the locally edited access mode.
+        this.partyOptionsDirty = false;
+      }
     });
     this.client.deploymentScanStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.scan = value);
     this.client.coopLobbyStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => {
@@ -46,6 +53,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public ngOnDestroy(): void {
+    if (this.partyOptionsTimer !== undefined) window.clearTimeout(this.partyOptionsTimer);
     this.destroy$.next();
     this.destroy$.complete();
   }
@@ -91,6 +99,15 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
     if (!this.isLeader()) return;
     this.sound.play(Sound.Ok);
     this.client.setSteamSessionAccess(this.sessionOpen, this.sessionOpen ? this.sessionPassword : '');
+  }
+
+  public queuePartyOptionsSave(): void {
+    this.partyOptionsDirty = true;
+    if (this.partyOptionsTimer !== undefined) window.clearTimeout(this.partyOptionsTimer);
+    this.partyOptionsTimer = window.setTimeout(() => {
+      this.partyOptionsTimer = undefined;
+      this.savePartyOptions();
+    }, 200);
   }
 
   public connectWithPassword(): void {
