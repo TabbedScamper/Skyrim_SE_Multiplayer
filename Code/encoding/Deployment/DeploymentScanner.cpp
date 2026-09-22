@@ -101,7 +101,8 @@ bool ShouldSkip(const std::string_view acPath) noexcept
            EndsWith(acPath, ".sqlite3") || EndsWith(acPath, ".sqlite3-wal") || EndsWith(acPath, ".sqlite3-shm") ||
            EndsWith(acPath, ".bak") || acPath.starts_with("skyrimsemultiplayerbackups/") ||
            acPath.starts_with("skyrimtogetherreborn/backups/") || acPath.starts_with("skyrimtogetherreborn/cache/") ||
-           acPath.starts_with("skyrimtogetherreborn/debug-feedback/") || acPath.starts_with("skyrimtogetherreborn/logs/") ||
+           acPath.starts_with("skyrimtogetherreborn/data/") || acPath.starts_with("skyrimtogetherreborn/debug-feedback/") ||
+           acPath.starts_with("skyrimtogetherreborn/logs/") ||
            acPath == "skyrimtogetherreborn/config/stserver.ini" ||
            acPath == "skyrimtogetherreborn/crashpad_handler.exe" || acPath == "skyrimtogetherreborn/crashpad_wer.dll" ||
            (acPath.starts_with("skyrimtogetherreborn/") && acPath.find(".pre-") != std::string_view::npos) ||

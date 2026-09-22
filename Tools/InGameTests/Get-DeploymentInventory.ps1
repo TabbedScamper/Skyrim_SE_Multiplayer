@@ -23,7 +23,7 @@ function Test-SkippedPath([string]$Path) {
     if (-not $Path -or $Path.StartsWith('.git/')) { return $true }
     if ($Path -match '\.(log|tmp|dmp|sqlite3|sqlite3-wal|sqlite3-shm|bak)$') { return $true }
     if ($Path.StartsWith('skyrimsemultiplayerbackups/')) { return $true }
-    if ($Path -match '^skyrimtogetherreborn/(backups|cache|debug-feedback|logs)/') { return $true }
+    if ($Path -match '^skyrimtogetherreborn/(backups|cache|data|debug-feedback|logs)/') { return $true }
     if ($Path -eq 'skyrimtogetherreborn/config/stserver.ini') { return $true }
     if ($Path -in @('skyrimtogetherreborn/crashpad_handler.exe', 'skyrimtogetherreborn/crashpad_wer.dll')) { return $true }
     if ($Path.StartsWith('skyrimtogetherreborn/') -and $Path.Contains('.pre-')) { return $true }

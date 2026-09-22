@@ -48,6 +48,7 @@ TEST_CASE("Effective Data deployment fingerprints are deterministic and cached",
     tree.Write("ignored.log", "ephemeral");
     tree.Write("SkyrimTogetherReborn/backups/old-client.exe", "ephemeral-backup");
     tree.Write("SkyrimTogetherReborn/cache/browser.bin", "ephemeral-cache");
+    tree.Write("SkyrimTogetherReborn/Data/loadorder.txt", "host-server-only");
     tree.Write("SkyrimTogetherReborn/debug-feedback/feedback.bmp", "ephemeral-report");
     tree.Write("SkyrimTogetherReborn/logs/session.txt", "ephemeral-log-sidecar");
     tree.Write("SkyrimSEMultiplayerBackups/old-menu/startmenu.swf", "ephemeral-backup");
@@ -62,7 +63,7 @@ TEST_CASE("Effective Data deployment fingerprints are deterministic and cached",
     REQUIRE(first.Manifest.Complete);
     REQUIRE(first.Manifest.AllFiles.FileCount == 7);
     REQUIRE(first.HashedFiles == 7);
-    REQUIRE(first.SkippedFiles == 11);
+    REQUIRE(first.SkippedFiles == 12);
     for (const auto& layer : first.Manifest.Layers)
         REQUIRE(layer.FileCount == 1);
 

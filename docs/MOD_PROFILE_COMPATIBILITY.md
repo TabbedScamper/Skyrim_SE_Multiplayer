@@ -71,6 +71,14 @@ would make an F10 report or a local rollback backup falsely block the next join.
 Legacy backup locations, `.bak`/`.pre-*` files, optional crash-report helpers,
 and the host-only `STServer.ini` are excluded for the same reason. Client-side
 gameplay configuration, including cell-respawn overrides, remains strict.
+The auto-hosted dedicated server's nested `SkyrimTogetherReborn/Data` directory
+is also server-only and excluded; its load order and pinned campaign manifest
+are enforced by the server authentication path instead.
+
+Use `Tools/InGameTests/Enable-StrictModPolicy.ps1` on every PC that may host.
+It builds the canonical server load order from the base masters, `Skyrim.ccc`,
+and enabled `plugins.txt` entries, enables mandatory checking and first-client
+manifest pinning, and backs up the previous policy files before changing them.
 
 This proves byte-identical effective inputs, but it does not yet say which MO2
 mod supplied a winning loose file or which BSA member wins at runtime. That

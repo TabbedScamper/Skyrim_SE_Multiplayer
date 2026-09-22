@@ -128,6 +128,11 @@ bool GetConfiguredRespawnPos(const char* apCellEditorId, NiPoint3& aOutPosition)
 }
 } // namespace
 
+void CellRespawnOverrides::EnsureSettings() noexcept
+{
+    (void)GetSettings();
+}
+
 bool CellRespawnOverrides::GetRespawnPos(const char* apCellEditorId, NiPoint3& aOutPos) noexcept
 {
     if (!apCellEditorId || !*apCellEditorId)

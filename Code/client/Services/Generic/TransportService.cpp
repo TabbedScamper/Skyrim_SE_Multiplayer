@@ -7,6 +7,7 @@
 #include <Events/UpdateEvent.h>
 
 #include <Games/References.h>
+#include <Games/Skyrim/CellRespawnOverrides.h>
 #include <Games/TES.h>
 #include <Forms/TESWorldSpace.h>
 #include <Forms/TESObjectCELL.h>
@@ -61,6 +62,10 @@ TransportService::TransportService(World& aWorld, entt::dispatcher& aDispatcher)
 
     m_connected = false;
 
+    // Gameplay-affecting defaults must exist before the immutable Data
+    // fingerprint is sampled, otherwise a fresh install and a previously run
+    // install would disagree despite using the same embedded values.
+    CellRespawnOverrides::EnsureSettings();
     const auto dataDirectory = GetGameDataDirectory();
     const auto cachePath = GetDeploymentCachePath();
     m_deploymentScan = std::async(std::launch::async, [dataDirectory, cachePath] { return DeploymentScanner::Scan(dataDirectory, cachePath); });
