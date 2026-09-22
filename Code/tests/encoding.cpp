@@ -276,10 +276,11 @@ TEST_CASE("Differential structures", "[encoding.differential]")
     GIVEN("AnimationVariables")
     {
         AnimationVariables vars, recvVars;
- 
+
         vars.Booleans.resize(76);
-        String testString("\xDE\xAD\xBE\xEF"
-                          "\xDE\xAD\xBE\xEF\x76\xB");
+        String testString(
+            "\xDE\xAD\xBE\xEF"
+            "\xDE\xAD\xBE\xEF\x76\xB");
         vars.String_to_VectorBool(testString, vars.Booleans);
 
         vars.Floats.push_back(1.f);
@@ -346,6 +347,9 @@ TEST_CASE("Packets", "[encoding.packets]")
         sendMessage.UserMods.ModList.push_back({"Hi", 14});
         sendMessage.UserMods.ModList.push_back({"Test", 8});
         sendMessage.UserMods.ModList.push_back({"Toast", 49});
+        sendMessage.UserMods.ModList[0].ContentSize = 123456;
+        sendMessage.UserMods.ModList[0].ContentSha256.fill(0xA5);
+        sendMessage.UserMods.ModList[0].HasFingerprint = true;
 
         Buffer::Writer writer(&buff);
         sendMessage.Serialize(writer);
@@ -385,6 +389,57 @@ TEST_CASE("Packets", "[encoding.packets]")
         recvMessage.DeserializeRaw(reader);
 
         REQUIRE(sendMessage == recvMessage);
+    }
+
+    SECTION("Exact plugin manifest comparison")
+    {
+        auto makeEntry = [](const char* acName, const uint16_t aId, const bool aIsLite, const uint64_t aSize, const uint8_t aHashByte)
+        {
+            Mods::Entry entry;
+            entry.Filename = acName;
+            entry.Id = aId;
+            entry.IsLite = aIsLite;
+            entry.ContentSize = aSize;
+            entry.ContentSha256.fill(aHashByte);
+            entry.HasFingerprint = true;
+            return entry;
+        };
+
+        Mods expected;
+        expected.ModList.push_back(makeEntry("Same.esp", 1, false, 100, 0x11));
+        expected.ModList.push_back(makeEntry("Missing.esm", 2, false, 200, 0x22));
+        expected.ModList.push_back({"Unverifiable.esl", 3, true});
+
+        Mods actual;
+        actual.ModList.push_back(makeEntry("same.ESP", 9, true, 101, 0x33));
+        actual.ModList.push_back({"Unverifiable.esl", 3, true});
+        actual.ModList.push_back(makeEntry("Unexpected.esp", 4, false, 400, 0x44));
+
+        const auto differences = Mods::Compare(expected, actual);
+        REQUIRE(differences.size() == 4);
+
+        const auto changed = std::find_if(
+            differences.begin(), differences.end(), [](const Mods::Difference& acDifference) { return acDifference.HasExpected && acDifference.Expected.Filename == "Same.esp"; });
+        REQUIRE(changed != differences.end());
+        REQUIRE((changed->MismatchFlags & Mods::kPluginType) != 0);
+        REQUIRE((changed->MismatchFlags & Mods::kLoadOrder) != 0);
+        REQUIRE((changed->MismatchFlags & Mods::kContentSize) != 0);
+        REQUIRE((changed->MismatchFlags & Mods::kContentHash) != 0);
+
+        const auto missing =
+            std::find_if(differences.begin(), differences.end(), [](const Mods::Difference& acDifference) { return acDifference.MismatchFlags == Mods::kMissing; });
+        REQUIRE(missing != differences.end());
+        REQUIRE(missing->Expected.Filename == "Missing.esm");
+
+        const auto unverifiable =
+            std::find_if(differences.begin(), differences.end(), [](const Mods::Difference& acDifference) { return acDifference.MismatchFlags == Mods::kUnverifiable; });
+        REQUIRE(unverifiable != differences.end());
+        REQUIRE(unverifiable->Expected.Filename == "Unverifiable.esl");
+
+        const auto unexpected =
+            std::find_if(differences.begin(), differences.end(), [](const Mods::Difference& acDifference) { return acDifference.MismatchFlags == Mods::kUnexpected; });
+        REQUIRE(unexpected != differences.end());
+        REQUIRE(unexpected->Actual.Filename == "Unexpected.esp");
     }
 
     SECTION("Revisioned quest messages")

@@ -2,6 +2,7 @@
 param(
     [int]$Port = 12578,
     [switch]$FailOnKnownGaps,
+    [switch]$EnableModCheck,
     [switch]$Compact
 )
 
@@ -15,6 +16,7 @@ $runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $artifactDirectory = Join-Path $PSScriptRoot "artifacts\protocol-$runStamp"
 $serverDirectory = Join-Path $artifactDirectory 'server'
 $configDirectory = Join-Path $serverDirectory 'config'
+$dataDirectory = Join-Path $serverDirectory 'Data'
 
 foreach ($required in @($serverSource, $serverDllSource, $botPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -24,6 +26,14 @@ foreach ($required in @($serverSource, $serverDllSource, $botPath)) {
 
 New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
 Copy-Item -LiteralPath $serverSource, $serverDllSource -Destination $serverDirectory
+
+if ($EnableModCheck) {
+    New-Item -ItemType Directory -Path $dataDirectory -Force | Out-Null
+    'ProtocolTest.esp' | Set-Content -LiteralPath (Join-Path $dataDirectory 'loadorder.txt') -Encoding ASCII
+}
+
+$modCheckValue = $EnableModCheck.IsPresent.ToString().ToLowerInvariant()
+$botManifestArgument = if ($EnableModCheck) { 'synthetic-plugin' } else { '' }
 
 @"
 [EULA]
@@ -51,7 +61,7 @@ uDifficulty=4
 [ModPolicy]
 bAllowMO2=true
 bAllowSKSE=true
-bEnableModCheck=false
+bEnableModCheck=$modCheckValue
 
 [GameServer]
 sPassword=
@@ -79,26 +89,42 @@ try {
     } while (-not $ready -and (Get-Date) -lt $deadline)
     if (-not $ready) { throw "Test server did not listen on port $Port" }
 
-    $joinOutput = & $botPath "127.0.0.1:$Port" join
+    $joinOutput = & $botPath "127.0.0.1:$Port" join $botManifestArgument
     $joinExitCode = $LASTEXITCODE
     $join = $joinOutput | ConvertFrom-Json
 
-    $handoffOutput = & $botPath "127.0.0.1:$Port" leader-handoff
+    $modMismatch = $null
+    $deploymentMismatch = $null
+    $modMismatchExitCode = 0
+    $deploymentMismatchExitCode = 0
+    if ($EnableModCheck) {
+        $modMismatchOutput = & $botPath "127.0.0.1:$Port" mod-mismatch $botManifestArgument
+        $modMismatchExitCode = $LASTEXITCODE
+        $modMismatch = $modMismatchOutput | ConvertFrom-Json
+        $deploymentMismatchOutput = & $botPath "127.0.0.1:$Port" deployment-mismatch $botManifestArgument
+        $deploymentMismatchExitCode = $LASTEXITCODE
+        $deploymentMismatch = $deploymentMismatchOutput | ConvertFrom-Json
+    }
+
+    $handoffOutput = & $botPath "127.0.0.1:$Port" leader-handoff $botManifestArgument
     $handoffExitCode = $LASTEXITCODE
     $handoff = $handoffOutput | ConvertFrom-Json
 
-    $reconnectOutput = & $botPath "127.0.0.1:$Port" follower-reconnect
+    $reconnectOutput = & $botPath "127.0.0.1:$Port" follower-reconnect $botManifestArgument
     $reconnectExitCode = $LASTEXITCODE
     $reconnect = $reconnectOutput | ConvertFrom-Json
 
-    $authorityOutput = & $botPath "127.0.0.1:$Port" quest-authority-audit
+    $authorityOutput = & $botPath "127.0.0.1:$Port" quest-authority-audit $botManifestArgument
     $authorityExitCode = $LASTEXITCODE
     $authority = $authorityOutput | ConvertFrom-Json
 
     $summary = [pscustomobject]@{
         passed = $joinExitCode -eq 0 -and $handoffExitCode -eq 0 -and $reconnectExitCode -eq 0 -and `
+            $modMismatchExitCode -eq 0 -and $deploymentMismatchExitCode -eq 0 -and `
             ($authorityExitCode -eq 0 -or (-not $FailOnKnownGaps -and $authorityExitCode -eq 2))
         join = $join
+        modMismatch = $modMismatch
+        deploymentMismatch = $deploymentMismatch
         leaderHandoff = $handoff
         followerReconnect = $reconnect
         questAuthority = $authority

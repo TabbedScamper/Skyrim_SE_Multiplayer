@@ -72,14 +72,12 @@ bool ESLoader::LoadLoadOrder()
     {
         String line;
         std::getline(loadOrderFile, line);
-        if (line[0] == '#' || line.empty())
+        line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+        if (line.empty() || line[0] == '#')
             continue;
 
         PluginData plugin;
         plugin.m_filename = line;
-
-        // On Linux, the carriage return won't be taken into account
-        line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
 
         char extensionType = line.back();
 

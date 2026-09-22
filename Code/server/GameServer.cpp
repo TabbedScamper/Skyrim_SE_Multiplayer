@@ -43,12 +43,16 @@ Console::Setting bEnablePvp{"Gameplay:bEnablePvp", "Enables pvp", false};
 Console::Setting bSyncPlayerHomes{"Gameplay:bSyncPlayerHomes", "Sync chests and displays in player homes and other NoResetZones", false};
 Console::Setting bEnableDeathSystem{"Gameplay:bEnableDeathSystem", "Enables the custom multiplayer death system", true};
 Console::Setting uTimeScale{"Gameplay:uTimeScale", "How many seconds pass ingame for every real second (0 to 1000). Changing this can make the game unstable", 20u};
-Console::Setting bSyncPlayerCalendar{"Gameplay:bSyncPlayerCalendar", "Syncs up all player calendars to be the same day, month, and year. This uses the date of the player with the furthest ahead date at connection.", false};
+Console::Setting bSyncPlayerCalendar{
+    "Gameplay:bSyncPlayerCalendar",
+    "Syncs up all player calendars to be the same day, month, and year. This uses the date of the player with the furthest ahead date at connection.", false};
 Console::Setting bAutoPartyJoin{"Gameplay:bAutoPartyJoin", "Join parties automatically, as long as there is only one party in the server", true};
 // ModPolicy Stuff
-Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Bypass the checking of mods on the server", false, Console::SettingsFlags::kLocked};
+Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Require clients to match the campaign mod manifest", false, Console::SettingsFlags::kLocked};
 Console::Setting bAllowSKSE{"ModPolicy:bAllowSKSE", "Allow clients with SKSE active to join", true, Console::SettingsFlags::kLocked};
 Console::Setting bAllowMO2{"ModPolicy:bAllowMO2", "Allow clients running Mod Organizer 2 to join", true, Console::SettingsFlags::kLocked};
+Console::Setting bAllowManifestBootstrap{
+    "ModPolicy:bAllowManifestBootstrap", "Allow the first load-order-compatible client to pin an absent campaign plugin manifest", true, Console::SettingsFlags::kLocked};
 
 // -- Commands --
 Console::Command<> TogglePremium(
@@ -176,9 +180,10 @@ GameServer::GameServer(Console::ConsoleRegistry& aConsole) noexcept
 
     if (!bEnableDeathSystem)
     {
-        spdlog::warn("The multiplayer death system is disabled on this server. We recommend that you ONLY do this if you have"
-                     " a mod that replaces the vanilla death system. You should only disable our death system if you"
-                     " absolutely know what you are doing!");
+        spdlog::warn(
+            "The multiplayer death system is disabled on this server. We recommend that you ONLY do this if you have"
+            " a mod that replaces the vanilla death system. You should only disable our death system if you"
+            " absolutely know what you are doing!");
     }
 
     m_isPasswordProtected = strcmp(sPassword.value(), "") != 0;
@@ -862,7 +867,8 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         if (mo2Problem)
             response += "MO2 ";
 
-        spdlog::info("New player {:x} '{}' tried to connect, but {}{} disallowed - Kicked.", aConnectionId, remoteAddress, response.c_str(), skseProblem && mo2Problem ? "are" : "is");
+        spdlog::info(
+            "New player {:x} '{}' tried to connect, but {}{} disallowed - Kicked.", aConnectionId, remoteAddress, response.c_str(), skseProblem && mo2Problem ? "are" : "is");
 
         serverResponse.SKSEActive = acRequest->SKSEActive;
         serverResponse.MO2Active = acRequest->MO2Active;
@@ -886,37 +892,69 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
 
         if (IsMoPoActive())
         {
-            // mods that exist on the client, but not on the server
-            // modscomponent contains a list filled in by the recordcollection
-            Mods modsToRemove;
-
-            const auto& userMods = acRequest->UserMods.ModList;
-            for (const Mods::Entry& mod : userMods)
+            if (!modsComponent.IsManifestPinned() && (!bAllowManifestBootstrap || !modsComponent.TryPinManifest(acRequest->UserMods)))
             {
-                // if the client has more mods than the server..
-                if (!modsComponent.IsInstalled(mod.Filename))
-                {
-                    modsToRemove.ModList.push_back(mod);
-                }
+                spdlog::warn("ModPolicy refused to pin the first campaign manifest because the client did not match the server load order");
+            }
+            else if (modsComponent.IsManifestPinned())
+            {
+                spdlog::debug("ModPolicy validated against pinned campaign plugin manifest v{}", acRequest->UserMods.SchemaVersion);
             }
 
-            // TODO(Vince): if you have a better to do this than two for loops
-            // let me know!
-            // Also, for the future, lets think about a mode that allows more than the server installed mods
-            // but requires essential mods?
-
-            // mods that may exist on the server, but not on the client
-            for (const auto& entry : modsComponent.GetServerMods())
+            Mods modsToRemove;
+            if (!modsComponent.IsManifestPinned())
             {
-                const auto it = std::find_if(userMods.begin(), userMods.end(), [&](const Mods::Entry& it) { return it.Filename == entry.first; });
+                Mods::Entry mismatch;
+                mismatch.Filename = "Campaign manifest could not be pinned";
+                mismatch.MismatchFlags = Mods::kDeployment | Mods::kUnverifiable;
+                modsToRemove.ModList.push_back(std::move(mismatch));
+            }
+            const auto differences = Mods::Compare(modsComponent.GetServerManifest(), acRequest->UserMods);
+            for (const auto& difference : differences)
+            {
+                auto mismatch = difference.HasActual ? difference.Actual : difference.Expected;
+                mismatch.MismatchFlags = difference.MismatchFlags;
+                if (!difference.HasActual)
+                    mismatch.Id = 0; // Preserve the legacy UI's missing-mod signal.
+                modsToRemove.ModList.push_back(std::move(mismatch));
 
-                if (it == userMods.end())
-                {
-                    Mods::Entry removeEntry;
-                    removeEntry.Filename = entry.first;
-                    removeEntry.Id = 0;
-                    modsToRemove.ModList.push_back(removeEntry);
-                }
+                spdlog::warn(
+                    "ModPolicy mismatch for {}: flags=0x{:02X}, expected id/type/size={}/{}/{}, actual id/type/size={}/{}/{}",
+                    difference.HasExpected ? difference.Expected.Filename.c_str() : difference.Actual.Filename.c_str(), difference.MismatchFlags,
+                    difference.HasExpected ? difference.Expected.Id : 0, difference.HasExpected ? difference.Expected.IsLite : false,
+                    difference.HasExpected ? difference.Expected.ContentSize : 0, difference.HasActual ? difference.Actual.Id : 0,
+                    difference.HasActual ? difference.Actual.IsLite : false, difference.HasActual ? difference.Actual.ContentSize : 0);
+            }
+
+            const auto& expectedDeployment = modsComponent.GetServerManifest().Deployment;
+            const auto& actualDeployment = acRequest->UserMods.Deployment;
+            uint16_t deploymentDifferences{};
+            if (!expectedDeployment.Complete || !actualDeployment.Complete ||
+                expectedDeployment.SchemaVersion != actualDeployment.SchemaVersion)
+            {
+                deploymentDifferences = (1u << static_cast<uint8_t>(DeploymentManifest::Layer::Count)) - 1u;
+            }
+            else
+            {
+                deploymentDifferences = expectedDeployment.MismatchedLayers(actualDeployment);
+                if (deploymentDifferences == 0 && expectedDeployment.AllFiles != actualDeployment.AllFiles)
+                    deploymentDifferences = 1u << static_cast<uint8_t>(DeploymentManifest::Layer::Assets);
+            }
+
+            constexpr std::array<std::string_view, static_cast<size_t>(DeploymentManifest::Layer::Count)> layerNames{
+                "plugins", "archives", "scripts", "native DLLs", "configuration", "behaviors", "assets"};
+            for (size_t i = 0; i < layerNames.size(); ++i)
+            {
+                if ((deploymentDifferences & (1u << i)) == 0)
+                    continue;
+                Mods::Entry mismatch;
+                mismatch.Filename = "Data: ";
+                mismatch.Filename += layerNames[i].data();
+                mismatch.MismatchFlags = Mods::kDeployment | Mods::kContentHash;
+                if (!expectedDeployment.Complete || !actualDeployment.Complete)
+                    mismatch.MismatchFlags |= Mods::kUnverifiable;
+                modsToRemove.ModList.push_back(std::move(mismatch));
+                spdlog::warn("ModPolicy effective Data mismatch in {} layer", layerNames[i]);
             }
 
             if (modsToRemove.ModList.size() > 0)

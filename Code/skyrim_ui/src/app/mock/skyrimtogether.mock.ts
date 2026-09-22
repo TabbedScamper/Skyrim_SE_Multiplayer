@@ -63,10 +63,10 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
             error: 'mods_mismatch',
             data: {
               mods: [
-                ['missing.esp', '0'],
-                ['remove.esp', '12'],
-                ['missing_2.esp', '0'],
-                ['remove_2.esp', '12'],
+                ['missing.esp', '0', 1],
+                ['remove.esp', '12', 2],
+                ['wrong_version.esp', '4', 32],
+                ['wrong_order.esp', '9', 8],
               ],
             },
           };

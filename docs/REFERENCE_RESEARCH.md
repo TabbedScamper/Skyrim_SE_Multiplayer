@@ -1,5 +1,44 @@
 # Reference research
 
+## Reproducible multiplayer mod profiles
+
+- [Wabbajack](https://github.com/wabbajack-tools/wabbajack)
+  - Its installer reproduces a mod setup without treating a human-readable
+    version or archive filename as content identity. Archive size, hash, and a
+    provider-specific download state are kept separately.
+  - Direction for this project: use cryptographic fingerprints as compatibility
+    truth and retain provider metadata for later repair/download adapters. A
+    version label is display metadata, not proof that two files match.
+
+- [Mod Organizer 2 profile implementation](https://github.com/ModOrganizer2/modorganizer/blob/master/src/profile.cpp)
+  and [plugin model](https://github.com/ModOrganizer2/modorganizer/blob/master/src/pluginlist.h)
+  - MO2 separately represents enabled mod priority, plugin enabled state,
+    plugin load order, archives, masters, profile INIs, and local saves. This
+    confirms that an ESP/ESM/ESL list alone cannot reproduce Skyrim's deployed
+    data view.
+  - Direction for this project: deliver strict loaded-plugin identity first,
+    then add the winning loose-file/archive tree, SKSE DLL/config inventory, and
+    generated behavior/output layers. Preserve both mod priority and plugin
+    load order in an isolated campaign profile.
+
+- [Nexus Mods collection guidelines](https://help.nexusmods.com/article/115-guidelines-for-collections)
+  - A collection is a metadata list; it may not bundle other authors' mod files
+    without permission. Generated list-specific output is treated separately.
+  - Direction for this project: the server hosts the signed campaign manifest,
+    not a universal mod mirror. Downloads resolve through original providers;
+    LAN/content-addressed transfer is limited to our files, generated outputs,
+    and content whose redistribution permission is known.
+
+Implemented first boundary: plugin manifest schema v1 adds SHA-256, byte size,
+normal/light type, and exact load-order slot to authentication. Server-side
+comparison now fails closed for missing, unexpected, altered, reordered, or
+unverifiable loaded plugins. A dedicated server without plugin files can pin
+the first load-order-compatible authenticated client's hashes and persist only
+that manifest; it does not mirror mod content. This does not yet validate
+BSA/loose assets, SKSE plugins, configuration, FOMOD provenance, or Creation
+entitlements. The remaining layer contract is tracked in
+`docs/MOD_PROFILE_COMPATIBILITY.md`.
+
 ## Runtime display switching and cursor behavior
 
 - [SSE Display Tweaks](https://github.com/SlavicPotato/SSEDisplayTweaks)
@@ -523,3 +562,30 @@ the ledger before modifying the in-memory quest log or broadcasting. Native
 ESS writes remain intentionally out of scope until snapshot/reconnect and save
 barrier protocols can prove that all clients are materializing the same
 committed revision.
+
+## Effective deployed mod view
+
+- [Mod Organizer 2 USVFS](https://github.com/ModOrganizer2/usvfs) is a GPLv3
+  process-local virtual filesystem that hooks file discovery/open operations and
+  can overlay multiple directories at one destination. This supports scanning
+  `Data` inside Skyrim rather than scanning MO2's physical mod directories: the
+  scanner observes the same merged loose-file winners available to the game.
+  No USVFS code was copied.
+- [Wabbajack's pre-compilation documentation](https://github.com/wabbajack-tools/wabbajack/wiki/04.-Pre-Compilation)
+  describes tracing installed files to archive sources and hashing files inside
+  BSAs, while its changelog documents a non-blocking file-hash cache. This is
+  prior art for content identity and cached hashing. The first implementation
+  here deliberately hashes whole BSAs: identical archives plus identical loose
+  winners prove equivalent inputs without needing to redistribute or unpack
+  copyrighted archives. Archive-member provenance remains future work.
+- [Wabbajack indexed game files](https://github.com/wabbajack-tools/indexed-game-files)
+  publishes per-game file hashes, supporting a later separate base-runtime
+  manifest. It is not currently consumed because installed Skyrim builds and
+  Creation Club entitlements must be identified locally and policy must remain
+  explicit.
+
+Implemented direction: `Code/encoding/Deployment/DeploymentScanner.*` scans the
+effective in-process `Data` namespace asynchronously, caches SHA-256 results by
+normalized path/backing-file identity/size/write time, and creates deterministic whole-tree and
+semantic-layer roots. Authentication carries the roots, and the server freezes
+the first compatible complete deployment in the campaign manifest.

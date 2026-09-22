@@ -4,7 +4,11 @@
 #include "Events/DisconnectedEvent.h"
 
 #include <atomic>
+#include <future>
+#include <optional>
 #include <Client.hpp>
+
+#include <Deployment/DeploymentScanner.h>
 
 struct ImguiService;
 struct UpdateEvent;
@@ -51,6 +55,8 @@ protected:
     void HandleNotifySettingsChange(const NotifySettingsChange& acMessage) noexcept;
 
 private:
+    void SendAuthenticationRequest();
+
     World& m_world;
     entt::dispatcher& m_dispatcher;
     bool m_connected;
@@ -59,6 +65,9 @@ private:
     String m_campaignId{};
     uint64_t m_campaignRevision{};
     uint64_t m_authorityEpoch{};
+    std::future<DeploymentScanResult> m_deploymentScan;
+    std::optional<DeploymentManifest> m_deploymentManifest;
+    bool m_authenticationPending{};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_sendServerMessageConnection;

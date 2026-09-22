@@ -24,7 +24,7 @@ export interface WrongVersionErrorEvent extends ErrorEvent {
 
 export interface ModsMismatchErrorEvent extends ErrorEvent {
   error: 'mods_mismatch';
-  data: { mods: [filename: string, id: string][] };
+  data: { mods: [filename: string, id: string, mismatchFlags?: number][] };
 }
 
 export interface ClientModsDisallowedErrorEvent extends ErrorEvent {
@@ -65,7 +65,9 @@ export class ErrorService {
         case 'mods_mismatch':
           let mods = '';
           const install = error.data.mods
-            .filter(mod => mod[1] === '0')
+            .filter(mod =>
+              mod[2] === undefined ? mod[1] === '0' : (mod[2] & 1) !== 0,
+            )
             .map(mod => mod[0]);
           if (install.length > 0) {
             mods += '\n\n<hr>\n';
@@ -77,7 +79,9 @@ export class ErrorService {
             );
           }
           const remove = error.data.mods
-            .filter(mod => mod[1] !== '0')
+            .filter(mod =>
+              mod[2] === undefined ? mod[1] !== '0' : (mod[2] & 2) !== 0,
+            )
             .map(mod => mod[0]);
           if (remove.length > 0) {
             mods += '\n\n<hr>\n';
@@ -87,6 +91,16 @@ export class ErrorService {
                 { mods: `<strong>${remove.join(', ')}</strong>` },
               ),
             );
+          }
+          const repair = error.data.mods
+            .filter(mod => mod[2] !== undefined && (mod[2] & 0x7c) !== 0)
+            .map(mod => mod[0]);
+          if (repair.length > 0) {
+            mods += '\n\n<hr>\n';
+            mods +=
+              'These installed plugins do not exactly match the campaign profile ' +
+              '(content, plugin type, load order, or verification failed). Repair the profile before joining:\n' +
+              `<strong>${repair.join(', ')}</strong>`;
           }
           data = { mods };
           break;
