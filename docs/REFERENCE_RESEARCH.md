@@ -675,6 +675,20 @@ the first compatible complete deployment in the campaign manifest.
   dereferenced the invalidated CEF wrapper. `OverlayApp::ExecuteAsync` now
   inserts a writable `Copy()` so callers may safely reuse their payload.
 
+## Lobby focus and cursor ownership
+
+- The WAI-ARIA keyboard-interface guidance in the
+  [ARIA Practices source](https://github.com/w3c/aria-practices/blob/main/content/practices/keyboard-interface/keyboard-interface-practice.html)
+  requires composite widgets to move focus explicitly when consuming arrow
+  keys; browsers do not provide directional button focus automatically. The
+  title lobby now cycles through its visible enabled controls with all four
+  arrow keys while preserving arrow behavior inside text/password fields.
+- Skyrim's Cursor Menu remains the only rendered pointer over title-screen CEF
+  panels. Physical mouse movement updates the native and browser hit-test
+  coordinates together without re-enabling CEF's software cursor. Absolute raw
+  mouse packets (including Remote Desktop input) are normalized from the
+  0..65535 desktop coordinate space instead of being ignored.
+
 ## Multiplayer state flight recorder
 
 - [SKSE64's plugin messaging API](https://github.com/ianpatt/skse64/blob/master/skse64/PluginAPI.h)

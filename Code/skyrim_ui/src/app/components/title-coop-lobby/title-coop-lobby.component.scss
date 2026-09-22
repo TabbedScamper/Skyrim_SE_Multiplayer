@@ -15,6 +15,13 @@ header { text-align: center; border-bottom: 1px solid rgba(255,255,255,.24); mar
 h1 { margin: 0; letter-spacing: .22em; font-weight: 400; }
 header p, h2 { letter-spacing: .14em; text-transform: uppercase; color: #bfc8c8; }
 button, input { min-height: 3.2rem; }
+button:focus, input:focus, summary:focus {
+  outline: 2px solid #eef5f4;
+  outline-offset: 2px;
+  color: white;
+  background-color: rgba(190, 210, 210, .2);
+  box-shadow: 0 0 .7rem rgba(220, 240, 238, .45);
+}
 .entry-grid, .campaign, .friend-list, .party-options { display: grid; gap: .8rem; }
 .party-options { margin: 1rem 0; padding: 1rem; border: 1px solid rgba(255,255,255,.15); }
 .status-row { display: grid; grid-template-columns: 1fr 2fr; gap: .5rem 1rem; margin-bottom: 1rem; }

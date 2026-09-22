@@ -125,6 +125,24 @@ POINT AdvanceOverlayMouse(HWND aWindow, const RAWMOUSE& acMouse, TiltedPhoques::
         s_overlayMouseX = std::clamp<LONG>(s_overlayMouseX + deltaX, 0, static_cast<LONG>(std::max(1u, overlayWidth) - 1));
         s_overlayMouseY = std::clamp<LONG>(s_overlayMouseY + deltaY, 0, static_cast<LONG>(std::max(1u, overlayHeight) - 1));
     }
+    else
+    {
+        // Remote Desktop, accessibility software, and some high-resolution
+        // devices report absolute raw coordinates. Treating those values as
+        // deltas leaves the menu cursor permanently at its initial center.
+        const bool virtualDesktop = (acMouse.usFlags & MOUSE_VIRTUAL_DESKTOP) != 0;
+        const int originX = virtualDesktop ? GetSystemMetrics(SM_XVIRTUALSCREEN) : 0;
+        const int originY = virtualDesktop ? GetSystemMetrics(SM_YVIRTUALSCREEN) : 0;
+        const int screenWidth = std::max(1, GetSystemMetrics(virtualDesktop ? SM_CXVIRTUALSCREEN : SM_CXSCREEN));
+        const int screenHeight = std::max(1, GetSystemMetrics(virtualDesktop ? SM_CYVIRTUALSCREEN : SM_CYSCREEN));
+        POINT screenPosition{
+            originX + static_cast<LONG>((static_cast<int64_t>(acMouse.lLastX) * (screenWidth - 1)) / 65535),
+            originY + static_cast<LONG>((static_cast<int64_t>(acMouse.lLastY) * (screenHeight - 1)) / 65535)};
+        ScreenToClient(aWindow, &screenPosition);
+        position = MapClientToOverlay(aWindow, screenPosition, apRenderer);
+        s_overlayMouseX = position.x;
+        s_overlayMouseY = position.y;
+    }
 
     return {s_overlayMouseX, s_overlayMouseY};
 }
@@ -506,14 +524,10 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             if (active)
             {
-                // Last-used-device behavior: physical mouse movement restores
-                // the CEF pointer immediately; controller navigation hides it.
-                // Window focus/warping can emit a final raw-mouse packet after a
-                // controller action. Keep controller modality briefly; genuine
-                // later mouse motion still restores the pointer immediately.
-                if ((mouse.lLastX != 0 || mouse.lLastY != 0) &&
-                    GetTickCount64() - s_lastControllerInputMs.load(std::memory_order_relaxed) >= 250)
-                    pRenderer->SetCursorVisible(true);
+                // Skyrim's native cursor is the only visible pointer. CEF still
+                // receives the same coordinates for hit testing, but drawing
+                // its software cursor here creates a second pointer.
+                pRenderer->SetCursorVisible(false);
                 position = AdvanceOverlayMouse(hwnd, mouse, pRenderer.get());
                 if (s_pOverlay->GetTitleScreen())
                     SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
