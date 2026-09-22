@@ -17,6 +17,11 @@ namespace ESLoader
 struct RecordCollection;
 }
 
+namespace Campaign
+{
+class Ledger;
+}
+
 struct World : entt::registry
 {
     World();
@@ -41,6 +46,8 @@ struct World : entt::registry
     PlayerManager& GetPlayerManager() noexcept { return m_playerManager; }
     const PlayerManager& GetPlayerManager() const noexcept { return m_playerManager; }
     ScriptService& GetScriptService() const noexcept { return *m_pScriptService; }
+    Campaign::Ledger& GetCampaignLedger() noexcept { return *m_pCampaignLedger; }
+    const Campaign::Ledger& GetCampaignLedger() const noexcept { return *m_pCampaignLedger; }
 
     // Null checked at start when MoPo is on!
     ESLoader::RecordCollection* GetRecordCollection() noexcept { return m_recordCollection.get(); }
@@ -54,6 +61,7 @@ private:
 
     TiltedPhoques::SharedPtr<AdminService> m_spAdminService;
     TiltedPhoques::UniquePtr<ScriptService> m_pScriptService;
+    TiltedPhoques::UniquePtr<Campaign::Ledger> m_pCampaignLedger;
     PlayerManager m_playerManager;
     UniquePtr<ESLoader::RecordCollection> m_recordCollection;
 };

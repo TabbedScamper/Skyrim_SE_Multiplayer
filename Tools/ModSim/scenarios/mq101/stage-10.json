@@ -1,0 +1,18 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "MQ101 Fragment 2 starts Helgen",
+  "adapter": "pex.mq101-fragment",
+  "seed": 301,
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "actions": [
+    { "at": 0, "actor": "host", "type": "papyrus.execute", "data": { "script": "QF_MQ101_0003372B", "function": "Fragment_2" } }
+  ],
+  "assertions": [
+    { "after": 0, "type": "quest.stagesEqual", "data": { "stages": [10] } },
+    { "after": 0, "type": "trace.contains", "data": { "event": "global.setValue:GameHour:7.000000" } }
+  ]
+}

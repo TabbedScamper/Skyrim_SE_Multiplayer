@@ -1,5 +1,89 @@
 <div class="container">
   <div class="settings">
+    <ng-container *ngIf="gameSettings as game">
+      <section>
+        <h2>Display</h2>
+        <div class="setting">
+          <label for="displayMode">Display mode</label>
+          <app-dropdown id="displayMode" [noTranslate]="true" [ngModel]="game.displayMode" (ngModelChange)="preview('displayMode', $event)">
+            <app-dropdown-option *ngFor="let mode of displayModes" [text]="mode.label" [value]="mode.value"></app-dropdown-option>
+          </app-dropdown>
+        </div>
+        <div class="setting">
+          <label for="monitor">Monitor</label>
+          <app-dropdown id="monitor" [noTranslate]="true" [ngModel]="game.monitor" (ngModelChange)="preview('monitor', $event)">
+            <app-dropdown-option *ngFor="let monitor of monitors; let index = index" [text]="monitor" [value]="index"></app-dropdown-option>
+          </app-dropdown>
+        </div>
+        <div class="setting">
+          <label for="resolution">Resolution</label>
+          <app-dropdown id="resolution" [noTranslate]="true" [(ngModel)]="selectedResolution">
+            <app-dropdown-option *ngFor="let resolution of resolutions" [text]="resolution" [value]="resolution"></app-dropdown-option>
+          </app-dropdown>
+        </div>
+        <div class="setting">
+          <label for="vsync">Vertical synchronization</label>
+          <input type="checkbox" id="vsync" [ngModel]="game.vsync" (ngModelChange)="preview('vsync', $event)" />
+        </div>
+        <div class="setting">
+          <label for="gamma">Brightness</label>
+          <div class="slider-with-value">
+            <input type="range" id="gamma" min="0.5" max="1.5" step="0.05"
+              [ngModel]="game.gamma" (ngModelChange)="preview('gamma', $event)" />
+            <span>{{ game.gamma | number:'1.2-2' }}</span>
+          </div>
+        </div>
+        <p class="hint">Press F11 at any time to toggle windowed mode and restore your previous fullscreen mode.</p>
+      </section>
+
+      <section>
+        <h2>Game Audio</h2>
+        <div class="setting" *ngFor="let audio of [
+          { key: 'master', label: 'Master volume' },
+          { key: 'effects', label: 'Effects' },
+          { key: 'voice', label: 'Voice' },
+          { key: 'music', label: 'Music' },
+          { key: 'footsteps', label: 'Footsteps' }
+        ]">
+          <label [for]="audio.key">{{ audio.label }}</label>
+          <div class="slider-with-value">
+            <input type="range" [id]="audio.key" min="0" max="1" step="0.05"
+              [ngModel]="$any(game)[audio.key]" (ngModelChange)="preview($any(audio.key), $event)" />
+            <span>{{ $any(game)[audio.key] * 100 | number:'1.0-0' }}%</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Controls</h2>
+        <div class="setting">
+          <label for="mouseSensitivity">Mouse sensitivity</label>
+          <div class="slider-with-value">
+            <input type="range" id="mouseSensitivity" min="0.001" max="0.1" step="0.001"
+              [ngModel]="game.mouseSensitivity" (ngModelChange)="preview('mouseSensitivity', $event)" />
+            <span>{{ game.mouseSensitivity | number:'1.3-3' }}</span>
+          </div>
+        </div>
+        <div class="setting">
+          <label for="gamepadSensitivity">Controller sensitivity</label>
+          <div class="slider-with-value">
+            <input type="range" id="gamepadSensitivity" min="0.1" max="2" step="0.05"
+              [ngModel]="game.gamepadSensitivity" (ngModelChange)="preview('gamepadSensitivity', $event)" />
+            <span>{{ game.gamepadSensitivity | number:'1.2-2' }}</span>
+          </div>
+        </div>
+        <div class="setting"><label for="invertY">Invert Y axis</label><input type="checkbox" id="invertY" [ngModel]="game.invertY" (ngModelChange)="preview('invertY', $event)" /></div>
+        <div class="setting"><label for="alwaysRun">Always run</label><input type="checkbox" id="alwaysRun" [ngModel]="game.alwaysRun" (ngModelChange)="preview('alwaysRun', $event)" /></div>
+        <div class="setting"><label for="controllerRumble">Controller vibration</label><input type="checkbox" id="controllerRumble" [ngModel]="game.controllerRumble" (ngModelChange)="preview('controllerRumble', $event)" /></div>
+      </section>
+
+      <section>
+        <h2>Accessibility</h2>
+        <div class="setting"><label for="dialogueSubtitles">Dialogue subtitles</label><input type="checkbox" id="dialogueSubtitles" [ngModel]="game.dialogueSubtitles" (ngModelChange)="preview('dialogueSubtitles', $event)" /></div>
+        <div class="setting"><label for="generalSubtitles">General subtitles</label><input type="checkbox" id="generalSubtitles" [ngModel]="game.generalSubtitles" (ngModelChange)="preview('generalSubtitles', $event)" /></div>
+      </section>
+    </ng-container>
+
     <section>
       <h2>{{ 'COMPONENT.SETTINGS.VERSION.HEADER' | transloco }}</h2>
       <div class="flex-item">
@@ -174,7 +258,17 @@
 </div>
 
 <div class="actions">
-  <button data-style-ornament="simple" class="btnCancel" (click)="close()">
-    {{ 'COMPONENT.SETTINGS.BACK' | transloco }}
-  </button>
+  <button data-style-ornament="simple" (click)="resetDefaults()">Defaults</button>
+  <button data-style-ornament="simple" class="btnClose" (click)="close()">Close</button>
+</div>
+
+<div class="display-confirm-backdrop" *ngIf="displayPreviewSeconds">
+  <div class="display-confirm" role="dialog" aria-modal="true" aria-labelledby="display-confirm-title">
+    <h2 id="display-confirm-title">Keep these display settings?</h2>
+    <p>The previous resolution and window mode will be restored in {{ displayPreviewSeconds }} seconds.</p>
+    <div class="confirm-actions">
+      <button data-style-ornament="simple" (click)="revertDisplaySettings()">Revert</button>
+      <button data-style-ornament="simple" (click)="keepDisplaySettings()">Keep changes</button>
+    </div>
+  </div>
 </div>

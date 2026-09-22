@@ -42,9 +42,14 @@ export class RootComponent implements OnInit {
   connected$ = this.client.connectionStateChange.asObservable();
   menuOpen$ = this.client.openingMenuChange.asObservable();
   inGame$ = this.client.inGameStateChange.asObservable();
+  titleScreen$ = this.client.titleScreenStateChange.asObservable();
   active$ = this.client.activationStateChange.asObservable();
   connectionInProgress$ = this.client.isConnectionInProgressChange.asObservable();
   revealingInProgress$ = false;
+  public debugPromptText: string | null = null;
+  public debugFeedbackNote = '';
+  public debugFeedbackNeedsNote = false;
+  public debugFeedbackTitle = 'Visual check';
 
   @ViewChild('chat') private chatComp!: ChatComponent;
   @ViewChild(GroupComponent) private groupComponent: GroupComponent;
@@ -67,6 +72,29 @@ export class RootComponent implements OnInit {
     this.onInGameStateSubscription();
     this.onActivationStateSubscription();
     this.onFontSizeSubscription();
+    this.client.titleOptionsRequested
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.setView(View.SETTINGS));
+    this.client.debugPrompt
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(payload => {
+        const separator = payload.indexOf('\n');
+        const mode = separator >= 0 ? payload.substring(0, separator) : 'check';
+        this.debugPromptText = separator >= 0 ? payload.substring(separator + 1) : payload;
+        this.debugFeedbackTitle = mode === 'report' ? 'Report a problem' : 'Visual check';
+        this.debugFeedbackNote = '';
+        this.debugFeedbackNeedsNote = mode === 'report';
+      });
+    this.client.debugPromptCancelled
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => this.cancelDebugPrompt());
+    this.client.debugPromptSubmitted
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(() => {
+        if (this.debugPromptText && this.debugFeedbackNeedsNote) {
+          this.submitDebugProblem();
+        }
+      });
   }
 
   public onInGameStateSubscription() {
@@ -119,6 +147,38 @@ export class RootComponent implements OnInit {
 
   public closeView() {
     this.uiRepository.openView(null);
+    if (this.client.titleScreenStateChange.getValue()) {
+      this.client.deactivate();
+    }
+  }
+
+  public openTitleOptions(): void {
+    this.client.openTitleOptions();
+    this.setView(View.SETTINGS);
+  }
+
+  public answerDebugPrompt(looksRight: boolean): void {
+    if (looksRight) {
+      this.client.submitDebugFeedback(true);
+      this.debugPromptText = null;
+      this.debugFeedbackNeedsNote = false;
+      this.client.deactivate();
+      return;
+    }
+    this.debugFeedbackNeedsNote = true;
+  }
+
+  public submitDebugProblem(): void {
+    this.client.submitDebugFeedback(false, this.debugFeedbackNote.trim());
+    this.debugPromptText = null;
+    this.debugFeedbackNeedsNote = false;
+    this.client.deactivate();
+  }
+
+  public cancelDebugPrompt(): void {
+    this.debugPromptText = null;
+    this.debugFeedbackNote = '';
+    this.debugFeedbackNeedsNote = false;
   }
 
   public reconnect(): void {

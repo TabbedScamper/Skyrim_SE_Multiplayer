@@ -35,7 +35,11 @@ struct RendererWindow
     bool IsForeground();
 };
 
+struct RendererData;
 RendererWindow* GetMainWindow();
+RendererData* GetRendererData();
+struct Renderer;
+Renderer* GetRenderer();
 
 struct DepthStencilTarget
 {
@@ -58,19 +62,23 @@ struct CubeMapRenderTarget
 struct RendererData
 {
     uint32_t uiAdapter;            // 0x0000
-    uint64_t DesiredRefreshRate;   // 0x0004
-    uint64_t ActualRefreshRate;    // 0x000C
+    uint32_t DesiredRefreshRate;   // 0x0004
+    uint32_t ActualRefreshRate;    // 0x0008
+    uint32_t unk0C;                // 0x000C
+    uint32_t unk10;                // 0x0010
     uint32_t ScaleMode;            // 0x0014
     uint32_t ScanlineMode;         // 0x0018
     int32_t bFullScreen;           // 0x001C
     bool bAppFullScreen;           // 0x0020
     bool bBorderlessWindow;        // 0x0021
-    bool bVSync;                   // 0x0022
-    bool bInitialized;             // 0x0023
+    bool bReadOnlyDepth;           // 0x0022
+    uint8_t unk23;                 // 0x0023
     bool bRequestWindowSizeChange; // 0x0024
+    uint8_t pad25[3];              // 0x0025
     uint32_t uiNewWidth;           // 0x0028
     uint32_t uiNewHeight;          // 0x002C
-    uint32_t uiPresentInterval;    // 0x0030
+    uint32_t unk30;                // 0x0030
+    uint32_t uiPresentInterval;    // 0x0034
     ID3D11Device* pForwarder;      // 0x0038
     ID3D11DeviceContext* pContext; // 0x0040
 
@@ -80,6 +88,11 @@ struct RendererData
     BSGraphics::CubeMapRenderTarget pCubeMapRenderTargetsA[1];
 };
 
+static_assert(offsetof(RendererData, bAppFullScreen) == 0x20);
+static_assert(offsetof(RendererData, bRequestWindowSizeChange) == 0x24);
+static_assert(offsetof(RendererData, uiNewWidth) == 0x28);
+static_assert(offsetof(RendererData, uiNewHeight) == 0x2C);
+static_assert(offsetof(RendererData, uiPresentInterval) == 0x34);
 static_assert(offsetof(RendererData, pForwarder) == 0x38);
 static_assert(offsetof(RendererData, RenderWindowA) == 0x48);
 static_assert(offsetof(RendererData, pRenderTargetsA) == 0xA48);
@@ -91,7 +104,13 @@ struct Renderer
     bool bSkipNextPresent;
     void (*ResetRenderTargets)();
     BSGraphics::RendererData Data;
+
+    void ResizeWindow(uint32_t aWindowId, uint32_t aWidth, uint32_t aHeight, bool aFullscreen, bool aBorderless);
+    void RequestWindowResize(uint32_t aWidth, uint32_t aHeight);
+    void WindowSizeChanged(uint32_t aWindowId);
 };
+
+static_assert(offsetof(Renderer, Data) == 0x10);
 
 struct RendererInitReturn
 {

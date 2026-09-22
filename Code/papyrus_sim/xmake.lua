@@ -1,0 +1,8 @@
+target("SkyrimPapyrusSim")
+    set_kind("binary")
+    set_group("Tests")
+    set_symbols("debug", "hidden")
+    add_files("main.cpp")
+    add_deps("SkyMPPapyrusVM")
+    add_packages("spdlog")
+    add_defines("SPDLOG_HEADER_ONLY")

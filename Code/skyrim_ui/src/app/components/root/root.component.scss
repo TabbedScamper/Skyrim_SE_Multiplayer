@@ -76,7 +76,7 @@
 ::ng-deep {
   .app-root-popups {
     > app-popup > app-window {
-      max-width: 32vw;
+      max-width: 58vw;
       min-width: 20vw;
     }
 
@@ -88,6 +88,11 @@
     > app-popup[data-popup='playerManager'] > app-window {
       max-width: 30vw;
       min-width: 25vw;
+    }
+
+    > app-popup[data-popup='settings'] > app-window {
+      width: clamp(48rem, 28vw, 68rem);
+      font-size: clamp(1rem, 1.4vh, 1.4rem);
     }
   }
 }
@@ -101,6 +106,14 @@
   flex-direction: column;
   width: 32vw;
   bottom: $-size-gap;
+}
+
+.title-options-popup {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .app-root-menu,
@@ -161,4 +174,41 @@
   &.cooldown-active {
     background-position: 100%;
   }
+}
+.debug-feedback-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: all;
+}
+
+.debug-feedback-dialog {
+  display: block;
+  width: clamp(38rem, 34vw, 58rem);
+  max-width: 88vw;
+  padding: clamp(1.5rem, 2.2vh, 2.5rem);
+  font-size: clamp(1rem, 1.4vh, 1.4rem);
+
+  h2 { margin-top: 0; }
+  textarea {
+    display: block;
+    width: 100%;
+    min-height: clamp(10rem, 20vh, 18rem);
+    margin: 0.75rem 0;
+    padding: 0.6rem;
+    font-size: inherit;
+    line-height: 1.35;
+    resize: vertical;
+  }
+}
+
+.debug-feedback-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1rem;
 }

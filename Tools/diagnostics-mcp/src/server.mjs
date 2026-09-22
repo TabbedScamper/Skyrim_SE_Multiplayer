@@ -12,6 +12,15 @@ import {
   queueCommand,
   requestSnapshot,
 } from "./diagnostics.mjs";
+import {
+  captureClientBundle,
+  getGameSnapshot,
+  getNativeStatus,
+  recordClientTimeline,
+  watchQuest,
+} from "./native-client.mjs";
+import { compareSnapshotFiles } from "./snapshot-diff.mjs";
+import { runProtocolTests } from "./protocol-tests.mjs";
 
 const server = new McpServer(
   { name: "skyrim-seamless-diagnostics", version: "0.1.0" },
@@ -35,6 +44,123 @@ server.registerTool(
     annotations: { readOnlyHint: true },
   },
   async () => result(await getSessionStatus()),
+);
+
+server.registerTool(
+  "client_status",
+  {
+    description:
+      "Check the local Skyrim client bridge protocol and supported live commands.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true },
+  },
+  async () => result(await getNativeStatus()),
+);
+
+server.registerTool(
+  "client_game_snapshot",
+  {
+    description:
+      "Read the latest game-thread snapshot: player, controls, camera, menus, party, watched quests, and quest event journal.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true },
+  },
+  async () => result(await getGameSnapshot()),
+);
+
+server.registerTool(
+  "watch_quest",
+  {
+    description:
+      "Add a quest editor ID to the live client snapshot watch list. MQ101 is watched by default.",
+    inputSchema: z.object({ editor_id: z.string().min(1).max(128) }),
+    annotations: { readOnlyHint: false },
+  },
+  async ({ editor_id }) => result(await watchQuest(editor_id)),
+);
+
+server.registerTool(
+  "capture_client_bundle",
+  {
+    description:
+      "Capture a local Skyrim screenshot and matching game-thread JSON state bundle.",
+    inputSchema: z.object({}),
+    annotations: { readOnlyHint: true },
+  },
+  async () => result(await captureClientBundle()),
+);
+
+server.registerTool(
+  "record_client_timeline",
+  {
+    description:
+      "Record repeated game-thread snapshots to a timestamped JSON artifact for diagnosing state transitions that a single capture misses.",
+    inputSchema: z.object({
+      duration_ms: z.number().int().min(500).max(30000).default(5000),
+      interval_ms: z.number().int().min(100).max(2000).default(100),
+    }),
+    annotations: { readOnlyHint: true },
+  },
+  async ({ duration_ms, interval_ms }) =>
+    result(await recordClientTimeline({ durationMs: duration_ms, intervalMs: interval_ms })),
+);
+
+server.registerTool(
+  "capture_issue",
+  {
+    description:
+      "Capture one correlated issue bundle: a bug marker, local screenshot and game state, authoritative server snapshot, and recent errors.",
+    inputSchema: z.object({ description: z.string().min(1).max(500) }),
+    annotations: { readOnlyHint: false },
+  },
+  async ({ description }) => {
+    const marker = await markBug(description);
+    const [client, serverSnapshot, errors] = await Promise.allSettled([
+      captureClientBundle(),
+      requestSnapshot({ reason: `bug ${marker.id}: ${description}`, waitMs: 3000 }),
+      getRecentErrors(50),
+    ]);
+    const unwrap = (entry) =>
+      entry.status === "fulfilled"
+        ? { ok: true, value: entry.value }
+        : { ok: false, error: entry.reason?.message ?? String(entry.reason) };
+    return result({
+      marker,
+      client: unwrap(client),
+      server: unwrap(serverSnapshot),
+      recent_errors: unwrap(errors),
+    });
+  },
+);
+
+server.registerTool(
+  "compare_client_snapshots",
+  {
+    description:
+      "Compare saved leader and follower game-state JSON files and report meaningful multiplayer divergence while ignoring expected local identity differences.",
+    inputSchema: z.object({
+      leader_path: z.string().min(1),
+      follower_path: z.string().min(1),
+    }),
+    annotations: { readOnlyHint: true },
+  },
+  async ({ leader_path, follower_path }) =>
+    result(await compareSnapshotFiles(leader_path, follower_path)),
+);
+
+server.registerTool(
+  "run_protocol_tests",
+  {
+    description:
+      "Run two headless production-protocol clients against an isolated dedicated server and report join convergence plus known authority gaps.",
+    inputSchema: z.object({
+      port: z.number().int().min(1024).max(65535).default(12578),
+      fail_on_known_gaps: z.boolean().default(false),
+    }),
+    annotations: { readOnlyHint: false },
+  },
+  async ({ port, fail_on_known_gaps }) =>
+    result(await runProtocolTests({ port, failOnKnownGaps: fail_on_known_gaps })),
 );
 
 server.registerTool(

@@ -5,6 +5,7 @@ import { environment } from '../../environments/environment';
 import { Debug } from '../models/debug';
 import { PartyInfo } from '../models/party-info';
 import { Player } from '../models/player';
+import { DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
 import { ChatService } from './chat.service';
 import { ErrorEvents, ErrorService } from './error.service';
 import { LoadingService } from './loading.service';
@@ -22,6 +23,8 @@ export class ClientService implements OnDestroy {
 
   /** InGame state change. */
   public inGameStateChange = new BehaviorSubject(!environment.game);
+  public titleScreenStateChange = new BehaviorSubject(false);
+  public titleOptionsRequested = new Subject<void>();
 
   /** Opening/close menu change. */
   public openingMenuChange = new BehaviorSubject(false);
@@ -72,6 +75,14 @@ export class ClientService implements OnDestroy {
 
   public protocolMismatchChange = new BehaviorSubject(false);
 
+  public gameSettingsChange = new ReplaySubject<GameSettingsPayload>(1);
+  public displayPreviewStarted = new Subject<void>();
+  public displayPreviewReverted = new Subject<void>();
+  public gameSettingsApplied = new Subject<void>();
+  public debugPrompt = new Subject<string>();
+  public debugPromptCancelled = new Subject<void>();
+  public debugPromptSubmitted = new Subject<void>();
+
   /** Receive error from core */
   public triggerError = new ReplaySubject<ErrorEvents>(1);
 
@@ -120,6 +131,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('deactivate', this.onDeactivate.bind(this));
     skyrimtogether.on('enterGame', this.onEnterGame.bind(this));
     skyrimtogether.on('exitGame', this.onExitGame.bind(this));
+    skyrimtogether.on('enterTitleScreen', () => this.zone.run(() => this.titleScreenStateChange.next(true)));
+    skyrimtogether.on('exitTitleScreen', () => this.zone.run(() => this.titleScreenStateChange.next(false)));
+    skyrimtogether.on('showTitleOptions', () => this.zone.run(() => this.titleOptionsRequested.next()));
     skyrimtogether.on('openingMenu', this.onOpeningMenu.bind(this));
     skyrimtogether.on('connect', this.onConnect.bind(this));
     skyrimtogether.on('disconnect', this.onDisconnect.bind(this));
@@ -151,6 +165,16 @@ export class ClientService implements OnDestroy {
       'partyInviteReceived',
       this.onPartyInviteReceived.bind(this),
     );
+    skyrimtogether.on('gameSettings', this.onGameSettings.bind(this));
+    skyrimtogether.on('displayPreviewStarted', () => this.zone.run(() => this.displayPreviewStarted.next()));
+    skyrimtogether.on('displayPreviewReverted', () => this.zone.run(() => this.displayPreviewReverted.next()));
+    skyrimtogether.on('gameSettingsApplied', () => this.zone.run(() => this.gameSettingsApplied.next()));
+    skyrimtogether.on('debugPrompt', (message: string, noteOnly: boolean) =>
+      this.zone.run(() => this.debugPrompt.next(`${noteOnly ? 'report' : 'check'}\n${message}`)));
+    skyrimtogether.on('cancelDebugPrompt', () =>
+      this.zone.run(() => this.debugPromptCancelled.next()));
+    skyrimtogether.on('submitDebugPrompt', () =>
+      this.zone.run(() => this.debugPromptSubmitted.next()));
   }
 
   /**
@@ -162,6 +186,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('deactivate');
     skyrimtogether.off('enterGame');
     skyrimtogether.off('exitGame');
+    skyrimtogether.off('enterTitleScreen');
+    skyrimtogether.off('exitTitleScreen');
+    skyrimtogether.off('showTitleOptions');
     skyrimtogether.off('openingMenu');
     skyrimtogether.off('connect');
     skyrimtogether.off('disconnect');
@@ -184,6 +211,10 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('partyCreated');
     skyrimtogether.off('partyLeft');
     skyrimtogether.off('partyInviteReceived');
+    skyrimtogether.off('gameSettings');
+    skyrimtogether.off('displayPreviewStarted');
+    skyrimtogether.off('displayPreviewReverted');
+    skyrimtogether.off('gameSettingsApplied');
   }
 
   /**
@@ -199,6 +230,55 @@ export class ClientService implements OnDestroy {
     this._host = host;
     this._port = port;
     this._password = password;
+  }
+
+  public hostSteamSession(): void {
+    skyrimtogether.hostSteamSession();
+  }
+
+  public joinSteamSession(lobbyId: string): void {
+    skyrimtogether.joinSteamSession(lobbyId);
+  }
+
+  public leaveSteamSession(): void {
+    skyrimtogether.leaveSteamSession();
+  }
+
+  public requestGameSettings(): void {
+    skyrimtogether.requestGameSettings();
+  }
+
+  public previewGameSetting(name: string, value: number | boolean | string): void {
+    skyrimtogether.previewGameSetting(name, String(value));
+  }
+
+  public confirmDisplaySettings(): void {
+    skyrimtogether.confirmDisplaySettings();
+  }
+
+  public applyGameSettings(settings: GameSettings): void {
+    skyrimtogether.applyGameSettings(
+      settings.displayMode, settings.monitor, settings.width, settings.height, settings.vsync,
+      settings.master, settings.footsteps, settings.voice, settings.music, settings.effects,
+      settings.gamma, settings.mouseSensitivity, settings.gamepadSensitivity, settings.invertY,
+      settings.dialogueSubtitles, settings.generalSubtitles, settings.alwaysRun, settings.controllerRumble,
+    );
+  }
+
+  public revertGameSettings(): void {
+    skyrimtogether.revertGameSettings();
+  }
+
+  public resetGameSettings(): void {
+    skyrimtogether.resetGameSettings();
+  }
+
+  public openTitleOptions(): void {
+    skyrimtogether.openTitleOptions();
+  }
+
+  public submitDebugFeedback(looksRight: boolean, note = ''): void {
+    skyrimtogether.submitDebugFeedback(looksRight, note);
   }
 
   /**
@@ -630,5 +710,25 @@ export class ClientService implements OnDestroy {
     this.zone.run(() => {
       this.partyInviteReceivedChange.next(inviterId);
     });
+  }
+
+  private onGameSettings(
+    displayMode: number, monitor: number, width: number, height: number, vsync: boolean,
+    master: number, footsteps: number, voice: number, music: number, effects: number,
+    gamma: number, mouseSensitivity: number, gamepadSensitivity: number, invertY: boolean,
+    dialogueSubtitles: boolean, generalSubtitles: boolean, alwaysRun: boolean,
+    controllerRumble: boolean, monitors: string, resolutions: string, defaults: boolean,
+  ): void {
+    this.zone.run(() => this.gameSettingsChange.next({
+      settings: {
+        displayMode: displayMode as DisplayMode,
+        monitor, width, height, vsync, master, footsteps, voice, music, effects,
+        gamma, mouseSensitivity, gamepadSensitivity, invertY, dialogueSubtitles,
+        generalSubtitles, alwaysRun, controllerRumble,
+      },
+      monitors: monitors ? monitors.split('|') : [],
+      resolutions: resolutions ? resolutions.split('|') : [],
+      defaults,
+    }));
   }
 }

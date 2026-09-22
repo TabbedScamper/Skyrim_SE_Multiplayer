@@ -1,4 +1,21 @@
 <div class="container">
+  <h2>Skyrim SE Multiplayer</h2>
+  <app-action-buttons>
+    <button [disabled]="connecting" (click)="hostSteamSession()" data-style-ornament="simple">
+      Host Session
+    </button>
+  </app-action-buttons>
+  <input
+    type="text"
+    placeholder="Steam lobby ID"
+    [(ngModel)]="steamLobbyId"
+    (keydown.enter)="joinSteamSession()"
+    spellcheck="false"
+  />
+  <button [disabled]="connecting" (click)="joinSteamSession()" data-style-ornament="simple">
+    Join Session
+  </button>
+  <hr />
   <div class="instructions">
     <p [innerHtml]="'COMPONENT.CONNECT.INFO.SERVER_ADDRESS' | transloco"></p>
     <p class="warning">

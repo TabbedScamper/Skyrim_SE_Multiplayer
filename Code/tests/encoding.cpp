@@ -366,6 +366,9 @@ TEST_CASE("Packets", "[encoding.packets]")
 
         AuthenticationResponse sendMessage, recvMessage;
         sendMessage.Type = AuthenticationResponse::ResponseType::kAccepted;
+        sendMessage.CampaignId = "ad9dc044-d8d7-4da2-a857-079c436f202a";
+        sendMessage.CampaignRevision = 0x1020304050607080ULL;
+        sendMessage.AuthorityEpoch = 12;
         sendMessage.UserMods.ModList.push_back({"Hello", 42});
         sendMessage.UserMods.ModList.push_back({"Hi", 14});
         sendMessage.UserMods.ModList.push_back({"Test", 8});
@@ -382,6 +385,42 @@ TEST_CASE("Packets", "[encoding.packets]")
         recvMessage.DeserializeRaw(reader);
 
         REQUIRE(sendMessage == recvMessage);
+    }
+
+    SECTION("Revisioned quest messages")
+    {
+        Buffer requestBuffer(1000);
+        RequestQuestUpdate sendRequest, recvRequest;
+        sendRequest.Id = GameId(42, 0x123456);
+        sendRequest.Stage = 160;
+        sendRequest.Status = RequestQuestUpdate::StageUpdate;
+        sendRequest.ClientQuestType = 4;
+        sendRequest.TransactionId = 0x1122334455667788ULL;
+
+        Buffer::Writer requestWriter(&requestBuffer);
+        sendRequest.Serialize(requestWriter);
+        Buffer::Reader requestReader(&requestBuffer);
+        uint64_t opcode;
+        requestReader.ReadBits(opcode, 8);
+        recvRequest.DeserializeRaw(requestReader);
+        REQUIRE(sendRequest == recvRequest);
+
+        Buffer notifyBuffer(1000);
+        NotifyQuestUpdate sendNotify, recvNotify;
+        sendNotify.Id = sendRequest.Id;
+        sendNotify.Stage = sendRequest.Stage;
+        sendNotify.Status = NotifyQuestUpdate::StageUpdate;
+        sendNotify.ClientQuestType = sendRequest.ClientQuestType;
+        sendNotify.TransactionId = sendRequest.TransactionId;
+        sendNotify.Revision = 9876543210ULL;
+        sendNotify.AuthorityEpoch = 7;
+
+        Buffer::Writer notifyWriter(&notifyBuffer);
+        sendNotify.Serialize(notifyWriter);
+        Buffer::Reader notifyReader(&notifyBuffer);
+        notifyReader.ReadBits(opcode, 8);
+        recvNotify.DeserializeRaw(notifyReader);
+        REQUIRE(sendNotify == recvNotify);
     }
 
     SECTION("AssignCharacterRequest")

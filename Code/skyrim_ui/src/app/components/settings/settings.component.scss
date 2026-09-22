@@ -65,15 +65,78 @@
   }
 
   & > input,
-  > app-dropdown {
+  > app-dropdown,
+  > select,
+  > .slider-with-value {
     width: 10em;
     max-width: 10em;
     font-size: inherit;
   }
 }
 
+input:focus,
+button:focus,
+app-dropdown:focus {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
+}
+
+.slider-with-value {
+  display: grid;
+  grid-template-columns: 1fr 4em;
+  align-items: center;
+  gap: 0.75rem;
+
+  input {
+    width: 100%;
+  }
+
+  span {
+    text-align: right;
+  }
+}
+
+.safety {
+  color: #ffcf66;
+  text-align: center;
+}
+
+.hint {
+  opacity: 0.75;
+  font-size: 0.9em;
+}
+
 .actions {
   margin-top: 1rem;
   display: flex;
   justify-content: center;
+  gap: 1rem;
+  align-items: center;
+
+}
+
+.display-confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.78);
+}
+
+.display-confirm {
+  width: min(32rem, 80%);
+  padding: 2rem;
+  border: 2px solid #d8d8d8;
+  background: #111;
+  text-align: center;
+
+  h2 { margin-top: 0; }
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
 }

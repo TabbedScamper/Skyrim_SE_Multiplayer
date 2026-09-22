@@ -8,10 +8,15 @@
 #include <Services/CharacterService.h>
 #include <Services/MagicService.h>
 #include <Services/DebugService.h>
+#include <Services/SteamLobbyService.h>
+#include <Services/GameSettingsService.h>
+#include <Services/GameTestService.h>
 
 #include <Systems/ModSystem.h>
 
 #include <Structs/ServerSettings.h>
+
+class QuestService;
 
 struct World : entt::registry
 {
@@ -34,6 +39,10 @@ struct World : entt::registry
     const DebugService& GetDebugService() const noexcept { return ctx().at<const DebugService>(); }
     MagicService& GetMagicService() noexcept { return ctx().at<MagicService>(); }
     const MagicService& GetMagicService() const noexcept { return ctx().at<const MagicService>(); }
+    SteamLobbyService& GetSteamLobbyService() noexcept { return ctx().at<SteamLobbyService>(); }
+    GameSettingsService& GetGameSettingsService() noexcept { return ctx().at<GameSettingsService>(); }
+    GameTestService& GetGameTestService() noexcept { return ctx().at<GameTestService>(); }
+    QuestService& GetQuestService() noexcept;
 
     auto& GetDispatcher() noexcept { return m_dispatcher; }
 

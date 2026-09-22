@@ -21,6 +21,9 @@
 #include <Services/CombatService.h>
 #include <Services/WeatherService.h>
 #include <Services/MapService.h>
+#include <Services/SteamLobbyService.h>
+#include <Services/GameSettingsService.h>
+#include <Services/GameTestService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -54,6 +57,9 @@ World::World()
     ctx().emplace<CombatService>(*this, m_transport, m_dispatcher);
     ctx().emplace<WeatherService>(*this, m_transport, m_dispatcher);
     ctx().emplace<MapService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<SteamLobbyService>(*this, m_dispatcher);
+    ctx().emplace<GameSettingsService>(*this, m_dispatcher);
+    ctx().emplace<GameTestService>(*this);
 
     BehaviorVar::Get()->Init();
 }
@@ -73,6 +79,7 @@ void World::Update() noexcept
     // Force run this before so we get the tasks scheduled to run
     m_runner.OnUpdate(UpdateEvent(cDeltaSeconds));
     m_dispatcher.trigger(UpdateEvent(cDeltaSeconds));
+    ctx().at<GameTestService>().OnGameThread();
 }
 
 RunnerService& World::GetRunner() noexcept
@@ -83,6 +90,11 @@ RunnerService& World::GetRunner() noexcept
 TransportService& World::GetTransport() noexcept
 {
     return m_transport;
+}
+
+QuestService& World::GetQuestService() noexcept
+{
+    return ctx().at<QuestService>();
 }
 
 ModSystem& World::GetModSystem() noexcept

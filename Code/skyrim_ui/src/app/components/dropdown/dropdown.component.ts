@@ -6,6 +6,7 @@ import {
   ElementRef,
   EventEmitter,
   forwardRef,
+  HostBinding,
   HostListener,
   Input,
   Output,
@@ -37,6 +38,8 @@ let dropdownCounter = 1;
   ],
 })
 export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
+  @HostBinding('attr.tabindex') tabindex = 0;
+  @HostBinding('attr.role') role = 'combobox';
   dropdownCounter = dropdownCounter++;
   isOpen = false;
   isDisabled = false;
@@ -53,6 +56,7 @@ export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
 
   private onTouchedCallback: () => void = noop;
   private onChangeCallback: (_: any) => void = noop;
+  private currentValue: any;
 
   key: string;
   isFocused: boolean;
@@ -69,19 +73,21 @@ export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
       .pipe(takeUntil(this.destroy$), startWith(null))
       .subscribe(() => {
         const options = this.optionChildren.toArray();
-        this.options.next(
-          options.map(o => ({
+        const mappedOptions = options.map(o => ({
             text: o.text,
             value: o.value,
-          })),
-        );
+          }));
+        this.options.next(mappedOptions);
+        if (this.currentValue != null)
+          this.selected = mappedOptions.findIndex(o => o.value === this.currentValue);
         this.cdr.detectChanges();
       });
   }
 
   @HostListener('focus')
   focusHandler() {
-    this.selected = 0;
+    if (this.selected === undefined || this.selected < 0)
+      this.selected = 0;
     this.isFocused = true;
   }
 
@@ -90,7 +96,44 @@ export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
     this.isFocused = false;
   }
 
+  @HostListener('keydown', ['$event'])
+  keydownHandler(event: KeyboardEvent) {
+    if (this.isDisabled) return;
+
+    if (event.key === ' ' || event.key === 'Enter') {
+      if (this.isOpen && this.selected >= 0) {
+        const option = this.options.getValue()[this.selected];
+        if (option) this.optionSelect(option.value, this.selected);
+      } else {
+        this.toggle();
+      }
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      if (!this.isOpen) return;
+      const options = this.options.getValue();
+      if (!options.length) return;
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      const current = this.selected >= 0 ? this.selected : 0;
+      this.selected = (current + direction + options.length) % options.length;
+      document
+        .querySelector(`#li-${this.dropdownCounter}-${this.selected}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const options = this.options.getValue();
+      if (!options.length) return;
+      const direction = event.key === 'ArrowRight' ? 1 : -1;
+      const current = this.selected >= 0 ? this.selected : 0;
+      const next = (current + direction + options.length) % options.length;
+      this.optionSelect(options[next].value, next);
+    } else {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   optionSelect(selectedOption: any, idx: number) {
+    this.currentValue = selectedOption;
     this.selected = idx;
     this.isOpen = false;
     this.soundService.play(Sound.Check);
@@ -133,6 +176,7 @@ export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
   }
 
   writeValue(obj: any): void {
+    this.currentValue = obj;
     if (obj != null) {
       this.selected = this.options.getValue().findIndex(o => o.value === obj);
     }

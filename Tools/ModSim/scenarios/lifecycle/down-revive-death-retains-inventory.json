@@ -1,0 +1,31 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "nearby revive and isolated death retain inventory",
+  "adapter": "model.player-lifecycle",
+  "description": "A nearby living party member causes downed state; without one, lethal damage commits death without rolling inventory back.",
+  "seed": 201,
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "initialState": { "reviveRadius": 512 },
+  "actions": [
+    { "at": 0, "actor": "host", "type": "player.setPosition", "data": { "cell": "Whiterun", "position": [0, 0, 0] } },
+    { "at": 0, "actor": "guest", "type": "player.setPosition", "data": { "cell": "Whiterun", "position": [100, 0, 0] } },
+    { "at": 1, "actor": "guest", "type": "inventory.grant", "data": { "item": "Skyrim.esm:0000000F", "quantity": 73, "transaction": "loot-1" } },
+    { "at": 2, "actor": "guest", "type": "player.lethalDamage", "data": { "transaction": "damage-1" } },
+    { "at": 3, "actor": "host", "type": "player.revive", "data": { "target": "guest", "transaction": "revive-1" } },
+    { "at": 4, "actor": "host", "type": "player.revive", "data": { "target": "guest", "transaction": "revive-1" } },
+    { "at": 5, "actor": "host", "type": "session.disconnect" },
+    { "at": 6, "actor": "guest", "type": "player.lethalDamage", "data": { "transaction": "damage-2" } }
+  ],
+  "assertions": [
+    { "after": 2, "type": "player.stateEquals", "data": { "participant": "guest", "state": "downed" } },
+    { "after": 3, "type": "player.stateEquals", "data": { "participant": "guest", "state": "alive" } },
+    { "after": 4, "type": "transaction.effectCountEquals", "data": { "transaction": "revive-1", "count": 1 } },
+    { "after": 4, "type": "inventory.quantityEquals", "data": { "participant": "guest", "item": "Skyrim.esm:0000000F", "quantity": 73 } },
+    { "after": 6, "type": "player.stateEquals", "data": { "participant": "guest", "state": "dead" } },
+    { "after": 6, "type": "inventory.quantityEquals", "data": { "participant": "guest", "item": "Skyrim.esm:0000000F", "quantity": 73 } }
+  ]
+}

@@ -1,5 +1,6 @@
 
 #include "Services/InputService.h"
+#include "Services/GameTestService.h"
 #include "Systems/RenderSystemD3D11.h"
 
 #include "World.h"
@@ -18,6 +19,8 @@ namespace
 static RenderSystemD3D11* g_sRs = nullptr;
 static WNDPROC RealWndProc = nullptr;
 static RendererWindow* g_RenderWindow = nullptr;
+static RendererData* g_RendererData = nullptr;
+static Renderer* g_Renderer = nullptr;
 
 static constexpr char kTogetherWindowName[]{"Skyrim Together"};
 
@@ -25,6 +28,38 @@ static constexpr char kTogetherWindowName[]{"Skyrim Together"};
 RendererWindow* GetMainWindow()
 {
     return g_RenderWindow;
+}
+
+RendererData* GetRendererData()
+{
+    return g_RendererData;
+}
+
+Renderer* GetRenderer()
+{
+    return g_Renderer;
+}
+
+void Renderer::ResizeWindow(uint32_t aWindowId, uint32_t aWidth, uint32_t aHeight, bool aFullscreen, bool aBorderless)
+{
+    TP_THIS_FUNCTION(TResizeWindow, void, Renderer, uint32_t, uint32_t, uint32_t, bool, bool);
+    POINTER_SKYRIMSE(TResizeWindow, s_resizeWindow, 77239);
+    TiltedPhoques::ThisCall(s_resizeWindow.Get(), this, aWindowId, aWidth, aHeight, aFullscreen, aBorderless);
+}
+
+void Renderer::RequestWindowResize(uint32_t aWidth, uint32_t aHeight)
+{
+    TP_THIS_FUNCTION(TRequestWindowResize, void, Renderer, uint32_t, uint32_t);
+    POINTER_SKYRIMSE(TRequestWindowResize, s_requestWindowResize, 77235);
+    TiltedPhoques::ThisCall(s_requestWindowResize.Get(), this, aWidth, aHeight);
+}
+
+void Renderer::WindowSizeChanged(uint32_t aWindowId)
+{
+    TP_THIS_FUNCTION(TWindowSizeChanged, void, Renderer, uint32_t);
+    POINTER_SKYRIMSE(TWindowSizeChanged, s_windowSizeChanged, 77238);
+    if (s_windowSizeChanged.Get())
+        TiltedPhoques::ThisCall(s_windowSizeChanged.Get(), this, aWindowId);
 }
 
 bool RendererWindow::IsForeground()
@@ -37,10 +72,41 @@ void (*Renderer_Init)(Renderer*, BSGraphics::RendererInitOSData*, const BSGraphi
 // WNDPROC seems to be part of the renderer
 LRESULT CALLBACK Hook_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    if (InputService::WndProc(hwnd, uMsg, wParam, lParam) != 0)
+    if (uMsg == cGameTestWakeMessage && entt::locator<World>::has_value())
+    {
+        World::Get().GetGameTestService().OnWindowThread();
         return 0;
+    }
 
-    return RealWndProc(hwnd, uMsg, wParam, lParam);
+    if ((uMsg == cGameSettingsWakeMessage ||
+        (uMsg == WM_TIMER && wParam == cGameSettingsTimerId)) &&
+        entt::locator<World>::has_value())
+    {
+        World::Get().GetGameSettingsService().OnMainLoop();
+        return 0;
+    }
+
+    if (const auto inputResult = InputService::WndProc(hwnd, uMsg, wParam, lParam); inputResult != 0)
+        return inputResult;
+
+    const auto result = RealWndProc(hwnd, uMsg, wParam, lParam);
+
+    if (uMsg == WM_SIZE && entt::locator<World>::has_value())
+        World::Get().GetGameSettingsService().OnWindowSizeChanged(wParam);
+
+    if (uMsg == WM_KILLFOCUS || (uMsg == WM_ACTIVATEAPP && wParam == FALSE) ||
+        (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE))
+    {
+        // Skyrim may hide/clip the cursor inside its deactivation handler, so
+        // release it after the real WndProc has finished.
+        ClipCursor(nullptr);
+        ReleaseCapture();
+        while (ShowCursor(TRUE) < 0)
+            ;
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    }
+
+    return result;
 }
 
 void Hook_Renderer_Init(Renderer* self, BSGraphics::RendererInitOSData* aOSData, const BSGraphics::ApplicationWindowProperties* aFBData, BSGraphics::RendererInitReturn* aOut)
@@ -59,6 +125,8 @@ void Hook_Renderer_Init(Renderer* self, BSGraphics::RendererInitOSData* aOSData,
     g_sRs = &World::Get().ctx().at<RenderSystemD3D11>();
     // This how the game does it too
     g_RenderWindow = &self->Data.RenderWindowA[0];
+    g_RendererData = &self->Data;
+    g_Renderer = self;
 
     const BSGraphics::RendererData& renderer = self->Data;
 

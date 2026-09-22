@@ -36,6 +36,9 @@ struct TransportService : Client
     [[nodiscard]] bool IsOnline() const noexcept { return m_connected; }
     void SetServerPassword(const std::string& acPassword) noexcept { m_serverPassword = acPassword; }
     const uint32_t& GetLocalPlayerId() const noexcept { return m_localPlayerId; }
+    const String& GetCampaignId() const noexcept { return m_campaignId; }
+    uint64_t GetCampaignRevision() const noexcept { return m_campaignRevision; }
+    uint64_t GetAuthorityEpoch() const noexcept { return m_authorityEpoch; }
 
 protected:
     // Event handlers
@@ -52,7 +55,10 @@ private:
     entt::dispatcher& m_dispatcher;
     bool m_connected;
     String m_serverPassword{};
-    uint32_t m_localPlayerId;
+    uint32_t m_localPlayerId{};
+    String m_campaignId{};
+    uint64_t m_campaignRevision{};
+    uint64_t m_authorityEpoch{};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_sendServerMessageConnection;

@@ -54,7 +54,7 @@ private:
 
     bool m_inParty = false;
     bool m_isLeader = false;
-    uint32_t m_leaderPlayerId;
+    uint32_t m_leaderPlayerId{};
     Vector<uint32_t> m_partyMembers;
 
     World& m_world;

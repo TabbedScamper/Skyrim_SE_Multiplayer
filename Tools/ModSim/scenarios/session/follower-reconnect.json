@@ -1,0 +1,25 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "follower reconnects to the existing party",
+  "adapter": "protocol.follower-reconnect",
+  "seed": 3,
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "actions": [
+    { "at": 0, "actor": "host", "type": "session.create" },
+    { "at": 1, "actor": "guest", "type": "session.join" },
+    { "at": 2, "actor": "guest", "type": "session.disconnect" },
+    { "at": 3, "actor": "guest", "type": "session.reconnect" }
+  ],
+  "assertions": [
+    { "after": 3, "type": "clients.converged" },
+    {
+      "after": 3,
+      "type": "party.leaderEquals",
+      "data": { "participant": "host" }
+    }
+  ]
+}

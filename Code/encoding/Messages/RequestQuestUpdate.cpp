@@ -8,6 +8,7 @@ void RequestQuestUpdate::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) co
     aWriter.WriteBits(Stage, 16);
     aWriter.WriteBits(Status, 8);
     aWriter.WriteBits(ClientQuestType, 8);
+    aWriter.WriteBits(TransactionId, 64);
 }
 
 void RequestQuestUpdate::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -24,4 +25,6 @@ void RequestQuestUpdate::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) 
 
     aReader.ReadBits(tmp, 8);
     ClientQuestType = tmp & 0xFF;
+
+    aReader.ReadBits(TransactionId, 64);
 }

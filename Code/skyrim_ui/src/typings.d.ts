@@ -20,6 +20,7 @@ declare namespace SkyrimTogetherTypes {
 
   /** Player game exit callback */
   type ExitGameCallback = () => void;
+  type TitleScreenCallback = () => void;
 
   /** Player open/close game menu callback */
   type OpeningMenuCallback = (openingMenu: boolean) => void;
@@ -94,6 +95,10 @@ declare namespace SkyrimTogetherTypes {
   type PartyLeftCallback = (inviterId: number) => void;
 
   type PartyInviteReceivedCallback = (inviterId: number) => void;
+
+  type GameSettingsCallback = (...settings: Array<number | boolean | string>) => void;
+  type DebugPromptCallback = (message: string, noteOnly: boolean) => void;
+  type VoidCallback = () => void;
 }
 
 /** Global Skyrim: Together object. */
@@ -103,6 +108,12 @@ declare const skyrimtogether: SkyrimTogether;
 interface SkyrimTogether {
   /** Add listener to when the UI is first initialized. */
   on(event: 'init', callback: SkyrimTogetherTypes.InitCallback): void;
+
+  on(event: 'debugPrompt', callback: SkyrimTogetherTypes.DebugPromptCallback): void;
+
+  on(event: 'cancelDebugPrompt', callback: SkyrimTogetherTypes.VoidCallback): void;
+
+  on(event: 'submitDebugPrompt', callback: SkyrimTogetherTypes.VoidCallback): void;
 
   /** Add listener to when the UI is activated. */
   on(event: 'activate', callback: SkyrimTogetherTypes.ActivateCallback): void;
@@ -118,6 +129,9 @@ interface SkyrimTogether {
 
   /** Add listener to when the player exits a game. */
   on(event: 'exitGame', callback: SkyrimTogetherTypes.ExitGameCallback): void;
+  on(event: 'enterTitleScreen', callback: SkyrimTogetherTypes.TitleScreenCallback): void;
+  on(event: 'exitTitleScreen', callback: SkyrimTogetherTypes.TitleScreenCallback): void;
+  on(event: 'showTitleOptions', callback: SkyrimTogetherTypes.VoidCallback): void;
 
   /** Add listener to when the player open/close a game menu. */
   on(
@@ -219,6 +233,11 @@ interface SkyrimTogether {
     callback: SkyrimTogetherTypes.PartyInviteReceivedCallback,
   ): void;
 
+  on(event: 'gameSettings', callback: SkyrimTogetherTypes.GameSettingsCallback): void;
+  on(event: 'displayPreviewStarted', callback: SkyrimTogetherTypes.VoidCallback): void;
+  on(event: 'displayPreviewReverted', callback: SkyrimTogetherTypes.VoidCallback): void;
+  on(event: 'gameSettingsApplied', callback: SkyrimTogetherTypes.VoidCallback): void;
+
   /** Remove listener from when the application is first initialized. */
   off(event: 'init', callback?: SkyrimTogetherTypes.InitCallback): void;
 
@@ -239,6 +258,9 @@ interface SkyrimTogether {
 
   /** Remove listener from when the player exits a game. */
   off(event: 'exitGame', callback?: SkyrimTogetherTypes.ExitGameCallback): void;
+  off(event: 'enterTitleScreen', callback?: SkyrimTogetherTypes.TitleScreenCallback): void;
+  off(event: 'exitTitleScreen', callback?: SkyrimTogetherTypes.TitleScreenCallback): void;
+  off(event: 'showTitleOptions', callback?: SkyrimTogetherTypes.VoidCallback): void;
 
   /** Add listener to when the player open/close a game menu. */
   off(
@@ -349,6 +371,11 @@ interface SkyrimTogether {
     callback?: SkyrimTogetherTypes.PartyInviteReceivedCallback,
   ): void;
 
+  off(event: 'gameSettings', callback?: SkyrimTogetherTypes.GameSettingsCallback): void;
+  off(event: 'displayPreviewStarted', callback?: SkyrimTogetherTypes.VoidCallback): void;
+  off(event: 'displayPreviewReverted', callback?: SkyrimTogetherTypes.VoidCallback): void;
+  off(event: 'gameSettingsApplied', callback?: SkyrimTogetherTypes.VoidCallback): void;
+
   /**
    * Connect to server at given address and port.
    *
@@ -399,6 +426,28 @@ interface SkyrimTogether {
    * Launch a party.
    */
   launchParty(): void;
+
+  hostSteamSession(): void;
+
+  joinSteamSession(lobbyId: string): void;
+
+  leaveSteamSession(): void;
+
+  requestGameSettings(): void;
+
+  previewGameSetting(name: string, value: string): void;
+
+  confirmDisplaySettings(): void;
+
+  applyGameSettings(...settings: Array<number | boolean>): void;
+
+  revertGameSettings(): void;
+
+  resetGameSettings(): void;
+
+  openTitleOptions(): void;
+
+  submitDebugFeedback(looksRight: boolean, note: string): void;
 
   /**
    * Send a party invite to player with player id.

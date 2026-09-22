@@ -1,0 +1,17 @@
+add_requires("sqlite3")
+
+target("CampaignCore")
+    set_kind("static")
+    set_group("common")
+    add_includedirs(".", {public = true})
+    add_headerfiles("*.h")
+    add_files("*.cpp")
+    add_packages("sqlite3")
+
+target("CampaignCoreTests")
+    set_kind("binary")
+    set_group("Tests")
+    add_includedirs(".")
+    add_files("tests/*.cpp")
+    add_deps("CampaignCore")
+    add_packages("catch2")

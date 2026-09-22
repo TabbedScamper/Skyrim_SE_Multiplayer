@@ -1,0 +1,18 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "MQ101 Fragment 303 grants starting bow and arrows",
+  "adapter": "pex.mq101-fragment",
+  "seed": 302,
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "actions": [
+    { "at": 0, "actor": "host", "type": "papyrus.execute", "data": { "script": "QF_MQ101_0003372B", "function": "Fragment_303" } }
+  ],
+  "assertions": [
+    { "after": 0, "type": "inventory.quantityEquals", "data": { "item": "Longbow", "quantity": 1 } },
+    { "after": 0, "type": "inventory.quantityEquals", "data": { "item": "IronArrow", "quantity": 12 } }
+  ]
+}

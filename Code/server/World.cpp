@@ -18,10 +18,27 @@
 #include <Services/MapService.h>
 #include <Services/DiagnosticsService.h>
 
+#include <CampaignLedger.h>
+#include <console/Setting.h>
+
 #include <es_loader/ESLoader.h>
+
+namespace
+{
+Console::StringSetting sCampaignDatabasePath{
+    "Campaign:sDatabasePath",
+    "Path to the durable shared-campaign database",
+    "Data/SkyrimSEMultiplayer.campaign.sqlite3",
+    Console::SettingsFlags::kLocked};
+}
 
 World::World()
 {
+    m_pCampaignLedger = TiltedPhoques::MakeUnique<Campaign::Ledger>(sCampaignDatabasePath.value());
+    const auto campaign = m_pCampaignLedger->GetMetadata();
+    spdlog::info("Loaded shared campaign {} at revision {} (authority epoch {})",
+        campaign.CampaignId, campaign.Revision, campaign.AuthorityEpoch);
+
     m_spAdminService = std::make_shared<AdminService>(*this, m_dispatcher);
     spdlog::default_logger()->sinks().push_back(std::static_pointer_cast<spdlog::sinks::sink>(m_spAdminService));
 

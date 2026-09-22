@@ -1,0 +1,48 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "follower quest write is rejected",
+  "adapter": "protocol.quest-authority",
+  "description": "A modified or stale follower cannot author shared quest progress.",
+  "seed": 101,
+  "productionBuild": "working-tree",
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "faults": {
+    "maxDelayTicks": 0,
+    "dropProbability": 0,
+    "duplicateProbability": 0,
+    "allowReorder": false
+  },
+  "actions": [
+    { "at": 0, "actor": "host", "type": "session.create" },
+    { "at": 1, "actor": "guest", "type": "session.join" },
+    {
+      "at": 2,
+      "actor": "host",
+      "type": "quest.setStage",
+      "data": { "quest": "Skyrim.esm:0003372B", "stage": 10, "transaction": "q1" }
+    },
+    {
+      "at": 3,
+      "actor": "guest",
+      "type": "quest.setStage",
+      "data": { "quest": "Skyrim.esm:0003372B", "stage": 20, "transaction": "q2" }
+    }
+  ],
+  "assertions": [
+    {
+      "after": 3,
+      "type": "quest.committedStageEquals",
+      "data": { "quest": "Skyrim.esm:0003372B", "stage": 10 }
+    },
+    {
+      "after": 3,
+      "type": "transaction.rejected",
+      "data": { "transaction": "q2", "reason": "not-party-leader" }
+    },
+    { "after": 3, "type": "clients.converged" }
+  ]
+}

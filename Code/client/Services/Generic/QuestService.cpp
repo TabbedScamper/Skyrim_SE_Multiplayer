@@ -15,6 +15,18 @@
 #include <Messages/RequestQuestUpdate.h>
 #include <Messages/NotifyQuestUpdate.h>
 
+#include <atomic>
+
+namespace
+{
+uint64_t NextQuestTransactionId() noexcept
+{
+    static std::atomic_uint64_t transactionId{
+        (GetTickCount64() << 16) ^ static_cast<uint64_t>(GetCurrentProcessId())};
+    return ++transactionId;
+}
+}
+
 static TESQuest* FindQuestByNameId(const String& name)
 {
     auto& questRegistry = ModManager::Get()->quests;
@@ -54,7 +66,14 @@ void QuestService::OnConnected(const ConnectedEvent&) noexcept
 
 BSTEventResult QuestService::OnEvent(const TESQuestStartStopEvent* apEvent, const EventDispatcher<TESQuestStartStopEvent>*)
 {
-    if (ScopedQuestOverride::IsOverriden() || !m_world.Get().GetPartyService().IsInParty())
+    const bool scopedOverride = ScopedQuestOverride::IsOverriden();
+    uint16_t currentStage = 0;
+    if (TESQuest* pQuest = Cast<TESQuest>(TESForm::GetById(apEvent->formId)))
+        currentStage = pQuest->currentStage;
+    RecordDebugEvent("local_start_stop", apEvent->formId, currentStage, scopedOverride);
+
+    const auto& partyService = m_world.Get().GetPartyService();
+    if (scopedOverride || !partyService.IsInParty() || !partyService.IsLeader())
         return BSTEventResult::kOk;
 
     spdlog::info("Quest start/stop event: {:X}", apEvent->formId);
@@ -91,6 +110,7 @@ BSTEventResult QuestService::OnEvent(const TESQuestStartStopEvent* apEvent, cons
                     update.Stage = stageId;
                     update.Status = stopped ? RequestQuestUpdate::Stopped : RequestQuestUpdate::Started;
                     update.ClientQuestType = static_cast<std::underlying_type_t<TESQuest::Type>>(type); 
+                    update.TransactionId = NextQuestTransactionId();
 
                     m_world.GetTransport().Send(update);
                 }
@@ -102,7 +122,11 @@ BSTEventResult QuestService::OnEvent(const TESQuestStartStopEvent* apEvent, cons
 
 BSTEventResult QuestService::OnEvent(const TESQuestStageEvent* apEvent, const EventDispatcher<TESQuestStageEvent>*)
 {
-    if (ScopedQuestOverride::IsOverriden() || !m_world.Get().GetPartyService().IsInParty())
+    const bool scopedOverride = ScopedQuestOverride::IsOverriden();
+    RecordDebugEvent("local_stage", apEvent->formId, apEvent->stageId, scopedOverride);
+
+    const auto& partyService = m_world.Get().GetPartyService();
+    if (scopedOverride || !partyService.IsInParty() || !partyService.IsLeader())
         return BSTEventResult::kOk;
 
     spdlog::info("Quest stage event: {:X}, stage: {}", apEvent->formId, apEvent->stageId);
@@ -141,6 +165,7 @@ BSTEventResult QuestService::OnEvent(const TESQuestStageEvent* apEvent, const Ev
                     update.Stage = stageId;
                     update.Status = RequestQuestUpdate::StageUpdate;
                     update.ClientQuestType = static_cast<std::underlying_type_t<TESQuest::Type>>(type);
+                    update.TransactionId = NextQuestTransactionId();
 
                     m_world.GetTransport().Send(update);
                 }
@@ -154,6 +179,7 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
 {
     ModSystem& modSystem = World::Get().GetModSystem();
     uint32_t formId = modSystem.GetGameId(aUpdate.Id);
+    RecordDebugEvent("remote_update", formId, aUpdate.Stage, true);
     TESQuest* pQuest = Cast<TESQuest>(TESForm::GetById(formId));
     if (!pQuest)
     {
@@ -193,6 +219,32 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
 
     if (!bResult)
         spdlog::error("Failed to update the client quest state, quest: {:X}, stage: {}, status: {}", formId, aUpdate.Stage, aUpdate.Status);
+}
+
+void QuestService::RecordDebugEvent(const char* acKind, uint32_t aFormId, uint16_t aStage,
+    bool aScopedOverride) noexcept
+{
+    DebugEvent event;
+    event.TimeMs = GetTickCount64();
+    event.FormId = aFormId;
+    event.Stage = aStage;
+    event.Kind = acKind;
+    event.ScopedOverride = aScopedOverride;
+    event.InParty = m_world.GetPartyService().IsInParty();
+    event.Leader = m_world.GetPartyService().IsLeader();
+
+    std::scoped_lock lock(m_debugEventMutex);
+    event.Sequence = ++m_debugEventSequence;
+    m_debugEvents.emplace_back(std::move(event));
+    constexpr size_t cMaxDebugEvents = 128;
+    while (m_debugEvents.size() > cMaxDebugEvents)
+        m_debugEvents.pop_front();
+}
+
+Vector<QuestService::DebugEvent> QuestService::GetRecentDebugEvents() const
+{
+    std::scoped_lock lock(m_debugEventMutex);
+    return {m_debugEvents.begin(), m_debugEvents.end()};
 }
 
 bool QuestService::StopQuest(uint32_t aformId)

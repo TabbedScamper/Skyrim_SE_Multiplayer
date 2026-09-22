@@ -5,13 +5,17 @@
 #include <OverlayApp.hpp>
 
 #include <D3D11Hook.hpp>
+#include <DInputHook.hpp>
 #include <OverlayRenderHandlerD3D11.hpp>
 
 #include <Systems/RenderSystemD3D11.h>
 
 #include <World.h>
+#include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
+#include <Games/Skyrim/Interface/MainMenuIntegration.h>
 
 #include <Services/OverlayClient.h>
+#include <Services/InputService.h>
 #include <Services/TransportService.h>
 
 #include <Messages/NotifyChatMessageBroadcast.h>
@@ -38,9 +42,107 @@
 #include <Forms/TESWorldSpace.h>
 #include <Forms/TESObjectCELL.h>
 #include <Games/ActorExtension.h>
+#include <Games/Skyrim/Interface/UI.h>
+
+#include <xinput.h>
 
 using TiltedPhoques::OverlayRenderHandler;
 using TiltedPhoques::OverlayRenderHandlerD3D11;
+
+namespace
+{
+using TXInputGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+
+void InjectControllerKey(OverlayApp* apOverlay, uint16_t aKey, uint32_t aModifiers = 0)
+{
+    const auto scanCode = static_cast<uint16_t>(MapVirtualKeyW(aKey, MAPVK_VK_TO_VSC));
+    apOverlay->InjectKey(KEYEVENT_KEYDOWN, aModifiers, aKey, scanCode);
+    apOverlay->InjectKey(KEYEVENT_KEYUP, aModifiers, aKey, scanCode);
+}
+
+void PollControllerNavigation(OverlayApp* apOverlay, bool aActive)
+{
+    static TXInputGetState s_getState = []() -> TXInputGetState {
+        for (const wchar_t* library : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+            if (const auto module = LoadLibraryW(library))
+                if (const auto proc = GetProcAddress(module, "XInputGetState"))
+                    return reinterpret_cast<TXInputGetState>(proc);
+        return nullptr;
+    }();
+    static WORD s_previous = 0;
+    static WORD s_repeating = 0;
+    static auto s_nextRepeat = std::chrono::steady_clock::time_point{};
+
+    if (!aActive || !apOverlay || !s_getState)
+    {
+        s_previous = 0;
+        s_repeating = 0;
+        return;
+    }
+
+    XINPUT_STATE state{};
+    bool connected = false;
+    for (DWORD index = 0; index < XUSER_MAX_COUNT; ++index)
+    {
+        if (s_getState(index, &state) == ERROR_SUCCESS)
+        {
+            connected = true;
+            break;
+        }
+    }
+    if (!connected)
+    {
+        s_previous = 0;
+        return;
+    }
+
+    WORD buttons = state.Gamepad.wButtons;
+    if (state.Gamepad.sThumbLY > XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_UP;
+    if (state.Gamepad.sThumbLY < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_DOWN;
+    if (state.Gamepad.sThumbLX < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_LEFT;
+    if (state.Gamepad.sThumbLX > XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+
+    constexpr WORD navigation = XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_DOWN |
+        XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT;
+    const WORD pressed = buttons & ~s_previous;
+    const auto now = std::chrono::steady_clock::now();
+    WORD triggered = pressed;
+    const WORD heldNavigation = buttons & navigation;
+    if (heldNavigation != s_repeating)
+    {
+        s_repeating = heldNavigation;
+        s_nextRepeat = now + 400ms;
+    }
+    else if (heldNavigation && now >= s_nextRepeat)
+    {
+        triggered |= heldNavigation;
+        s_nextRepeat = now + 110ms;
+    }
+
+    if (triggered & XINPUT_GAMEPAD_DPAD_UP)
+        InjectControllerKey(apOverlay, VK_UP);
+    else if (triggered & XINPUT_GAMEPAD_DPAD_DOWN)
+        InjectControllerKey(apOverlay, VK_DOWN);
+    if (triggered & XINPUT_GAMEPAD_DPAD_LEFT)
+        InjectControllerKey(apOverlay, VK_LEFT);
+    else if (triggered & XINPUT_GAMEPAD_DPAD_RIGHT)
+        InjectControllerKey(apOverlay, VK_RIGHT);
+    if (pressed & XINPUT_GAMEPAD_A)
+        InjectControllerKey(apOverlay, VK_SPACE);
+    if (pressed & XINPUT_GAMEPAD_B)
+        InjectControllerKey(apOverlay, VK_ESCAPE);
+
+    if (triggered || (pressed & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B)))
+    {
+        InputService::NotifyControllerInput();
+        if (const auto client = apOverlay->GetClient())
+            if (const auto renderer = client->GetOverlayRenderHandler())
+                renderer->SetCursorVisible(false);
+    }
+
+    s_previous = buttons;
+}
+}
 
 struct D3D11RenderProvider final : OverlayApp::RenderProvider, OverlayRenderHandlerD3D11::Renderer
 {
@@ -152,6 +254,110 @@ void OverlayService::Create(RenderSystemD3D11* apRenderSystem) noexcept
 
 void OverlayService::Render() noexcept
 {
+    static bool s_f9WasDown = false;
+    static bool s_f10WasDown = false;
+    static bool s_debugPromptOpen = false;
+    static bool s_titleBaselineScheduled = false;
+    static std::chrono::steady_clock::time_point s_mainMenuDumpAt{};
+
+    PollControllerNavigation(m_pOverlay.get(), m_active);
+
+    const auto dumpMainMenuState = [this]() {
+        uint32_t overlayWidth = 0;
+        uint32_t overlayHeight = 0;
+        if (m_pOverlay && m_pOverlay->GetClient())
+        {
+            if (auto pRenderer = m_pOverlay->GetClient()->GetOverlayRenderHandler())
+                std::tie(overlayWidth, overlayHeight) = pRenderer->GetRenderSize();
+        }
+        DumpMainMenuState(overlayWidth, overlayHeight);
+    };
+
+    auto* pUI = UI::Get();
+    const bool titleScreen = pUI && pUI->GetMenuOpen(BSFixedString("Main Menu"));
+    if (titleScreen)
+        PollMainMenuOptions(pUI->FindMenuByName(BSFixedString("Main Menu")));
+    SetMainMenuOverlayActive(m_active && titleScreen);
+    if (titleScreen && !s_titleBaselineScheduled)
+    {
+        // Wait until Skyrim, Scaleform, Mist Menu, and the CEF render target have
+        // all advanced beyond their first initialization frame.
+        s_mainMenuDumpAt = std::chrono::steady_clock::now() + 1500ms;
+        s_titleBaselineScheduled = true;
+    }
+    else if (!titleScreen)
+    {
+        s_titleBaselineScheduled = false;
+        s_mainMenuDumpAt = {};
+    }
+
+    const bool f11Down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    if (f11Down && !m_f11WasDown)
+    {
+        m_world.GetGameSettingsService().ToggleWindowMode();
+        // Window mode switching is asynchronous. Capture the stable result,
+        // not the frame containing the resize request.
+        if (titleScreen)
+            s_mainMenuDumpAt = std::chrono::steady_clock::now() + 2000ms;
+    }
+    m_f11WasDown = f11Down;
+
+    const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    if (f9Down && !s_f9WasDown)
+        dumpMainMenuState();
+    s_f9WasDown = f9Down;
+
+    if (titleScreen && s_mainMenuDumpAt != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() >= s_mainMenuDumpAt)
+    {
+        dumpMainMenuState();
+        s_mainMenuDumpAt = {};
+    }
+
+    const bool f10Down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    if (f10Down && !s_f10WasDown)
+    {
+        if (s_debugPromptOpen && m_pOverlay)
+        {
+            spdlog::info("F10 in-game problem report submitted without mouse input");
+            m_pOverlay->ExecuteAsync("submitDebugPrompt");
+            s_debugPromptOpen = false;
+        }
+        else
+        {
+            spdlog::info("F10 in-game problem report requested");
+            ShowDebugPrompt("Describe what is wrong, then press F10 again to capture and send. Press Escape to cancel.", true);
+            s_debugPromptOpen = true;
+        }
+    }
+    s_f10WasDown = f10Down;
+
+    const bool escapeDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    if (escapeDown && !m_escapeWasDown && m_active)
+    {
+        if (s_debugPromptOpen && m_pOverlay)
+        {
+            m_pOverlay->ExecuteAsync("cancelDebugPrompt");
+            s_debugPromptOpen = false;
+            spdlog::info("In-game problem report cancelled with Escape");
+        }
+        m_world.GetGameSettingsService().RevertSettings();
+        SetActive(false);
+    }
+    m_escapeWasDown = escapeDown;
+
+    if (!m_active)
+        s_debugPromptOpen = false;
+
+    if (titleScreen != m_titleScreen)
+    {
+        m_titleScreen = titleScreen;
+        SetVersion(BUILD_COMMIT);
+        m_pOverlay->ExecuteAsync(m_titleScreen ? "enterTitleScreen" : "exitTitleScreen");
+        if (!m_titleScreen && !m_inGame)
+            SetActive(false);
+    }
+
     auto pPlayer = PlayerCharacter::Get();
     bool inGame = pPlayer && pPlayer->GetNiNode();
     if (inGame && !m_inGame)
@@ -160,6 +366,8 @@ void OverlayService::Render() noexcept
         SetInGame(false);
 
     m_pOverlay->GetClient()->Render();
+    if (m_active)
+        RenderNativeCursorOnTop();
 }
 
 void OverlayService::Reset() const noexcept
@@ -185,12 +393,27 @@ void OverlayService::Initialize() noexcept
 
 void OverlayService::SetActive(bool aActive) noexcept
 {
-    if (!m_inGame)
+    if (!m_inGame && !m_titleScreen)
         return;
     if (m_active == aActive)
         return;
 
     m_active = aActive;
+    SetMainMenuOverlayActive(m_active && m_titleScreen);
+
+    TiltedPhoques::DInputHook::Get().SetEnabled(m_active);
+    if (m_pOverlay && m_pOverlay->GetClient())
+    {
+        if (auto pRenderer = m_pOverlay->GetClient()->GetOverlayRenderHandler())
+            pRenderer->SetCursorVisible(false);
+    }
+
+    const auto* pWindow = BSGraphics::GetMainWindow();
+    if (pWindow && GetForegroundWindow() == pWindow->hWnd)
+    {
+        while (ShowCursor(FALSE) >= 0)
+            ;
+    }
 
     m_pOverlay->ExecuteAsync(m_active ? "activate" : "deactivate");
 }
@@ -245,6 +468,41 @@ void OverlayService::SendSystemMessage(const std::string& acMessage)
     pArguments->SetString(1, acMessage);
 
     m_pOverlay->ExecuteAsync("message", pArguments);
+}
+
+void OverlayService::ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly)
+{
+    if (!m_pOverlay)
+        return;
+
+    auto pArguments = CefListValue::Create();
+    pArguments->SetString(0, acMessage);
+    pArguments->SetBool(1, aNoteOnly);
+    spdlog::info("Dispatching debugPrompt event to overlay");
+    m_pOverlay->ExecuteAsync("debugPrompt", pArguments);
+    SetActive(true);
+}
+
+bool OverlayService::InjectTestControllerButton(const std::string& acButton) noexcept
+{
+    if (!m_pOverlay || !m_active)
+        return false;
+
+    uint16_t key = 0;
+    if (acButton == "up") key = VK_UP;
+    else if (acButton == "down") key = VK_DOWN;
+    else if (acButton == "left") key = VK_LEFT;
+    else if (acButton == "right") key = VK_RIGHT;
+    else if (acButton == "a") key = VK_SPACE;
+    else if (acButton == "b") key = VK_ESCAPE;
+    else return false;
+
+    InjectControllerKey(m_pOverlay.get(), key);
+    InputService::NotifyControllerInput();
+    if (const auto client = m_pOverlay->GetClient())
+        if (const auto renderer = client->GetOverlayRenderHandler())
+            renderer->SetCursorVisible(false);
+    return true;
 }
 
 void OverlayService::SetPlayerHealthPercentage(uint32_t aFormId) const noexcept

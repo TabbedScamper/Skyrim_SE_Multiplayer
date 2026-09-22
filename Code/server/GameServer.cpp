@@ -21,6 +21,7 @@
 #include <Messages/NotifySettingsChange.h>
 #include <console/ConsoleRegistry.h>
 #include <resources/ResourceCollection.h>
+#include <CampaignLedger.h>
 
 constexpr size_t kMaxServerNameLength = 128u;
 
@@ -970,6 +971,11 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         }
 
         serverResponse.PlayerId = pPlayer->GetId();
+
+        const auto campaign = m_pWorld->GetCampaignLedger().GetMetadata();
+        serverResponse.CampaignId = campaign.CampaignId;
+        serverResponse.CampaignRevision = campaign.Revision;
+        serverResponse.AuthorityEpoch = campaign.AuthorityEpoch;
 
         auto modList = PrettyPrintModList(acRequest->UserMods.ModList);
         spdlog::info("New player '{}' [{:x}] connected with {} mods\n\t: {}", pPlayer->GetUsername().c_str(), aConnectionId, acRequest->UserMods.ModList.size(), modList.c_str());

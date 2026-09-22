@@ -80,6 +80,67 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             ProcessTeleportMessage(eventArgs);
         else if (eventName == "toggleDebugUI")
             ProcessToggleDebugUI();
+        else if (eventName == "hostSteamSession")
+            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().HostSession(); });
+        else if (eventName == "joinSteamSession")
+        {
+            const auto lobbyId = eventArgs->GetString(0).ToString();
+            World::Get().GetRunner().Queue(
+                [lobbyId]() { World::Get().GetSteamLobbyService().JoinSession(lobbyId.c_str()); });
+        }
+        else if (eventName == "leaveSteamSession")
+            World::Get().GetRunner().Queue([]() { World::Get().GetSteamLobbyService().LeaveSession(); });
+        else if (eventName == "requestGameSettings")
+            World::Get().GetGameSettingsService().QueueRequestSettings();
+        else if (eventName == "previewGameSetting")
+        {
+            const String name = eventArgs->GetString(0).ToString().c_str();
+            const String value = eventArgs->GetString(1).ToString().c_str();
+            World::Get().GetGameSettingsService().QueuePreviewSetting(name, value);
+        }
+        else if (eventName == "confirmDisplaySettings")
+            World::Get().GetGameSettingsService().QueueConfirmDisplaySettings();
+        else if (eventName == "applyGameSettings")
+        {
+            GameSettingsSnapshot settings{};
+            settings.DisplayMode = eventArgs->GetInt(0);
+            settings.Monitor = eventArgs->GetInt(1);
+            settings.Width = eventArgs->GetInt(2);
+            settings.Height = eventArgs->GetInt(3);
+            settings.VSync = eventArgs->GetBool(4);
+            settings.MasterVolume = eventArgs->GetDouble(5);
+            settings.FootstepsVolume = eventArgs->GetDouble(6);
+            settings.VoiceVolume = eventArgs->GetDouble(7);
+            settings.MusicVolume = eventArgs->GetDouble(8);
+            settings.EffectsVolume = eventArgs->GetDouble(9);
+            settings.Gamma = eventArgs->GetDouble(10);
+            settings.MouseSensitivity = eventArgs->GetDouble(11);
+            settings.GamepadSensitivity = eventArgs->GetDouble(12);
+            settings.InvertY = eventArgs->GetBool(13);
+            settings.DialogueSubtitles = eventArgs->GetBool(14);
+            settings.GeneralSubtitles = eventArgs->GetBool(15);
+            settings.AlwaysRun = eventArgs->GetBool(16);
+            settings.ControllerRumble = eventArgs->GetBool(17);
+            World::Get().GetGameSettingsService().QueueApplySettings(settings);
+        }
+        else if (eventName == "revertGameSettings")
+            World::Get().GetGameSettingsService().QueueRevertSettings();
+        else if (eventName == "resetGameSettings")
+            World::Get().GetGameSettingsService().QueueResetSettings();
+        else if (eventName == "submitDebugFeedback")
+        {
+            const bool looksRight = eventArgs->GetBool(0);
+            const String note = eventArgs->GetString(1).ToString().c_str();
+            // This is a diagnostic Win32/GDI capture and is safe to perform on
+            // the CEF browser callback. Queuing it on the game runner can leave
+            // reports permanently pending while Skyrim is on the main menu.
+            spdlog::info("Processing in-game problem report immediately");
+            World::Get().GetGameSettingsService().RecordDebugFeedback(looksRight, note);
+        }
+        else if (eventName == "openTitleOptions")
+            SetUIVisible(true);
+        else if (eventName == "deactivate")
+            SetUIVisible(false);
 
         return true;
     }
@@ -158,5 +219,5 @@ void OverlayClient::SetUIVisible(bool aVisible) noexcept
 
     TiltedPhoques::DInputHook::Get().SetEnabled(aVisible);
     World::Get().GetOverlayService().SetActive(aVisible);
-    pRenderer->SetCursorVisible(aVisible);
+    pRenderer->SetCursorVisible(false);
 }

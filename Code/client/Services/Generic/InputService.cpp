@@ -14,9 +14,120 @@
 #include <World.h>
 
 #include "Games/Skyrim/Interface/MenuControls.h"
+#include "Games/Skyrim/Interface/MainMenuIntegration.h"
 
 static OverlayService* s_pOverlay = nullptr;
 static UINT s_currentACP = CP_ACP;
+static LONG s_overlayMouseX = 0;
+static LONG s_overlayMouseY = 0;
+static bool s_overlayMouseInitialized = false;
+static uint16_t s_overlayMouseWidth = 0;
+static uint16_t s_overlayMouseHeight = 0;
+static uint32_t s_overlayMouseButtonModifiers = 0;
+static bool s_systemCursorReleased = false;
+static std::atomic_uint64_t s_lastControllerInputMs{0};
+
+void InputService::NotifyControllerInput() noexcept
+{
+    s_lastControllerInputMs.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+void ReleaseCursorToWindows()
+{
+    ClipCursor(nullptr);
+    ReleaseCapture();
+    while (ShowCursor(TRUE) < 0)
+        ;
+    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    s_systemCursorReleased = true;
+}
+
+void ReclaimCursorForGame()
+{
+    s_systemCursorReleased = false;
+    while (ShowCursor(FALSE) >= 0)
+        ;
+}
+
+POINT MapClientToOverlay(HWND aWindow, POINT aPosition, TiltedPhoques::OverlayRenderHandler* apRenderer)
+{
+    RECT client{};
+    if (!apRenderer || !GetClientRect(aWindow, &client))
+        return aPosition;
+
+    const int clientWidth = client.right - client.left;
+    const int clientHeight = client.bottom - client.top;
+    const auto [overlayWidth, overlayHeight] = apRenderer->GetRenderSize();
+    if (clientWidth <= 0 || clientHeight <= 0 || overlayWidth == 0 || overlayHeight == 0)
+        return aPosition;
+
+    aPosition.x = std::clamp<LONG>(aPosition.x, 0, static_cast<LONG>(clientWidth - 1));
+    aPosition.y = std::clamp<LONG>(aPosition.y, 0, static_cast<LONG>(clientHeight - 1));
+    aPosition.x = static_cast<LONG>((static_cast<int64_t>(aPosition.x) * overlayWidth) / clientWidth);
+    aPosition.y = static_cast<LONG>((static_cast<int64_t>(aPosition.y) * overlayHeight) / clientHeight);
+
+    static int s_lastClientWidth = 0;
+    static int s_lastClientHeight = 0;
+    static uint32_t s_lastOverlayWidth = 0;
+    static uint32_t s_lastOverlayHeight = 0;
+    if (clientWidth != s_lastClientWidth || clientHeight != s_lastClientHeight ||
+        overlayWidth != s_lastOverlayWidth || overlayHeight != s_lastOverlayHeight)
+    {
+        spdlog::info("Mouse coordinate mapping: client {}x{} -> overlay {}x{}",
+            clientWidth, clientHeight, overlayWidth, overlayHeight);
+        s_lastClientWidth = clientWidth;
+        s_lastClientHeight = clientHeight;
+        s_lastOverlayWidth = overlayWidth;
+        s_lastOverlayHeight = overlayHeight;
+    }
+
+    return aPosition;
+}
+
+POINT GetOverlayMousePosition(TiltedPhoques::OverlayRenderHandler* apRenderer)
+{
+    const auto [width, height] = apRenderer->GetRenderSize();
+    if (!s_overlayMouseInitialized)
+    {
+        s_overlayMouseX = static_cast<LONG>(width / 2);
+        s_overlayMouseY = static_cast<LONG>(height / 2);
+        s_overlayMouseWidth = width;
+        s_overlayMouseHeight = height;
+        s_overlayMouseInitialized = true;
+        spdlog::info("Overlay raw cursor initialized at {},{} in {}x{}", s_overlayMouseX, s_overlayMouseY, width, height);
+    }
+    else if (width && height && (width != s_overlayMouseWidth || height != s_overlayMouseHeight))
+    {
+        const auto oldWidth = std::max<uint16_t>(1, s_overlayMouseWidth);
+        const auto oldHeight = std::max<uint16_t>(1, s_overlayMouseHeight);
+        s_overlayMouseX = static_cast<LONG>((static_cast<int64_t>(s_overlayMouseX) * width) / oldWidth);
+        s_overlayMouseY = static_cast<LONG>((static_cast<int64_t>(s_overlayMouseY) * height) / oldHeight);
+        s_overlayMouseWidth = width;
+        s_overlayMouseHeight = height;
+        spdlog::info("Overlay cursor rescaled to {},{} in {}x{}", s_overlayMouseX, s_overlayMouseY, width, height);
+    }
+    return {s_overlayMouseX, s_overlayMouseY};
+}
+
+POINT AdvanceOverlayMouse(HWND aWindow, const RAWMOUSE& acMouse, TiltedPhoques::OverlayRenderHandler* apRenderer)
+{
+    POINT position = GetOverlayMousePosition(apRenderer);
+    const auto [overlayWidth, overlayHeight] = apRenderer->GetRenderSize();
+    RECT client{};
+    GetClientRect(aWindow, &client);
+    const int clientWidth = std::max(1L, client.right - client.left);
+    const int clientHeight = std::max(1L, client.bottom - client.top);
+
+    if ((acMouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0)
+    {
+        const auto deltaX = static_cast<LONG>((static_cast<int64_t>(acMouse.lLastX) * overlayWidth) / clientWidth);
+        const auto deltaY = static_cast<LONG>((static_cast<int64_t>(acMouse.lLastY) * overlayHeight) / clientHeight);
+        s_overlayMouseX = std::clamp<LONG>(s_overlayMouseX + deltaX, 0, static_cast<LONG>(std::max(1u, overlayWidth) - 1));
+        s_overlayMouseY = std::clamp<LONG>(s_overlayMouseY + deltaY, 0, static_cast<LONG>(std::max(1u, overlayHeight) - 1));
+    }
+
+    return {s_overlayMouseX, s_overlayMouseY};
+}
 
 void ForceKillAllInput()
 {
@@ -25,7 +136,7 @@ void ForceKillAllInput()
 
 uint32_t GetCefModifiers(uint16_t aVirtualKey)
 {
-    uint32_t modifiers = EVENTFLAG_NONE;
+    uint32_t modifiers = s_overlayMouseButtonModifiers;
 
     if (GetKeyState(VK_MENU) & 0x8000)
     {
@@ -40,21 +151,6 @@ uint32_t GetCefModifiers(uint16_t aVirtualKey)
     if (GetKeyState(VK_SHIFT) & 0x8000)
     {
         modifiers |= EVENTFLAG_SHIFT_DOWN;
-    }
-
-    if (GetKeyState(VK_LBUTTON) & 0x8000)
-    {
-        modifiers |= EVENTFLAG_LEFT_MOUSE_BUTTON;
-    }
-
-    if (GetKeyState(VK_RBUTTON) & 0x8000)
-    {
-        modifiers |= EVENTFLAG_RIGHT_MOUSE_BUTTON;
-    }
-
-    if (GetKeyState(VK_MBUTTON) & 0x8000)
-    {
-        modifiers |= EVENTFLAG_MIDDLE_MOUSE_BUTTON;
     }
 
     if (GetKeyState(VK_CAPITAL) & 1)
@@ -102,15 +198,18 @@ void SetUIActive(OverlayService& aOverlay, auto apRenderer, bool aActive)
     TiltedPhoques::DInputHook::Get().SetEnabled(aActive);
     aOverlay.SetActive(aActive);
 
-    // Ensures the game is actually loaded, in case the initial event was sent too early
+    // Ensures the UI receives the current shell state if the initial event was sent too early.
     aOverlay.SetVersion(BUILD_COMMIT);
-    aOverlay.GetOverlayApp()->ExecuteAsync("enterGame");
+    aOverlay.GetOverlayApp()->ExecuteAsync(aOverlay.GetInGame() ? "enterGame" : "enterTitleScreen");
 
-    apRenderer->SetCursorVisible(aActive);
+    // Skyrim's native Cursor Menu is the single cursor owner. It is rendered
+    // over CEF by OverlayService, so never draw CEF's software cursor too.
+    apRenderer->SetCursorVisible(false);
 
     // This is to disable the Windows cursor
     while (ShowCursor(FALSE) >= 0)
         ;
+    s_systemCursorReleased = false;
 }
 
 void ProcessKeyboard(uint16_t aKey, uint16_t aScanCode, cef_key_event_type_t aType, bool aE0, bool aE1)
@@ -193,7 +292,7 @@ void ProcessKeyboard(uint16_t aKey, uint16_t aScanCode, cef_key_event_type_t aTy
 
     if (aType != KEYEVENT_CHAR && (IsToggleKey(aKey) || (IsDisableKey(aKey) && active)))
     {
-        if (!overlay.GetInGame())
+        if (!overlay.GetInGame() && !overlay.GetTitleScreen())
         {
             TiltedPhoques::DInputHook::Get().SetEnabled(false);
         }
@@ -226,7 +325,7 @@ void ProcessMouseMove(uint16_t aX, uint16_t aY)
 
     const auto active = overlay.GetActive();
 
-    if (active)
+    if (active || overlay.GetTitleScreen())
     {
         pApp->InjectMouseMove(aX, aY, GetCefModifiers(0));
     }
@@ -250,7 +349,7 @@ void ProcessMouseButton(uint16_t aX, uint16_t aY, cef_mouse_button_type_t aButto
 
     const auto active = overlay.GetActive();
 
-    if (active)
+    if (active || overlay.GetTitleScreen())
     {
         pApp->InjectMouseButton(aX, aY, aButton, !aDown, GetCefModifiers(0));
     }
@@ -300,6 +399,24 @@ UINT GetRealACP()
 
 LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    // Windows-key shell UI and Alt-Tab do not always deliver the initiating
+    // key message to Skyrim. Focus loss is authoritative: immediately undo
+    // Skyrim's ShowCursor/ClipCursor ownership so the desktop pointer remains
+    // visible even while it crosses the unfocused game window.
+    if (uMsg == WM_KILLFOCUS || (uMsg == WM_ACTIVATEAPP && wParam == FALSE) ||
+        (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE))
+        ReleaseCursorToWindows();
+
+    // Do not rely on having observed a particular deactivation message. The
+    // foreground HWND is the source of truth whenever Windows asks which
+    // cursor to display over this window.
+    if (uMsg == WM_SETCURSOR && GetForegroundWindow() != hwnd)
+    {
+        ReleaseCursorToWindows();
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+        return TRUE;
+    }
+
     const auto pApp = s_pOverlay->GetOverlayApp();
     if (!pApp)
         return 0;
@@ -312,10 +429,33 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     if (!pRenderer)
         return 0;
 
+    // Win+Z belongs to the Windows shell. Skyrim normally keeps the shared
+    // system cursor hidden and clipped even while the Snap Layout chooser is
+    // visible, leaving the user unable to click a zone. Release it as soon as
+    // either Windows key arrives and keep the arrow alive until focus or a
+    // click explicitly returns to the game.
+    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) &&
+        (wParam == VK_LWIN || wParam == VK_RWIN))
+        ReleaseCursorToWindows();
+
+    if (s_systemCursorReleased && uMsg == WM_SETCURSOR)
+    {
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+        return 1;
+    }
+
+    if (s_systemCursorReleased && uMsg == WM_LBUTTONDOWN)
+        ReclaimCursorForGame();
+
     auto& discord = World::Get().ctx().at<DiscordService>();
     discord.WndProcHandler(hwnd, uMsg, wParam, lParam);
 
     const bool active = s_pOverlay->GetActive();
+    if (!active)
+    {
+        s_overlayMouseInitialized = false;
+        s_overlayMouseButtonModifiers = 0;
+    }
     if (active)
     {
         auto& imgui = World::Get().ctx().at<ImguiService>();
@@ -325,7 +465,15 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     POINT position;
 
     GetCursorPos(&position);
-    ScreenToClient(GetActiveWindow(), &position);
+    ScreenToClient(hwnd, &position);
+    position = MapClientToOverlay(hwnd, position, pRenderer.get());
+
+    if (active)
+    {
+        position = GetOverlayMousePosition(pRenderer.get());
+        if (s_pOverlay->GetTitleScreen())
+            SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
+    }
 
     ProcessMouseMove(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y));
 
@@ -346,11 +494,31 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         {
             const auto keyboard = input.data.keyboard;
 
+            if ((keyboard.Flags & RI_KEY_BREAK) == 0 &&
+                (keyboard.VKey == VK_LWIN || keyboard.VKey == VK_RWIN))
+                ReleaseCursorToWindows();
+
             ProcessKeyboard(keyboard.VKey, keyboard.MakeCode, keyboard.Flags & RI_KEY_BREAK ? KEYEVENT_KEYUP : KEYEVENT_KEYDOWN, keyboard.Flags & RI_KEY_E0, keyboard.Flags & RI_KEY_E1);
         }
         else if (input.header.dwType == RIM_TYPEMOUSE)
         {
             const auto mouse = input.data.mouse;
+
+            if (active)
+            {
+                // Last-used-device behavior: physical mouse movement restores
+                // the CEF pointer immediately; controller navigation hides it.
+                // Window focus/warping can emit a final raw-mouse packet after a
+                // controller action. Keep controller modality briefly; genuine
+                // later mouse motion still restores the pointer immediately.
+                if ((mouse.lLastX != 0 || mouse.lLastY != 0) &&
+                    GetTickCount64() - s_lastControllerInputMs.load(std::memory_order_relaxed) >= 250)
+                    pRenderer->SetCursorVisible(true);
+                position = AdvanceOverlayMouse(hwnd, mouse, pRenderer.get());
+                if (s_pOverlay->GetTitleScreen())
+                    SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
+                ProcessMouseMove(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y));
+            }
 
             if (mouse.usButtonFlags & RI_MOUSE_WHEEL)
             {
@@ -359,31 +527,37 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             if (mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
             {
+                s_overlayMouseButtonModifiers |= EVENTFLAG_LEFT_MOUSE_BUTTON;
                 ProcessMouseButton(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y), MBT_LEFT, true);
             }
 
             if (mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)
             {
+                s_overlayMouseButtonModifiers &= ~EVENTFLAG_LEFT_MOUSE_BUTTON;
                 ProcessMouseButton(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y), MBT_LEFT, false);
             }
 
             if (mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
             {
+                s_overlayMouseButtonModifiers |= EVENTFLAG_RIGHT_MOUSE_BUTTON;
                 ProcessMouseButton(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y), MBT_RIGHT, true);
             }
 
             if (mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
             {
+                s_overlayMouseButtonModifiers &= ~EVENTFLAG_RIGHT_MOUSE_BUTTON;
                 ProcessMouseButton(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y), MBT_RIGHT, false);
             }
 
             if (mouse.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN)
             {
+                s_overlayMouseButtonModifiers |= EVENTFLAG_MIDDLE_MOUSE_BUTTON;
                 ProcessMouseButton(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y), MBT_MIDDLE, true);
             }
 
             if (mouse.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP)
             {
+                s_overlayMouseButtonModifiers &= ~EVENTFLAG_MIDDLE_MOUSE_BUTTON;
                 ProcessMouseButton(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y), MBT_MIDDLE, false);
             }
         }
@@ -406,13 +580,21 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     {
         TiltedPhoques::DInputHook::Get().SetEnabled(true);
         s_pOverlay->SetActive(true);
-        pRenderer->SetCursorVisible(true);
+        pRenderer->SetCursorVisible(false);
+        ReclaimCursorForGame();
     }
     else if (uMsg == WM_INPUTLANGCHANGE)
     {
         s_currentACP = GetRealACP();
         spdlog::info("Input language changed, current ACP: {}", s_currentACP);
     }
+
+    // While our UI is active it owns input. Do not let the same keyboard or
+    // mouse event activate the native Skyrim menu underneath the modal panel.
+    if (active && (uMsg == WM_INPUT || uMsg == WM_CHAR ||
+        (uMsg >= WM_KEYFIRST && uMsg <= WM_KEYLAST) ||
+        (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST)))
+        return 1;
 
     return 0;
 }

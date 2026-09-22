@@ -1,0 +1,19 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "two clients join one leader-owned party",
+  "adapter": "protocol.join",
+  "seed": 1,
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "actions": [
+    { "at": 0, "actor": "host", "type": "session.create" },
+    { "at": 1, "actor": "guest", "type": "session.join" }
+  ],
+  "assertions": [
+    { "after": 1, "type": "clients.converged" },
+    { "after": 1, "type": "party.singleLeader" }
+  ]
+}

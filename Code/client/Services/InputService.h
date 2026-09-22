@@ -11,6 +11,7 @@ struct InputService
     ~InputService() noexcept;
 
     static LRESULT WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static void NotifyControllerInput() noexcept;
 
     TP_NOCOPYMOVE(InputService);
 };

@@ -1,0 +1,24 @@
+{
+  "$schema": "../../schema/scenario-v1.schema.json",
+  "schemaVersion": 1,
+  "name": "follower becomes leader after host disconnect",
+  "adapter": "protocol.leader-handoff",
+  "seed": 2,
+  "participants": [
+    { "id": "host", "role": "leader" },
+    { "id": "guest", "role": "follower" }
+  ],
+  "actions": [
+    { "at": 0, "actor": "host", "type": "session.create" },
+    { "at": 1, "actor": "guest", "type": "session.join" },
+    { "at": 2, "actor": "host", "type": "session.disconnect" }
+  ],
+  "assertions": [
+    { "after": 2, "type": "party.singleLeader" },
+    {
+      "after": 2,
+      "type": "party.leaderEquals",
+      "data": { "participant": "guest" }
+    }
+  ]
+}

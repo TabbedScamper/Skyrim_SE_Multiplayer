@@ -23,6 +23,7 @@ import { UiRepository } from '../../store/ui.repository';
   styleUrls: ['./connect.component.scss'],
 })
 export class ConnectComponent implements OnDestroy, AfterViewInit {
+  public steamLobbyId = '';
   public address = '';
   public password = '';
   public savePassword = false;
@@ -128,6 +129,23 @@ export class ConnectComponent implements OnDestroy, AfterViewInit {
 
   public openServerList(): void {
     this.uiRepository.openView(View.SERVER_LIST);
+  }
+
+  public hostSteamSession(): void {
+    this.sound.play(Sound.Ok);
+    this.client.hostSteamSession();
+    this.done.next();
+  }
+
+  public joinSteamSession(): void {
+    const lobbyId = this.steamLobbyId.trim();
+    if (!/^\d+$/.test(lobbyId)) {
+      this.sound.play(Sound.Fail);
+      return;
+    }
+    this.sound.play(Sound.Ok);
+    this.client.joinSteamSession(lobbyId);
+    this.done.next();
   }
 
   @ViewChild('input')

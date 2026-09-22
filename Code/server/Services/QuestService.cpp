@@ -8,6 +8,7 @@
 #include <Messages/NotifyQuestUpdate.h>
 
 #include <Setting.h>
+#include <CampaignLedger.h>
 namespace
 {
 Console::Setting bEnableMiscQuestSync{"Gameplay:bEnableMiscQuestSync", "(Experimental) Syncs miscellaneous quests when possible", false};
@@ -25,6 +26,14 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
     const auto& message = acMessage.Packet;
 
     auto* pPlayer = acMessage.pPlayer;
+
+    auto& partyService = m_world.GetPartyService();
+    if (partyService.IsPlayerInParty(pPlayer) && !partyService.IsPlayerLeader(pPlayer))
+    {
+        spdlog::warn("{}: rejected quest update from non-leader player {}, gameId {:X}, stage {}",
+            __FUNCTION__, pPlayer->GetId(), message.Id.LogFormat(), message.Stage);
+        return;
+    }
 
     auto& questComponent = pPlayer->GetQuestLogComponent();
     auto& entries = questComponent.QuestContent.Entries;
@@ -44,6 +53,45 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
         spdlog::info("{}: syncing type none/misc quest to party, gameId {:X} questStage {} questStatus {} questType {}",
                      __FUNCTION__, notify.Id.LogFormat(), notify.Stage, notify.Status, notify.ClientQuestType);
     }
+
+    if (message.Status > RequestQuestUpdate::Stopped)
+    {
+        spdlog::warn("{}: rejected invalid quest status {} from player {}", __FUNCTION__, message.Status, pPlayer->GetId());
+        return;
+    }
+
+    if (message.TransactionId == 0)
+    {
+        spdlog::warn("{}: rejected quest update without a transaction id from player {}", __FUNCTION__, pPlayer->GetId());
+        return;
+    }
+
+    const auto transactionKey = fmt::format("quest:{}:{}", pPlayer->GetId(), message.TransactionId);
+    const auto payload = fmt::format(
+        "mod={};base={};stage={};status={};type={}",
+        message.Id.ModId, message.Id.BaseId, message.Stage, message.Status, message.ClientQuestType);
+
+    Campaign::CommitResult commit;
+    try
+    {
+        commit = m_world.GetCampaignLedger().Commit(transactionKey, "quest", payload);
+    }
+    catch (const std::exception& exception)
+    {
+        spdlog::error("{}: failed to commit quest transaction {}: {}", __FUNCTION__, transactionKey, exception.what());
+        return;
+    }
+
+    if (!commit.Inserted)
+    {
+        spdlog::debug("{}: ignored duplicate quest transaction {} at revision {}",
+            __FUNCTION__, transactionKey, commit.Entry.Revision);
+        return;
+    }
+
+    notify.TransactionId = message.TransactionId;
+    notify.Revision = commit.Entry.Revision;
+    notify.AuthorityEpoch = commit.Entry.AuthorityEpoch;
 
     if (message.Status == RequestQuestUpdate::Started || message.Status == RequestQuestUpdate::StageUpdate)
     {

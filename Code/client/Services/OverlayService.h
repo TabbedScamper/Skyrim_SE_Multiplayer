@@ -55,12 +55,15 @@ struct OverlayService
 
     void SetInGame(bool aInGame) noexcept;
     [[nodiscard]] bool GetInGame() const noexcept;
+    [[nodiscard]] bool GetTitleScreen() const noexcept { return m_titleScreen; }
 
     void SetVersion(const std::string& acVersion);
 
     OverlayApp* GetOverlayApp() const noexcept { return m_pOverlay.get(); }
 
     void SendSystemMessage(const std::string& acMessage);
+    void ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly = false);
+    bool InjectTestControllerButton(const std::string& acButton) noexcept;
 
     void SetPlayerHealthPercentage(uint32_t aFormId) const noexcept;
 
@@ -94,6 +97,9 @@ private:
 
     bool m_active = false;
     bool m_inGame = false;
+    bool m_titleScreen = false;
+    bool m_f11WasDown = false;
+    bool m_escapeWasDown = false;
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_connectedConnection;

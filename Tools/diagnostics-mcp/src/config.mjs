@@ -18,6 +18,9 @@ export const logDirectory = path.resolve(
 export const commandFile = path.join(runtimeDirectory, "commands.tsv");
 export const markerFile = path.join(runtimeDirectory, "markers.jsonl");
 export const telemetryFile = path.join(runtimeDirectory, "telemetry.jsonl");
+export const nativePipe =
+  process.env.SKYRIM_DIAGNOSTICS_PIPE ??
+  "\\\\.\\pipe\\SkyrimSEMultiplayer.Test";
 
 export const configuredLogs = [
   { source: "server", path: path.join(logDirectory, "STServerOut.log") },

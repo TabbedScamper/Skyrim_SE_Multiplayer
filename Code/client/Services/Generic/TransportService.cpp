@@ -201,6 +201,12 @@ void TransportService::HandleAuthenticationResponse(const AuthenticationResponse
         m_connected = true;
 
         m_world.SetServerSettings(acMessage.Settings);
+        m_campaignId = acMessage.CampaignId;
+        m_campaignRevision = acMessage.CampaignRevision;
+        m_authorityEpoch = acMessage.AuthorityEpoch;
+
+        spdlog::info("Joined shared campaign {} at revision {} (authority epoch {})",
+            m_campaignId.c_str(), m_campaignRevision, m_authorityEpoch);
 
         m_dispatcher.trigger(acMessage.UserMods);
         m_dispatcher.trigger(acMessage.Settings);

@@ -27,6 +27,21 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     m_pCoreObject->SetValue("changePartyLeader", CefV8Value::CreateFunction("changePartyLeader", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
     m_pCoreObject->SetValue("teleportToPlayer", CefV8Value::CreateFunction("teleportToPlayer", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
     m_pCoreObject->SetValue("toggleDebugUI", CefV8Value::CreateFunction("toggleDebugUI", m_pOverlayHandler), V8_PROPERTY_ATTRIBUTE_NONE);
+
+    // Keep every UI -> native command exported here. Declaring a method in
+    // typings.d.ts and handling it in OverlayClient is not enough: CEF only
+    // exposes functions explicitly installed on this V8 object.
+    CreateFunction("hostSteamSession");
+    CreateFunction("joinSteamSession");
+    CreateFunction("leaveSteamSession");
+    CreateFunction("requestGameSettings");
+    CreateFunction("previewGameSetting");
+    CreateFunction("confirmDisplaySettings");
+    CreateFunction("applyGameSettings");
+    CreateFunction("revertGameSettings");
+    CreateFunction("resetGameSettings");
+    CreateFunction("submitDebugFeedback");
+    CreateFunction("openTitleOptions");
 }
 
 void ProcessHandler::OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context)

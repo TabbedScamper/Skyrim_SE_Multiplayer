@@ -1,3 +1,32 @@
+<div *ngIf="debugPromptText" class="debug-feedback-backdrop">
+  <app-window class="debug-feedback-dialog" border="strip">
+    <h2>{{ debugFeedbackTitle }}</h2>
+    <p>{{ debugPromptText }}</p>
+    <ng-container *ngIf="!debugFeedbackNeedsNote; else debugProblemNote">
+      <div class="debug-feedback-actions">
+        <button data-style-ornament="inverted" (click)="answerDebugPrompt(true)">Yes</button>
+        <button data-style-ornament="inverted" (click)="answerDebugPrompt(false)">No</button>
+      </div>
+    </ng-container>
+    <ng-template #debugProblemNote>
+      <label for="debug-feedback-note">What looks wrong?</label>
+      <textarea id="debug-feedback-note" [(ngModel)]="debugFeedbackNote" autofocus></textarea>
+      <p class="debug-feedback-shortcut">Press F10 again to capture &amp; send · Escape to cancel</p>
+      <div class="debug-feedback-actions">
+        <button data-style-ornament="inverted" (click)="submitDebugProblem()">Capture &amp; send</button>
+      </div>
+    </ng-template>
+  </app-window>
+</div>
+
+<ng-container *ngIf="titleScreen$ | async">
+  <div [@fadeInOutActive]="active$ | async" class="app-root-popups title-options-popup">
+    <app-popup *ngIf="(view$ | async) === RootView.SETTINGS" data-popup="settings">
+      <app-settings (done)="closeView()"></app-settings>
+    </app-popup>
+  </div>
+</ng-container>
+
 <ng-container *ngIf="inGame$ | async">
   <ng-container *ngIf="!(menuOpen$ | async)">
     <app-debug></app-debug>
