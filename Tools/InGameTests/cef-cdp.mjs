@@ -85,6 +85,13 @@ if (action === 'snapshot') {
   const capture = await call('Page.captureScreenshot', { format: 'png', fromSurface: true });
   fs.writeFileSync(outputPath, Buffer.from(capture.data, 'base64'));
   result = { path: outputPath };
+} else if (action === 'reload') {
+  await call('Page.reload', { ignoreCache: true });
+  result = { reloaded: true };
+} else if (action === 'press-enter') {
+  await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+  await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+  result = { key: 'Enter' };
 } else {
   throw new Error(`Unknown CDP action: ${action}`);
 }
