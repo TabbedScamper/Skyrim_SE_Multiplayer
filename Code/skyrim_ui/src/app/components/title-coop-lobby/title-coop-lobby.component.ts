@@ -60,6 +60,13 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
 
   @HostListener('document:keydown', ['$event'])
   public navigateWithKeyboard(event: KeyboardEvent): void {
+    if (event.key === 'Escape' || event.key === 'Esc') {
+      this.close();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
     const active = document.activeElement as HTMLInputElement | null;
     if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
       if (active?.matches('.coop-lobby button, .coop-lobby input[type="checkbox"], .coop-lobby summary')) {
