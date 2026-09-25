@@ -59,8 +59,22 @@ const std::vector<std::pair<const char*, const char*>> kSurfaces = {
     {"FSTPlayerStoneSolidWalkLSD", "FSTPlayerStoneSolidWalkRSD"}, {"FSTPlayerDirtWalkLSD", "FSTPlayerDirtWalkRSD"},
     {"FSTPlayerGrassWalkLSD", "FSTPlayerGrassWalkRSD"}, {"FSTPlayerWoodWalkLSD", "FSTPlayerWoodWalkRSD"},
     {"FSTPlayerGravelWalkLSD", "FSTPlayerGravelWalkRSD"}, {"FSTPlayerSnowWalkLSD", "FSTPlayerSnowWalkRSD"}};
-// The only SNDR under AudioCategoryVOCGeneral; dialogue lines are not sound descriptors.
-const std::vector<const char*> kVoiceLines = {"NPCDraugrVoiceTaunt"};
+// Real dialogue from Skyrim - Voices_en0.bsa, spread over voice types.
+const std::vector<const char*> kVoiceLines = {
+    "Data\\Sound\\Voice\\Skyrim.esm\\maleguard\\dialoguecr_dgcrimepayfine_00020fa9_2.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\maleguard\\dialoguewh_dialoguewhiteru_000d1981_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\malenord\\dialoguewh__000c02dd_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\malenord\\dialoguewh__000c06de_3.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\femalenord\\dialoguewh_dialoguewhiteru_00093132_4.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\femalenord\\dialogueiv_dialogueivarste_000daaf3_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\maleeventoned\\dialoguegeneric__0006d93b_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\maleeventoned\\dialoguewh__0007ebdf_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\femaleeventoned\\dialoguegeneric__0006d949_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\femaleeventoned\\dialoguege_dialoguegeneric_0006ae39_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\malecommoner\\dialoguegeneric__0006d948_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\malecommoner\\dialogueso_dialoguesoljund_0006a886_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\femalecommoner\\dialoguesolitude__000bfaf7_1.wav",
+    "Data\\Sound\\Voice\\Skyrim.esm\\femalecommoner\\dialoguemorthal__00042e3a_1.wav"};
 
 // ---- playing music track (BGSMusicSingleTrack, vtable ID 191021) ----
 // Handles at +0x68 and +0x74 (FUN_140326690 creates them, FUN_140326750
@@ -202,6 +216,61 @@ void PlayDescriptor(const char* apEditorId, uint32_t aOutputModel = kOutputStere
     s_state.Handle = handle; // one-shots overlap naturally; only the latest is faded on stop
 }
 
+// Plays a dialogue file the way Actor speech does (STR_Actor_speakSoundFunction):
+// path normalised under "sound\\" (ID 69822), BSResource::ID from it (ID 69971),
+// BSAudioManager::GetSoundHandleByFile (ID 67664) with flags 0x10 / priority 0x40.
+// Dialogue's own category chain includes AudioCategoryPausedDuringMenu, so in
+// any menu it would start paused; it is moved to PausedDuringMenuLoad (master
+// only, not paused in menus) and its handle volume set to what the Voice
+// slider gives in the world: VOCGeneral static 0.9 x user level.
+void PlayVoiceFile(const char* apPath) noexcept
+{
+    using TNormalize = const char* (*)(char*, uint32_t, const char*, const char*);
+    using TMakeId = void (*)(void*, const char*);
+    using TGetSingleton = void* (*)();
+    using TGetByFile = void (*)(void*, SoundHandle&, const void*, uint32_t, uint32_t, const char*);
+    using TSetOutputModel = void (*)(SoundHandle*, const void*);
+    using TSetCategory = void (*)(SoundHandle*, const void*, uint16_t);
+    using TSetVolume = bool (*)(SoundHandle*, float);
+    using TPlay = bool (*)(SoundHandle*);
+    static VersionDbPtr<void> s_normalize(69822);
+    static VersionDbPtr<void> s_makeId(69971);
+    static VersionDbPtr<void> s_getSingleton(67652);
+    static VersionDbPtr<void> s_getByFile(67664);
+    static VersionDbPtr<void> s_setOutputModel(67624);
+    static VersionDbPtr<void> s_setCategory(67623);
+    static VersionDbPtr<void> s_setVolume(67626);
+    static VersionDbPtr<void> s_play(67616);
+
+    auto* pManager = reinterpret_cast<TGetSingleton>(s_getSingleton.GetPtr())();
+    if (!pManager)
+        return;
+    char normalized[0x104]{};
+    const char* pNormalized = reinterpret_cast<TNormalize>(s_normalize.GetPtr())(normalized, sizeof(normalized), apPath, "sound\\");
+    alignas(8) uint8_t resourceId[0x10]{}; // BSResource::ID (file, ext, dir hashes)
+    reinterpret_cast<TMakeId>(s_makeId.GetPtr())(resourceId, pNormalized ? pNormalized : normalized);
+
+    SoundHandle handle{};
+    reinterpret_cast<TGetByFile>(s_getByFile.GetPtr())(pManager, handle, resourceId, 0x10, 0x40, apPath);
+    if (handle.SoundId == 0xFFFFFFFF)
+    {
+        spdlog::warn("Audio preview: voice file {} not found", apPath);
+        return;
+    }
+    if (auto* pOutput = TESForm::GetById(0x000B5183)) // SOMDialogue2D
+        reinterpret_cast<TSetOutputModel>(s_setOutputModel.GetPtr())(&handle, reinterpret_cast<uint8_t*>(pOutput) + 0x20);
+    if (auto* pCategory = TESForm::GetById(0x0010AA60)) // AudioCategoryPausedDuringMenuLoad
+        reinterpret_cast<TSetCategory>(s_setCategory.GetPtr())(&handle, reinterpret_cast<uint8_t*>(pCategory) + 0x30, 0);
+    float voice = 1.f;
+    if (auto* pVoice = TESForm::GetById(kVoice))
+        voice = *reinterpret_cast<const float*>(reinterpret_cast<uint8_t*>(pVoice) + 0x50);
+    reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(&handle, 0.9f * voice);
+    reinterpret_cast<TPlay>(s_play.GetPtr())(&handle);
+    spdlog::debug("Audio preview: voice line at {:.2f} ({})", 0.9f * voice, apPath);
+    StopSound(); // one line at a time
+    s_state.Handle = handle;
+}
+
 // Plays the next sample for the channel and returns the delay until the one after.
 std::chrono::milliseconds PlayNext(const std::string& acChannel) noexcept
 {
@@ -227,8 +296,8 @@ std::chrono::milliseconds PlayNext(const std::string& acChannel) noexcept
     }
     if (channel == "voice")
     {
-        PlayDescriptor(Pick(kVoiceLines), kOutputDialogue2D);
-        return std::chrono::milliseconds(std::uniform_int_distribution<int>(2600, 3400)(Rng()));
+        PlayVoiceFile(Pick(kVoiceLines));
+        return std::chrono::milliseconds(std::uniform_int_distribution<int>(3600, 4600)(Rng()));
     }
     return 500ms; // music: nothing to play, the current track is the preview
 }
