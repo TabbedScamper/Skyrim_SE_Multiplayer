@@ -3040,8 +3040,16 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 // pose, with no motion of its own, until it sits there, then place it exactly and stop.
                 // Left to settle on its own, the cart came to rest off the host's, and the driver and
                 // passengers climbed out of a different cart.
-                const bool atFinalPose = renderTime - static_cast<double>(sample(count - 1).Tick) >
-                    static_cast<double>(kHostDrivenHoldAfterMs);
+                // A short gap (a hitch on the host) coasts on this PC's physics; only a long one is the
+                // host at rest. Treating every 250 ms gap as the final pose braked the moving cart and
+                // yanked it on at the next sample ("jumpy").
+                const double sinceNewest = renderTime - static_cast<double>(sample(count - 1).Tick);
+                if (sinceNewest > static_cast<double>(kHostDrivenHoldAfterMs) && sinceNewest <= 1500.0)
+                {
+                    ++it;
+                    continue;
+                }
+                const bool atFinalPose = sinceNewest > 1500.0;
                 if (atFinalPose)
                 {
                     pA = pB = &sample(count - 1);
