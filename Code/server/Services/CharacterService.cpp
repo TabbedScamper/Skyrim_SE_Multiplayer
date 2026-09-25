@@ -184,6 +184,12 @@ void CharacterService::EnforceLeaderAuthority() const noexcept
         Player* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
         if (!pLeader)
             continue;
+        // A leader that relinquished this actor (not loaded there although its cell is in range)
+        // keeps it relinquished: taking it back every second flipped the owner (and re-sent its
+        // inventory) forever, actor 1F in the intro, epochs 2..94.
+        if (std::find(ownerComponent.InvalidOwners.begin(), ownerComponent.InvalidOwners.end(), pLeader) !=
+            ownerComponent.InvalidOwners.end())
+            continue;
         const auto& cellIdComponent = view.get<CellIdComponent>(entity);
         if (cellIdComponent.Cell == GameId{} || pLeader->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
             transfers.emplace_back(pLeader, entity);
@@ -516,6 +522,9 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     const auto& bodies = acMessage.Packet.Bodies;
     if (bodies.empty() || bodies.size() > CorpseRagdollRequest::kMaxBodies)
         return;
+    if (!std::all_of(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin),
+            [](float v) { return std::isfinite(v) && std::abs(v) < 10'000'000.f; }))
+        return;
     for (const auto& body : bodies)
     {
         float norm = 0.f;
@@ -529,6 +538,7 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     NotifyCorpseRagdoll notify{};
     notify.ServerId = acMessage.Packet.ServerId;
     notify.Tick = acMessage.Packet.Tick;
+    std::copy(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin), std::begin(notify.Origin));
     notify.Bodies = bodies;
     GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
 }
@@ -1054,6 +1064,11 @@ bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aE
 
     if (!partyService.IsPlayerLeader(apPlayer))
     {
+        // EnforceLeaderAuthority gives every unknown-cell actor to the leader. Letting a follower
+        // claim it back (nothing is ever "in range" of an unknown cell) flipped the owner every
+        // second, re-sending its inventory each time (actor 20 in the intro, epochs 125..138).
+        if (unknownCell)
+            return reject("the actor's cell is unknown; the leader simulates it");
         auto* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
         if (pLeader && pLeader->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
             return reject("the leader is in range and retains simulation authority");

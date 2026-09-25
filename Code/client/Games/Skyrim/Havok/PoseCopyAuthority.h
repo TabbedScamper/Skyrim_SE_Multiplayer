@@ -25,6 +25,9 @@ void SetPresentationTick(uint64_t aTick) noexcept;
 // Main thread, every frame: the current shared-clock tick, stamped on captured poses.
 void SetCurrentTick(uint64_t aTick) noexcept;
 [[nodiscard]] uint64_t GetPresentationTick() noexcept;
+// The presentation time now (SmoothClock minus the presentation delay), fractional milliseconds.
+[[nodiscard]] double GetPresentationTimeMs() noexcept;
+void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
 [[nodiscard]] uint64_t GetCurrentTick() noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.

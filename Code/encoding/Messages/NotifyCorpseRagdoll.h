@@ -13,10 +13,14 @@ struct NotifyCorpseRagdoll final : ServerMessage
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
     bool operator==(const NotifyCorpseRagdoll& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && Bodies == acRhs.Bodies;
+        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && Bodies == acRhs.Bodies &&
+               std::equal(std::begin(Origin), std::end(Origin), std::begin(acRhs.Origin));
     }
 
     uint32_t ServerId{};
     uint64_t Tick{};
+    // The owner's actor position; body positions are offsets from it. Placing them from the
+    // receiver's own actor position followed that copy wherever its local ragdoll dragged it.
+    float Origin[3]{};
     TiltedPhoques::Vector<CorpseRagdollBody> Bodies{};
 };

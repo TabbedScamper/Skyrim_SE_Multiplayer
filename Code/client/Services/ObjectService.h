@@ -3,6 +3,10 @@
 #include <Events/EventDispatcher.h>
 #include <Games/Events.h>
 #include <array>
+#include <atomic>
+#include <mutex>
+#include <vector>
+#include <Messages/PhysicsReferencesMoveRequest.h>
 
 struct ServerTimeSettings;
 struct DisconnectedEvent;
@@ -30,6 +34,16 @@ public:
     // Test switch for the exterior-cell handoff of host-driven bodies.
     static void SetCellHandoffEnabled(bool aEnabled) noexcept;
     static void SetRootBodyWriteEnabled(bool aEnabled) noexcept;
+    static void SetHostDrivenPlaybackEnabled(bool aEnabled) noexcept;
+    static void SetMainFramePlaybackEnabled(bool aEnabled) noexcept;
+    static void SetMainFrameCaptureEnabled(bool aEnabled) noexcept;
+    static void SetPhysicsStampEnabled(bool aEnabled) noexcept;
+    static void SetHermitePlaybackEnabled(bool aEnabled) noexcept;
+    static void SetCartSmoothingEnabled(bool aEnabled) noexcept;
+    // Called by the Main::Update hook on the game's main thread, before the frame's jobs.
+    static void OnMainFrame() noexcept;
+    // After Main::Update (the frame is drawn): end-of-frame probe of host-driven bodies.
+    static void OnMainFrameEnd() noexcept;
 
     struct RemotePhysicsDiagnostic
     {
@@ -286,6 +300,8 @@ private:
             NiPoint3 Rotation{};
             // The reference's other bodies (PhysicsReferenceUpdate::ChildBodies).
             std::vector<std::array<float, 7>> Children{};
+            // The host body's linear velocity, game units per second.
+            NiPoint3 Velocity{};
         };
         std::array<Sample, 12> Samples{};
         uint32_t SampleCount{};
@@ -294,6 +310,44 @@ private:
         bool HostDriven{};
         // Newest sample tick whose resting pose has been written; later frames skip the write.
         uint64_t AppliedRestTick{};
+        // End-of-frame probe: the root and first child as drawn, against what this frame wrote.
+        NiMatrix3 ProbeWrittenRotate{};
+        glm::vec3 ProbeChild0Written{};
+        NiMatrix3 ProbeChild0Rotate{};
+        bool ProbeEndArmed{};
+        uint32_t ProbeEndFrames{};
+        uint32_t ProbeEndMoved{};
+        float ProbeEndMoveMax{};
+        float ProbeEndTurnMax{};
+        float ProbeEndChildMoveMax{};
+        float ProbeEndChildTurnMax{};
+        // Smoothing of the played-back transform (see kCartSmoothingMs).
+        bool SmoothHas{};
+        glm::vec3 SmoothPosition{};
+        glm::vec3 SmoothRotation{};
+        std::chrono::steady_clock::time_point SmoothAt{};
+        std::vector<std::array<float, 7>> SmoothChildren{};
+        // Jitter probe: what this PC's node shows between two playback writes.
+        glm::vec3 ProbeWritten{};
+        bool ProbeHas{};
+        std::chrono::steady_clock::time_point ProbeLastWrite{};
+        std::chrono::steady_clock::time_point ProbeNextLog{};
+        uint32_t ProbeFrames{};
+        uint32_t ProbeMoved{};
+        float ProbeDriftMax{};
+        float ProbeSpeedSum{};
+        float ProbeSpeedChangeSum{};
+        float ProbeSpeedChangeMax{};
+        float ProbeLastSpeed{};
+        float ProbeDtMaxMs{};
+        glm::vec3 ProbeLastRotation{};
+        glm::vec3 ProbeLastAngularSpeed{};
+        float ProbeAngularChangeSum{};
+        float ProbeAngularChangeMax{};
+        std::vector<glm::vec3> ProbeChildWritten{};
+        uint32_t ProbeChildMoved{};
+        float ProbeChildDriftMax{};
+        std::string ProbeChildMotion{};
     };
     std::unordered_map<uint32_t, ReferencePose> m_referencePoses;
     std::unordered_map<uint32_t, RemoteReferencePose> m_remoteReferencePoses;
@@ -303,4 +357,12 @@ private:
     std::chrono::steady_clock::time_point m_nextPhysicsPosePrune{};
     uint32_t m_gridDiscoveryCursor{};
     void ApplyRemotePhysics() noexcept;
+    // m_remoteReferencePoses is filled on the VM job thread and played back on the main thread.
+    mutable std::recursive_mutex m_remotePhysicsLock;
+    std::atomic<bool> m_applyOnMainFrame{};
+    // Host: the physics snapshot is read on the main thread (a consistent frame) and sent from
+    // the update thread.
+    void CaptureHostPhysics(bool aSendNow) noexcept;
+    std::atomic<bool> m_captureOnMainFrame{};
+    std::vector<PhysicsReferencesMoveRequest> m_pendingPhysicsRequests;
 };

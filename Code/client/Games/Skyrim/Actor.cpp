@@ -951,6 +951,9 @@ bool Actor::IsDragon() const noexcept
     return BehaviorVar::IsDragon(pExtension->GraphDescriptorHash);
 }
 
+// Set around our death sync's KillImpl call (see HookKillImpl).
+thread_local bool t_syncKill = false;
+
 void Actor::Kill() noexcept
 {
     // Never kill players
@@ -959,7 +962,9 @@ void Actor::Kill() noexcept
         return;
 
     // TODO: these args are kind of bogus of course
+    t_syncKill = true;
     KillImpl(nullptr, 100.f, true, true);
+    t_syncKill = false;
 
     // Papyrus kill will not go through if it is queued by a kill move
     /*
@@ -1093,6 +1098,29 @@ bool TP_MAKE_THISCALL(HookSpawnActorInWorld, Actor)
 
 TP_THIS_FUNCTION(TDamageActor, bool, Actor, float aDamage, Actor* apHitter, bool aKillMove);
 static TDamageActor* RealDamageActor = nullptr;
+
+// Actor::KillImpl (vtable 0x10E, ID 37896). On a PC that does not own an NPC, a local kill (a
+// scene or quest script, a local projectile) killed and ragdolled its copy on its own: the intro
+// prisoner was 70 units from the owner's ragdoll when the owner's stream arrived and snapped
+// across. The owner decides the death; this PC shows it through the death sync and the owner's
+// ragdoll stream. Our own death sync (Actor::Kill) and a kill by this PC's player still go through.
+TP_THIS_FUNCTION(TKillImpl, void, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant);
+static TKillImpl* RealKillImpl = nullptr;
+std::atomic<uint64_t> s_blockedRemoteKills{0};
+
+void TP_MAKE_THISCALL(HookKillImpl, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant)
+{
+    const auto* pExtension = apThis ? apThis->GetExtension() : nullptr;
+    const bool attackerIsLocalPlayer = apAttacker && apAttacker->GetExtension() && apAttacker->GetExtension()->IsLocalPlayer();
+    if (!t_syncKill && pExtension && pExtension->IsRemote() && !pExtension->IsPlayer() && !attackerIsLocalPlayer)
+    {
+        if (s_blockedRemoteKills.fetch_add(1, std::memory_order_relaxed) < 32)
+            spdlog::info("Kept {:X} alive here: its owner decides the death (attacker {:X})", apThis->formID,
+                apAttacker ? apAttacker->formID : 0);
+        return;
+    }
+    TiltedPhoques::ThisCall(RealKillImpl, apThis, apAttacker, aDamage, aSendEvent, aRagdollInstant);
+}
 
 // TODO: this is flawed, since it does not account for invulnerable actors
 bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bool aKillMove)
@@ -1563,6 +1591,8 @@ static TiltedPhoques::Initializer s_actorHooks(
         POINTER_SKYRIMSE(TForceState, s_ForceState, 37313);
         POINTER_SKYRIMSE(TSpawnActorInWorld, s_SpawnActorInWorld, 19742);
         POINTER_SKYRIMSE(TDamageActor, s_damageActor, 37335);
+        POINTER_SKYRIMSE(TKillImpl, s_killImpl, 37896);
+        RealKillImpl = s_killImpl.Get();
         POINTER_SKYRIMSE(TApplyActorEffect, s_applyActorEffect, 35086);
         POINTER_SKYRIMSE(TRegenAttributes, s_regenAttributes, 37448);
         POINTER_SKYRIMSE(TAddInventoryItem, s_addInventoryItem, 37525);
@@ -1616,6 +1646,7 @@ static TiltedPhoques::Initializer s_actorHooks(
             TP_HOOK(&RealNativeSetInteraction, HookNativeSetInteraction);
         TP_HOOK(&RealSetPosition, HookSetPosition);
         TP_HOOK(&RealKnockExplosion, HookKnockExplosion);
+        TP_HOOK(&RealKillImpl, HookKillImpl);
         TP_HOOK(&RealRemoveSpell, HookRemoveSpell);
         TP_HOOK(&RealCharacterConstructor, HookCharacterConstructor);
         TP_HOOK(&RealCharacterConstructor2, HookCharacterConstructor2);

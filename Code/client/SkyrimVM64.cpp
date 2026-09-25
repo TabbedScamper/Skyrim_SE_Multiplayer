@@ -2,6 +2,8 @@
 #include "TiltedOnlineApp.h"
 #include "GameLoopDiagnostic.h"
 #include <Misc/GameVM.h>
+#include <Services/ObjectService.h>
+#include <Services/CorpseRagdollService.h>
 
 extern std::unique_ptr<TiltedOnlineApp> g_appInstance;
 
@@ -37,9 +39,12 @@ int TP_MAKE_THISCALL(HookVMUpdate, GameVM, float a2)
 
 short TP_MAKE_THISCALL(HookMainLoop, Main)
 {
-    TP_EMPTY_HOOK_PLACEHOLDER
+    ObjectService::OnMainFrame();
+    CorpseRagdollService::OnMainFrame();
 
-    return TiltedPhoques::ThisCall(MainLoop, apThis);
+    const auto result = TiltedPhoques::ThisCall(MainLoop, apThis);
+    ObjectService::OnMainFrameEnd();
+    return result;
 }
 
 uintptr_t TP_MAKE_THISCALL(HookVMDestructor, void)

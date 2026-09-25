@@ -3,6 +3,8 @@
 #include <Messages/CorpseRagdollRequest.h>
 
 #include <array>
+#include <atomic>
+#include <mutex>
 
 struct World;
 struct TransportService;
@@ -24,6 +26,9 @@ class CorpseRagdollService
 public:
     CorpseRagdollService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept;
     TP_NOCOPYMOVE(CorpseRagdollService);
+    // Called by the Main::Update hook on the main thread: the remote ragdolls are placed there,
+    // before the frame's physics step, not from the update job running beside it.
+    static void OnMainFrame() noexcept;
 
 private:
     struct OwnedRagdoll
@@ -35,6 +40,7 @@ private:
     struct Sample
     {
         uint64_t Tick{};
+        float Origin[3]{};
         Vector<CorpseRagdollBody> Bodies;
     };
     struct RemoteRagdoll
@@ -62,6 +68,8 @@ private:
     uint64_t m_nextTickMs{};
     Map<uint32_t, OwnedRagdoll> m_owned;
     Map<uint32_t, RemoteRagdoll> m_remote;
+    std::recursive_mutex m_remoteLock;
+    std::atomic<bool> m_applyOnMainFrame{};
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_disconnectConnection;
     entt::scoped_connection m_ragdollConnection;

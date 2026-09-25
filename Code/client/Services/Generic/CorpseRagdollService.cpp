@@ -23,6 +23,7 @@ using namespace ActorPoseDiagnosticViews;
 
 // Havok world units to game units (matches ObjectService).
 constexpr float kHavokToGameUnits = 70.f;
+std::atomic<CorpseRagdollService*> s_ragdollService{};
 // A body counts as settled below this speed (Havok units/s, about 2 game units/s).
 constexpr float kSettledLinear = 0.03f;
 constexpr float kSettledAngular = 0.05f;
@@ -137,7 +138,7 @@ void SleepBody(RigidBody* apBody) noexcept
 // hkpRigidBody::setPositionAndRotation (ID 60898). The raw Havok call from our update crashed
 // (0x140B4CF03) when a physics step was running. Velocities are cleared so the solver does not
 // carry the body off before the next placement.
-bool SetBodyPose(RigidBody* apBody, const float* apPosition, const float* apRotation) noexcept
+bool SetBodyPose(RigidBody* apBody, const float* apPosition, const float* apRotation, const float* apVelocity) noexcept
 {
     void* pWrapper = nullptr;
     void* pWrapped = nullptr;
@@ -156,7 +157,11 @@ bool SetBodyPose(RigidBody* apBody, const float* apPosition, const float* apRota
     alignas(16) float rotation[4]{apRotation[0], apRotation[1], apRotation[2], apRotation[3]};
     using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
     reinterpret_cast<TSetPositionAndRotation>(pMethod)(pWrapper, position, rotation);
-    std::fill(std::begin(apBody->linearVelocity), std::end(apBody->linearVelocity), 0.f);
+    // The owner's motion between its samples (Havok units per second): this PC's step then carries
+    // the body the way the owner's did until the next placement, instead of dropping it.
+    for (int axis = 0; axis < 3; ++axis)
+        apBody->linearVelocity[axis] = apVelocity ? apVelocity[axis] : 0.f;
+    apBody->linearVelocity[3] = 0.f;
     std::fill(std::begin(apBody->angularVelocity), std::end(apBody->angularVelocity), 0.f);
     return true;
 }
@@ -179,19 +184,32 @@ CorpseRagdollService::CorpseRagdollService(World& aWorld, entt::dispatcher& aDis
     : m_world(aWorld)
     , m_transport(aTransport)
 {
+    s_ragdollService.store(this, std::memory_order_release);
     m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&CorpseRagdollService::OnUpdate>(this);
     m_disconnectConnection = aDispatcher.sink<DisconnectedEvent>().connect<&CorpseRagdollService::OnDisconnected>(this);
     m_ragdollConnection = aDispatcher.sink<NotifyCorpseRagdoll>().connect<&CorpseRagdollService::OnCorpseRagdoll>(this);
 }
 
+void CorpseRagdollService::OnMainFrame() noexcept
+{
+    auto* pService = s_ragdollService.load(std::memory_order_acquire);
+    if (!pService || !pService->m_applyOnMainFrame.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard lock(pService->m_remoteLock);
+    pService->ApplyRemote(NowMs());
+}
+
 void CorpseRagdollService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
+    m_applyOnMainFrame.store(false, std::memory_order_relaxed);
+    std::lock_guard lock(m_remoteLock);
     m_owned.clear();
     m_remote.clear();
 }
 
 void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage) noexcept
 {
+    std::lock_guard lock(m_remoteLock);
     auto& ragdoll = m_remote[acMessage.ServerId];
     const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
     if (ragdoll.RingCount)
@@ -209,8 +227,23 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
             ragdoll.LiveLogged = false;
         }
     }
+    // A new ragdoll event (first sample, or after a gap): knock this copy into ragdoll now, on
+    // receipt, so its bodies follow from the first frame. Waiting for the death or knock sync left
+    // the intro prisoner animated on the follower for the whole fall (24 s behind the owner).
+    if (!ragdoll.Knocked)
+    {
+        ragdoll.Knocked = true;
+        if (auto* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
+            pActor && pActor->GetNiNode() && !PhysicsOwnsSkeleton(pActor) && pActor->currentProcess)
+        {
+            pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+            spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll to follow the owner (sample tick {}, presentation {})",
+                pActor->formID, acMessage.Tick, PoseCopyAuthority::GetPresentationTick());
+        }
+    }
     auto& sample = ragdoll.Ring[ragdoll.RingNext];
     sample.Tick = acMessage.Tick;
+    std::copy(std::begin(acMessage.Origin), std::end(acMessage.Origin), std::begin(sample.Origin));
     sample.Bodies = acMessage.Bodies;
     ragdoll.RingNext = (ragdoll.RingNext + 1) % size;
     ragdoll.RingCount = (std::min)(ragdoll.RingCount + 1, size);
@@ -220,14 +253,17 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
 void CorpseRagdollService::OnUpdate(const UpdateEvent&) noexcept
 {
     if (!m_transport.IsConnected())
+    {
+        m_applyOnMainFrame.store(false, std::memory_order_relaxed);
         return;
+    }
     const auto now = NowMs();
     if (now >= m_nextTickMs)
     {
         m_nextTickMs = now + kStreamMs;
         CaptureOwned(now);
     }
-    ApplyRemote(now);
+    m_applyOnMainFrame.store(true, std::memory_order_relaxed);
 }
 
 void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
@@ -265,6 +301,9 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
         CorpseRagdollRequest request{};
         request.ServerId = serverId;
         request.Tick = PoseCopyAuthority::GetCurrentTick();
+        request.Origin[0] = pActor->position.x;
+        request.Origin[1] = pActor->position.y;
+        request.Origin[2] = pActor->position.z;
         for (auto* pBody : bodies)
         {
             CorpseRagdollBody body{};
@@ -287,7 +326,8 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
 
 void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
 {
-    const uint64_t presentation = PoseCopyAuthority::GetPresentationTick();
+    const double presentationTime = PoseCopyAuthority::GetPresentationTimeMs();
+    const auto presentation = static_cast<uint64_t>(presentationTime);
     for (auto it = m_remote.begin(); it != m_remote.end(); ++it)
     {
         auto& ragdoll = it.value();
@@ -303,20 +343,9 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
         auto* pActor = Utils::GetByServerId<Actor>(it->first);
         if (!pActor || !pActor->GetNiNode())
             continue;
+        // Not ragdolling here yet (the knock is on its way): nothing to place.
         if (!PhysicsOwnsSkeleton(pActor))
-        {
-            // The owner's actor went ragdoll (death, shout, explosion) before this copy did: the
-            // death or knock sync arrives later (the intro prisoner fell for seconds on the owner
-            // while the follower copy was still animated). Knock it into ragdoll now with a
-            // zero-strength KnockExplosion so its bodies can follow the stream from this frame.
-            if (!settled && !ragdoll.Knocked && pActor->currentProcess)
-            {
-                ragdoll.Knocked = true;
-                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
-                spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll to follow the owner", pActor->formID);
-            }
             continue;
-        }
         Vector<RigidBody*> bodies;
         if (!GetRagdollBodies(pActor, bodies))
             continue;
@@ -345,7 +374,8 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
                     continue;
                 pA = &a;
                 pB = &b;
-                t = b.Tick > a.Tick ? static_cast<float>(presentation - a.Tick) / static_cast<float>(b.Tick - a.Tick) : 1.f;
+                t = b.Tick > a.Tick ? static_cast<float>((presentationTime - static_cast<double>(a.Tick)) /
+                    static_cast<double>(b.Tick - a.Tick)) : 1.f;
                 break;
             }
         }
@@ -355,9 +385,19 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
         {
             const auto& x = pA->Bodies[i];
             const auto& y = pB->Bodies[i];
+            // World position on the owner's timeline: its origin plus the body offset, both
+            // interpolated; the velocity is the owner's motion across this sample span.
             float wanted[3];
+            float velocity[3]{};
+            const float spanSeconds = pB->Tick > pA->Tick ? static_cast<float>(pB->Tick - pA->Tick) / 1000.f : 0.f;
             for (int axis = 0; axis < 3; ++axis)
-                wanted[axis] = ((&pActor->position.x)[axis] + x.Position[axis] + (y.Position[axis] - x.Position[axis]) * t) / kHavokToGameUnits;
+            {
+                const float from = pA->Origin[axis] + x.Position[axis];
+                const float to = pB->Origin[axis] + y.Position[axis];
+                wanted[axis] = (from + (to - from) * t) / kHavokToGameUnits;
+                if (spanSeconds > 0.f && !settled)
+                    velocity[axis] = (to - from) / kHavokToGameUnits / spanSeconds;
+            }
             for (int axis = 0; axis < 3; ++axis)
                 worstDrift = (std::max)(worstDrift, std::abs((bodies[i]->transform[12 + axis] - wanted[axis]) * kHavokToGameUnits));
             float dot = 0.f;
@@ -374,7 +414,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
             for (float& value : rotation)
                 value *= norm;
-            SetBodyPose(bodies[i], wanted, rotation);
+            SetBodyPose(bodies[i], wanted, rotation, velocity);
         }
 
         if (!settled && !ragdoll.LiveLogged)

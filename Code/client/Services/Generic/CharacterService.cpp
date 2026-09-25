@@ -1,3 +1,4 @@
+#include <Services/SmoothClock.h>
 #include "Forms/TESObjectCELL.h"
 #include "Forms/TESWorldSpace.h"
 #include "Services/PapyrusService.h"
@@ -398,7 +399,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
         s_nextScriptedPackageMs = packageNow + 100;
         UpdateLeaderScriptedPackage();
     }
-    PoseCopyAuthority::SetCurrentTick(m_transport.GetClock().GetCurrentTick());
+    PoseCopyAuthority::SetCurrentTick(SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick());
     static uint64_t s_nextPoseRegistryMs = 0;
     if (const auto registryNow = GetTickCount64(); registryNow >= s_nextPoseRegistryMs)
     {
@@ -2331,7 +2332,7 @@ void CharacterService::RunLocalUpdates() const noexcept
     // The actors nearest a player get a full pose every snapshot (20 Hz); the rest share the
     // remaining slots round-robin. Sparse samples (one per 100-150 ms) made nearby NPCs on the
     // other PC jitter as they caught up between poses.
-    constexpr size_t cNearPoseActors = 16;
+    constexpr size_t cNearPoseActors = 24;
     constexpr size_t cRotatingPoseActors = 4;
     Set<entt::entity> nearPoseActors;
     {
@@ -2403,9 +2404,11 @@ void CharacterService::RunLocalUpdates() const noexcept
 void CharacterService::RunRemoteUpdates() noexcept
 {
     // Keep actor, visual-pose, voice, and subtitle playback on one timeline.
-    const auto now = m_transport.GetClock().GetCurrentTick();
+    const auto smoothNow = SmoothClock::NowTick();
+    const auto now = smoothNow ? smoothNow : m_transport.GetClock().GetCurrentTick();
     const auto delay = static_cast<uint64_t>(GetPresentationDelayMs());
     const auto tick = now > delay ? now - delay : 0;
+    PoseCopyAuthority::SetPresentationDelayMs(static_cast<uint32_t>(delay));
     VisualPoseMailbox::SetPresentationTick(tick);
     PoseCopyAuthority::SetPresentationTick(tick);
 

@@ -1,3 +1,4 @@
+#include <Services/SmoothClock.h>
 #include <Services/ObjectService.h>
 
 #include <World.h>
@@ -66,6 +67,94 @@ constexpr float kHavokToGameUnits = 70.f;
 std::atomic<bool> s_cellHandoffEnabled{true};
 // Test switch: also write the root Havok body (a keyframed body otherwise follows its node).
 std::atomic<bool> s_rootBodyWriteEnabled{true};
+// Test switch: host-driven playback of moving bodies as a whole (off = local physics).
+std::atomic<bool> s_hostDrivenPlaybackEnabled{true};
+// Playback of host-driven bodies runs at the start of Main::Update on the main thread. The VM
+// update (World::Update) is a job on a worker thread in parallel with the frame; writing a
+// cart's scene nodes there raced the renderer and physics and showed as the cart flashing.
+std::atomic<bool> s_mainFramePlaybackEnabled{true};
+// The host's snapshot of those bodies is read there too: read on the update job, a cart's root and
+// its wheels could come from two different physics steps, which played back as the cart jittering.
+std::atomic<bool> s_mainFrameCaptureEnabled{false};
+
+// Host sample probe: how well each sample's tick matches the motion it carries (the speed implied
+// by position and tick against the body's own velocity). Timestamp noise plays back as jitter.
+struct HostSampleProbe
+{
+    glm::vec3 Position{};
+    uint64_t Tick{};
+    bool Has{};
+    uint32_t Samples{};
+    float ErrorSum{};
+    float ErrorMax{};
+    float BodySpeedSum{};
+    float GapErrorSum{};
+    std::chrono::steady_clock::time_point NextLog{};
+    glm::vec3 BodyPosition{};
+    float BodyErrorSum{};
+};
+std::unordered_map<uint32_t, HostSampleProbe> s_hostSampleProbes;
+
+// Host render probe: the same per-frame measure as the follower's jitter probe, on the host's own
+// (physics-driven) node, so both screens are compared by one number.
+struct HostRenderProbe
+{
+    glm::vec3 Last{};
+    std::chrono::steady_clock::time_point LastAt{};
+    bool Has{};
+    float LastSpeed{};
+    uint32_t Frames{};
+    float SpeedSum{};
+    float ChangeSum{};
+    float ChangeMax{};
+    std::chrono::steady_clock::time_point NextLog{};
+};
+std::unordered_map<uint32_t, HostRenderProbe> s_hostRenderProbes;
+
+void ProbeHostRender() noexcept
+{
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& [formId, probe] : s_hostRenderProbes)
+    {
+        auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
+        auto* pNode = pReference ? pReference->GetNiNode() : nullptr;
+        if (!pNode)
+            continue;
+        const glm::vec3 shown{pNode->world.translate.x, pNode->world.translate.y, pNode->world.translate.z};
+        if (probe.Has)
+        {
+            const float dtMs = std::chrono::duration<float, std::milli>(now - probe.LastAt).count();
+            if (dtMs > 0.f)
+            {
+                const float speed = glm::length(shown - probe.Last) / dtMs * 1000.f;
+                const float change = std::abs(speed - probe.LastSpeed);
+                probe.SpeedSum += speed;
+                probe.ChangeSum += change;
+                probe.ChangeMax = (std::max)(probe.ChangeMax, change);
+                probe.LastSpeed = speed;
+                ++probe.Frames;
+            }
+        }
+        probe.Last = shown;
+        probe.LastAt = now;
+        probe.Has = true;
+        if (now >= probe.NextLog && probe.Frames)
+        {
+            if (probe.SpeedSum / probe.Frames > 5.f)
+                spdlog::info("Host body {:X} render: {} frames, speed {:.0f} u/s, speed change mean {:.0f} max {:.0f}", formId,
+                    probe.Frames, probe.SpeedSum / probe.Frames, probe.ChangeSum / probe.Frames, probe.ChangeMax);
+            probe.Frames = 0;
+            probe.SpeedSum = probe.ChangeSum = probe.ChangeMax = 0.f;
+            probe.NextLog = now + std::chrono::seconds(5);
+        }
+    }
+}
+std::atomic<ObjectService*> s_objectService{};
+std::atomic<bool> s_loggedMainFrameThread{};
+std::atomic<bool> s_loggedUpdateThread{};
+std::atomic<uint32_t> s_mainThreadId{};
+std::atomic<uint64_t> s_updatesOnMain{}, s_updatesOffMain{};
+std::chrono::steady_clock::time_point s_nextThreadReport{};
 // Default-off, single-reference engine-boundary probe. The form ID is chosen
 // at runtime by the test bridge; no quest/cart reference is hardcoded.
 std::atomic<uint32_t> s_bodyPlaybackFormId{};
@@ -125,6 +214,23 @@ std::atomic<uint64_t> s_worldUpdateCalls{};
 std::atomic<uint32_t> s_worldUpdateLastThreadId{};
 std::atomic<uint32_t> s_worldUpdateLastDurationUs{};
 std::atomic<uint64_t> s_worldUpdateLastEndNs{};
+// Start of the newest completed bhkWorld update, and whether one is running now. A host sample is
+// stamped with the time its physics state was stepped, not the time it was read: the read comes a
+// variable part of a frame later (measured up to 30 ms), which played back as the cart jittering.
+std::atomic<uint64_t> s_worldUpdateStartNs{};
+std::atomic<uint64_t> s_worldUpdateLastStartNs{};
+std::atomic<int32_t> s_worldUpdatesRunning{};
+std::atomic<bool> s_physicsStampEnabled{true};
+// Host-driven bodies follow a curve through the host samples that also matches the host body's
+// velocity at each one. Straight lines between samples changed speed at every sample (the sampled
+// positions carry up to half the speed in timing noise), which showed as the cart surging.
+std::atomic<bool> s_hermitePlaybackEnabled{true};
+// Host-driven bodies: the played-back transform (root and every child part) follows the host's
+// path through a critically damped filter with this time constant, read this far ahead on the
+// host's timeline so the filter's lag cancels at steady speed. The host's samples carry timing
+// noise that no interpolation removes; the filter does, at no cost in position.
+std::atomic<bool> s_cartSmoothingEnabled{true};
+constexpr float kCartSmoothingMs = 50.f;
 std::atomic<uint64_t> s_nativeStepCalls{};
 std::atomic<uint32_t> s_nativeStepLastThreadId{};
 std::atomic<uint32_t> s_nativeStepLastDurationUs{};
@@ -1267,10 +1373,15 @@ static TiltedPhoques::Initializer s_nativeStepHook(
 bool HookWorldUpdate(void* apWorld, uint32_t aFlags)
 {
     const auto started = std::chrono::steady_clock::now();
+    s_worldUpdatesRunning.fetch_add(1, std::memory_order_acq_rel);
+    s_worldUpdateStartNs.store(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        started.time_since_epoch()).count()), std::memory_order_relaxed);
     ++s_worldUpdateDepth;
     const bool result = s_originalWorldUpdate ?
         s_originalWorldUpdate(apWorld, aFlags) : false;
     --s_worldUpdateDepth;
+    s_worldUpdateLastStartNs.store(s_worldUpdateStartNs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    s_worldUpdatesRunning.fetch_sub(1, std::memory_order_acq_rel);
     const auto ended = std::chrono::steady_clock::now();
     s_worldUpdateCalls.fetch_add(1, std::memory_order_relaxed);
     s_worldUpdateLastThreadId.store(GetCurrentThreadId(),
@@ -1736,6 +1847,7 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     : m_world(aWorld)
     , m_transport(aTransport)
 {
+    s_objectService.store(this, std::memory_order_release);
     m_disconnectedConnection = aDispatcher.sink<DisconnectedEvent>().connect<&ObjectService::OnDisconnected>(this);
     m_cellChangeConnection = aDispatcher.sink<CellChangeEvent>().connect<&ObjectService::OnCellChange>(this);
     m_onActivateConnection = aDispatcher.sink<ActivateEvent>().connect<&ObjectService::OnActivate>(this);
@@ -1754,6 +1866,7 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
 bool ObjectService::GetRemotePhysicsDiagnostic(uint32_t aFormId,
     RemotePhysicsDiagnostic& arDiagnostic) const noexcept
 {
+    std::lock_guard lock(m_remotePhysicsLock);
     const auto it = m_remoteReferencePoses.find(aFormId);
     if (it == m_remoteReferencePoses.end())
         return false;
@@ -1841,7 +1954,10 @@ void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
     s_watchedHavokBody.store(nullptr, std::memory_order_release);
     s_watchedHavokWorld.store(nullptr, std::memory_order_release);
     m_referencePoses.clear();
-    m_remoteReferencePoses.clear();
+    {
+        std::lock_guard lock(m_remotePhysicsLock);
+        m_remoteReferencePoses.clear();
+    }
     m_physicsStreamCandidates.clear();
     m_gridDiscoveryCursor = 0;
     m_nextCurrentCellDiscovery = {};
@@ -1850,8 +1966,23 @@ void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
 
 void ObjectService::OnUpdate(const UpdateEvent&) noexcept
 {
+    if (!s_loggedUpdateThread.exchange(true))
+        spdlog::info("Object update runs on thread {}", GetCurrentThreadId());
+    {
+        const auto mainThread = s_mainThreadId.load(std::memory_order_relaxed);
+        const auto thread = static_cast<uint32_t>(GetCurrentThreadId());
+        (thread == mainThread ? s_updatesOnMain : s_updatesOffMain).fetch_add(1, std::memory_order_relaxed);
+        if (const auto now = std::chrono::steady_clock::now(); now >= s_nextThreadReport)
+        {
+            s_nextThreadReport = now + std::chrono::seconds(20);
+            spdlog::info("Object update threads: {} on main {}, {} elsewhere (this one {})", s_updatesOnMain.load(),
+                mainThread, s_updatesOffMain.load(), thread);
+        }
+    }
     if (!m_transport.IsConnected() || !m_world.GetPartyService().IsInParty())
     {
+        m_applyOnMainFrame.store(false, std::memory_order_relaxed);
+        m_captureOnMainFrame.store(false, std::memory_order_relaxed);
         RestoreKinematicProbe();
         s_preStepExpectedEpoch.store(0, std::memory_order_release);
         s_watchedBodyWrapper.store(nullptr, std::memory_order_release);
@@ -1933,10 +2064,39 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
 
     if (!m_world.GetPartyService().IsLeader())
     {
-        ApplyRemotePhysics();
+        const bool mainFrame = s_mainFramePlaybackEnabled.load(std::memory_order_relaxed);
+        m_applyOnMainFrame.store(mainFrame, std::memory_order_relaxed);
+        m_captureOnMainFrame.store(false, std::memory_order_relaxed);
+        if (!mainFrame)
+            ApplyRemotePhysics();
         return;
     }
+    m_applyOnMainFrame.store(false, std::memory_order_relaxed);
 
+    if (s_mainFrameCaptureEnabled.load(std::memory_order_relaxed))
+    {
+        m_captureOnMainFrame.store(true, std::memory_order_relaxed);
+        std::vector<PhysicsReferencesMoveRequest> pending;
+        {
+            std::lock_guard lock(m_remotePhysicsLock);
+            pending.swap(m_pendingPhysicsRequests);
+        }
+        for (const auto& request : pending)
+        {
+            s_physicsHostPacketsSent.fetch_add(1, std::memory_order_relaxed);
+            m_transport.Send(request);
+        }
+        return;
+    }
+    m_captureOnMainFrame.store(false, std::memory_order_relaxed);
+    CaptureHostPhysics(true);
+}
+
+void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
+{
+    std::lock_guard physicsLock(m_remotePhysicsLock);
+    const auto watchedFormId = s_preStepPlaybackFormId.load(std::memory_order_acquire) ?
+        s_preStepPlaybackFormId.load(std::memory_order_acquire) : s_referencePhaseFormId.load(std::memory_order_acquire);
     const auto now = std::chrono::steady_clock::now();
     if (now < m_nextPhysicsSnapshot)
         return;
@@ -1948,7 +2108,21 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         return;
 
     PhysicsReferencesMoveRequest request{};
-    request.Tick = m_transport.GetClock().GetCurrentTick();
+    request.Tick = SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick();
+    if (s_physicsStampEnabled.load(std::memory_order_relaxed))
+    {
+        // Physics mid-step: its state is half old, half new. Read it next frame instead.
+        if (s_worldUpdatesRunning.load(std::memory_order_acquire) > 0)
+        {
+            m_nextPhysicsSnapshot = now;
+            return;
+        }
+        const auto nowNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count());
+        const auto stepNs = s_worldUpdateLastStartNs.load(std::memory_order_relaxed);
+        if (stepNs && nowNs >= stepNs && nowNs - stepNs < 200'000'000ull)
+            request.Tick -= (nowNs - stepNs) / 1'000'000ull;
+    }
     Set<uint32_t> observed;
     uint32_t referencesVisited{};
     auto processReference = [&](TESObjectREFR* pReference)
@@ -2093,6 +2267,46 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
                 update.ChildBodies.push_back(entry);
             }
         }
+        if (!passive)
+        {
+            s_hostRenderProbes.try_emplace(pReference->formID);
+            auto& probe = s_hostSampleProbes[pReference->formID];
+            const glm::vec3 position{update.Position.x, update.Position.y, update.Position.z};
+            const float bodySpeed = glm::length(glm::vec3{update.LinearVelocity.x, update.LinearVelocity.y,
+                update.LinearVelocity.z}) * kHavokToGameUnits;
+            if (probe.Has && request.Tick > probe.Tick && request.Tick - probe.Tick < 200)
+            {
+                const float dtMs = static_cast<float>(request.Tick - probe.Tick);
+                const float implied = glm::length(position - probe.Position) / dtMs * 1000.f;
+                const float error = std::abs(implied - bodySpeed);
+                probe.ErrorSum += error;
+                probe.ErrorMax = (std::max)(probe.ErrorMax, error);
+                probe.BodySpeedSum += bodySpeed;
+                probe.GapErrorSum += std::abs(dtMs - 50.f);
+                const glm::vec3 bodyPosition{update.BodyTransform[12] * kHavokToGameUnits,
+                    update.BodyTransform[13] * kHavokToGameUnits, update.BodyTransform[14] * kHavokToGameUnits};
+                probe.BodyErrorSum += std::abs(glm::length(bodyPosition - probe.BodyPosition) / dtMs * 1000.f - bodySpeed);
+                ++probe.Samples;
+            }
+            probe.Position = position;
+            probe.BodyPosition = {update.BodyTransform[12] * kHavokToGameUnits, update.BodyTransform[13] * kHavokToGameUnits,
+                update.BodyTransform[14] * kHavokToGameUnits};
+            probe.Tick = request.Tick;
+            probe.Has = true;
+            if (now >= probe.NextLog && probe.Samples)
+            {
+                if (probe.BodySpeedSum / probe.Samples > 5.f)
+                    spdlog::info("Host sample {:X}: {} samples, body speed {:.0f} u/s, implied-speed error mean {:.1f} max {:.1f} u/s, "
+                        "body-position error mean {:.1f} u/s, tick gap off 50 ms by {:.1f} ms ({} thread)", pReference->formID, probe.Samples,
+                        probe.BodySpeedSum / probe.Samples, probe.ErrorSum / probe.Samples, probe.ErrorMax,
+                        probe.BodyErrorSum / probe.Samples,
+                        probe.GapErrorSum / probe.Samples, aSendNow ? "update" : "main");
+                probe = HostSampleProbe{probe.Position, probe.Tick, true};
+                probe.BodyPosition = {update.BodyTransform[12] * kHavokToGameUnits,
+                    update.BodyTransform[13] * kHavokToGameUnits, update.BodyTransform[14] * kHavokToGameUnits};
+                probe.NextLog = now + std::chrono::seconds(5);
+            }
+        }
         request.Updates.push_back(update);
         s_physicsHostUpdatesQueued.fetch_add(1, std::memory_order_relaxed);
         if (!passive && bodyMoved && !referenceMoved)
@@ -2208,6 +2422,13 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         std::memory_order_relaxed);
     if (!request.Updates.empty())
     {
+        if (!aSendNow)
+        {
+            // Two snapshots can wait at most (the update job runs every frame).
+            if (m_pendingPhysicsRequests.size() < 4)
+                m_pendingPhysicsRequests.push_back(std::move(request));
+            return;
+        }
         s_physicsHostPacketsSent.fetch_add(1, std::memory_order_relaxed);
         m_transport.Send(request);
     }
@@ -2215,6 +2436,7 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
 
 void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& acMessage) noexcept
 {
+    std::lock_guard lock(m_remotePhysicsLock);
     const auto& party = m_world.GetPartyService();
     if (!party.IsInParty() || party.IsLeader() ||
         acMessage.AuthorityEpoch != party.GetStartEpoch())
@@ -2261,7 +2483,14 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             pose.LastReceived = std::chrono::steady_clock::now();
             pose.BodyDriven = true;
             pose.HostMotionType = update.MotionType;
-            pose.Samples[pose.SampleNext] = {acMessage.Tick, pose.Position, pose.Rotation, update.ChildBodies};
+            pose.Samples[pose.SampleNext] = {acMessage.Tick, pose.Position, pose.Rotation, update.ChildBodies,
+                {}};
+            {
+                auto& velocity = pose.Samples[pose.SampleNext].Velocity;
+                velocity.x = update.LinearVelocity.x * kHavokToGameUnits;
+                velocity.y = update.LinearVelocity.y * kHavokToGameUnits;
+                velocity.z = update.LinearVelocity.z * kHavokToGameUnits;
+            }
             pose.SampleNext = (pose.SampleNext + 1) % pose.Samples.size();
             pose.SampleCount = (std::min)(pose.SampleCount + 1, static_cast<uint32_t>(pose.Samples.size()));
             if (formId == s_preStepPlaybackFormId.load(
@@ -2311,8 +2540,114 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
     }
 }
 
+void ObjectService::OnMainFrame() noexcept
+{
+    s_mainThreadId.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
+    auto* pService = s_objectService.load(std::memory_order_acquire);
+    if (!pService)
+        return;
+    {
+        std::lock_guard lock(pService->m_remotePhysicsLock);
+        ProbeHostRender();
+    }
+    if (pService->m_captureOnMainFrame.load(std::memory_order_relaxed) &&
+        s_mainFrameCaptureEnabled.load(std::memory_order_relaxed))
+    {
+        pService->CaptureHostPhysics(false);
+        return;
+    }
+    if (!pService->m_applyOnMainFrame.load(std::memory_order_relaxed) ||
+        !s_mainFramePlaybackEnabled.load(std::memory_order_relaxed))
+        return;
+    if (!s_loggedMainFrameThread.exchange(true))
+        spdlog::info("Host-driven body playback runs on the main thread {}", GetCurrentThreadId());
+    pService->ApplyRemotePhysics();
+}
+
+void ObjectService::SetCartSmoothingEnabled(bool aEnabled) noexcept
+{
+    s_cartSmoothingEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body smoothing {}", aEnabled ? "on" : "off");
+}
+
+void ObjectService::SetHermitePlaybackEnabled(bool aEnabled) noexcept
+{
+    s_hermitePlaybackEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body playback {}", aEnabled ? "on velocity curves" : "on straight lines");
+}
+
+void ObjectService::SetPhysicsStampEnabled(bool aEnabled) noexcept
+{
+    s_physicsStampEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host samples stamped with the {} time", aEnabled ? "physics step" : "read");
+}
+
+namespace
+{
+// Angle (degrees) between two rotations.
+float RotationAngleDegrees(const NiMatrix3& a, const NiMatrix3& b) noexcept
+{
+    float trace = 0.f;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            trace += a.entry[r][c] * b.entry[r][c];
+    const float cosine = std::clamp((trace - 1.f) * 0.5f, -1.f, 1.f);
+    return std::acos(cosine) * 57.2958f;
+}
+} // namespace
+
+void ObjectService::OnMainFrameEnd() noexcept
+{
+    auto* pService = s_objectService.load(std::memory_order_acquire);
+    if (!pService || !pService->m_applyOnMainFrame.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard lock(pService->m_remotePhysicsLock);
+    for (auto& [formId, pose] : pService->m_remoteReferencePoses)
+    {
+        if (!pose.ProbeEndArmed)
+            continue;
+        pose.ProbeEndArmed = false;
+        auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
+        const auto* pNode = pReference ? pReference->GetNiNode() : nullptr;
+        if (!pNode)
+            continue;
+        ++pose.ProbeEndFrames;
+        const float move = glm::length(glm::vec3{pNode->world.translate.x, pNode->world.translate.y, pNode->world.translate.z} -
+            pose.ProbeWritten);
+        const float turn = RotationAngleDegrees(pNode->world.rotate, pose.ProbeWrittenRotate);
+        std::vector<ChildBody> children;
+        CollectChildBodies(pReference, children);
+        float childMove = 0.f, childTurn = 0.f;
+        if (!children.empty())
+        {
+            const auto& w = children[0].Node->world;
+            childMove = glm::length(glm::vec3{w.translate.x, w.translate.y, w.translate.z} - pose.ProbeChild0Written);
+            childTurn = RotationAngleDegrees(w.rotate, pose.ProbeChild0Rotate);
+        }
+        if (move > 0.1f || turn > 0.1f || childMove > 0.1f || childTurn > 0.1f)
+            ++pose.ProbeEndMoved;
+        pose.ProbeEndMoveMax = (std::max)(pose.ProbeEndMoveMax, move);
+        pose.ProbeEndTurnMax = (std::max)(pose.ProbeEndTurnMax, turn);
+        pose.ProbeEndChildMoveMax = (std::max)(pose.ProbeEndChildMoveMax, childMove);
+        pose.ProbeEndChildTurnMax = (std::max)(pose.ProbeEndChildTurnMax, childTurn);
+    }
+}
+
+void ObjectService::SetMainFrameCaptureEnabled(bool aEnabled) noexcept
+{
+    s_mainFrameCaptureEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host body snapshot on the {} thread", aEnabled ? "main" : "update");
+}
+
+void ObjectService::SetMainFramePlaybackEnabled(bool aEnabled) noexcept
+{
+    s_mainFramePlaybackEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body playback on the {} thread", aEnabled ? "main" : "update");
+}
+
 void ObjectService::ApplyRemotePhysics() noexcept
 {
+    std::lock_guard lock(m_remotePhysicsLock);
     const auto now = std::chrono::steady_clock::now();
     for (auto it = m_remoteReferencePoses.begin(); it != m_remoteReferencePoses.end();)
     {
@@ -2325,7 +2660,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
         }
 
         auto& pose = it->second;
-        if (pose.BodyDriven && kHostDrivenMovingBodies &&
+        if (pose.BodyDriven && kHostDrivenMovingBodies && s_hostDrivenPlaybackEnabled.load(std::memory_order_relaxed) &&
             s_bodyPlaybackFormId.load(std::memory_order_acquire) != it->first)
         {
             if (!pose.SampleCount)
@@ -2345,8 +2680,13 @@ void ObjectService::ApplyRemotePhysics() noexcept
             const uint32_t size = static_cast<uint32_t>(pose.Samples.size());
             const auto sample = [&](uint32_t aIndex) -> const RemoteReferencePose::Sample&
             { return pose.Samples[(pose.SampleNext + size - count + aIndex) % size]; };
-            const int64_t renderTick = static_cast<int64_t>(m_transport.GetClock().GetCurrentTick()) -
-                static_cast<int64_t>(m_world.GetCharacterService().GetPresentationDelayMs());
+            // Smooth presentation time, read now (see SmoothClock); renderTick is its whole milliseconds.
+            const bool smoothing = s_cartSmoothingEnabled.load(std::memory_order_relaxed);
+            const double renderTime = (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
+                static_cast<double>(m_transport.GetClock().GetCurrentTick())) -
+                static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs()) +
+                (smoothing ? static_cast<double>(kCartSmoothingMs) : 0.0);
+            const int64_t renderTick = static_cast<int64_t>(std::floor(renderTime));
 
             const auto lerpAngle = [](float aFrom, float aTo, float aT)
             {
@@ -2399,9 +2739,21 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     if (renderTick > static_cast<int64_t>(b.Tick))
                         continue;
                     const int64_t span = static_cast<int64_t>(b.Tick) - static_cast<int64_t>(a.Tick);
-                    const float t = span > 0 ? static_cast<float>(renderTick - static_cast<int64_t>(a.Tick)) /
-                        static_cast<float>(span) : 1.f;
+                    const float t = span > 0 ? static_cast<float>((renderTime - static_cast<double>(a.Tick)) /
+                        static_cast<double>(span)) : 1.f;
                     position = a.Position + (b.Position - a.Position) * t;
+                    if (s_hermitePlaybackEnabled.load(std::memory_order_relaxed) && span > 0 && span < 250)
+                    {
+                        const float spanSeconds = static_cast<float>(span) / 1000.f;
+                        const float t2 = t * t;
+                        const float t3 = t2 * t;
+                        const float h00 = 2.f * t3 - 3.f * t2 + 1.f;
+                        const float h10 = t3 - 2.f * t2 + t;
+                        const float h01 = -2.f * t3 + 3.f * t2;
+                        const float h11 = t3 - t2;
+                        position = a.Position * h00 + a.Velocity * (h10 * spanSeconds) + b.Position * h01 +
+                            b.Velocity * (h11 * spanSeconds);
+                    }
                     rotation = glm::vec3{lerpAngle(a.Rotation.x, b.Rotation.x, t), lerpAngle(a.Rotation.y, b.Rotation.y, t),
                         lerpAngle(a.Rotation.z, b.Rotation.z, t)};
                     pChildA = &a;
@@ -2420,6 +2772,116 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 continue;
             }
             pose.AppliedRestTick = atRest ? newestTick : 0;
+            // Critically damped smoothing of the root (snap on a real jump, or when switched off).
+            float smoothAlpha = 1.f;
+            if (smoothing && pose.SmoothHas)
+            {
+                const float dtMs = std::chrono::duration<float, std::milli>(now - pose.SmoothAt).count();
+                smoothAlpha = dtMs > 0.f ? 1.f - std::exp(-dtMs / kCartSmoothingMs) : 0.f;
+                const glm::vec3 target{position.x, position.y, position.z};
+                if (glm::length(target - pose.SmoothPosition) > 50.f)
+                    smoothAlpha = 1.f;
+            }
+            if (smoothing && !atRest)
+            {
+                const glm::vec3 target{position.x, position.y, position.z};
+                pose.SmoothPosition = pose.SmoothHas ? pose.SmoothPosition + (target - pose.SmoothPosition) * smoothAlpha : target;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float targetAngle = (&rotation.x)[k];
+                    pose.SmoothRotation[k] = pose.SmoothHas ? pose.SmoothRotation[k] +
+                        std::remainder(targetAngle - pose.SmoothRotation[k], static_cast<float>(TiltedPhoques::Pi * 2)) * smoothAlpha :
+                        targetAngle;
+                }
+                position.x = pose.SmoothPosition.x;
+                position.y = pose.SmoothPosition.y;
+                position.z = pose.SmoothPosition.z;
+                rotation.x = pose.SmoothRotation.x;
+                rotation.y = pose.SmoothRotation.y;
+                rotation.z = pose.SmoothRotation.z;
+                pose.SmoothHas = true;
+            }
+            else
+            {
+                pose.SmoothPosition = {position.x, position.y, position.z};
+                pose.SmoothRotation = {rotation.x, rotation.y, rotation.z};
+                pose.SmoothHas = true;
+                smoothAlpha = 1.f;
+            }
+            pose.SmoothAt = now;
+            // Jitter probe: did anything move the node since our last write, and how even is our
+            // own step (speed change between frames)?
+            if (auto* pProbeNode = pReference->GetNiNode(); pProbeNode && pose.ProbeHas)
+            {
+                const glm::vec3 shown{pProbeNode->world.translate.x, pProbeNode->world.translate.y,
+                    pProbeNode->world.translate.z};
+                const float drift = glm::length(shown - pose.ProbeWritten);
+                if (drift > 0.5f)
+                    ++pose.ProbeMoved;
+                // The child parts (wheels, yoke): does something else move them between our writes?
+                {
+                    std::vector<ChildBody> probeChildren;
+                    CollectChildBodies(pReference, probeChildren);
+                    pose.ProbeChildMotion.clear();
+                    for (size_t i = 0; i < probeChildren.size(); ++i)
+                    {
+                        pose.ProbeChildMotion += std::to_string(probeChildren[i].Body->motionType);
+                        if (i >= pose.ProbeChildWritten.size())
+                            continue;
+                        const auto& w = probeChildren[i].Node->world.translate;
+                        const float childDrift = glm::length(glm::vec3{w.x, w.y, w.z} - pose.ProbeChildWritten[i]);
+                        if (childDrift > 0.5f)
+                            ++pose.ProbeChildMoved;
+                        pose.ProbeChildDriftMax = (std::max)(pose.ProbeChildDriftMax, childDrift);
+                    }
+                }
+                pose.ProbeDriftMax = (std::max)(pose.ProbeDriftMax, drift);
+                const float dtMs = std::chrono::duration<float, std::milli>(now - pose.ProbeLastWrite).count();
+                if (dtMs > 0.f)
+                {
+                    const float speed = glm::length(glm::vec3{position.x, position.y, position.z} - pose.ProbeWritten) /
+                        dtMs * 1000.f;
+                    const float change = std::abs(speed - pose.ProbeLastSpeed);
+                    pose.ProbeSpeedSum += speed;
+                    pose.ProbeSpeedChangeSum += change;
+                    pose.ProbeSpeedChangeMax = (std::max)(pose.ProbeSpeedChangeMax, change);
+                    pose.ProbeLastSpeed = speed;
+                    // Angular speed (deg/s) per axis and its frame-to-frame change.
+                    const glm::vec3 rot{rotation.x, rotation.y, rotation.z};
+                    glm::vec3 angular{};
+                    for (int k = 0; k < 3; ++k)
+                        angular[k] = std::remainder(rot[k] - pose.ProbeLastRotation[k], static_cast<float>(TiltedPhoques::Pi * 2)) /
+                            dtMs * 1000.f * 57.2958f;
+                    const float angularChange = glm::length(angular - pose.ProbeLastAngularSpeed);
+                    pose.ProbeAngularChangeSum += angularChange;
+                    pose.ProbeAngularChangeMax = (std::max)(pose.ProbeAngularChangeMax, angularChange);
+                    pose.ProbeLastAngularSpeed = angular;
+                    pose.ProbeDtMaxMs = (std::max)(pose.ProbeDtMaxMs, dtMs);
+                    ++pose.ProbeFrames;
+                }
+                if (now >= pose.ProbeNextLog && pose.ProbeFrames)
+                {
+                    const float meanSpeed = pose.ProbeSpeedSum / pose.ProbeFrames;
+                    if (meanSpeed > 5.f)
+                        spdlog::info("Host-driven body {:X} jitter: {} frames, speed {:.0f} u/s, speed change mean {:.0f} max {:.0f}, "
+                            "turn-rate change mean {:.1f} max {:.1f} deg/s, moved by others {} (max {:.1f} u), children [{}] moved by "
+                            "others {} (max {:.1f} u), longest frame {:.0f} ms; drawn: {}/{} frames moved after the write, "
+                            "root max {:.2f} u {:.2f} deg, child max {:.2f} u {:.2f} deg", it->first, pose.ProbeFrames, meanSpeed,
+                            pose.ProbeSpeedChangeSum / pose.ProbeFrames, pose.ProbeSpeedChangeMax,
+                            pose.ProbeAngularChangeSum / pose.ProbeFrames, pose.ProbeAngularChangeMax, pose.ProbeMoved,
+                            pose.ProbeDriftMax, pose.ProbeChildMotion, pose.ProbeChildMoved, pose.ProbeChildDriftMax, pose.ProbeDtMaxMs, pose.ProbeEndMoved,
+                            pose.ProbeEndFrames, pose.ProbeEndMoveMax, pose.ProbeEndTurnMax, pose.ProbeEndChildMoveMax,
+                            pose.ProbeEndChildTurnMax);
+                    pose.ProbeNextLog = now + std::chrono::seconds(5);
+                    pose.ProbeFrames = pose.ProbeMoved = 0;
+                    pose.ProbeDriftMax = pose.ProbeSpeedSum = pose.ProbeSpeedChangeSum = pose.ProbeSpeedChangeMax = 0.f;
+                    pose.ProbeDtMaxMs = 0.f;
+                    pose.ProbeAngularChangeSum = pose.ProbeAngularChangeMax = pose.ProbeChildDriftMax = 0.f;
+                    pose.ProbeChildMoved = 0;
+                    pose.ProbeEndFrames = pose.ProbeEndMoved = 0;
+                    pose.ProbeEndMoveMax = pose.ProbeEndTurnMax = pose.ProbeEndChildMoveMax = pose.ProbeEndChildTurnMax = 0.f;
+                }
+            }
             const glm::vec3 jump{position.x - pReference->position.x, position.y - pReference->position.y, position.z - pReference->position.z};
             pReference->position = position;
             pReference->SetRotation(rotation.x, rotation.y, rotation.z);
@@ -2453,6 +2915,34 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
                         for (float& value : q)
                             value *= norm;
+                        // The same smoothing for the part (translation and rotation).
+                        if (pose.SmoothChildren.size() != childBodies.size())
+                            pose.SmoothChildren.assign(childBodies.size(), std::array<float, 7>{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
+                        auto& smooth = pose.SmoothChildren[i];
+                        const bool seeded = smooth[3] != 0.f || smooth[4] != 0.f || smooth[5] != 0.f || smooth[6] != 0.f;
+                        const float a = seeded ? smoothAlpha : 1.f;
+                        smooth[0] += (local.translate.x - smooth[0]) * a;
+                        smooth[1] += (local.translate.y - smooth[1]) * a;
+                        smooth[2] += (local.translate.z - smooth[2]) * a;
+                        float qdot = 0.f;
+                        for (int k = 0; k < 4; ++k)
+                            qdot += smooth[3 + k] * q[k];
+                        const float qsign = qdot < 0.f ? -1.f : 1.f;
+                        float qnorm = 0.f;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            smooth[3 + k] += (qsign * q[k] - smooth[3 + k]) * a;
+                            qnorm += smooth[3 + k] * smooth[3 + k];
+                        }
+                        qnorm = qnorm > 0.f ? 1.f / std::sqrt(qnorm) : 1.f;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            smooth[3 + k] *= qnorm;
+                            q[k] = smooth[3 + k];
+                        }
+                        local.translate.x = smooth[0];
+                        local.translate.y = smooth[1];
+                        local.translate.z = smooth[2];
                         QuaternionToNiMatrix(q, local.rotate);
                     }
                 }
@@ -2460,6 +2950,26 @@ void ObjectService::ApplyRemotePhysics() noexcept
             // Warp (reset render motion history) only on a real jump: warping every frame of a
             // smoothly rolling cart made it flash under temporal anti-aliasing.
             pReference->Update3DPosition(glm::dot(jump, jump) > 50.f * 50.f);
+            if (const auto* pProbeNode = pReference->GetNiNode())
+            {
+                pose.ProbeWrittenRotate = pProbeNode->world.rotate;
+                pose.ProbeEndArmed = true;
+                pose.ProbeWritten = {pProbeNode->world.translate.x, pProbeNode->world.translate.y, pProbeNode->world.translate.z};
+                pose.ProbeHas = true;
+                pose.ProbeLastWrite = now;
+                pose.ProbeLastRotation = {rotation.x, rotation.y, rotation.z};
+                std::vector<ChildBody> probeChildren;
+                CollectChildBodies(pReference, probeChildren);
+                pose.ProbeChildWritten.clear();
+                for (const auto& child : probeChildren)
+                    pose.ProbeChildWritten.push_back({child.Node->world.translate.x, child.Node->world.translate.y,
+                        child.Node->world.translate.z});
+                if (!probeChildren.empty())
+                {
+                    pose.ProbeChild0Written = pose.ProbeChildWritten[0];
+                    pose.ProbeChild0Rotate = probeChildren[0].Node->world.rotate;
+                }
+            }
             // Writing the position does not move a reference into the exterior cell it
             // now stands in. Measured: the follower's cart kept its start cell, and when
             // that cell detached behind the players the cart (and the player riding it)
@@ -3014,6 +3524,12 @@ BSTEventResult ObjectService::OnEvent(const TESActivateEvent* acEvent, const Eve
 #endif
 
     return BSTEventResult::kOk;
+}
+
+void ObjectService::SetHostDrivenPlaybackEnabled(bool aEnabled) noexcept
+{
+    s_hostDrivenPlaybackEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body playback {}", aEnabled ? "on" : "off");
 }
 
 void ObjectService::SetRootBodyWriteEnabled(bool aEnabled) noexcept

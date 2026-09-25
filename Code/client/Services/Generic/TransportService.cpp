@@ -1,4 +1,5 @@
 
+#include <Services/SmoothClock.h>
 #include <Services/TransportService.h>
 
 #include <Events/ConnectedEvent.h>
@@ -271,6 +272,7 @@ void TransportService::PumpMainMenu() noexcept
 void TransportService::HandleUpdate(const UpdateEvent& acEvent) noexcept
 {
     Update();
+    SmoothClock::Observe(GetClock().GetCurrentTick());
 }
 
 void TransportService::HandleConnected(const ConnectedEvent& acEvent) noexcept

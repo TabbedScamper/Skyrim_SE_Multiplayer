@@ -4041,6 +4041,42 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 PoseCopyAuthority::SetEnabled(enabled != "false");
             return Result(id, PoseCopyAuthority::StatsJson());
         }
+        if (command == "cart_smoothing")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetCartSmoothingEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "hermite_playback")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetHermitePlaybackEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "physics_stamp")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetPhysicsStampEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "main_frame_capture")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetMainFrameCaptureEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "main_frame_playback")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetMainFramePlaybackEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "host_driven_playback")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetHostDrivenPlaybackEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
         if (command == "root_body_write")
         {
             const bool enabled = GetJsonString(acLine, "enabled") != "false";

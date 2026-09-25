@@ -1,3 +1,4 @@
+#include <Services/SmoothClock.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 
 #include <World.h>
@@ -52,12 +53,26 @@ struct Sample
 
 struct ActorPose
 {
-    // Owner side.
+    // Owner side. The engine can copy a pose onto an actor more than once a frame (graph finalize,
+    // then the physics-step pass); only the last copy of a finished frame is published, so a read
+    // in between never sends a half-updated pose.
+    std::array<QsTransform, kMaxBones> Pending{};
+    uint32_t PendingCount{};
+    uint64_t PendingFrame{};
+    uint64_t PendingTick{};
     std::array<QsTransform, kMaxBones> Captured{};
     uint32_t CapturedCount{};
     uint64_t CapturedAtMs{};
     uint64_t CapturedTick{};
-    // Other PCs.
+    // Other PCs: hysteresis between the owner pose and the local graph. Switching every few
+    // hundred ms (sparse samples) showed as NPCs fighting two poses.
+    bool Overriding{};
+    uint64_t FreshSinceMs{};
+    // Other PCs. The newest owner value of every bone ever sent: when the owner animates fewer
+    // bones (its LOD for a distant actor), its other bones keep their last values there, so they
+    // hold those values here too. Filling them from the local graph blended two animations.
+    std::array<QsTransform, kMaxBones> Held{};
+    uint32_t HeldCount{};
     std::array<Sample, kRingSize> Ring{};
     uint32_t RingCount{};
     uint32_t RingNext{};
@@ -67,7 +82,19 @@ std::mutex s_lock;
 std::unordered_map<const void*, RegistryEntry> s_registry; // key: &graph->boneNodes
 std::unordered_map<uint32_t, ActorPose> s_poses;
 std::atomic<uint64_t> s_presentationTick{0};
+std::atomic<uint32_t> s_presentationDelayMs{0};
+// Actors whose owner sends fewer bones than this PC's skeleton copies (under s_lock): the bones
+// past the owner's count come from its held values, or from the local graph if never sent.
+struct ShortPose
+{
+    uint32_t Count{};
+    uint32_t Driven{};
+    uint32_t Held{};
+    uint64_t Frames{};
+};
+std::unordered_map<uint32_t, ShortPose> s_shortPoses;
 std::atomic<uint64_t> s_currentTick{0};
+std::atomic<uint64_t> s_frame{0};
 std::atomic<bool> s_enabled{true};
 std::atomic<uint64_t> s_captured{0}, s_applied{0}, s_fallback{0}, s_countMismatch{0};
 // Owner samples received, and the gap between consecutive samples of one actor (ms).
@@ -112,6 +139,16 @@ void Interpolate(const Sample& a, const Sample& b, const float t, const uint32_t
     }
 }
 
+thread_local std::array<QsTransform, kMaxBones> t_override{};
+
+// Bones [aDriven, aCount) the owner's samples do not carry: its held values, else the local graph.
+void FillUndriven(const ActorPose& acPose, const QsTransform* apLocal, const uint32_t aDriven, const uint32_t aCount) noexcept
+{
+    const uint32_t held = (std::min)(acPose.HeldCount, aCount);
+    for (uint32_t i = aDriven; i < aCount; ++i)
+        t_override[i] = i < held ? acPose.Held[i] : apLocal[i];
+}
+
 void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uint32_t aCount)
 {
     if (!s_enabled.load(std::memory_order_relaxed) || !apPose || !apBoneNodes)
@@ -123,7 +160,6 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
     if (count == 0 || count > kMaxBones)
         return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
 
-    thread_local std::array<QsTransform, kMaxBones> t_override{};
     bool useOverride = false;
     {
         std::lock_guard guard(s_lock);
@@ -139,10 +175,22 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
         auto& pose = s_poses[it->second.FormId];
         if (it->second.Kind == Role::Capture)
         {
-            std::copy_n(apPose, count, pose.Captured.begin());
-            pose.CapturedCount = count;
-            pose.CapturedAtMs = NowMs();
-            pose.CapturedTick = s_currentTick.load(std::memory_order_relaxed);
+            const auto frame = s_frame.load(std::memory_order_relaxed);
+            if (pose.PendingCount && pose.PendingFrame != frame)
+            {
+                std::copy_n(pose.Pending.begin(), pose.PendingCount, pose.Captured.begin());
+                pose.CapturedCount = pose.PendingCount;
+                pose.CapturedTick = pose.PendingTick;
+                pose.CapturedAtMs = NowMs();
+            }
+            // Merge every copy of the frame bone by bone, as the skeleton itself ends up: some passes
+            // copy only the first bone or few (measured: samples of 1 to 5 of 98 bones), and
+            // publishing such a pass as the frame's pose left the other PC's bones stale.
+            // Bones a pass does not write keep their values (as the nodes do), across frames too.
+            std::copy_n(apPose, count, pose.Pending.begin());
+            pose.PendingCount = (std::max)(pose.PendingCount, count);
+            pose.PendingFrame = frame;
+            pose.PendingTick = s_currentTick.load(std::memory_order_relaxed);
             s_captured.fetch_add(1, std::memory_order_relaxed);
         }
         else
@@ -150,7 +198,10 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
             // Oldest-to-newest view of the ring; bracket the presentation tick.
             const auto size = static_cast<uint32_t>(pose.Ring.size());
             const auto sample = [&](uint32_t i) -> const Sample& { return pose.Ring[(pose.RingNext + size - pose.RingCount + i) % size]; };
-            const auto tick = s_presentationTick.load(std::memory_order_relaxed);
+            // Read the smooth clock at this copy (engine threads call it at their own point in the
+            // frame), not the millisecond tick of the last update.
+            const double time = PoseCopyAuthority::GetPresentationTimeMs();
+            const auto tick = static_cast<uint64_t>(time);
             for (uint32_t i = 1; i < pose.RingCount && !useOverride; ++i)
             {
                 const auto& a = sample(i - 1);
@@ -163,9 +214,15 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 if (driven < count)
                 {
                     s_countMismatch.fetch_add(1, std::memory_order_relaxed);
-                    std::copy_n(apPose, count, t_override.begin());
+                    FillUndriven(pose, apPose, driven, count);
+                    auto& shortPose = s_shortPoses[it->second.FormId];
+                    shortPose.Count = count;
+                    shortPose.Driven = driven;
+                    shortPose.Held = pose.HeldCount;
+                    ++shortPose.Frames;
                 }
-                const float t = b.Tick > a.Tick ? static_cast<float>(tick - a.Tick) / static_cast<float>(b.Tick - a.Tick) : 1.f;
+                const float t = b.Tick > a.Tick ? static_cast<float>((time - static_cast<double>(a.Tick)) /
+                    static_cast<double>(b.Tick - a.Tick)) : 1.f;
                 Interpolate(a, b, t, driven, t_override.data());
                 useOverride = true;
             }
@@ -179,10 +236,27 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 {
                     const uint32_t driven = (std::min)(count, newest.Count);
                     if (driven < count)
-                        std::copy_n(apPose, count, t_override.begin());
+                        FillUndriven(pose, apPose, driven, count);
                     std::copy_n(newest.Bones.begin(), driven, t_override.begin());
                     useOverride = true;
                 }
+            }
+            // Hysteresis: take the owner pose only after a second of steady samples; drop it only
+            // when samples actually stop (the hold above covers short gaps).
+            const auto nowMs = NowMs();
+            if (!useOverride)
+            {
+                pose.Overriding = false;
+                pose.FreshSinceMs = 0;
+            }
+            else if (!pose.Overriding)
+            {
+                if (!pose.FreshSinceMs)
+                    pose.FreshSinceMs = nowMs;
+                if (nowMs - pose.FreshSinceMs >= 1000)
+                    pose.Overriding = true;
+                else
+                    useOverride = false;
             }
             (useOverride ? s_applied : s_fallback).fetch_add(1, std::memory_order_relaxed);
         }
@@ -242,6 +316,21 @@ void SetPresentationTick(const uint64_t aTick) noexcept
 void SetCurrentTick(const uint64_t aTick) noexcept
 {
     s_currentTick.store(aTick, std::memory_order_relaxed);
+    s_frame.fetch_add(1, std::memory_order_relaxed);
+}
+
+double GetPresentationTimeMs() noexcept
+{
+    const double now = SmoothClock::NowMs();
+    const auto delay = static_cast<double>(s_presentationDelayMs.load(std::memory_order_relaxed));
+    if (now <= delay)
+        return static_cast<double>(s_presentationTick.load(std::memory_order_relaxed));
+    return now - delay;
+}
+
+void SetPresentationDelayMs(const uint32_t aDelayMs) noexcept
+{
+    s_presentationDelayMs.store(aDelayMs, std::memory_order_relaxed);
 }
 
 uint64_t GetPresentationTick() noexcept
@@ -309,6 +398,8 @@ void PushOwnerSample(const uint32_t aFormId, const EvaluatedPoseSnapshot& acPose
         std::copy(source.Scale.begin(), source.Scale.end(), target.scale);
         target.scale[3] = 0.f;
     }
+    std::copy_n(sample.Bones.begin(), sample.Count, pose.Held.begin());
+    pose.HeldCount = (std::max)(pose.HeldCount, sample.Count);
     pose.RingNext = (pose.RingNext + 1) % kRingSize;
     pose.RingCount = (std::min)(pose.RingCount + 1, static_cast<uint32_t>(kRingSize));
 }
@@ -326,15 +417,21 @@ bool IsEnabled() noexcept
 std::string StatsJson() noexcept
 {
     size_t registered = 0;
+    std::string shortPoses;
     {
         std::lock_guard guard(s_lock);
         registered = s_registry.size();
+        std::vector<std::pair<uint32_t, ShortPose>> sorted(s_shortPoses.begin(), s_shortPoses.end());
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.Frames > b.second.Frames; });
+        for (size_t i = 0; i < sorted.size() && i < 10; ++i)
+            shortPoses += fmt::format("{}\"{:X}\":\"{}/{} held {} x{}\"", i ? "," : "", sorted[i].first, sorted[i].second.Driven,
+                sorted[i].second.Count, sorted[i].second.Held, sorted[i].second.Frames);
     }
     const auto gaps = s_gapCount.load();
     return fmt::format("\"enabled\":{},\"registered\":{},\"captured\":{},\"applied\":{},\"fallback\":{},\"countMismatch\":{},"
-        "\"samples\":{},\"meanGapMs\":{},\"maxGapMs\":{},\"gapsOver150Ms\":{}",
+        "\"samples\":{},\"meanGapMs\":{},\"maxGapMs\":{},\"gapsOver150Ms\":{},\"shortPoses\":{{{}}}",
         s_enabled.load() ? "true" : "false", registered, s_captured.load(), s_applied.load(), s_fallback.load(),
-        s_countMismatch.load(), s_samples.load(), gaps ? s_gapTotalMs.load() / gaps : 0, s_gapMaxMs.load(), s_gapsOver150.load());
+        s_countMismatch.load(), s_samples.load(), gaps ? s_gapTotalMs.load() / gaps : 0, s_gapMaxMs.load(), s_gapsOver150.load(), shortPoses);
 }
 } // namespace PoseCopyAuthority
 
