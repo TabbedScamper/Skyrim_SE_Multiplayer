@@ -15,37 +15,80 @@
   </div>
 
   <svg class="pad" viewBox="-120 0 880 345" role="img" [attr.aria-label]="model.name + ' layout'">
-    <path *ngFor="let d of model.body" class="shell" [attr.d]="d" />
+    <defs>
+      <radialGradient id="cb-body" cx="50%" cy="35%" r="75%">
+        <stop offset="0%" stop-color="#3b3b3b" />
+        <stop offset="60%" stop-color="#232323" />
+        <stop offset="100%" stop-color="#101010" />
+      </radialGradient>
+      <linearGradient id="cb-sheen" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.10" />
+        <stop offset="45%" stop-color="#ffffff" stop-opacity="0" />
+      </linearGradient>
+      <radialGradient id="cb-button" cx="45%" cy="35%" r="70%">
+        <stop offset="0%" stop-color="#3a3a3a" />
+        <stop offset="100%" stop-color="#121212" />
+      </radialGradient>
+      <radialGradient id="cb-well" cx="50%" cy="50%" r="50%">
+        <stop offset="60%" stop-color="#0b0b0b" />
+        <stop offset="100%" stop-color="#1e1e1e" />
+      </radialGradient>
+      <radialGradient id="cb-cap" cx="40%" cy="32%" r="75%">
+        <stop offset="0%" stop-color="#4a4a4a" />
+        <stop offset="100%" stop-color="#161616" />
+      </radialGradient>
+      <filter id="cb-shadow" x="-30%" y="-30%" width="160%" height="160%">
+        <feDropShadow dx="0" dy="2" stdDeviation="2.2" flood-color="#000" flood-opacity="0.8" />
+      </filter>
+    </defs>
+
+    <!-- body: shaded silhouette, sheen on the upper half, light rim -->
+    <g filter="url(#cb-shadow)">
+      <path *ngFor="let d of model.body" class="shell" [attr.d]="d" />
+    </g>
+    <path *ngFor="let d of model.body" class="sheen" [attr.d]="d" />
     <ng-container *ngFor="let deco of model.decorations">
-      <path *ngIf="deco.kind === 'path'" class="detail" [class.dashed]="deco.dashed" [attr.d]="deco.d" />
-      <rect *ngIf="deco.kind === 'rect'" class="detail" [class.dashed]="deco.dashed"
-        [attr.x]="deco.x" [attr.y]="deco.y" [attr.width]="deco.w" [attr.height]="deco.h" />
-      <circle *ngIf="deco.kind === 'circle'" class="detail" [class.dashed]="deco.dashed"
+      <path *ngIf="deco.kind === 'path'" class="detail" [class.bevel]="deco.dashed" [attr.d]="deco.d" />
+      <rect *ngIf="deco.kind === 'rect'" class="detail" [class.bevel]="deco.dashed"
+        [attr.x]="deco.x" [attr.y]="deco.y" [attr.width]="deco.w" [attr.height]="deco.h" rx="4" />
+      <circle *ngIf="deco.kind === 'circle'" class="detail" [class.bevel]="deco.dashed"
         [attr.cx]="deco.x" [attr.cy]="deco.y" [attr.r]="deco.r" />
     </ng-container>
+    <path *ngIf="dpadCenter as c" class="dpad-body" [attr.d]="dpadPath(c)" filter="url(#cb-shadow)" />
 
     <ng-container *ngFor="let b of buttons">
       <polyline class="leader" [attr.points]="leader(b)" [class.lit]="focusKey === b.key" />
+      <circle class="leader-dot" [attr.cx]="b.x" [attr.cy]="b.y" r="2" [class.lit]="focusKey === b.key" />
       <g class="button" [class.lit]="focusKey === b.key" (mouseenter)="focusKey = b.key" (click)="focusKey = b.key">
-        <rect *ngIf="b.shape === 'trigger'" [attr.x]="b.x - 27" [attr.y]="b.y - 9" width="54" height="18" />
-        <rect *ngIf="b.shape === 'bumper'" [attr.x]="b.x - 36" [attr.y]="b.y - 6" width="72" height="12" />
-        <circle *ngIf="b.shape === 'small'" [attr.cx]="b.x" [attr.cy]="b.y" r="7" />
-        <circle *ngIf="b.shape === 'face'" [attr.cx]="b.x" [attr.cy]="b.y" r="13" />
+        <path *ngIf="b.shape === 'trigger'" class="cap" [attr.d]="triggerPath(b)" filter="url(#cb-shadow)" />
+        <path *ngIf="b.shape === 'bumper'" class="cap" [attr.d]="bumperPath(b)" filter="url(#cb-shadow)" />
+        <circle *ngIf="b.shape === 'small'" class="cap" [attr.cx]="b.x" [attr.cy]="b.y" r="8" filter="url(#cb-shadow)" />
+        <circle *ngIf="b.shape === 'face'" class="cap" [attr.cx]="b.x" [attr.cy]="b.y" r="14" filter="url(#cb-shadow)" />
         <ng-container *ngIf="b.shape === 'stick'">
-          <circle [attr.cx]="b.x" [attr.cy]="b.y" r="25" />
-          <circle class="inner" [attr.cx]="b.x" [attr.cy]="b.y" r="14" />
+          <circle class="well" [attr.cx]="b.x" [attr.cy]="b.y" r="29" />
+          <circle class="stick-cap" [attr.cx]="b.x" [attr.cy]="b.y" r="20" filter="url(#cb-shadow)" />
+          <circle class="grip" [attr.cx]="b.x" [attr.cy]="b.y" r="14" />
         </ng-container>
-        <rect *ngIf="b.shape === 'dpad'" [attr.x]="b.x - 8" [attr.y]="b.y - 8" width="16" height="16" />
+        <ng-container *ngIf="b.shape === 'dpad'">
+          <rect class="hit" [attr.x]="b.x - 9" [attr.y]="b.y - 9" width="18" height="18" />
+          <path class="arrow" [attr.d]="dpadArrow(b)" />
+        </ng-container>
         <path *ngIf="symbolPath(b)" class="symbol" [attr.d]="symbolPath(b)" />
         <text *ngIf="letterOf(b)" class="glyph" [attr.x]="b.x" [attr.y]="b.y + 6">{{ letterOf(b) }}</text>
       </g>
-      <text class="callout" [class.lit]="focusKey === b.key"
-        [attr.x]="b.side === 'left' ? 40 : 600" [attr.y]="b.labelY"
-        [attr.text-anchor]="b.side === 'left' ? 'end' : 'start'"
-        (mouseenter)="focusKey = b.key">
-        <tspan class="name">{{ padLabel(b.key) }}</tspan>
-        <tspan class="action" [attr.x]="b.side === 'left' ? 40 : 600" dy="19">{{ actionsOn(b.key) }}</tspan>
-      </text>
+      <g class="callout-group" (mouseenter)="focusKey = b.key">
+        <!-- circle-slash marks an unbound button -->
+        <g *ngIf="isUnbound(b.key)" class="unbound"
+          [attr.transform]="'translate(' + (b.side === 'left' ? 52 : 588) + ',' + (b.labelY + 13) + ')'">
+          <circle r="6" /><path d="M-4.2,4.2 L4.2,-4.2" />
+        </g>
+        <text class="callout" [class.lit]="focusKey === b.key"
+          [attr.x]="b.side === 'left' ? 40 : 600" [attr.y]="b.labelY"
+          [attr.text-anchor]="b.side === 'left' ? 'end' : 'start'">
+          <tspan class="name">{{ padLabel(b.key) }}</tspan>
+          <tspan class="action" [class.none]="isUnbound(b.key)" [attr.x]="b.side === 'left' ? 40 : 600" dy="19">{{ isUnbound(b.key) ? 'Unbound' : actionsOn(b.key) }}</tspan>
+        </text>
+      </g>
     </ng-container>
   </svg>
   <p *ngIf="model.note" class="hint center">{{ model.note }}</p>

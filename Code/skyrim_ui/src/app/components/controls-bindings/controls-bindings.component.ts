@@ -125,6 +125,50 @@ export class ControlsBindingsComponent implements OnInit, OnDestroy {
     }
   }
 
+  /** Centre of the D-pad cross (mean of its four arms). */
+  get dpadCenter(): { x: number; y: number } | undefined {
+    const arms = this.model.buttons.filter(b => b.shape === 'dpad');
+    if (arms.length !== 4) return undefined;
+    return { x: arms.reduce((t, b) => t + b.x, 0) / 4, y: arms.reduce((t, b) => t + b.y, 0) / 4 };
+  }
+
+  /** Solid D-pad cross outline around its centre. */
+  dpadPath(c: { x: number; y: number }): string {
+    const a = 11, l = 31; // half arm width, arm reach
+    return `M${c.x - a},${c.y - l} h${2 * a} v${l - a} h${l - a} v${2 * a} h${-(l - a)} v${l - a} h${-2 * a} ` +
+      `v${-(l - a)} h${-(l - a)} v${-2 * a} h${l - a} Z`;
+  }
+
+  /** Small arrow on a D-pad arm, pointing away from the centre. */
+  dpadArrow(b: PadButton): string {
+    const c = this.dpadCenter;
+    if (!c) return '';
+    const dx = Math.sign(Math.round(b.x - c.x)), dy = Math.sign(Math.round(b.y - c.y));
+    const x = b.x + dx * 6, y = b.y + dy * 6, s = 5;
+    if (dy < 0) return `M${x},${y - s} L${x + s},${y + s * 0.6} L${x - s},${y + s * 0.6} Z`;
+    if (dy > 0) return `M${x},${y + s} L${x + s},${y - s * 0.6} L${x - s},${y - s * 0.6} Z`;
+    if (dx < 0) return `M${x - s},${y} L${x + s * 0.6},${y - s} L${x + s * 0.6},${y + s} Z`;
+    return `M${x + s},${y} L${x - s * 0.6},${y - s} L${x - s * 0.6},${y + s} Z`;
+  }
+
+  /** Trigger: a rounded cap whose top follows the shoulder. */
+  triggerPath(b: PadButton): string {
+    const w = 30, h = 20;
+    return `M${b.x - w},${b.y + h / 2} L${b.x - w},${b.y - h / 4} Q${b.x - w},${b.y - h / 2 - 6} ${b.x},${b.y - h / 2 - 8} ` +
+      `Q${b.x + w},${b.y - h / 2 - 6} ${b.x + w},${b.y - h / 4} L${b.x + w},${b.y + h / 2} Z`;
+  }
+
+  /** Bumper: a shallow arc band along the top edge. */
+  bumperPath(b: PadButton): string {
+    const w = 40;
+    return `M${b.x - w},${b.y + 5} Q${b.x},${b.y - 11} ${b.x + w},${b.y + 5} L${b.x + w},${b.y - 2} ` +
+      `Q${b.x},${b.y - 18} ${b.x - w},${b.y - 2} Z`;
+  }
+
+  isUnbound(key: number): boolean {
+    return this.actionsOn(key) === '-';
+  }
+
   letterOf(button: PadButton): string {
     return button.glyph && 'letter' in button.glyph ? button.glyph.letter : '';
   }
