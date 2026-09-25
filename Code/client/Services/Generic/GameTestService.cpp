@@ -3985,6 +3985,26 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             m_world.GetSteamLobbyService().QueueJoinFriend(std::stoull(steamId));
             return Result(id, fmt::format("\"steamId\":\"{}\"", EscapeJson(steamId)));
         }
+        // Steam session tests: the lobby as the UI sees it, direct invites, answering invites.
+        if (command == "steam_state")
+            return Result(id, fmt::format("\"steam\":{}", m_world.GetSteamLobbyService().TestStateJson()));
+        if (command == "steam_invite")
+        {
+            const auto steamId = GetJsonString(acLine, "steamId");
+            if (steamId.empty())
+                return Error(id, "steamId is required");
+            m_world.GetSteamLobbyService().QueueInviteFriendDirect(std::stoull(steamId));
+            return Result(id, fmt::format("\"steamId\":\"{}\"", EscapeJson(steamId)));
+        }
+        if (command == "steam_answer_invite")
+        {
+            const auto lobby = GetJsonString(acLine, "lobby");
+            if (lobby.empty())
+                return Error(id, "lobby is required");
+            const bool accept = GetJsonString(acLine, "accept") != "false";
+            m_world.GetSteamLobbyService().QueueAnswerInvite(std::stoull(lobby), accept);
+            return Result(id, fmt::format("\"lobby\":\"{}\",\"accept\":{}", EscapeJson(lobby), accept));
+        }
         if (command == "set_ready")
         {
             const bool ready = GetJsonString(acLine, "ready") != "false";

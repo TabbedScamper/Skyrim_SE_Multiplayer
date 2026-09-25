@@ -114,7 +114,21 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             }
         }
         else if (eventName == "inviteSteamFriend")
-            World::Get().GetSteamLobbyService().QueueInviteFriend();
+        {
+            // With a friend id: a direct Steam invite. Without: Steam's own invite dialog.
+            uint64_t steamId = 0;
+            if (eventArgs->GetSize() > 0)
+                steamId = std::strtoull(eventArgs->GetString(0).ToString().c_str(), nullptr, 10);
+            if (steamId)
+                World::Get().GetSteamLobbyService().QueueInviteFriendDirect(steamId);
+            else
+                World::Get().GetSteamLobbyService().QueueInviteFriend();
+        }
+        else if (eventName == "answerSteamInvite")
+        {
+            const auto lobbyId = std::strtoull(eventArgs->GetString(0).ToString().c_str(), nullptr, 10);
+            World::Get().GetSteamLobbyService().QueueAnswerInvite(lobbyId, eventArgs->GetBool(1));
+        }
         else if (eventName == "refreshSteamLobby")
             World::Get().GetSteamLobbyService().QueueRefreshLobbyState();
         else if (eventName == "setSteamSessionAccess")

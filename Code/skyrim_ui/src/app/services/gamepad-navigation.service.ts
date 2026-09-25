@@ -43,6 +43,8 @@ export class GamepadNavigationService {
   private rowElement?: Element;
   /** Where focus was when a dialog opened; it returns there when the dialog closes. */
   private beforeModal?: { modal: HTMLElement; focus: HTMLElement };
+  /** Where the focused control was, so focus can land next to it if it disappears or is disabled. */
+  private lastFocus?: { scope: HTMLElement; x: number; y: number };
   private scheduled = false;
   private modelRequested = false;
 
@@ -468,7 +470,19 @@ export class GamepadNavigationService {
       if (scope?.contains(focus) && this.visible(focus)) focus.focus({ preventScroll: true });
     }
     let current = scope ? this.current(scope) : null;
-    // A menu just opened (or the focused control disappeared): pick its default.
+    // The focused control went away (disabled after use, row removed): the nearest control
+    // to where it was. A menu that just opened: its default.
+    if (scope && !current && this.lastFocus?.scope === scope) {
+      const { x, y } = this.lastFocus;
+      const nearest = this.focusables(scope)
+        .map(e => ({ e, r: e.getBoundingClientRect() }))
+        .sort((a, b) => Math.hypot(a.r.left + a.r.width / 2 - x, a.r.top + a.r.height / 2 - y) -
+          Math.hypot(b.r.left + b.r.width / 2 - x, b.r.top + b.r.height / 2 - y))[0]?.e;
+      if (nearest) {
+        nearest.focus({ preventScroll: true });
+        current = this.current(scope);
+      }
+    }
     if (scope && !current) {
       const target = this.defaultTarget(scope);
       if (target) {
@@ -477,7 +491,11 @@ export class GamepadNavigationService {
       }
     }
 
-    const row = current?.closest('.row, .binding, .option, .member, .friend, label') ?? current ?? undefined;
+    if (scope && current) {
+      const r = current.getBoundingClientRect();
+      this.lastFocus = { scope, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    const row = current?.closest('.row, .binding, .option, .member, .friend, .friend-row, .invite, label') ?? current ?? undefined;
     if (row !== this.rowElement) {
       this.rowElement?.classList.remove('nav-row');
       row?.classList.add('nav-row');

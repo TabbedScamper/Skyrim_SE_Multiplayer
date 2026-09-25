@@ -154,10 +154,35 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
 
   joinSteamFriend(_steamId: string): void {}
 
-  inviteSteamFriend(): void {}
+  inviteSteamFriend(steamId?: string): void {
+    if (steamId) this.mockInvited.add(steamId);
+    this.refreshSteamLobby();
+  }
+
+  answerSteamInvite(lobbyId: string, _accept: boolean): void {
+    this.mockInvites = this.mockInvites.filter(invite => invite.lobby !== lobbyId);
+    this.refreshSteamLobby();
+  }
+
+  /** Set true (e.g. from DevTools) to preview the lobby with a Steam session and friends. */
+  mockSteam = false;
+  private mockInvited = new Set<string>();
+  private mockInvites = [{ friendId: '5', name: 'Lydia', lobby: '9001' }];
 
   refreshSteamLobby(): void {
-    this.emit('steamLobbyState', '', '', [], [], [], [], false, false, false, false);
+    if (!this.mockSteam) {
+      this.emit('steamLobbyState', '', '', [], [], [], [], false, false, false, false);
+      return;
+    }
+    const friends = [
+      { id: '3', name: 'Aela', status: 'coop', lobby: '7001', inLobby: false, invited: false },
+      { id: '4', name: 'Farkas', status: 'skyrim', lobby: '', inLobby: false, invited: this.mockInvited.has('4') },
+      { id: '5', name: 'Lydia', status: 'online', lobby: '', inLobby: false, invited: this.mockInvited.has('5') },
+      { id: '6', name: 'Serana', status: 'away', lobby: '', inLobby: false, invited: this.mockInvited.has('6') },
+      { id: '2', name: 'Partner', status: 'coop', lobby: '109775242742410746', inLobby: true, invited: false },
+    ];
+    this.emit('steamLobbyState', '109775242742410746', '1', ['1', '2'], ['Host', 'Partner'], ['3'], ['Aela'],
+      false, false, false, true, JSON.stringify({ friends, offline: 12, invites: this.mockInvites }));
   }
 
   setSteamSessionAccess(_open: boolean, _password: string): void {}

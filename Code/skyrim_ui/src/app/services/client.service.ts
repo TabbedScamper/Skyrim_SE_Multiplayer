@@ -9,7 +9,7 @@ import { AudioDevice, DisplayMode, GameSettings, GameSettingsPayload } from '../
 import { ControlBindingsState } from '../models/control-bindings';
 import { ChatService } from './chat.service';
 import { CoopLobbyState } from '../models/coop-lobby-state';
-import { SteamLobbyState } from '../models/steam-lobby-state';
+import { SteamFriend, SteamInvite, SteamLobbyState } from '../models/steam-lobby-state';
 import { ErrorEvents, ErrorService } from './error.service';
 import { LoadingService } from './loading.service';
 
@@ -32,6 +32,8 @@ export class ClientService implements OnDestroy {
   public coopLobbyStateChange = new ReplaySubject<CoopLobbyState>(1);
   public coopGameplaySettingsChange = new ReplaySubject<{ difficulty: number; pvpEnabled: boolean; deathSystemEnabled: boolean; greetingsEnabled: boolean }>(1);
   public steamLobbyStateChange = new ReplaySubject<SteamLobbyState>(1);
+  /** Steam avatars (data URLs) by Steam id, sent once per person. */
+  public steamAvatars = new BehaviorSubject<Record<string, string>>({});
   public deploymentScanStateChange = new ReplaySubject<{ complete: boolean; fileCount: number; hashed: number; cached: number; errors: number }>(1);
 
   /** Opening/close menu change. */
@@ -152,8 +154,21 @@ export class ClientService implements OnDestroy {
       this.zone.run(() => this.coopLobbyStateChange.next({ playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected })));
     skyrimtogether.on('coopGameplaySettings', (difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled) =>
       this.zone.run(() => this.coopGameplaySettingsChange.next({ difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled })));
-    skyrimtogether.on('steamLobbyState', (lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost) =>
-      this.zone.run(() => this.steamLobbyStateChange.next({ lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost })));
+    skyrimtogether.on('steamLobbyState', (lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost, social) =>
+      this.zone.run(() => {
+        let parsed: { friends?: SteamFriend[]; offline?: number; invites?: SteamInvite[] } = {};
+        try {
+          parsed = social ? JSON.parse(social) : {};
+        } catch {
+          // An unreadable friends payload leaves the list empty rather than breaking the lobby.
+        }
+        this.steamLobbyStateChange.next({
+          lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost,
+          friends: parsed.friends ?? [], offlineFriends: parsed.offline ?? 0, invites: parsed.invites ?? [],
+        });
+      }));
+    skyrimtogether.on('steamAvatar', (steamId: string, dataUrl: string) =>
+      this.zone.run(() => this.steamAvatars.next({ ...this.steamAvatars.value, [steamId]: dataUrl })));
     skyrimtogether.on('deploymentScanState', (complete, fileCount, hashed, cached, errors) =>
       this.zone.run(() => this.deploymentScanStateChange.next({ complete, fileCount, hashed, cached, errors })));
     skyrimtogether.on('openingMenu', this.onOpeningMenu.bind(this));
@@ -226,6 +241,7 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('coopLobbyState');
     skyrimtogether.off('coopGameplaySettings');
     skyrimtogether.off('steamLobbyState');
+    skyrimtogether.off('steamAvatar');
     skyrimtogether.off('deploymentScanState');
     skyrimtogether.off('openingMenu');
     skyrimtogether.off('connect');
@@ -289,8 +305,14 @@ export class ClientService implements OnDestroy {
     skyrimtogether.joinSteamFriend(steamId);
   }
 
-  public inviteSteamFriend(): void {
-    skyrimtogether.inviteSteamFriend();
+  /** A direct invite to one friend, or Steam's invite dialog without an id. */
+  public inviteSteamFriend(steamId?: string): void {
+    if (steamId) skyrimtogether.inviteSteamFriend(steamId);
+    else skyrimtogether.inviteSteamFriend();
+  }
+
+  public answerSteamInvite(lobbyId: string, accept: boolean): void {
+    skyrimtogether.answerSteamInvite(lobbyId, accept);
   }
 
   public refreshSteamLobby(): void {

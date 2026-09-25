@@ -8,6 +8,15 @@
     <!-- Left: who is here -->
     <section class="card party">
       <h2 class="separator"><span>Party</span></h2>
+      <div *ngFor="let invite of steam.invites" class="invite" role="alert">
+        <span class="avatar" [class.empty]="!avatars[invite.friendId]">
+          <img *ngIf="avatars[invite.friendId]; else inviteInitial" [src]="avatars[invite.friendId]" alt="" />
+          <ng-template #inviteInitial>{{ initial(invite.name) }}</ng-template>
+        </span>
+        <span class="who"><strong>{{ invite.name }}</strong><small>invited you to their session</small></span>
+        <button data-style-ornament="inverted" data-nav-default (click)="answerInvite(invite, true)">Accept</button>
+        <button class="link" (click)="answerInvite(invite, false)">Decline</button>
+      </div>
       <p *ngIf="steam.lobbyId" class="access-mode">{{ steam.open ? (steam.passwordProtected ? 'Open to friends, password required' : 'Open to friends') : 'Invite only' }}</p>
 
       <p *ngIf="!steam.lobbyId" class="muted">Creating your private session...</p>
@@ -15,6 +24,10 @@
       <ul *ngIf="steam.lobbyId" class="roster">
         <li *ngFor="let name of steam.memberNames; let i = index" class="member" [class.ready]="isMemberReady(i)">
           <span class="mark" aria-hidden="true"></span>
+          <span class="avatar small" [class.empty]="!avatars[steam.memberIds[i]]">
+            <img *ngIf="avatars[steam.memberIds[i]]; else memberInitial" [src]="avatars[steam.memberIds[i]]" alt="" />
+            <ng-template #memberInitial>{{ initial(name) }}</ng-template>
+          </span>
           <span class="name">{{ name }}</span>
           <small *ngIf="memberPlayerId(i) === lobby.leaderId" class="badge">Host</small>
           <small class="state">{{ isMemberReady(i) ? 'Ready' : 'Not ready' }}</small>
@@ -22,7 +35,7 @@
             class="link" (click)="promote(memberPlayerId(i))">Make host</button>
         </li>
         <li *ngIf="steam.memberNames.length < 2" class="member empty">
-          <span class="name">Waiting for a companion...</span>
+          <span class="name">Waiting for a companion... invite a friend below.</span>
         </li>
       </ul>
 
@@ -44,11 +57,22 @@
       </div>
 
       <div class="join">
-        <h3 class="separator"><span>Join a friend</span></h3>
-        <p *ngIf="steam.friendIds.length === 0" class="muted">No friends are hosting an open session. Ask them to invite you.</p>
-        <button *ngFor="let id of steam.friendIds; let i = index" class="friend" (click)="joinFriend(id)">
-          {{ steam.friendNames[i] || 'Steam friend' }}<small>Join</small>
-        </button>
+        <h3 class="separator"><span>Friends</span></h3>
+        <p *ngIf="!friends.length" class="muted">None of your Steam friends are online right now.</p>
+        <ul class="friend-list" *ngIf="friends.length">
+          <li *ngFor="let friend of friends; trackBy: trackFriend" class="friend-row" [class.coop]="friend.status === 'coop'"
+            [class.faded]="friend.status === 'away' || friend.status === 'busy'">
+            <span class="avatar" [class.empty]="!avatars[friend.id]">
+              <img *ngIf="avatars[friend.id]; else friendInitial" [src]="avatars[friend.id]" alt="" />
+              <ng-template #friendInitial>{{ initial(friend.name) }}</ng-template>
+            </span>
+            <span class="who"><span class="name">{{ friend.name }}</span><small>{{ friendStatus(friend) }}</small></span>
+            <button *ngIf="friend.status === 'coop'" data-style-ornament="inverted" (click)="joinFriend(friend.id)">Join</button>
+            <button *ngIf="friend.status !== 'coop' && steam.lobbyId" data-style-ornament="simple" [disabled]="friend.invited"
+              (click)="inviteFriend(friend)">{{ friend.invited ? 'Invited' : 'Invite' }}</button>
+          </li>
+        </ul>
+        <p *ngIf="steam.offlineFriends" class="muted small">{{ steam.offlineFriends }} {{ steam.offlineFriends === 1 ? 'friend is' : 'friends are' }} offline.</p>
         <details>
           <summary>Connect by IP address</summary>
           <div class="lan">

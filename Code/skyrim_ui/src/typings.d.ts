@@ -97,6 +97,8 @@ declare namespace SkyrimTogetherTypes {
   type SteamLobbyStateCallback = (
     lobbyId: string, ownerId: string, memberIds: string[], memberNames: string[], friendIds: string[], friendNames: string[],
     open: boolean, passwordProtected: boolean, waitingForPassword: boolean, isHost: boolean,
+    /** JSON {friends, offline, invites} (see models/steam-lobby-state.ts). */
+    social?: string,
   ) => void;
   type DeploymentScanStateCallback = (complete: boolean, fileCount: number, hashed: number, cached: number, errors: number) => void;
 
@@ -234,6 +236,7 @@ interface SkyrimTogether {
   on(event: 'coopGameplaySettings', callback: SkyrimTogetherTypes.CoopGameplaySettingsCallback): void;
   on(event: 'showTitleLobby', callback: SkyrimTogetherTypes.VoidCallback): void;
   on(event: 'steamLobbyState', callback: SkyrimTogetherTypes.SteamLobbyStateCallback): void;
+  on(event: 'steamAvatar', callback: (steamId: string, dataUrl: string) => void): void;
   on(event: 'deploymentScanState', callback: SkyrimTogetherTypes.DeploymentScanStateCallback): void;
 
   on(
@@ -281,6 +284,7 @@ interface SkyrimTogether {
   off(event: 'showTitleOptions', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'showTitleLobby', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'steamLobbyState', callback?: SkyrimTogetherTypes.SteamLobbyStateCallback): void;
+  off(event: 'steamAvatar', callback?: (steamId: string, dataUrl: string) => void): void;
   off(event: 'deploymentScanState', callback?: SkyrimTogetherTypes.DeploymentScanStateCallback): void;
 
   /** Add listener to when the player open/close a game menu. */
@@ -467,7 +471,9 @@ interface SkyrimTogether {
 
   joinSteamFriend(steamId: string): void;
 
-  inviteSteamFriend(): void;
+  /** With a Steam id: a direct invite. Without: Steam's own invite dialog. */
+  inviteSteamFriend(steamId?: string): void;
+  answerSteamInvite(lobbyId: string, accept: boolean): void;
 
   refreshSteamLobby(): void;
 

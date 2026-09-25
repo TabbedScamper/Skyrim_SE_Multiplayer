@@ -1,7 +1,7 @@
 import { Component, EventEmitter, HostBinding, HostListener, OnDestroy, OnInit, Output } from '@angular/core';
 import { Subject, takeUntil } from 'rxjs';
 import { CoopLobbyState } from '../../models/coop-lobby-state';
-import { SteamLobbyState } from '../../models/steam-lobby-state';
+import { SteamFriend, SteamInvite, SteamLobbyState } from '../../models/steam-lobby-state';
 import { ClientService } from '../../services/client.service';
 import { Sound, SoundService } from '../../services/sound.service';
 import { SettingService } from '../../services/setting.service';
@@ -14,7 +14,8 @@ import { SettingService } from '../../services/setting.service';
 export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   @Output() public done = new EventEmitter<void>();
 
-  public steam: SteamLobbyState = { lobbyId: '', ownerId: '', memberIds: [], memberNames: [], friendIds: [], friendNames: [], open: false, passwordProtected: false, waitingForPassword: false, isHost: false };
+  public steam: SteamLobbyState = { lobbyId: '', ownerId: '', memberIds: [], memberNames: [], friendIds: [], friendNames: [], open: false, passwordProtected: false, waitingForPassword: false, isHost: false, friends: [], offlineFriends: 0, invites: [] };
+  public avatars: Record<string, string> = {};
   public lobby: CoopLobbyState = { playerIds: [], leaderId: 0, readyPlayerIds: [], campaignMode: 1, sessionState: 0, startEpoch: '0', checkpointId: '', lobbyOpen: false, passwordProtected: false };
   public connected = false;
   public ready = false;
@@ -47,6 +48,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
       }
     });
     this.client.deploymentScanStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.scan = value);
+    this.client.steamAvatars.pipe(takeUntil(this.destroy$)).subscribe(value => this.avatars = value);
     this.client.coopGameplaySettingsChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.gameplay = { ...value });
     this.client.coopLobbyStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => {
       this.lobby = value;
@@ -101,6 +103,42 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   public invite(): void {
     this.sound.play(Sound.Ok);
     this.client.inviteSteamFriend();
+  }
+
+  /** Friends in the order you would reach for them: in a session, playing Skyrim, online, away. */
+  get friends(): SteamFriend[] {
+    const rank: Record<SteamFriend['status'], number> = { coop: 0, skyrim: 1, online: 2, busy: 3, away: 4 };
+    return [...(this.steam.friends ?? [])]
+      .filter(friend => !friend.inLobby)
+      .sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name));
+  }
+
+  friendStatus(friend: SteamFriend): string {
+    switch (friend.status) {
+      case 'coop': return 'In a co-op session';
+      case 'skyrim': return 'Playing Skyrim';
+      case 'busy': return 'Busy';
+      case 'away': return 'Away';
+      default: return 'Online';
+    }
+  }
+
+  inviteFriend(friend: SteamFriend): void {
+    this.sound.play(Sound.Ok);
+    this.client.inviteSteamFriend(friend.id);
+  }
+
+  answerInvite(invite: SteamInvite, accept: boolean): void {
+    this.sound.play(accept ? Sound.Ok : Sound.Cancel);
+    this.client.answerSteamInvite(invite.lobby, accept);
+  }
+
+  initial(name: string): string {
+    return (name || '?').trim().charAt(0).toUpperCase();
+  }
+
+  trackFriend(_: number, friend: SteamFriend): string {
+    return friend.id;
   }
 
   public savePartyOptions(): void {

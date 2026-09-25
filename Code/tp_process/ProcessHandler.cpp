@@ -36,6 +36,7 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     CreateFunction("leaveSteamSession");
     CreateFunction("joinSteamFriend");
     CreateFunction("inviteSteamFriend");
+    CreateFunction("answerSteamInvite");
     CreateFunction("refreshSteamLobby");
     CreateFunction("setSteamSessionAccess");
     CreateFunction("setCoopGameplaySettings");

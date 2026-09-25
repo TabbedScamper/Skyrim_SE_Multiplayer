@@ -33,6 +33,84 @@ using GetFriendPersonaName = const char*(__cdecl*)(void*, uint64_t);
 using GetFriendGamePlayed = bool(__cdecl*)(void*, uint64_t, void*);
 using ActivateGameOverlayInviteDialog = void(__cdecl*)(void*, uint64_t);
 using GetAppId = uint32_t(__cdecl*)(void*);
+using InviteUserToLobby = bool(__cdecl*)(void*, uint64_t, uint64_t);
+using GetFriendPersonaState = int(__cdecl*)(void*, uint64_t);
+using SetRichPresence = bool(__cdecl*)(void*, const char*, const char*);
+using ClearRichPresence = void(__cdecl*)(void*);
+using GetSmallFriendAvatar = int(__cdecl*)(void*, uint64_t);
+using GetImageSize = bool(__cdecl*)(void*, int, uint32_t*, uint32_t*);
+using GetImageRgba = bool(__cdecl*)(void*, int, uint8_t*, int);
+
+// Callback ids (steam_api's k_iSteamFriendsCallbacks = 300, k_iSteamMatchmakingCallbacks = 500).
+constexpr int kGameLobbyJoinRequested = 333;         // {CSteamID lobby, CSteamID friend}
+constexpr int kGameRichPresenceJoinRequested = 337;  // {CSteamID friend, char connect[256]}
+constexpr int kLobbyInvite = 503;                    // {uint64 user, uint64 lobby, uint64 gameId}
+
+#pragma pack(push, 8)
+struct GameLobbyJoinRequestedData
+{
+    uint64_t LobbyId;
+    uint64_t FriendId;
+};
+struct GameRichPresenceJoinRequestedData
+{
+    uint64_t FriendId;
+    char Connect[256];
+};
+struct LobbyInviteData
+{
+    uint64_t FriendId;
+    uint64_t LobbyId;
+    uint64_t GameId;
+};
+#pragma pack(pop)
+
+/** "+connect_lobby <id>" as Steam passes it when the game is started from a join or invite. */
+uint64_t LobbyFromConnectString(const char* acText) noexcept
+{
+    if (!acText)
+        return 0;
+    const char* pFound = strstr(acText, "+connect_lobby");
+    if (!pFound)
+        return 0;
+    pFound += strlen("+connect_lobby");
+    while (*pFound == ' ' || *pFound == '"')
+        ++pFound;
+    return strtoull(pFound, nullptr, 10);
+}
+
+std::string Base64(const uint8_t* apData, size_t aSize)
+{
+    static constexpr char cTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((aSize + 2) / 3 * 4);
+    for (size_t i = 0; i < aSize; i += 3)
+    {
+        const uint32_t chunk = (apData[i] << 16) | ((i + 1 < aSize ? apData[i + 1] : 0) << 8) | (i + 2 < aSize ? apData[i + 2] : 0);
+        out += cTable[(chunk >> 18) & 63];
+        out += cTable[(chunk >> 12) & 63];
+        out += i + 1 < aSize ? cTable[(chunk >> 6) & 63] : '=';
+        out += i + 2 < aSize ? cTable[chunk & 63] : '=';
+    }
+    return out;
+}
+
+std::string JsonEscape(const char* acText)
+{
+    std::string out;
+    for (const char* p = acText ? acText : ""; *p; ++p)
+    {
+        const auto c = static_cast<unsigned char>(*p);
+        if (c == '"' || c == '\\')
+        {
+            out += '\\';
+            out += *p;
+        }
+        else if (c >= 0x20)
+            out += *p;
+    }
+    return out;
+}
 
 struct FriendGameInfo
 {
@@ -61,6 +139,65 @@ struct LobbyEnterResult
 };
 }
 
+/**
+ * A Steam CCallbackBase (steam_api.h) for SteamAPI_RegisterCallback. Declared
+ * exactly like the SDK class so MSVC lays out the same vtable Steam calls into.
+ */
+class SteamCallbackBase
+{
+public:
+    virtual void Run(void* apParam) = 0;
+    virtual void Run(void* apParam, bool aIoFailure, uint64_t aApiCall) = 0;
+    virtual int GetCallbackSizeBytes() = 0;
+
+protected:
+    uint8_t m_nCallbackFlags{};
+    int m_iCallback{};
+    friend struct SteamLobbyService::CallbackBridge;
+};
+
+struct SteamLobbyService::CallbackBridge final : SteamCallbackBase
+{
+    CallbackBridge(SteamLobbyService& aOwner, int aCallback, int aSize) noexcept
+        : Owner(aOwner)
+        , Size(aSize)
+    {
+        m_iCallback = aCallback;
+    }
+
+    void Run(void* apParam) override
+    {
+        if (!apParam)
+            return;
+        switch (m_iCallback)
+        {
+        case kGameLobbyJoinRequested:
+        {
+            const auto* pData = static_cast<const GameLobbyJoinRequestedData*>(apParam);
+            Owner.OnJoinRequested(pData->LobbyId, pData->FriendId);
+            break;
+        }
+        case kGameRichPresenceJoinRequested:
+        {
+            const auto* pData = static_cast<const GameRichPresenceJoinRequestedData*>(apParam);
+            Owner.OnRichPresenceJoinRequested(pData->FriendId, pData->Connect);
+            break;
+        }
+        case kLobbyInvite:
+        {
+            const auto* pData = static_cast<const LobbyInviteData*>(apParam);
+            Owner.OnLobbyInvite(pData->FriendId, pData->LobbyId);
+            break;
+        }
+        }
+    }
+    void Run(void* apParam, bool, uint64_t) override { Run(apParam); }
+    int GetCallbackSizeBytes() override { return Size; }
+
+    SteamLobbyService& Owner;
+    int Size;
+};
+
 SteamLobbyService::SteamLobbyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
     , m_updateConnection(aDispatcher.sink<UpdateEvent>().connect<&SteamLobbyService::OnUpdate>(this))
@@ -70,6 +207,10 @@ SteamLobbyService::SteamLobbyService(World& aWorld, entt::dispatcher& aDispatche
 
 SteamLobbyService::~SteamLobbyService() noexcept
 {
+    if (m_steamModule)
+        if (const auto unregister = LoadSteamFunction<void(__cdecl*)(void*)>(m_steamModule, "SteamAPI_UnregisterCallback"))
+            for (auto& pCallback : m_callbacks)
+                unregister(pCallback.get());
     LeaveSession();
     if (m_serverJob)
         CloseHandle(m_serverJob);
@@ -116,7 +257,157 @@ bool SteamLobbyService::Initialize() noexcept
         ShowMessage("Steam matchmaking could not be initialized.");
         return false;
     }
+    RegisterSteamCallbacks();
+    // Started from a Steam "Join game" / accepted invite while the game was closed.
+    m_launchLobby = LobbyFromConnectString(GetCommandLineA());
+    if (m_launchLobby)
+        spdlog::info("Steam lobby: launched with +connect_lobby {}", m_launchLobby);
     return true;
+}
+
+void SteamLobbyService::RegisterSteamCallbacks() noexcept
+{
+    if (!m_callbacks.empty())
+        return;
+    const auto registerCallback = LoadSteamFunction<void(__cdecl*)(void*, int)>(m_steamModule, "SteamAPI_RegisterCallback");
+    if (!registerCallback)
+    {
+        spdlog::warn("Steam lobby: SteamAPI_RegisterCallback is unavailable; invites must be joined from the co-op menu");
+        return;
+    }
+    for (const auto [id, size] : {std::pair{kGameLobbyJoinRequested, int(sizeof(GameLobbyJoinRequestedData))},
+             std::pair{kGameRichPresenceJoinRequested, int(sizeof(GameRichPresenceJoinRequestedData))},
+             std::pair{kLobbyInvite, int(sizeof(LobbyInviteData))}})
+    {
+        auto pCallback = std::make_unique<CallbackBridge>(*this, id, size);
+        registerCallback(pCallback.get(), id);
+        m_callbacks.push_back(std::move(pCallback));
+    }
+    spdlog::info("Steam lobby: listening for invites and join requests");
+}
+
+void SteamLobbyService::OnJoinRequested(const uint64_t aLobbyId, const uint64_t aFriendId) noexcept
+{
+    spdlog::info("Steam lobby: join requested for lobby {} (friend {})", aLobbyId, aFriendId);
+    std::erase_if(m_invites, [aLobbyId](const Invite& acInvite) { return acInvite.LobbyId == aLobbyId; });
+    if (!aLobbyId || aLobbyId == m_lobbyId)
+        return;
+    m_world.GetTransport().Close();
+    LeaveSession();
+    StopLocalServer();
+    JoinSession(std::to_string(aLobbyId).c_str());
+}
+
+void SteamLobbyService::OnRichPresenceJoinRequested(const uint64_t aFriendId, const char* acConnect) noexcept
+{
+    spdlog::info("Steam lobby: rich presence join from friend {}: {}", aFriendId, acConnect ? acConnect : "");
+    OnJoinRequested(LobbyFromConnectString(acConnect), aFriendId);
+}
+
+void SteamLobbyService::OnLobbyInvite(const uint64_t aFriendId, const uint64_t aLobbyId) noexcept
+{
+    if (!aLobbyId || aLobbyId == m_lobbyId)
+        return;
+    std::erase_if(m_invites, [aLobbyId](const Invite& acInvite) { return acInvite.LobbyId == aLobbyId; });
+    m_invites.push_back({aFriendId, aLobbyId});
+    const auto getName = LoadSteamFunction<GetFriendPersonaName>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+    const char* pName = getName ? getName(m_friends, aFriendId) : nullptr;
+    spdlog::info("Steam lobby: invite from {} to lobby {}", aFriendId, aLobbyId);
+    ShowMessage(String(pName ? pName : "A friend") + " invited you to their session. Open Co-op to accept.");
+    PublishLobbyState();
+}
+
+void SteamLobbyService::AnswerInvite(const uint64_t aLobbyId, const bool aAccept) noexcept
+{
+    const bool known = std::any_of(m_invites.begin(), m_invites.end(), [aLobbyId](const Invite& acInvite) { return acInvite.LobbyId == aLobbyId; });
+    std::erase_if(m_invites, [aLobbyId](const Invite& acInvite) { return acInvite.LobbyId == aLobbyId; });
+    if (aAccept && known)
+        OnJoinRequested(aLobbyId, 0);
+    PublishLobbyState();
+}
+
+void SteamLobbyService::InviteFriendDirect(const uint64_t aSteamId) noexcept
+{
+    if (!Initialize() || !m_lobbyId)
+    {
+        ShowMessage("Create or join a lobby before inviting a friend.");
+        return;
+    }
+    const auto invite = LoadSteamFunction<InviteUserToLobby>(m_steamModule, "SteamAPI_ISteamMatchmaking_InviteUserToLobby");
+    const bool sent = invite && invite(m_matchmaking, m_lobbyId, aSteamId);
+    spdlog::info("Steam lobby: invited friend {} to lobby {}: {}", aSteamId, m_lobbyId, sent);
+    if (sent)
+        m_invited.insert(aSteamId);
+    else
+        ShowMessage("Steam could not send the invite.");
+    PublishLobbyState();
+}
+
+// Friends see "In a Skyrim co-op session" and a Join Game entry that sends
+// "+connect_lobby <id>" (GameRichPresenceJoinRequested / launch argument).
+void SteamLobbyService::UpdateRichPresence() noexcept
+{
+    if (m_richPresenceLobby == m_lobbyId)
+        return;
+    m_richPresenceLobby = m_lobbyId;
+    const auto set = LoadSteamFunction<SetRichPresence>(m_steamModule, "SteamAPI_ISteamFriends_SetRichPresence");
+    const auto clear = LoadSteamFunction<ClearRichPresence>(m_steamModule, "SteamAPI_ISteamFriends_ClearRichPresence");
+    if (!set || !clear)
+        return;
+    clear(m_friends);
+    if (!m_lobbyId)
+        return;
+    const auto lobby = std::to_string(m_lobbyId);
+    set(m_friends, "status", "In a Skyrim co-op session");
+    set(m_friends, "connect", ("+connect_lobby " + lobby).c_str());
+    set(m_friends, "steam_player_group", lobby.c_str());
+    set(m_friends, "steam_player_group_size", "2");
+}
+
+// 32x32 Steam avatar as an uncompressed BMP data URL, sent once per friend.
+void SteamLobbyService::SendAvatar(const uint64_t aSteamId) noexcept
+{
+    if (m_avatarsSent.contains(aSteamId))
+        return;
+    const auto getAvatar = LoadSteamFunction<GetSmallFriendAvatar>(m_steamModule, "SteamAPI_ISteamFriends_GetSmallFriendAvatar");
+    const auto getSize = LoadSteamFunction<GetImageSize>(m_steamModule, "SteamAPI_ISteamUtils_GetImageSize");
+    const auto getRgba = LoadSteamFunction<GetImageRgba>(m_steamModule, "SteamAPI_ISteamUtils_GetImageRGBA");
+    if (!getAvatar || !getSize || !getRgba)
+        return;
+    const int image = getAvatar(m_friends, aSteamId);
+    uint32_t width = 0, height = 0;
+    if (image <= 0 || !getSize(m_utils, image, &width, &height) || !width || !height || width > 64 || height > 64)
+        return; // not downloaded yet; retried on the next refresh
+    std::vector<uint8_t> rgba(width * height * 4);
+    if (!getRgba(m_utils, image, rgba.data(), static_cast<int>(rgba.size())))
+        return;
+
+    const uint32_t pixelBytes = width * height * 4;
+    std::vector<uint8_t> bmp(54 + pixelBytes);
+    auto put32 = [&](size_t aOffset, uint32_t aValue) { memcpy(bmp.data() + aOffset, &aValue, 4); };
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    put32(2, static_cast<uint32_t>(bmp.size()));
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, width);
+    put32(22, static_cast<uint32_t>(-static_cast<int32_t>(height))); // top-down
+    bmp[26] = 1;
+    bmp[28] = 32;
+    put32(34, pixelBytes);
+    for (uint32_t i = 0; i < width * height; ++i)
+    {
+        bmp[54 + i * 4 + 0] = rgba[i * 4 + 2];
+        bmp[54 + i * 4 + 1] = rgba[i * 4 + 1];
+        bmp[54 + i * 4 + 2] = rgba[i * 4 + 0];
+        bmp[54 + i * 4 + 3] = rgba[i * 4 + 3];
+    }
+    m_avatarsSent.insert(aSteamId);
+    auto arguments = CefListValue::Create();
+    arguments->SetString(0, std::to_string(aSteamId));
+    arguments->SetString(1, "data:image/bmp;base64," + Base64(bmp.data(), bmp.size()));
+    if (auto* pApp = m_world.GetOverlayService().GetOverlayApp())
+        pApp->ExecuteAsync("steamAvatar", arguments);
 }
 
 void SteamLobbyService::HostSession() noexcept
@@ -251,7 +542,14 @@ void SteamLobbyService::PumpCallbacks() noexcept
     if (!m_autoHostAttempted && GetTickCount64() > 2000)
     {
         m_autoHostAttempted = true;
-        HostSession();
+        if (Initialize() && m_launchLobby)
+        {
+            const auto lobby = m_launchLobby;
+            m_launchLobby = 0;
+            JoinSession(std::to_string(lobby).c_str());
+        }
+        else
+            HostSession();
     }
     const auto runCallbacks = LoadSteamFunction<RunCallbacks>(m_steamModule, "SteamAPI_RunCallbacks");
     if (runCallbacks)
@@ -309,6 +607,22 @@ void SteamLobbyService::QueueJoinFriend(const uint64_t aSteamId) noexcept
 void SteamLobbyService::QueueInviteFriend() noexcept
 {
     m_titleScreenTasks.Add([this]() { InviteFriend(); });
+}
+
+void SteamLobbyService::QueueInviteFriendDirect(const uint64_t aSteamId) noexcept
+{
+    m_titleScreenTasks.Add([this, aSteamId]() { InviteFriendDirect(aSteamId); });
+}
+
+void SteamLobbyService::QueueAnswerInvite(const uint64_t aLobbyId, const bool aAccept) noexcept
+{
+    m_titleScreenTasks.Add([this, aLobbyId, aAccept]() { AnswerInvite(aLobbyId, aAccept); });
+}
+
+std::string SteamLobbyService::TestStateJson() const noexcept
+{
+    std::lock_guard lock(m_testStateLock);
+    return m_testState;
 }
 
 void SteamLobbyService::QueueRefreshLobbyState() noexcept
@@ -476,6 +790,59 @@ void SteamLobbyService::PublishLobbyState() noexcept
     arguments->SetBool(7, m_passwordProtected);
     arguments->SetBool(8, m_waitingForPassword);
     arguments->SetBool(9, m_isHost);
+
+    // Every friend who is not offline, with what they are doing:
+    // "coop" = in a joinable co-op lobby, "skyrim" = playing Skyrim SE, "online" / "away" / "busy".
+    const auto getState = LoadSteamFunction<GetFriendPersonaState>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendPersonaState");
+    std::string friends = "[";
+    int offline = 0;
+    const uint32_t appId = getAppId(m_utils);
+    for (int i = 0; i < friendCount; ++i)
+    {
+        const auto id = getFriend(m_friends, i, kImmediateFriends);
+        const int persona = getState ? getState(m_friends, id) : 1;
+        FriendGameInfo game{};
+        const bool inGame = getGame(m_friends, id, &game);
+        const bool sameApp = inGame && (game.GameId & 0xFFFFFFu) == appId;
+        if (persona == 0 && !inGame)
+        {
+            ++offline;
+            continue;
+        }
+        const char* pStatus = sameApp && game.LobbyId ? "coop" : sameApp ? "skyrim"
+            : persona == 2 ? "busy" : (persona == 3 || persona == 4) ? "away" : "online";
+        const char* pName = getName(m_friends, id);
+        if (friends.size() > 1)
+            friends += ',';
+        friends += fmt::format(R"({{"id":"{}","name":"{}","status":"{}","lobby":"{}","inLobby":{},"invited":{}}})", id,
+            JsonEscape(pName ? pName : "Steam friend"), pStatus, sameApp && game.LobbyId ? std::to_string(game.LobbyId) : "",
+            m_lobbyId && game.LobbyId == m_lobbyId ? "true" : "false", m_invited.contains(id) ? "true" : "false");
+        SendAvatar(id);
+    }
+    friends += "]";
+    std::string invites = "[";
+    for (const auto& invite : m_invites)
+    {
+        const char* pName = getName(m_friends, invite.FriendId);
+        if (invites.size() > 1)
+            invites += ',';
+        invites += fmt::format(R"({{"friendId":"{}","name":"{}","lobby":"{}"}})", invite.FriendId,
+            JsonEscape(pName ? pName : "A friend"), invite.LobbyId);
+    }
+    invites += "]";
+    arguments->SetString(10, fmt::format(R"({{"friends":{},"offline":{},"invites":{}}})", friends, offline, invites));
+    {
+        std::string members = "[";
+        for (int i = 0; i < memberCount; ++i)
+            members += fmt::format("{}\"{}\"", i ? "," : "", getMember(m_matchmaking, m_lobbyId, i));
+        members += "]";
+        std::lock_guard lock(m_testStateLock);
+        m_testState = fmt::format(R"({{"lobbyId":"{}","isHost":{},"open":{},"members":{},"friends":{},"offline":{},"invites":{}}})",
+            m_lobbyId, m_isHost ? "true" : "false", m_lobbyOpen ? "true" : "false", members, friends, offline, invites);
+    }
+    for (int i = 0; i < memberCount; ++i)
+        SendAvatar(getMember(m_matchmaking, m_lobbyId, i));
+    UpdateRichPresence();
     if (auto* pApp = m_world.GetOverlayService().GetOverlayApp())
         pApp->ExecuteAsync("steamLobbyState", arguments);
 }
@@ -489,6 +856,7 @@ void SteamLobbyService::LeaveSession() noexcept
             leaveLobby(m_matchmaking, m_lobbyId);
     }
     m_lobbyId = 0;
+    m_invited.clear();
     m_isHost = false;
     m_lobbyOpen = false;
     m_passwordProtected = false;
