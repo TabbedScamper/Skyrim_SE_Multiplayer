@@ -75,7 +75,7 @@
           </app-dropdown>
         </div>
         <div class="row" *ngFor="let audio of volumeChannels">
-          <div class="row-label"><label [for]="audio.key">{{ audio.label }}</label></div>
+          <div class="row-label"><label [for]="audio.key">{{ audio.label }}</label><small>{{ audio.hint }}</small></div>
           <div class="slider">
             <input type="range" [id]="audio.key" min="0" max="1" step="0.05" [ngModel]="$any(game)[audio.key]" (ngModelChange)="preview($any(audio.key), $event)" />
             <output>{{ $any(game)[audio.key] * 100 | number: '1.0-0' }}%</output>

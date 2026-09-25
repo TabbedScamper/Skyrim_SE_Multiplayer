@@ -65,11 +65,11 @@ export class SettingsComponent implements OnDestroy {
     { id: 'about', label: 'About' },
   ];
   readonly volumeChannels = [
-    { key: 'master', label: 'Master volume' },
-    { key: 'effects', label: 'Effects' },
-    { key: 'voice', label: 'Voice' },
-    { key: 'music', label: 'Music' },
-    { key: 'footsteps', label: 'Footsteps' },
+    { key: 'master', label: 'Master volume', hint: 'Plays a sample while you adjust it.' },
+    { key: 'effects', label: 'Effects', hint: 'Plays a sword strike while you adjust it.' },
+    { key: 'voice', label: 'Voice', hint: 'Plays a spoken line while you adjust it.' },
+    { key: 'music', label: 'Music', hint: 'Adjusts the music that is playing now.' },
+    { key: 'footsteps', label: 'Footsteps', hint: 'Plays footsteps while you adjust it.' },
   ];
   public activeSection: SettingsSection = SettingsComponent.restoreSection();
   /** Undefined until the client reports devices (older clients never do). */

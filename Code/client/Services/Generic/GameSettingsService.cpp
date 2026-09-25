@@ -10,6 +10,7 @@
 #include <DefaultObjectManager.h>
 #include <Games/Skyrim/Interface/MainMenuIntegration.h>
 #include <Games/Skyrim/Audio/AudioDeviceSelection.h>
+#include <Games/Skyrim/Audio/AudioPreview.h>
 #include <Games/Skyrim/Interface/ControlBindings.h>
 #include <OverlayApp.hpp>
 
@@ -18,10 +19,13 @@
 
 namespace
 {
-constexpr uint32_t cFootstepsCategory = 94881;
-constexpr uint32_t cVoiceCategory = 1007612;
-constexpr uint32_t cMusicCategory = 554685;
-constexpr uint32_t cEffectsCategory = 466532;
+// BGSSoundCategory form IDs, read from Skyrim.esm SNCT records (EDID in
+// brackets). These were previously rotated one slot, so each slider drove a
+// different category than its label.
+constexpr uint32_t cEffectsCategory = 0x000172A1;   // AudioCategorySFX
+constexpr uint32_t cFootstepsCategory = 0x000F5FFC; // AudioCategoryFST
+constexpr uint32_t cVoiceCategory = 0x000876BD;     // AudioCategoryVOCGeneral
+constexpr uint32_t cMusicCategory = 0x00071E64;     // AudioCategoryMUS
 
 float Clamp(float aValue, float aMinimum, float aMaximum)
 {
@@ -389,6 +393,9 @@ void GameSettingsService::PreviewSetting(const String& acName, const String& acV
         else if (name == "audioDevice") m_preview.AudioDevice = value;
 
         ApplyRuntime(m_preview, display);
+        // Let the player hear the channel at its new level.
+        if (name == "master" || name == "effects" || name == "footsteps" || name == "voice")
+            AudioPreview::Play(name);
         if (display)
         {
             m_displayPreviewActive = true;
