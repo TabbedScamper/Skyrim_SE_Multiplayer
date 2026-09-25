@@ -83,6 +83,7 @@ std::unordered_map<const void*, RegistryEntry> s_registry; // key: &graph->boneN
 std::unordered_map<uint32_t, ActorPose> s_poses;
 std::atomic<uint64_t> s_presentationTick{0};
 std::atomic<uint32_t> s_presentationDelayMs{0};
+std::atomic<uint32_t> s_localMirror{0};
 // Actors whose owner sends fewer bones than this PC's skeleton copies (under s_lock): the bones
 // past the owner's count come from its held values, or from the local graph if never sent.
 struct ShortPose
@@ -270,7 +271,8 @@ namespace PoseCopyAuthority
 void RefreshRegistry(World& aWorld) noexcept
 {
     std::unordered_map<const void*, RegistryEntry> registry;
-    const auto add = [&](const uint32_t aFormId, const Role aKind)
+    // aKeyFormId: whose pose this skeleton records or takes (itself, or the mirrored leader).
+    const auto add = [&](const uint32_t aFormId, const Role aKind, const uint32_t aKeyFormId = 0)
     {
         auto* pActor = Cast<Actor>(TESForm::GetById(aFormId));
         if (!pActor || !pActor->GetNiNode())
@@ -286,7 +288,7 @@ void RefreshRegistry(World& aWorld) noexcept
             {
                 auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(index));
                 if (pGraph)
-                    registry[pGraph + offsetof(AnimationGraph, boneNodes)] = {aFormId, aKind, pActor};
+                    registry[pGraph + offsetof(AnimationGraph, boneNodes)] = {aKeyFormId ? aKeyFormId : aFormId, aKind, pActor};
             }
         }
         pManager->Release();
@@ -297,6 +299,9 @@ void RefreshRegistry(World& aWorld) noexcept
     auto remoteView = aWorld.view<FormIdComponent, RemoteComponent>();
     for (auto entity : remoteView)
         add(remoteView.get<FormIdComponent>(entity).Id, Role::Apply);
+    // Cutscene follow: this player's skeleton takes the leader's pose (replaces its capture).
+    if (const auto mirror = s_localMirror.load(std::memory_order_relaxed))
+        add(0x14, Role::Apply, mirror);
 
     std::lock_guard guard(s_lock);
     s_registry = std::move(registry);
@@ -326,6 +331,11 @@ double GetPresentationTimeMs() noexcept
     if (now <= delay)
         return static_cast<double>(s_presentationTick.load(std::memory_order_relaxed));
     return now - delay;
+}
+
+void SetLocalMirror(const uint32_t aSourceFormId) noexcept
+{
+    s_localMirror.store(aSourceFormId, std::memory_order_relaxed);
 }
 
 void SetPresentationDelayMs(const uint32_t aDelayMs) noexcept

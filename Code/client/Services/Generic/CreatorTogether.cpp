@@ -109,6 +109,8 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
         s_active = false;
         return;
     }
+    if (!s_active)
+        spdlog::info("Character creator together: active (window in focus {})", GameInFocus());
     s_active = true;
 
     // The other players' characters here, in player id order.
@@ -143,6 +145,8 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
         wanted = (s_view + count - 1) % count;
     if (next && !s_nextKey)
         wanted = (s_view + 1) % count;
+    if ((prev && !s_prevKey) || (next && !s_nextKey))
+        spdlog::info("Character creator together: {} pressed, {} other players", prev ? "[" : "]", s_remotePlayers.size());
     s_prevKey = prev;
     s_nextKey = next;
     if (wanted != s_view)
@@ -151,6 +155,7 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
         const auto text = s_view == 0 ? std::string("Viewing: your character") :
                                         fmt::format("Viewing: player {} of {}", s_view + 1, count);
         ShowNotice(text.c_str());
+        spdlog::info("Character creator together: viewing {}", s_view == 0 ? 0x14 : s_remotePlayers[s_view - 1]);
     }
 
     // Only the viewed character is visible.

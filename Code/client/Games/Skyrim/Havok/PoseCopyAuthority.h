@@ -28,6 +28,9 @@ void SetCurrentTick(uint64_t aTick) noexcept;
 // The presentation time now (SmoothClock minus the presentation delay), fractional milliseconds.
 [[nodiscard]] double GetPresentationTimeMs() noexcept;
 void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
+// Cutscene follow: this PC's own player takes the pose of this actor (the leader's character
+// here); 0 turns it off. Applied from the next registry refresh.
+void SetLocalMirror(uint32_t aSourceFormId) noexcept;
 [[nodiscard]] uint64_t GetCurrentTick() noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.

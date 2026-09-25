@@ -1195,7 +1195,7 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
                 const glm::vec3 error = wanted - current;
                 using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
                 POINTER_SKYRIMSE(std::remove_pointer_t<TSetPositionAndRotation>, s_placeBody, 60898);
-                if (glm::length(error) > kFollowTeleport)
+                if (glm::length(error) > kFollowTeleport || pBody->motionType == 4)
                 {
                     alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
                     alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
@@ -3062,8 +3062,10 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 }
                 else
                     pose.SettledAtFinalPose = false;
+                // Keyframed here too (this PC's intro scene takes the cart over on arrival): followed,
+                // placed at the host's pose in the step, since velocity does not move it.
                 DynamicBody body{};
-                if (GetDynamicBody(pReference, body, false) && body.HavokBody && body.State.world)
+                if (GetDynamicBody(pReference, body, true) && body.HavokBody && body.State.world)
                 {
                     StepTarget target{body.State.world, body.HavokBody};
                     target.Dynamic = true;

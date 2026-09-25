@@ -405,6 +405,14 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
         Vector<RigidBody*> bodies;
         if (!GetRagdollBodies(pActor, bodies))
         {
+            // Dying here (the death sync) but its ragdoll bodies are not in the world yet (a death
+            // animation first): knock it so its bodies follow the owner's, whose ragdoll started.
+            if (!ragdoll.Knocked && pActor->currentProcess)
+            {
+                ragdoll.Knocked = true;
+                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+                spdlog::info("Ragdoll {:X}: dying without ragdoll bodies; knocked into ragdoll at the owner's sample", pActor->formID);
+            }
             skip("ragdoll bodies not found");
             continue;
         }

@@ -1,3 +1,4 @@
+#include <Services/CutsceneFollow.h>
 #include <Services/CreatorTogether.h>
 #include <Messages/LeaderControlRequest.h>
 #include <Messages/NotifyLeaderControl.h>
@@ -290,6 +291,14 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     CreatorTogether::Update(m_world, m_inParty && m_campaignMode == 1 && m_sessionState == 2, creatorOpen);
     if (m_sessionState >= 3)
         CreatorTogether::Release();
+
+    // Cutscene follow: until the leader is free, the scene plays once, the leader's way (not during
+    // the character creator, which CreatorTogether handles).
+    {
+        const bool leaderFree = m_isLeader ? m_leaderFreeSent == 1 : m_leaderFree;
+        const bool cutscene = m_inParty && m_sessionState >= 2 && m_startEpoch != 0 && !leaderFree && !creatorOpen;
+        CutsceneFollow::Update(m_world, cutscene, m_isLeader, m_leaderPlayerId);
+    }
 
     // Leader: tell the party whether this character is free (no intro or cutscene holding it), on
     // every change and every 5 s. Players pass through each other until it is.
