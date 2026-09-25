@@ -64,6 +64,7 @@
 #include <Messages/NotifyCheckpointSave.h>
 #include <Messages/NotifyCorpseRagdoll.h>
 #include <Messages/NotifyPlayerAppearance.h>
+#include <Messages/NotifyLeaderControl.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -78,7 +79,7 @@ struct ServerMessageFactory
             NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
             NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,
             NotifySubtitle, NotifyPlayerDialogue, NotifyActorTeleport, NotifyPlayerLeft, NotifyPlayerJoined, NotifyDialogue, NotifySubtitle, NotifyPlayerDialogue, NotifyPlayerLevel, NotifyPlayerCellChanged, NotifyTeleport, NotifyPlayerHealthUpdate, NotifySettingsChange,
-            NotifyWeatherChange, NotifySetWaypoint, NotifyRemoveWaypoint, NotifySetTimeResult, NotifyRemoveSpell, NotifyPhysicsReferencesMove, NotifyCameraState, NotifySceneTimeline, NotifyCheckpointSave, NotifyCorpseRagdoll, NotifyPlayerAppearance>;
+            NotifyWeatherChange, NotifySetWaypoint, NotifyRemoveWaypoint, NotifySetTimeResult, NotifyRemoveSpell, NotifyPhysicsReferencesMove, NotifyCameraState, NotifySceneTimeline, NotifyCheckpointSave, NotifyCorpseRagdoll, NotifyPlayerAppearance, NotifyLeaderControl>;
 
         return s_visitor(std::forward<T>(func));
     }

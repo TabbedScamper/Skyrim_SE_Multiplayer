@@ -1,3 +1,5 @@
+#include <Messages/LeaderControlRequest.h>
+#include <Messages/NotifyLeaderControl.h>
 #include <Services/PartyService.h>
 #include <Components.h>
 #include <GameServer.h>
@@ -38,6 +40,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyChangeLeaderConnection(aDispatcher.sink<PacketEvent<PartyChangeLeaderRequest>>().connect<&PartyService::OnPartyChangeLeader>(this))
     , m_partyKickConnection(aDispatcher.sink<PacketEvent<PartyKickRequest>>().connect<&PartyService::OnPartyKick>(this))
     , m_partyReadyConnection(aDispatcher.sink<PacketEvent<PartyReadyRequest>>().connect<&PartyService::OnPartyReady>(this))
+    , m_leaderControlConnection(aDispatcher.sink<PacketEvent<LeaderControlRequest>>().connect<&PartyService::OnLeaderControl>(this))
     , m_partyStartConnection(aDispatcher.sink<PacketEvent<PartyStartRequest>>().connect<&PartyService::OnPartyStart>(this))
     , m_partySessionSettingsConnection(aDispatcher.sink<PacketEvent<PartySessionSettingsRequest>>().connect<&PartyService::OnPartySessionSettings>(this))
     , m_partyGameplaySettingsConnection(aDispatcher.sink<PacketEvent<PartyGameplaySettingsRequest>>().connect<&PartyService::OnPartyGameplaySettings>(this))
@@ -220,6 +223,24 @@ void PartyService::OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) no
             BroadcastPlayerList(pKick);
         }
     }
+}
+
+void PartyService::OnLeaderControl(const PacketEvent<LeaderControlRequest>& acPacket) noexcept
+{
+    Player* const pPlayer = acPacket.pPlayer;
+    if (!pPlayer || !IsPlayerLeader(pPlayer) || !pPlayer->GetParty().JoinedPartyId)
+        return;
+    const auto it = m_parties.find(*pPlayer->GetParty().JoinedPartyId);
+    if (it == m_parties.end())
+        return;
+    NotifyLeaderControl notify{};
+    notify.FreeControl = acPacket.Packet.FreeControl;
+    for (auto* pMember : it->second.Members)
+    {
+        if (pMember != pPlayer)
+            pMember->Send(notify);
+    }
+    spdlog::info("[PartyService]: leader {} free control", notify.FreeControl ? "has" : "does not have");
 }
 
 void PartyService::OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) noexcept

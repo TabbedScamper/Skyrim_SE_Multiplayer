@@ -61,6 +61,7 @@ private:
         uint64_t NextCheckMs{};
         uint32_t Applications{};
         bool CountMismatchLogged{};
+        const char* LastSkipReason{};
     };
 
     void OnUpdate(const UpdateEvent&) noexcept;

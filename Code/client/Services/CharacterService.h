@@ -136,7 +136,7 @@ struct CharacterService
 public:
     // Where to show another player's character on this PC while they are in the creator: beside
     // this player instead of inside them (everyone stands on the same spot). Any thread.
-    static bool GetCreatorDisplayOffset(uint32_t aFormId, NiPoint3& arOffset) noexcept;
+    static bool GetCreatorDisplayOffset(uint32_t aFormId, NiPoint3& arOffset, float& arHeading) noexcept;
 
 private:
     void OnBeastFormChange(const BeastFormChangeEvent& acEvent) const noexcept;

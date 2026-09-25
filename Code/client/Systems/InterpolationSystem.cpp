@@ -8,6 +8,7 @@
 
 #include <Games/References.h>
 #include <World.h>
+#include <PlayerCharacter.h>
 #include <Services/ObjectService.h>
 #include <Services/CharacterService.h>
 
@@ -41,11 +42,16 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
             static_cast<float>(second.Tick - first.Tick);
 
     NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
-    // A player still in the character creator stands beside this player here, not inside them.
-    if (NiPoint3 creatorOffset{}; apActor && CharacterService::GetCreatorDisplayOffset(apActor->formID, creatorOffset))
+    // A player still in the character creator stands in front of this player here, facing it,
+    // not inside it (everyone creates on the same spot).
+    NiPoint3 creatorOffset{};
+    float creatorHeading = 0.f;
+    const bool creatorPreview = apActor && CharacterService::GetCreatorDisplayOffset(apActor->formID, creatorOffset, creatorHeading);
+    if (creatorPreview)
     {
-        position.x += creatorOffset.x;
-        position.y += creatorOffset.y;
+        position.x = PlayerCharacter::Get()->position.x + creatorOffset.x;
+        position.y = PlayerCharacter::Get()->position.y + creatorOffset.y;
+        position.z = PlayerCharacter::Get()->position.z;
     }
 
     aInterpolationComponent.Position = position;
@@ -142,7 +148,7 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     const auto finalY = TiltedPhoques::Mod(rotA.y + deltaY, float(TiltedPhoques::Pi * 2));
     const auto finalZ = TiltedPhoques::Mod(rotA.z + deltaZ, float(TiltedPhoques::Pi * 2));
 
-    apActor->SetRotation(finalX, finalY, finalZ);
+    apActor->SetRotation(finalX, finalY, creatorPreview ? creatorHeading : finalZ);
 }
 
 void InterpolationSystem::AddPoint(InterpolationComponent& aInterpolationComponent, const InterpolationComponent::TimePoint& acPoint) noexcept

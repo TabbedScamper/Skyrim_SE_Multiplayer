@@ -361,9 +361,22 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
         if (settled && ragdoll.Asleep && aNowMs < ragdoll.NextCheckMs)
             continue;
 
+        // Diagnostic: why a stream is not being followed, once per reason and ragdoll.
+        const auto skip = [&](const char* apReason)
+        {
+            if (ragdoll.LastSkipReason != apReason)
+            {
+                ragdoll.LastSkipReason = apReason;
+                spdlog::info("Ragdoll server {:X}: not placed ({}, presentation {}, first sample {}, newest {})", it->first, apReason,
+                    presentation, sample(0).Tick, newest.Tick);
+            }
+        };
         auto* pActor = Utils::GetByServerId<Actor>(it->first);
         if (!pActor || !pActor->GetNiNode())
+        {
+            skip(!pActor ? "no actor for the server id" : "no 3D");
             continue;
+        }
         // Not ragdolling here yet: knock this copy when the presentation time reaches the owner's first
         // ragdoll sample, so it falls from the owner's pose at that moment. Knocked on receipt, it
         // went ragdoll 255 ms early and its bodies jumped to a pose the owner reached later (156
@@ -377,15 +390,24 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
                 spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll at the owner's first sample (tick {}, presentation {})",
                     pActor->formID, sample(0).Tick, presentation);
             }
+            else
+                skip(ragdoll.Knocked ? "knocked but not ragdolling" : presentation < sample(0).Tick ? "waiting for the first sample" :
+                    "no AI process");
             continue;
         }
         // Ragdolling here before the owner's ragdoll starts on this PC's timeline (the death sync
         // arrives as early as the first sample): leave the bodies until the presentation time gets there.
         if (presentation < sample(0).Tick)
+        {
+            skip("ragdolling, waiting for the first sample");
             continue;
+        }
         Vector<RigidBody*> bodies;
         if (!GetRagdollBodies(pActor, bodies))
+        {
+            skip("ragdoll bodies not found");
             continue;
+        }
         if (bodies.size() != newest.Bodies.size())
         {
             if (!ragdoll.CountMismatchLogged)

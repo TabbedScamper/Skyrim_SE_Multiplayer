@@ -19,6 +19,7 @@ constexpr uint32_t kNoCollision = 1u << 14;
 constexpr auto kSettleAfterScript = std::chrono::seconds(5);
 
 bool s_mirroring = false;
+bool s_leaderFree{};
 std::chrono::steady_clock::time_point s_lastScripted{};
 // Original filter of each remote player whose controller we changed.
 std::unordered_map<uint32_t, uint32_t> s_changed;
@@ -67,6 +68,16 @@ void SetMirroringScript(const bool aMirroring) noexcept
     s_mirroring = aMirroring;
 }
 
+void SetLeaderFreeControl(const bool aFree) noexcept
+{
+    s_leaderFree = aFree;
+}
+
+bool LocalHasFreeControl() noexcept
+{
+    return !LocalPlayerScripted();
+}
+
 void Update(World& aWorld) noexcept
 {
     const auto& party = aWorld.GetPartyService();
@@ -74,7 +85,10 @@ void Update(World& aWorld) noexcept
     bool separate = false;
     if (party.IsInParty() && party.GetSessionState() >= 1)
     {
-        if (party.GetSessionState() < 3 || LocalPlayerScripted())
+        // Apart until the leader has free control of its character (intro and cutscenes play without
+        // players pushing each other), and while this player is scripted itself.
+        const bool leaderFree = party.IsLeader() ? !LocalPlayerScripted() : s_leaderFree;
+        if (party.GetSessionState() < 3 || LocalPlayerScripted() || !leaderFree)
             s_lastScripted = now;
         separate = now - s_lastScripted < kSettleAfterScript;
     }

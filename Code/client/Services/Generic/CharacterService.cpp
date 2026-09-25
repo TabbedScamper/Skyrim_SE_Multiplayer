@@ -1170,19 +1170,23 @@ uint64_t CreatorNowMs() noexcept
 }
 } // namespace
 
-bool CharacterService::GetCreatorDisplayOffset(const uint32_t aFormId, NiPoint3& arOffset) noexcept
+bool CharacterService::GetCreatorDisplayOffset(const uint32_t aFormId, NiPoint3& arOffset, float& arHeading) noexcept
 {
     std::lock_guard lock(s_creatorPlayersLock);
     const auto it = s_creatorPlayers.find(aFormId);
     auto* pPlayer = PlayerCharacter::Get();
     if (it == s_creatorPlayers.end() || !pPlayer)
         return false;
-    // To this player's side (alternating left and right), so a player waiting beside the creator
-    // watches the others edit.
-    const float side = (it->second.Slot % 2 ? 1.f : -1.f) * static_cast<float>((it->second.Slot + 1) / 2) * kCreatorSpacing;
-    arOffset.x = std::cos(pPlayer->rotation.z) * side;
-    arOffset.y = -std::sin(pPlayer->rotation.z) * side;
+    // In front of this player, side by side, facing it: a player waiting for the creator to finish
+    // watches the others edit without turning.
+    const float heading = pPlayer->rotation.z;
+    const float count = static_cast<float>(s_creatorPlayers.size());
+    const float side = (static_cast<float>(it->second.Slot) - (count + 1.f) * 0.5f) * kCreatorSpacing;
+    const float forward = 160.f;
+    arOffset.x = std::sin(heading) * forward + std::cos(heading) * side;
+    arOffset.y = std::cos(heading) * forward - std::sin(heading) * side;
     arOffset.z = 0.f;
+    arHeading = heading + static_cast<float>(TiltedPhoques::Pi);
     return true;
 }
 

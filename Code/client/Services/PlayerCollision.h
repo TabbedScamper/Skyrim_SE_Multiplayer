@@ -14,4 +14,8 @@ namespace PlayerCollision
 void Update(World& aWorld) noexcept;
 // Set while a follower's player mirrors the leader's scripted package.
 void SetMirroringScript(bool aMirroring) noexcept;
+// The leader's free control (NotifyLeaderControl); players pass through each other until it has it.
+void SetLeaderFreeControl(bool aFree) noexcept;
+// This player is not held by a script or cutscene (not AI driven, movement enabled).
+bool LocalHasFreeControl() noexcept;
 } // namespace PlayerCollision

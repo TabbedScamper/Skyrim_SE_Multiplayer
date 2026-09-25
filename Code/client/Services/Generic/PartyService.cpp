@@ -1,3 +1,6 @@
+#include <Messages/LeaderControlRequest.h>
+#include <Messages/NotifyLeaderControl.h>
+#include <Services/PlayerCollision.h>
 #include <Services/PartyService.h>
 
 #include <Services/TransportService.h>
@@ -43,6 +46,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, Transpo
     , m_transport(aTransportService)
 {
     m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&PartyService::OnUpdate>(this);
+    m_leaderControlConnection = aDispatcher.sink<NotifyLeaderControl>().connect<&PartyService::OnNotifyLeaderControl>(this);
     m_disconnectConnection = aDispatcher.sink<DisconnectedEvent>().connect<&PartyService::OnDisconnected>(this);
 
     m_playerListConnection = aDispatcher.sink<NotifyPlayerList>().connect<&PartyService::OnPlayerList>(this);
@@ -264,16 +268,11 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
             pControls->pMovementHandler->isEnabled && pControls->pLookHandler &&
             pControls->pLookHandler->isEnabled;
         bool ready = m_campaignMode != 1 && loaded && nativeControl;
+        // New Game: a player (host or follower) is ready once it closed the character creator. The
+        // host used to count only when the intro had moved on with control back, so it simply
+        // carried on while the followers were still editing.
         if (m_campaignMode == 1 && loaded)
-        {
-            if (m_isLeader)
-            {
-                const auto* pIntro = Cast<TESQuest>(TESForm::GetById(0x0003372B));
-                ready = pIntro && pIntro->currentStage >= 160 && nativeControl;
-            }
-            else
-                ready = m_creatorSeen;
-        }
+            ready = m_creatorSeen;
         if (ready)
         {
             PartyReadyRequest request;
@@ -281,6 +280,45 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
             m_transport.Send(request);
             m_gameplayReadySent = true;
             spdlog::info("Reached shared-campaign gameplay barrier for epoch {}", m_startEpoch);
+        }
+    }
+
+    // Leader: tell the party whether this character is free (no intro or cutscene holding it), on
+    // every change and every 5 s. Players pass through each other until it is.
+    if (m_inParty && m_isLeader && m_sessionState >= 2)
+    {
+        const bool free = m_sessionState >= 3 && PlayerCollision::LocalHasFreeControl();
+        const auto nowMs = GetTickCount64();
+        if (static_cast<int>(free) != m_leaderFreeSent || nowMs >= m_nextLeaderFreeSendMs)
+        {
+            if (static_cast<int>(free) != m_leaderFreeSent)
+                spdlog::info("Leader free control: {}", free);
+            m_leaderFreeSent = static_cast<int>(free);
+            m_nextLeaderFreeSendMs = nowMs + 5000;
+            LeaderControlRequest request;
+            request.FreeControl = free;
+            m_transport.Send(request);
+        }
+    }
+
+    // Character creator together: a player who finished waits, held in place (it can still look
+    // around at the others, shown in front of it), until every player finished.
+    {
+        const bool holdForCreator = m_inParty && m_campaignMode == 1 && m_sessionState == 2 && m_gameplayReadySent && !creatorOpen;
+        auto* pControls = PlayerControls::GetInstance();
+        if (holdForCreator != m_creatorWaitHeld && pControls && pControls->pMovementHandler)
+        {
+            pControls->pMovementHandler->isEnabled = !holdForCreator;
+            m_creatorWaitHeld = holdForCreator;
+            spdlog::info("Character creator: {} for the other players", holdForCreator ? "waiting" : "everyone finished, released");
+        }
+        if (m_creatorWaitHeld && GetTickCount64() >= m_nextCreatorWaitNoticeMs)
+        {
+            m_nextCreatorWaitNoticeMs = GetTickCount64() + 8000;
+            // SendHUDMessage::ShowHUDMessage (ID 52933): the top-left notification.
+            using TShowHUDMessage = void(const char*, const char*, bool);
+            POINTER_SKYRIMSE(TShowHUDMessage, s_showHUDMessage, 52933);
+            s_showHUDMessage.Get()("Waiting for the other players to finish their characters...", nullptr, true);
         }
     }
 
@@ -523,4 +561,47 @@ void PartyService::ReleaseFollowerIntroProtection() noexcept
     m_followerIntroProtectionHeld = false;
     m_playerWasEssential = false;
     spdlog::info("Follower intro protection disabled");
+}
+
+
+// Follower: the leader's free control. Players pass through each other until the leader is free;
+// the first time it is in a session, this player is placed around the leader to start playing.
+void PartyService::OnNotifyLeaderControl(const NotifyLeaderControl& acMessage) noexcept
+{
+    m_leaderFree = acMessage.FreeControl;
+    PlayerCollision::SetLeaderFreeControl(acMessage.FreeControl);
+    if (!acMessage.FreeControl || m_gatheredAroundLeader || m_isLeader)
+        return;
+    auto* pPlayer = PlayerCharacter::Get();
+    if (!pPlayer)
+        return;
+    // The leader's character here, and this player's slot among the followers.
+    Actor* pLeader = nullptr;
+    auto view = m_world.view<FormIdComponent, PlayerComponent>();
+    for (auto entity : view)
+    {
+        if (view.get<PlayerComponent>(entity).Id != m_leaderPlayerId)
+            continue;
+        pLeader = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        break;
+    }
+    if (!pLeader || !pLeader->parentCell)
+        return;
+    uint32_t slot = 0;
+    for (const auto memberId : m_partyMembers)
+    {
+        if (memberId == m_leaderPlayerId)
+            continue;
+        if (memberId == m_transport.GetLocalPlayerId())
+            break;
+        ++slot;
+    }
+    m_gatheredAroundLeader = true;
+    // A half circle behind the leader, 150 units away.
+    const float angle = pLeader->rotation.z + static_cast<float>(TiltedPhoques::Pi) + (static_cast<float>(slot) - 0.5f) * 0.9f;
+    NiPoint3 target = pLeader->position;
+    target.x += std::sin(angle) * 150.f;
+    target.y += std::cos(angle) * 150.f;
+    pPlayer->MoveTo(pLeader->parentCell, target);
+    spdlog::info("Leader has free control: this player placed around the leader (slot {})", slot);
 }

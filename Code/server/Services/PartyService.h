@@ -15,6 +15,7 @@ struct PartyCreateRequest;
 struct PartyChangeLeaderRequest;
 struct PartyKickRequest;
 struct PartyReadyRequest;
+struct LeaderControlRequest;
 struct PartyStartRequest;
 struct PartySessionSettingsRequest;
 struct PartyGameplaySettingsRequest;
@@ -65,6 +66,7 @@ protected:
     void OnPartyChangeLeader(const PacketEvent<PartyChangeLeaderRequest>& acPacket) noexcept;
     void OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) noexcept;
     void OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) noexcept;
+    void OnLeaderControl(const PacketEvent<LeaderControlRequest>& acPacket) noexcept;
     void OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept;
     void OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept;
     void OnPartyGameplaySettings(const PacketEvent<PartyGameplaySettingsRequest>& acPacket) noexcept;
@@ -91,6 +93,7 @@ private:
     entt::scoped_connection m_partyChangeLeaderConnection;
     entt::scoped_connection m_partyKickConnection;
     entt::scoped_connection m_partyReadyConnection;
+    entt::scoped_connection m_leaderControlConnection;
     entt::scoped_connection m_partyStartConnection;
     entt::scoped_connection m_partySessionSettingsConnection;
     entt::scoped_connection m_partyGameplaySettingsConnection;

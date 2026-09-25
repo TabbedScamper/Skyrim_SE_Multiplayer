@@ -84,6 +84,17 @@ private:
     bool m_creatorInputReleased{};
     bool m_creatorSeen{};
     bool m_gameplayReadySent{};
+    // Character creator together: this player finished and waits for the others (movement held).
+    bool m_creatorWaitHeld{};
+    // Leader free control: last state sent (leader), last received and whether this follower
+    // was already gathered around the leader this session (followers).
+    int m_leaderFreeSent{-1};
+    uint64_t m_nextLeaderFreeSendMs{};
+    bool m_leaderFree{};
+    bool m_gatheredAroundLeader{};
+    entt::scoped_connection m_leaderControlConnection;
+    void OnNotifyLeaderControl(const struct NotifyLeaderControl& acMessage) noexcept;
+    uint64_t m_nextCreatorWaitNoticeMs{};
     bool m_followerIntroProtectionHeld{};
     bool m_playerWasEssential{};
 
