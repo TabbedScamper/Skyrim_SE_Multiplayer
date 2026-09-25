@@ -197,7 +197,7 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
 
   requestControlBindings(): void {
     this.emit('controlBindings', JSON.stringify({
-      controller: 'xbox',
+      controller: 'dualsense',
       bindings: this.mockBindings.map(([event, device, key]) => ({ event, device, key, remappable: true })),
     }));
   }
@@ -205,6 +205,10 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
   startControlCapture(event: string, device: number): void {
     this.captureEvent = { event, device };
   }
+
+  audioPreviewKeepAlive(_channel: string): void {}
+
+  audioPreviewStop(): void {}
 
   cancelControlCapture(): void {
     this.captureEvent = undefined;

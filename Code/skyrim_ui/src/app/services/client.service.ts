@@ -316,6 +316,14 @@ export class ClientService implements OnDestroy {
     skyrimtogether.cancelControlCapture?.();
   }
 
+  public audioPreviewKeepAlive(channel: string): void {
+    skyrimtogether.audioPreviewKeepAlive?.(channel);
+  }
+
+  public audioPreviewStop(): void {
+    skyrimtogether.audioPreviewStop?.();
+  }
+
   public previewGameSetting(name: string, value: number | boolean | string): void {
     skyrimtogether.previewGameSetting(name, String(value));
   }

@@ -76,7 +76,7 @@ header {
 
   h3.separator {
     margin-top: 0.9rem;
-    font-size: 0.9em;
+    font-size: max(13px, 0.9em);
     letter-spacing: 0.16em;
     color: $-dim;
   }
@@ -86,7 +86,7 @@ header {
   margin: -0.2rem 0 0;
   text-align: center;
   color: $-dim;
-  font-size: 0.9em;
+  font-size: max(13px, 0.9em);
   letter-spacing: 0.08em;
 }
 
@@ -119,14 +119,14 @@ header {
 
   .badge {
     color: $-dim;
-    font-size: 0.8em;
+    font-size: max(13px, 0.8em);
     letter-spacing: 0.16em;
     text-transform: uppercase;
   }
 
   .state {
     color: $-dim;
-    font-size: 0.85em;
+    font-size: max(13px, 0.85em);
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
@@ -152,7 +152,7 @@ header {
     justify-self: start;
     min-height: 0;
     padding: 0.1rem 0;
-    font-size: 0.8em;
+    font-size: max(13px, 0.8em);
   }
 }
 
@@ -229,7 +229,7 @@ header {
   margin: 0;
   text-align: center;
   color: $-dim;
-  font-size: 0.9em;
+  font-size: max(13px, 0.9em);
 }
 
 .chosen {
@@ -272,7 +272,7 @@ header {
 
   small {
     color: $-dim;
-    font-size: 0.85em;
+    font-size: max(13px, 0.85em);
   }
 
   input[type='checkbox'] {
@@ -293,7 +293,7 @@ header {
     grid-template-columns: auto 1fr;
     gap: 0.3rem 1rem;
     margin: 0.5rem 0 0;
-    font-size: 0.9em;
+    font-size: max(13px, 0.9em);
   }
 
   dt {
@@ -311,7 +311,7 @@ header {
   margin: 0;
   color: $-dim;
   font-style: italic;
-  font-size: 0.9em;
+  font-size: max(13px, 0.9em);
 }
 
 details summary {
@@ -319,7 +319,7 @@ details summary {
   color: $-dim;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  font-size: 0.85em;
+  font-size: max(13px, 0.85em);
 }
 
 // ---- action bar ----

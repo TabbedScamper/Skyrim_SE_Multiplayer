@@ -1,5 +1,3 @@
-export type ControllerFamily = 'xbox' | 'playstation' | 'nintendo' | 'none';
-
 /** INPUT_DEVICE as Skyrim's ControlMap numbers it. */
 export enum InputDevice {
   Keyboard = 0,
@@ -17,6 +15,7 @@ export interface ControlBinding {
 }
 
 export interface ControlBindingsState {
-  controller: ControllerFamily;
+  /** Controller model detected from USB vendor/product ID (see controller-models.ts). */
+  controller: string;
   bindings: ControlBinding[];
 }

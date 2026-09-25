@@ -65,11 +65,11 @@ export class SettingsComponent implements OnDestroy {
     { id: 'about', label: 'About' },
   ];
   readonly volumeChannels = [
-    { key: 'master', label: 'Master volume', hint: 'Plays a sample while you adjust it.' },
-    { key: 'effects', label: 'Effects', hint: 'Plays a sword strike while you adjust it.' },
-    { key: 'voice', label: 'Voice', hint: 'Plays a spoken line while you adjust it.' },
-    { key: 'music', label: 'Music', hint: 'Adjusts the music that is playing now.' },
-    { key: 'footsteps', label: 'Footsteps', hint: 'Plays footsteps while you adjust it.' },
+    { key: 'master', label: 'Master volume', hint: 'Hold to hear a mix of game sounds.' },
+    { key: 'effects', label: 'Effects', hint: 'Hold to hear combat sounds alone.' },
+    { key: 'voice', label: 'Voice', hint: 'Hold to hear a spoken line alone.' },
+    { key: 'music', label: 'Music', hint: 'Hold to hear the current music alone.' },
+    { key: 'footsteps', label: 'Footsteps', hint: 'Hold to hear footsteps alone.' },
   ];
   public activeSection: SettingsSection = SettingsComponent.restoreSection();
   /** Undefined until the client reports devices (older clients never do). */
@@ -158,7 +158,29 @@ export class SettingsComponent implements OnDestroy {
     event.stopPropagation();
   }
 
+  /** Keeps the live audio preview going while a volume slider is held. */
+  startAudioPreview(channel: string): void {
+    this.stopAudioPreview(false);
+    this.client.audioPreviewKeepAlive(channel);
+    this.previewKeepAlive = setInterval(() => this.client.audioPreviewKeepAlive(channel), 500);
+  }
+
+  stopAudioPreview(notify = true): void {
+    if (this.previewKeepAlive) clearInterval(this.previewKeepAlive);
+    this.previewKeepAlive = undefined;
+    if (notify) this.client.audioPreviewStop();
+  }
+
+  private previewKeepAlive?: ReturnType<typeof setInterval>;
+
+  /** A release outside the slider still ends the preview. */
+  @HostListener('window:pointerup')
+  onWindowPointerUp(): void {
+    if (this.previewKeepAlive) this.stopAudioPreview();
+  }
+
   ngOnDestroy(): void {
+    this.stopAudioPreview();
     this.subscriptions.forEach(subscription => subscription.unsubscribe());
     if (this.previewTimer) clearInterval(this.previewTimer);
   }

@@ -60,7 +60,7 @@ $-faint: rgba(255, 255, 255, 0.35);
 
   h3.separator {
     margin: 1.75rem 0 0.25rem;
-    font-size: 0.95em;
+    font-size: max(13px, 0.95em);
     font-weight: 400;
     letter-spacing: 0.16em;
     text-transform: uppercase;
@@ -108,7 +108,7 @@ $-faint: rgba(255, 255, 255, 0.35);
 
   small {
     color: $-dim;
-    font-size: 0.85em;
+    font-size: max(13px, 0.85em);
     line-height: 1.3em;
   }
 }
@@ -172,7 +172,7 @@ app-dropdown:focus {
   .autosave {
     margin-right: auto;
     color: $-dim;
-    font-size: 0.85em;
+    font-size: max(13px, 0.85em);
     letter-spacing: 0.04em;
   }
 }

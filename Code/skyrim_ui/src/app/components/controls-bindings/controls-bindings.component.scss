@@ -8,6 +8,14 @@ $-separator: url('../../../assets/images/separator/single.svg');
   display: block;
 }
 
+.model-row {
+  display: grid;
+  grid-template-columns: 1fr 16rem;
+  align-items: center;
+  gap: 1.5rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
 .mode-switch {
   display: flex;
   justify-content: center;
@@ -22,7 +30,7 @@ $-separator: url('../../../assets/images/separator/single.svg');
 .hint {
   margin: 0.4rem 0;
   color: $-dim;
-  font-size: 0.85em;
+  font-size: max(13px, 0.85em);
 
   &.center {
     text-align: center;
@@ -42,11 +50,15 @@ $-separator: url('../../../assets/images/separator/single.svg');
     stroke-width: 1.6;
   }
 
-  .contour {
+  .detail {
     fill: none;
-    stroke: rgba(255, 255, 255, 0.3);
-    stroke-width: 1;
-    stroke-dasharray: 3 3;
+    stroke: rgba(255, 255, 255, 0.45);
+    stroke-width: 1.1;
+
+    &.dashed {
+      stroke: rgba(255, 255, 255, 0.28);
+      stroke-dasharray: 3 3;
+    }
   }
 
   .button {
@@ -67,8 +79,15 @@ $-separator: url('../../../assets/images/separator/single.svg');
 
     .glyph {
       fill: rgba(255, 255, 255, 0.85);
-      font-size: 11px;
+      font-size: 17px;
       text-anchor: middle;
+      pointer-events: none;
+    }
+
+    .symbol {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.85);
+      stroke-width: 1.6;
       pointer-events: none;
     }
 
@@ -81,6 +100,10 @@ $-separator: url('../../../assets/images/separator/single.svg');
 
       .glyph {
         fill: #000;
+      }
+
+      .symbol {
+        stroke: #000;
       }
     }
   }
@@ -97,19 +120,21 @@ $-separator: url('../../../assets/images/separator/single.svg');
 
   .callout {
     cursor: default;
-    font-size: 12px;
+    font-size: 16px;
     fill: $-dim;
 
+    // Drawing units: the pad renders at ~0.83 scale at its smallest, so
+    // 16 units stays >= 13px (3/32" floor).
     .name {
       fill: rgba(255, 255, 255, 0.55);
-      letter-spacing: 0.12em;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      font-size: 13px;
+      font-size: 16px;
     }
 
     .action {
-      fill: rgba(255, 255, 255, 0.9);
-      font-size: 16px;
+      fill: rgba(255, 255, 255, 0.92);
+      font-size: 17px;
     }
 
     &.lit .action {
@@ -143,7 +168,7 @@ $-separator: url('../../../assets/images/separator/single.svg');
 
   &.head span {
     color: $-dim;
-    font-size: 0.8em;
+    font-size: max(13px, 0.8em);
     letter-spacing: 0.14em;
     text-transform: uppercase;
   }
@@ -189,5 +214,5 @@ $-separator: url('../../../assets/images/separator/single.svg');
   border-top: 2px solid;
   border-image: $-separator 3;
   text-align: center;
-  font-size: 0.9em;
+  font-size: max(13px, 0.9em);
 }

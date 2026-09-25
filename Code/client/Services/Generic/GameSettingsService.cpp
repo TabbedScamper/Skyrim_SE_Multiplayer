@@ -324,6 +324,18 @@ void GameSettingsService::QueueStartControlCapture(const String& acEvent, int aD
     WakeWindowThread();
 }
 
+void GameSettingsService::QueueAudioPreviewKeepAlive(const String& acChannel) noexcept
+{
+    m_mainLoopTasks.Add([channel = std::string(acChannel.c_str())]() { AudioPreview::KeepAlive(channel); });
+    WakeWindowThread();
+}
+
+void GameSettingsService::QueueAudioPreviewStop() noexcept
+{
+    m_mainLoopTasks.Add([]() { AudioPreview::Stop(); });
+    WakeWindowThread();
+}
+
 void GameSettingsService::QueueCancelControlCapture() noexcept
 {
     m_mainLoopTasks.Add([]() { ControlBindings::CancelCapture(); });
@@ -393,9 +405,9 @@ void GameSettingsService::PreviewSetting(const String& acName, const String& acV
         else if (name == "audioDevice") m_preview.AudioDevice = value;
 
         ApplyRuntime(m_preview, display);
-        // Let the player hear the channel at its new level.
-        if (name == "master" || name == "effects" || name == "footsteps" || name == "voice")
-            AudioPreview::Play(name);
+        // Let the player hear the channel at its new level, alone.
+        if (name == "master" || name == "effects" || name == "footsteps" || name == "voice" || name == "music")
+            AudioPreview::KeepAlive(name);
         if (display)
         {
             m_displayPreviewActive = true;

@@ -1,5 +1,3 @@
-import { ControllerFamily } from '../../models/control-bindings';
-
 /** DirectInput scan codes (Skyrim keyboard bindings). E0-extended keys have the high bit set. */
 const KEYBOARD: Record<number, string> = {
   0x01: 'Esc', 0x02: '1', 0x03: '2', 0x04: '3', 0x05: '4', 0x06: '5', 0x07: '6', 0x08: '7', 0x09: '8',
@@ -31,25 +29,6 @@ export const PAD = {
   LeftTrigger: 9, RightTrigger: 10,
 } as const;
 
-const PAD_LABELS: Record<Exclude<ControllerFamily, 'none'>, Record<number, string>> = {
-  xbox: {
-    [PAD.A]: 'A', [PAD.B]: 'B', [PAD.X]: 'X', [PAD.Y]: 'Y',
-    [PAD.LeftBumper]: 'LB', [PAD.RightBumper]: 'RB', [PAD.LeftTrigger]: 'LT', [PAD.RightTrigger]: 'RT',
-    [PAD.LeftStick]: 'LS', [PAD.RightStick]: 'RS', [PAD.Back]: 'View', [PAD.Start]: 'Menu',
-  },
-  playstation: {
-    [PAD.A]: 'Cross', [PAD.B]: 'Circle', [PAD.X]: 'Square', [PAD.Y]: 'Triangle',
-    [PAD.LeftBumper]: 'L1', [PAD.RightBumper]: 'R1', [PAD.LeftTrigger]: 'L2', [PAD.RightTrigger]: 'R2',
-    [PAD.LeftStick]: 'L3', [PAD.RightStick]: 'R3', [PAD.Back]: 'Create', [PAD.Start]: 'Options',
-  },
-  // Labelled by position: Nintendo's bottom button is B.
-  nintendo: {
-    [PAD.A]: 'B', [PAD.B]: 'A', [PAD.X]: 'Y', [PAD.Y]: 'X',
-    [PAD.LeftBumper]: 'L', [PAD.RightBumper]: 'R', [PAD.LeftTrigger]: 'ZL', [PAD.RightTrigger]: 'ZR',
-    [PAD.LeftStick]: 'LS', [PAD.RightStick]: 'RS', [PAD.Back]: '-', [PAD.Start]: '+',
-  },
-};
-
 const DPAD: Record<number, string> = {
   [PAD.DPadUp]: 'D-pad Up', [PAD.DPadDown]: 'D-pad Down', [PAD.DPadLeft]: 'D-pad Left', [PAD.DPadRight]: 'D-pad Right',
 };
@@ -62,8 +41,8 @@ export function mouseName(key: number): string {
   return MOUSE[key] ?? `Mouse ${key}`;
 }
 
-export function padName(key: number, family: ControllerFamily): string {
-  const labels = PAD_LABELS[family === 'none' ? 'xbox' : family];
+/** Name of a gamepad input using a model's own labels (D-pad names are shared). */
+export function padName(key: number, labels: Record<number, string>): string {
   return DPAD[key] ?? labels[key] ?? `Button ${key}`;
 }
 

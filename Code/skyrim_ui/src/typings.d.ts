@@ -476,6 +476,8 @@ interface SkyrimTogether {
   requestControlBindings(): void;
   startControlCapture(event: string, device: number): void;
   cancelControlCapture(): void;
+  audioPreviewKeepAlive(channel: string): void;
+  audioPreviewStop(): void;
 
   previewGameSetting(name: string, value: string): void;
 

@@ -63,18 +63,48 @@ const MappingArray* GameplayMappings(ControlBindings::Device aDevice) noexcept
     return reinterpret_cast<const MappingArray*>(pContext + static_cast<uint32_t>(aDevice) * sizeof(MappingArray));
 }
 
-std::string ControllerFamily() noexcept
+// Exact controller model from the USB vendor/product ID of the first physical
+// HID game controller. Steam Input's virtual pad (28DE:11FF) is skipped so the
+// real device underneath is drawn.
+const char* ModelFor(DWORD aVendor, DWORD aProduct) noexcept
 {
-    // USB vendor of the first HID game controller: Sony / Nintendo / anything
-    // else XInput reports is drawn with Xbox labels.
+    switch (aVendor)
+    {
+    case 0x045E: // Microsoft
+        switch (aProduct)
+        {
+        case 0x028E: case 0x028F: case 0x0291: case 0x02A1: case 0x0719: return "xbox-360";
+        case 0x02D1: case 0x02DD: case 0x02E0: case 0x02E3: case 0x02EA: case 0x02FD: case 0x02FF:
+        case 0x0B00: case 0x0B05: case 0x0B0A: return "xbox-one";
+        default: return "xbox-series"; // 0B12/0B13/0B20/0B21/0B22 and newer
+        }
+    case 0x054C: // Sony
+        switch (aProduct)
+        {
+        case 0x05C4: case 0x09CC: case 0x0BA0: return "dualshock4";
+        default: return "dualsense"; // 0CE6, Edge 0DF2
+        }
+    case 0x057E: return "switch-pro"; // Nintendo (2009 Pro, Joy-Con pairs)
+    case 0x28DE: // Valve
+        switch (aProduct)
+        {
+        case 0x11FF: return nullptr; // Steam Input virtual gamepad
+        case 0x1205: return "steam-deck";
+        default: return "steam-controller";
+        }
+    default: return "generic";
+    }
+}
+
+std::string ControllerModel() noexcept
+{
     UINT count = 0;
     if (GetRawInputDeviceList(nullptr, &count, sizeof(RAWINPUTDEVICELIST)) != 0 || count == 0)
-        return "none";
+        return "xbox-series";
     std::vector<RAWINPUTDEVICELIST> devices(count);
     if (GetRawInputDeviceList(devices.data(), &count, sizeof(RAWINPUTDEVICELIST)) == static_cast<UINT>(-1))
-        return "none";
+        return "xbox-series";
 
-    std::string family = "none";
     for (const auto& device : devices)
     {
         if (device.dwType != RIM_TYPEHID)
@@ -84,18 +114,16 @@ std::string ControllerFamily() noexcept
         UINT size = sizeof(info);
         if (GetRawInputDeviceInfoW(device.hDevice, RIDI_DEVICEINFO, &info, &size) == static_cast<UINT>(-1))
             continue;
-        // Generic desktop page, joystick (4) or gamepad (5).
-        if (info.hid.usUsagePage != 0x01 || (info.hid.usUsage != 0x04 && info.hid.usUsage != 0x05))
+        // Generic desktop page, joystick (4) or gamepad (5), or Valve's vendor page for the Deck.
+        const bool gamepad = info.hid.usUsagePage == 0x01 && (info.hid.usUsage == 0x04 || info.hid.usUsage == 0x05);
+        const bool valve = info.hid.dwVendorId == 0x28DE;
+        if (!gamepad && !valve)
             continue;
-        switch (info.hid.dwVendorId)
-        {
-        case 0x054C: return "playstation";
-        case 0x057E: return "nintendo";
-        default: family = "xbox"; break;
-        }
+        if (const char* pModel = ModelFor(info.hid.dwVendorId, info.hid.dwProductId))
+            return pModel;
     }
-    // XInput pads (Xbox) are often not listed as HID joysticks.
-    return family == "none" ? "xbox" : family;
+    // Wired Xbox pads use the XUSB driver and are not HID devices.
+    return "xbox-series";
 }
 
 std::string Escape(const char* acText)
@@ -152,7 +180,7 @@ namespace ControlBindings
 {
 std::string BindingsJson() noexcept
 {
-    std::string json = "{\"controller\":\"" + ControllerFamily() + "\",\"bindings\":[";
+    std::string json = "{\"controller\":\"" + ControllerModel() + "\",\"bindings\":[";
     bool first = true;
     for (uint32_t device = 0; device < kDeviceCount; ++device)
     {

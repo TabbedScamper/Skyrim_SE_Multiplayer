@@ -19,6 +19,7 @@
 #include <Games/Skyrim/Interface/IMenu.h>
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
 #include <Games/Skyrim/Interface/ControlBindings.h>
+#include <Games/Skyrim/Audio/AudioPreview.h>
 
 #include <optional>
 
@@ -568,6 +569,12 @@ UINT GetRealACP()
 
 LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    if (uMsg == WM_TIMER && wParam == AudioPreview::kTimerId)
+    {
+        AudioPreview::Tick();
+        return 1;
+    }
+
     if (uMsg == cCursorUpdateMessage)
     {
         UpdateCursorOwnership(hwnd);

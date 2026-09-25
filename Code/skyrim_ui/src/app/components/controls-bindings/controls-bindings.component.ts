@@ -1,19 +1,10 @@
 import { Component, HostListener, OnDestroy, OnInit } from '@angular/core';
 import { Subject, takeUntil } from 'rxjs';
-import { ControlBinding, ControlBindingsState, ControllerFamily, InputDevice } from '../../models/control-bindings';
+import { ControlBinding, ControlBindingsState, InputDevice } from '../../models/control-bindings';
 import { ClientService } from '../../services/client.service';
 import { Sound, SoundService } from '../../services/sound.service';
-import { eventLabel, keyboardName, mouseName, PAD, padName } from './key-names';
-
-interface PadButton {
-  key: number;
-  side: 'left' | 'right';
-  /** Label row (viewBox units). */
-  labelY: number;
-  shape: 'trigger' | 'bumper' | 'small' | 'face' | 'stick' | 'dpad';
-  x: number;
-  y: number;
-}
+import { eventLabel, keyboardName, mouseName, padName } from './key-names';
+import { CONTROLLER_MODELS, ControllerModel, ControllerModelId, MODEL_CHOICES, PadButton } from './controller-models';
 
 interface ActionRow {
   event: string;
@@ -65,33 +56,77 @@ export class ControlsBindingsComponent implements OnInit, OnDestroy {
     this.destroy$.complete();
   }
 
-  get family(): ControllerFamily {
-    return this.state?.controller ?? 'xbox';
+  readonly modelChoices = MODEL_CHOICES;
+  /** '' = use the detected model. Remembered per PC. */
+  public modelOverride: ControllerModelId | '' = ControlsBindingsComponent.restoreOverride();
+
+  get detectedModel(): ControllerModel {
+    const id = (this.state?.controller ?? 'xbox-series') as ControllerModelId;
+    return CONTROLLER_MODELS[id] ?? CONTROLLER_MODELS['xbox-series'];
   }
 
-  /** Stick and D-pad swap places on PlayStation pads. */
+  get model(): ControllerModel {
+    return this.modelOverride ? CONTROLLER_MODELS[this.modelOverride] : this.detectedModel;
+  }
+
+  /**
+   * Callout rows are laid out here, not per model: each side keeps the model's
+   * top-to-bottom order but gets evenly spaced two-line rows, so labels never
+   * overlap and text can stay at the 13px floor.
+   */
   get buttons(): PadButton[] {
-    const ps = this.family === 'playstation';
-    const dpad = ps ? { x: 220, y: 165 } : { x: 265, y: 240 };
-    const leftStick = ps ? { x: 268, y: 240 } : { x: 220, y: 165 };
-    return [
-      { key: PAD.LeftTrigger, side: 'left', labelY: 40, shape: 'trigger', x: 215, y: 50 },
-      { key: PAD.LeftBumper, side: 'left', labelY: 76, shape: 'bumper', x: 215, y: 80 },
-      { key: PAD.Back, side: 'left', labelY: 112, shape: 'small', x: 290, y: 140 },
-      { key: PAD.LeftStick, side: 'left', labelY: 148, shape: 'stick', ...leftStick },
-      { key: PAD.DPadUp, side: 'left', labelY: 196, shape: 'dpad', x: dpad.x, y: dpad.y - 17 },
-      { key: PAD.DPadLeft, side: 'left', labelY: 230, shape: 'dpad', x: dpad.x - 17, y: dpad.y },
-      { key: PAD.DPadRight, side: 'left', labelY: 264, shape: 'dpad', x: dpad.x + 17, y: dpad.y },
-      { key: PAD.DPadDown, side: 'left', labelY: 298, shape: 'dpad', x: dpad.x, y: dpad.y + 17 },
-      { key: PAD.RightTrigger, side: 'right', labelY: 40, shape: 'trigger', x: 425, y: 50 },
-      { key: PAD.RightBumper, side: 'right', labelY: 76, shape: 'bumper', x: 425, y: 80 },
-      { key: PAD.Start, side: 'right', labelY: 112, shape: 'small', x: 350, y: 140 },
-      { key: PAD.Y, side: 'right', labelY: 148, shape: 'face', x: 425, y: 138 },
-      { key: PAD.X, side: 'right', labelY: 182, shape: 'face', x: 400, y: 163 },
-      { key: PAD.B, side: 'right', labelY: 216, shape: 'face', x: 450, y: 163 },
-      { key: PAD.A, side: 'right', labelY: 250, shape: 'face', x: 425, y: 188 },
-      { key: PAD.RightStick, side: 'right', labelY: 298, shape: 'stick', x: 372, y: 240 },
-    ];
+    const model = this.model;
+    if (this.layoutFor === model) return this.laidOut;
+    const place = (side: 'left' | 'right') => model.buttons
+      .filter(b => b.side === side)
+      .sort((a, b) => a.labelY - b.labelY)
+      .map((b, row) => ({ ...b, labelY: ControlsBindingsComponent.firstRow + row * ControlsBindingsComponent.rowStep }));
+    this.laidOut = [...place('left'), ...place('right')];
+    this.layoutFor = model;
+    return this.laidOut;
+  }
+
+  private static readonly firstRow = 24;
+  private static readonly rowStep = 41;
+  private layoutFor?: ControllerModel;
+  private laidOut: PadButton[] = [];
+
+  setModelOverride(id: ControllerModelId | ''): void {
+    this.modelOverride = id;
+    this.focusKey = undefined;
+    try {
+      localStorage.setItem(ControlsBindingsComponent.overrideKey, id);
+    } catch {
+      // Not remembered when storage is unavailable.
+    }
+  }
+
+  private static readonly overrideKey = 'controls.model';
+
+  private static restoreOverride(): ControllerModelId | '' {
+    try {
+      const saved = localStorage.getItem(ControlsBindingsComponent.overrideKey) as ControllerModelId | null;
+      return saved && saved in CONTROLLER_MODELS ? saved : '';
+    } catch {
+      return '';
+    }
+  }
+
+  /** SVG points for a PlayStation face symbol centred on the button. */
+  symbolPath(button: PadButton): string {
+    const { x, y } = button;
+    const glyph = button.glyph;
+    if (!glyph || !('symbol' in glyph)) return '';
+    switch (glyph.symbol) {
+      case 'triangle': return `M${x},${y - 7} L${x + 7},${y + 5} L${x - 7},${y + 5} Z`;
+      case 'square': return `M${x - 6},${y - 6} h12 v12 h-12 Z`;
+      case 'cross': return `M${x - 6},${y - 6} L${x + 6},${y + 6} M${x + 6},${y - 6} L${x - 6},${y + 6}`;
+      case 'circle': return `M${x - 7},${y} a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0`;
+    }
+  }
+
+  letterOf(button: PadButton): string {
+    return button.glyph && 'letter' in button.glyph ? button.glyph.letter : '';
   }
 
   /** Elbowed leader line from the button to its label column. */
@@ -102,7 +137,7 @@ export class ControlsBindingsComponent implements OnInit, OnDestroy {
   }
 
   padLabel(key: number): string {
-    return padName(key, this.family);
+    return padName(key, this.model.labels);
   }
 
   actionsOn(key: number): string {
@@ -116,7 +151,7 @@ export class ControlsBindingsComponent implements OnInit, OnDestroy {
     if (key === undefined || key === 0xff || key === 0xffff) return '-';
     if (device === InputDevice.Keyboard) return keyboardName(key);
     if (device === InputDevice.Mouse) return mouseName(key);
-    return padName(key, this.family);
+    return padName(key, this.model.labels);
   }
 
   isFocused(row: ActionRow): boolean {

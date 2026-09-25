@@ -153,6 +153,10 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             const String event = eventArgs->GetString(0).ToString().c_str();
             World::Get().GetGameSettingsService().QueueStartControlCapture(event, eventArgs->GetInt(1));
         }
+        else if (eventName == "audioPreviewKeepAlive")
+            World::Get().GetGameSettingsService().QueueAudioPreviewKeepAlive(eventArgs->GetString(0).ToString().c_str());
+        else if (eventName == "audioPreviewStop")
+            World::Get().GetGameSettingsService().QueueAudioPreviewStop();
         else if (eventName == "cancelControlCapture")
             World::Get().GetGameSettingsService().QueueCancelControlCapture();
         else if (eventName == "confirmDisplaySettings")

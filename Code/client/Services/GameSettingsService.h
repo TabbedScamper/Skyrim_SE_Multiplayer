@@ -60,6 +60,8 @@ struct GameSettingsService
     void QueueRequestControlBindings() noexcept;
     void QueueStartControlCapture(const String& acEvent, int aDevice) noexcept;
     void QueueCancelControlCapture() noexcept;
+    void QueueAudioPreviewKeepAlive(const String& acChannel) noexcept;
+    void QueueAudioPreviewStop() noexcept;
     void OnMainLoop() noexcept;
     void OnWindowSizeChanged(WPARAM aSizeType) noexcept;
 

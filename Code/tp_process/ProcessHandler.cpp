@@ -45,6 +45,8 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     CreateFunction("requestControlBindings");
     CreateFunction("startControlCapture");
     CreateFunction("cancelControlCapture");
+    CreateFunction("audioPreviewKeepAlive");
+    CreateFunction("audioPreviewStop");
     CreateFunction("confirmDisplaySettings");
     CreateFunction("applyGameSettings");
     CreateFunction("revertGameSettings");
