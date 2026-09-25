@@ -126,6 +126,7 @@ struct CharacterService
     void OnNotifyMount(const NotifyMount& acMessage) noexcept;
     void OnInitPackageEvent(const InitPackageEvent& acEvent) const noexcept;
     void OnNotifyNewPackage(const NotifyNewPackage& acMessage) const noexcept;
+    void UpdateLeaderScriptedPackage() noexcept;
     void OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept;
     void OnBeastFormChange(const BeastFormChangeEvent& acEvent) const noexcept;
     void OnAddExperienceEvent(const AddExperienceEvent& acEvent) noexcept;
@@ -168,6 +169,7 @@ private:
     entt::dispatcher& m_dispatcher;
     TransportService& m_transport;
     std::atomic<uint32_t> m_presentationDelayMs{300};
+    uint32_t m_lastLeaderScriptedPackage{};
     // Selected actor Serialize includes pose capture and the ordinary movement fields.
     mutable std::atomic<uint64_t> m_localPoseBatches{};
     mutable std::atomic<uint64_t> m_localPoseActors{};

@@ -43,6 +43,9 @@
 #include <Messages/ServerReferencesMoveRequest.h>
 #include <Games/Skyrim/Havok/VisualPoseMailbox.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
+#include <Services/EngineFixes.h>
+#include <AI/AIProcess.h>
+#include <Forms/TESPackage.h>
 #include <Messages/ClientReferencesMoveRequest.h>
 #include <Messages/CharacterSpawnRequest.h>
 #include <Messages/RequestFactionsChanges.h>
@@ -387,6 +390,13 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
     Actor::FlushPendingReset3D();
+    EngineFixes::OnFrame();
+    static uint64_t s_nextScriptedPackageMs = 0;
+    if (const auto packageNow = GetTickCount64(); packageNow >= s_nextScriptedPackageMs)
+    {
+        s_nextScriptedPackageMs = packageNow + 100;
+        UpdateLeaderScriptedPackage();
+    }
     PoseCopyAuthority::SetCurrentTick(m_transport.GetClock().GetCurrentTick());
     static uint64_t s_nextPoseRegistryMs = 0;
     if (const auto registryNow = GetTickCount64(); registryNow >= s_nextPoseRegistryMs)
@@ -1466,6 +1476,57 @@ void CharacterService::OnInitPackageEvent(const InitPackageEvent& acEvent) const
     m_transport.Send(request);
 }
 
+namespace
+{
+// PlayerCharacter::SetAIDriven (ID 40586; Game.SetPlayerAIDriven). The flag is bit 3 of +0xBEA.
+void SetPlayerAIDriven(PlayerCharacter* apPlayer, bool aDriven) noexcept
+{
+    TP_THIS_FUNCTION(TSetAIDriven, void, PlayerCharacter, bool);
+    POINTER_SKYRIMSE(TSetAIDriven, s_setAIDriven, 40586);
+    TiltedPhoques::ThisCall(s_setAIDriven, apPlayer, aDriven);
+}
+
+bool IsPlayerAIDriven(const PlayerCharacter* apPlayer) noexcept
+{
+    return (*(reinterpret_cast<const uint8_t*>(apPlayer) + 0xBEA) & 0x8) != 0;
+}
+
+// Whether this follower's player is currently mirroring the leader's scripted package.
+bool s_mirroringLeaderPackage = false;
+} // namespace
+
+// Scripted player movement (a quest or scene makes the player AI-driven and gives it a package:
+// the walk out of the Helgen cart, escorts, "follow me" scenes, mod cutscenes) runs from the
+// leader's scene or fragment, which the follower's copy may never start. The leader reports its
+// own player's scripted package as a package notification for its player; a follower applies the
+// same package to its own player, which then walks the same path to the same markers.
+void CharacterService::UpdateLeaderScriptedPackage() noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    auto* pPlayer = PlayerCharacter::Get();
+    if (!party.IsInParty() || !party.IsLeader() || party.GetSessionState() < 2 || !pPlayer)
+        return;
+    const auto* pProcess = pPlayer->currentProcess;
+    const uint32_t packageId = IsPlayerAIDriven(pPlayer) && pProcess && pProcess->package ? pProcess->package->formID : 0;
+    if (packageId == m_lastLeaderScriptedPackage)
+        return;
+    m_lastLeaderScriptedPackage = packageId;
+
+    auto view = m_world.view<FormIdComponent, LocalComponent>();
+    for (auto entity : view)
+    {
+        if (view.get<FormIdComponent>(entity).Id != 0x14)
+            continue;
+        NewPackageRequest request;
+        request.ActorId = view.get<LocalComponent>(entity).Id;
+        if (packageId && !m_world.GetModSystem().GetServerModId(packageId, request.PackageId.ModId, request.PackageId.BaseId))
+            return;
+        m_transport.Send(request);
+        spdlog::info("Leader player scripted package {:X} ({})", packageId, packageId ? "AI-driven" : "released");
+        return;
+    }
+}
+
 void CharacterService::OnNotifyNewPackage(const NotifyNewPackage& acMessage) const noexcept
 {
     auto remoteView = m_world.view<RemoteComponent, FormIdComponent>();
@@ -1481,6 +1542,29 @@ void CharacterService::OnNotifyNewPackage(const NotifyNewPackage& acMessage) con
 
     const TESForm* pForm = TESForm::GetById(formIdComponent.Id);
     Actor* pActor = Cast<Actor>(pForm);
+
+    const auto& party = m_world.GetPartyService();
+    if (pActor && pActor->GetExtension()->IsRemotePlayer() && party.IsInParty() && !party.IsLeader())
+    {
+        auto* pPlayer = PlayerCharacter::Get();
+        const uint32_t packageId = acMessage.PackageId.BaseId || acMessage.PackageId.ModId ?
+            World::Get().GetModSystem().GetGameId(acMessage.PackageId) : 0;
+        auto* pPackage = packageId ? Cast<TESPackage>(TESForm::GetById(packageId)) : nullptr;
+        if (pPlayer && pPackage)
+        {
+            SetPlayerAIDriven(pPlayer, true);
+            pPlayer->SetPackage(pPackage);
+            s_mirroringLeaderPackage = true;
+            spdlog::info("Follower player follows the leader's scripted package {:X}", packageId);
+        }
+        else if (pPlayer && s_mirroringLeaderPackage)
+        {
+            SetPlayerAIDriven(pPlayer, false);
+            s_mirroringLeaderPackage = false;
+            spdlog::info("Follower player released from the leader's scripted package");
+        }
+        return;
+    }
 
     const uint32_t cPackageFormId = World::Get().GetModSystem().GetGameId(acMessage.PackageId);
     const TESForm* pPackageForm = TESForm::GetById(cPackageFormId);

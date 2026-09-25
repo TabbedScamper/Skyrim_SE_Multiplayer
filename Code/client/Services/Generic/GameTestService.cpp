@@ -3971,6 +3971,28 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Error(id, "direct save is disabled after a paired cinematic hang; use gameplay_key quicksave after control handoff");
         if (command == "test_checkpoint_status")
             return Error(id, "direct save is disabled after a paired cinematic hang");
+        // An actor's 3D root and its parent chain (name, owning reference, world position).
+        if (command == "actor_3d_parent")
+        {
+            const auto form = GetJsonString(acLine, "form_id");
+            auto* pActor = form.empty() ? nullptr : Cast<Actor>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            if (!pActor || !pActor->GetNiNode())
+                return Error(id, "actor or 3D not found");
+            std::string chain = "[";
+            const NiAVObject* pNode = pActor->GetNiNode();
+            for (int depth = 0; pNode && depth < 12; ++depth, pNode = pNode->parent)
+            {
+                const auto* pOwner = static_cast<const TESObjectREFR*>(pNode->userData);
+                // NiObjectNET::name is the BSFixedString at +0x10.
+                const char* pName = *reinterpret_cast<const char* const*>(reinterpret_cast<const uint8_t*>(pNode) + 0x10);
+                chain += fmt::format("{}{{\"name\":\"{}\",\"owner\":{},\"world\":[{},{},{}]}}", depth ? "," : "",
+                    EscapeJson(pName ? pName : ""), pOwner ? pOwner->formID : 0,
+                    pNode->world.translate.x, pNode->world.translate.y, pNode->world.translate.z);
+            }
+            chain += "]";
+            return Result(id, fmt::format("\"position\":[{},{},{}],\"chain\":{}", pActor->position.x, pActor->position.y,
+                pActor->position.z, chain));
+        }
         // Host-driven bone playback: stats, and "enabled":"false" to compare against local animation.
         if (command == "pose_authority")
         {

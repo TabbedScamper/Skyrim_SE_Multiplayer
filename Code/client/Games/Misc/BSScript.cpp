@@ -224,6 +224,25 @@ BSScript::CallResult TP_MAKE_THISCALL(HookNativePapyrusCall, BSScript::NativeFun
             _stricmp(pName, "HideTitleSequenceMenu") == 0);
     if (isTitleCall)
         spdlog::info("Title sequence native enter {} tick={}", pName, GetTickCount64());
+    // Scripted player-state natives: which of these a quest/scene uses to drive the player
+    // (auto-walk, restraints, camera) decides what a follower must mirror.
+    if (pName && pObject)
+    {
+        static constexpr const char* s_scriptedPlayerNatives[] = {"SetPlayerAIDriven", "EvaluatePackage", "PathToReference",
+            "SetDontMove", "SetRestrained", "ForceThirdPerson", "ForceFirstPerson", "PlayIdle", "MoveTo", "TranslateTo",
+            "SetGhost", "SetAlpha", "KeepOffsetFromActor", "ClearKeepOffsetFromActor", "SetVehicle", "SetCameraTarget",
+            "SetPlayerControls", "SetInChargen", "ShowRaceMenu"};
+        for (const char* pWatched : s_scriptedPlayerNatives)
+        {
+            if (_stricmp(pName, pWatched) == 0)
+            {
+                static std::atomic<uint32_t> s_scriptedSamples{0};
+                if (s_scriptedSamples.fetch_add(1, std::memory_order_relaxed) < 400)
+                    spdlog::info("Scripted player native {}::{} tick={}", pObject, pName, GetTickCount64());
+                break;
+            }
+        }
+    }
     const bool isDisableControls = pName && pObject && _stricmp(pObject, "game") == 0 &&
         _stricmp(pName, "DisablePlayerControls") == 0;
     const bool isEnableControls = pName && pObject && _stricmp(pObject, "game") == 0 &&
