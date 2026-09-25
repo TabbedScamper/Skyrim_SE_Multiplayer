@@ -1,5 +1,5 @@
 <div class="settings-shell">
-  <nav class="sections" role="tablist" aria-label="Settings sections">
+  <nav class="sections" role="tablist" aria-label="Settings sections" data-nav-tabs>
     <button
       *ngFor="let section of sections"
       role="tab"
@@ -14,7 +14,7 @@
     </button>
   </nav>
 
-  <div class="panel" role="tabpanel">
+  <div class="panel" role="tabpanel" data-nav-content>
     <ng-container *ngIf="gameSettings as game; else loadingGame">
       <!-- Display -->
       <section *ngIf="activeSection === 'display'">
@@ -78,7 +78,7 @@
           <div class="row-label"><label [for]="audio.key">{{ audio.label }}</label><small>{{ audio.hint }}</small></div>
           <div class="slider">
             <input type="range" [id]="audio.key" min="0" max="1" step="0.05" [ngModel]="$any(game)[audio.key]" (ngModelChange)="preview($any(audio.key), $event)"
-              (pointerdown)="startAudioPreview(audio.key)" (pointerup)="stopAudioPreview()" (pointercancel)="stopAudioPreview()" (blur)="stopAudioPreview()" />
+              data-nav-a="Preview" (gamepadadjust)="nudgeAudioPreview(audio.key)" (pointerdown)="startAudioPreview(audio.key)" (pointerup)="stopAudioPreview()" (pointercancel)="stopAudioPreview()" (blur)="stopAudioPreview()" />
             <output>{{ $any(game)[audio.key] * 100 | number: '1.0-0' }}%</output>
           </div>
         </div>
@@ -223,17 +223,17 @@
 
 <footer class="actions">
   <span class="autosave">Changes apply and save immediately.</span>
-  <button data-style-ornament="simple" (click)="resetDefaults()">Restore defaults</button>
+  <button data-style-ornament="simple" data-nav-y="Restore defaults" (click)="resetDefaults()">Restore defaults</button>
   <button data-style-ornament="simple" class="btnClose" (click)="close()">Done</button>
 </footer>
 
-<div class="display-confirm-backdrop" *ngIf="displayPreviewSeconds">
+<div class="display-confirm-backdrop" *ngIf="displayPreviewSeconds" data-nav-scope="modal">
   <div class="display-confirm" role="dialog" aria-modal="true" aria-labelledby="display-confirm-title">
     <h2 id="display-confirm-title">Keep these display settings?</h2>
     <p>Reverting to the previous resolution and window mode in {{ displayPreviewSeconds }} seconds.</p>
     <div class="confirm-actions">
-      <button data-style-ornament="simple" (click)="revertDisplaySettings()">Revert</button>
-      <button data-style-ornament="simple" (click)="keepDisplaySettings()">Keep changes</button>
+      <button data-style-ornament="simple" data-nav-x="Revert" (click)="revertDisplaySettings()">Revert</button>
+      <button data-style-ornament="simple" data-nav-default (click)="keepDisplaySettings()">Keep changes</button>
     </div>
   </div>
 </div>

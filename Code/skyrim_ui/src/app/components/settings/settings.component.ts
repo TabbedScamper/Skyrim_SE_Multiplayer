@@ -1,4 +1,4 @@
-import { Component, ElementRef, EventEmitter, HostListener, OnDestroy, Output } from '@angular/core';
+import { Component, ElementRef, EventEmitter, HostBinding, HostListener, OnDestroy, Output } from '@angular/core';
 import { TranslocoService } from '@ngneat/transloco';
 import { lastValueFrom, map, Observable, Subscription } from 'rxjs';
 import { Tag } from 'src/app/models/tag';
@@ -130,32 +130,16 @@ export class SettingsComponent implements OnDestroy {
     this.client.requestGameSettings();
   }
 
-  @HostListener('keydown.arrowdown', ['$event'])
-  focusNext(event: KeyboardEvent): void {
-    this.moveFocus(1, event);
-  }
+  /** Controller navigation surface (GamepadNavigationService); movement is spatial there. */
+  @HostBinding('attr.data-nav-scope') readonly navScope = '';
 
-  @HostListener('keydown.arrowup', ['$event'])
-  focusPrevious(event: KeyboardEvent): void {
-    this.moveFocus(-1, event);
-  }
-
-  private moveFocus(direction: number, event: KeyboardEvent): void {
-    if (event.defaultPrevented) return;
-    const focusable = Array.from(
-      this.elementRef.nativeElement.querySelectorAll<HTMLElement>(
-        'app-dropdown, input:not([disabled]), button:not([disabled])',
-      ),
-    ).filter(element => element.offsetParent !== null);
-    if (!focusable.length) return;
-    const current = focusable.indexOf(document.activeElement as HTMLElement);
-    const next = current < 0
-      ? (direction > 0 ? 0 : focusable.length - 1)
-      : (current + direction + focusable.length) % focusable.length;
-    focusable[next].focus();
-    focusable[next].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    event.preventDefault();
-    event.stopPropagation();
+  /**
+   * A controller step (or A) on a volume slider: play that channel for a moment.
+   * The native preview stops by itself ~1.5 s after the last keep-alive.
+   */
+  nudgeAudioPreview(channel: string): void {
+    if (this.previewKeepAlive) return;
+    this.client.audioPreviewKeepAlive(channel);
   }
 
   /** Keeps the live audio preview going while a volume slider is held. */

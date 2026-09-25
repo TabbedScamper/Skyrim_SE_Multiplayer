@@ -40,6 +40,13 @@ let dropdownCounter = 1;
 export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
   @HostBinding('attr.tabindex') tabindex = 0;
   @HostBinding('attr.role') role = 'combobox';
+  /** Read by GamepadNavigationService: an open list takes up/down, B closes it. */
+  @HostBinding('attr.aria-expanded') get expanded(): string {
+    return this.isOpen ? 'true' : 'false';
+  }
+  @HostBinding('class.disabled') get disabledClass(): boolean {
+    return this.isDisabled;
+  }
   dropdownCounter = dropdownCounter++;
   isOpen = false;
   isDisabled = false;
@@ -100,7 +107,11 @@ export class DropdownComponent implements AfterViewInit, ControlValueAccessor {
   keydownHandler(event: KeyboardEvent) {
     if (this.isDisabled) return;
 
-    if (event.key === ' ' || event.key === 'Enter') {
+    if (event.key === 'Escape' || event.key === 'Esc') {
+      // Close only the list; the menu behind it stays open.
+      if (!this.isOpen) return;
+      this.toggle();
+    } else if (event.key === ' ' || event.key === 'Enter') {
       if (this.isOpen && this.selected >= 0) {
         const option = this.options.getValue()[this.selected];
         if (option) this.optionSelect(option.value, this.selected);

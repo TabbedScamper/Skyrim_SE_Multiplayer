@@ -6,6 +6,7 @@ import { animation } from './popup.animation';
   templateUrl: './popup.component.html',
   styleUrls: ['./popup.component.scss'],
   animations: [animation],
-  host: { '[@popup]': 'true' },
+  // Every popup is a controller navigation surface (GamepadNavigationService).
+  host: { '[@popup]': 'true', 'data-nav-scope': '' },
 })
 export class PopupComponent {}

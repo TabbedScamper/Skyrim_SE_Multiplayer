@@ -12,6 +12,7 @@ import {
   fontSizeToPixels,
 } from '../../services/setting.service';
 import { Sound, SoundService } from '../../services/sound.service';
+import { GamepadNavigationService } from '../../services/gamepad-navigation.service';
 import { UiRepository } from '../../store/ui.repository';
 import { ChatComponent } from '../chat/chat.component';
 import { GroupComponent } from '../group/group.component';
@@ -58,6 +59,8 @@ export class RootComponent implements OnInit {
     private readonly destroy$: DestroyService,
     private readonly client: ClientService,
     private readonly sound: SoundService,
+    // Created here so controller navigation is live from the first menu.
+    private readonly gamepadNavigation: GamepadNavigationService,
     private readonly uiRepository: UiRepository,
     private readonly translocoService: TranslocoService,
     private readonly settingService: SettingService,

@@ -88,6 +88,10 @@ export class ClientService implements OnDestroy {
   public displayPreviewStarted = new Subject<void>();
   public displayPreviewReverted = new Subject<void>();
   public gameSettingsApplied = new Subject<void>();
+  /** Controller actions from the game's XInput poll (OverlayService.cpp): up/down/left/right, a, b, x, y, lb, rb, lt, rt, start, view, ls, rs. */
+  public gamepadInput = new Subject<{ action: string; repeat: boolean }>();
+  /** Right-stick scroll, in pixels (positive scrolls down). */
+  public gamepadScroll = new Subject<number>();
   public debugPrompt = new Subject<string>();
   public debugPromptCancelled = new Subject<void>();
   public debugPromptSubmitted = new Subject<void>();
@@ -195,6 +199,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('displayPreviewStarted', () => this.zone.run(() => this.displayPreviewStarted.next()));
     skyrimtogether.on('displayPreviewReverted', () => this.zone.run(() => this.displayPreviewReverted.next()));
     skyrimtogether.on('gameSettingsApplied', () => this.zone.run(() => this.gameSettingsApplied.next()));
+    skyrimtogether.on('gamepadInput', (action: string, repeat: boolean) =>
+      this.zone.run(() => this.gamepadInput.next({ action, repeat: !!repeat })));
+    skyrimtogether.on('gamepadScroll', (amount: number) => this.zone.run(() => this.gamepadScroll.next(amount)));
     skyrimtogether.on('debugPrompt', (message: string, noteOnly: boolean) =>
       this.zone.run(() => this.debugPrompt.next(`${noteOnly ? 'report' : 'check'}\n${message}`)));
     skyrimtogether.on('cancelDebugPrompt', () =>
@@ -247,6 +254,8 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('displayPreviewStarted');
     skyrimtogether.off('displayPreviewReverted');
     skyrimtogether.off('gameSettingsApplied');
+    skyrimtogether.off('gamepadInput');
+    skyrimtogether.off('gamepadScroll');
   }
 
   /**

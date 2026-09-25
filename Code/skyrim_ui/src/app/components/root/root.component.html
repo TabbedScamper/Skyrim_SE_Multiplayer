@@ -1,4 +1,4 @@
-<div *ngIf="debugPromptText" class="debug-feedback-backdrop">
+<div *ngIf="debugPromptText" class="debug-feedback-backdrop" data-nav-scope="modal">
   <app-window class="debug-feedback-dialog" border="strip">
     <h2>{{ debugFeedbackTitle }}</h2>
     <p>{{ debugPromptText }}</p>
@@ -153,3 +153,6 @@
     <app-error></app-error>
   </div>
 </ng-container>
+
+<!-- controller button prompts for whichever menu has focus -->
+<app-gamepad-prompts></app-gamepad-prompts>

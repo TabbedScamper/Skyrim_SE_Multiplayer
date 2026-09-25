@@ -253,6 +253,8 @@ interface SkyrimTogether {
   on(event: 'displayPreviewStarted', callback: SkyrimTogetherTypes.VoidCallback): void;
   on(event: 'displayPreviewReverted', callback: SkyrimTogetherTypes.VoidCallback): void;
   on(event: 'gameSettingsApplied', callback: SkyrimTogetherTypes.VoidCallback): void;
+  on(event: 'gamepadInput', callback: (action: string, repeat: boolean) => void): void;
+  on(event: 'gamepadScroll', callback: (amount: number) => void): void;
 
   /** Remove listener from when the application is first initialized. */
   off(event: 'init', callback?: SkyrimTogetherTypes.InitCallback): void;
@@ -397,6 +399,8 @@ interface SkyrimTogether {
   off(event: 'displayPreviewStarted', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'displayPreviewReverted', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'gameSettingsApplied', callback?: SkyrimTogetherTypes.VoidCallback): void;
+  off(event: 'gamepadInput', callback?: (action: string, repeat: boolean) => void): void;
+  off(event: 'gamepadScroll', callback?: (amount: number) => void): void;
 
   /**
    * Connect to server at given address and port.

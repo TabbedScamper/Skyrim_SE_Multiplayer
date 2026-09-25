@@ -26,7 +26,7 @@
         </li>
       </ul>
 
-      <button *ngIf="steam.lobbyId" class="wide" data-style-ornament="simple" (click)="invite()">Invite a friend</button>
+      <button *ngIf="steam.lobbyId" class="wide" data-style-ornament="simple" data-nav-x="Invite" (click)="invite()">Invite a friend</button>
 
       <div *ngIf="steam.isHost && isLeader()" class="access">
         <label class="switch-row">
@@ -117,8 +117,8 @@
     <button class="back" data-style-ornament="simple" (click)="close()">Back</button>
     <span class="status" *ngIf="steam.lobbyId && lobby.sessionState === 0">{{ isLeader() ? (startBlocker() || 'Everyone is ready.') : (ready ? 'Waiting for the host to start.' : 'Ready up when you are set.') }}</span>
     <ng-container *ngIf="steam.lobbyId && lobby.sessionState === 0">
-      <button class="ready" data-style-ornament="inverted" [attr.data-style-active]="ready" [class.selected]="ready" [disabled]="!connected" (click)="toggleReady()">{{ ready ? 'Ready' : 'Ready up' }}</button>
-      <button *ngIf="isLeader()" class="primary" data-style-ornament="inverted" [disabled]="!canStart()" (click)="start()">Start together</button>
+      <button class="ready" data-style-ornament="inverted" [attr.data-nav-y]="ready ? 'Not ready' : 'Ready'" [attr.data-style-active]="ready" [class.selected]="ready" [disabled]="!connected" (click)="toggleReady()">{{ ready ? 'Ready' : 'Ready up' }}</button>
+      <button *ngIf="isLeader()" class="primary" data-style-ornament="inverted" data-nav-start="Start together" [disabled]="!canStart()" (click)="start()">Start together</button>
     </ng-container>
   </footer>
 </div>

@@ -338,3 +338,52 @@ hr {
     margin-right: -100%;
   }
 }
+
+// ---- controller navigation (GamepadNavigationService sets body.gamepad-mode) ----
+// Skyrim marks the selected entry with its arrow ornaments and brighter text;
+// the focused row gets a soft band so sliders, checkboxes and dropdowns read
+// as selected too.
+body.gamepad-mode {
+  cursor: none;
+
+  button:focus,
+  summary:focus {
+    outline: none;
+    opacity: 1 !important;
+    color: #fff;
+    text-shadow: 0 0 0.45rem rgba(255, 255, 255, 0.75);
+  }
+
+  button[data-style-ornament]:focus {
+    &::before,
+    &::after {
+      opacity: 1 !important;
+      transform: translateX(0) !important;
+    }
+  }
+
+  button:not([data-style-ornament]):focus,
+  summary:focus,
+  app-dropdown:focus,
+  input:focus {
+    outline: 1px solid rgba(255, 255, 255, 0.85);
+    outline-offset: 3px;
+  }
+
+  input[type='range']:focus {
+    outline: none;
+  }
+
+  .nav-row {
+    background: linear-gradient(to right, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.09) 18%,
+        rgba(255, 255, 255, 0.09) 82%, rgba(255, 255, 255, 0));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(255, 255, 255, 0.18);
+
+    label,
+    .row-label label,
+    .action-name {
+      color: #fff;
+      text-shadow: 0 0 0.4rem rgba(255, 255, 255, 0.6);
+    }
+  }
+}

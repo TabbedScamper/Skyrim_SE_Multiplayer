@@ -127,7 +127,7 @@ void PollControllerNavigation(OverlayApp* apOverlay, bool aActive)
         XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT;
     const WORD pressed = buttons & ~s_previous;
     const auto now = std::chrono::steady_clock::now();
-    WORD triggered = pressed;
+    WORD repeated = 0;
     const WORD heldNavigation = buttons & navigation;
     if (heldNavigation != s_repeating)
     {
@@ -136,24 +136,75 @@ void PollControllerNavigation(OverlayApp* apOverlay, bool aActive)
     }
     else if (heldNavigation && now >= s_nextRepeat)
     {
-        triggered |= heldNavigation;
+        repeated = heldNavigation;
         s_nextRepeat = now + 110ms;
     }
 
-    if (triggered & XINPUT_GAMEPAD_DPAD_UP)
-        InjectControllerKey(apOverlay, VK_UP);
-    else if (triggered & XINPUT_GAMEPAD_DPAD_DOWN)
-        InjectControllerKey(apOverlay, VK_DOWN);
-    if (triggered & XINPUT_GAMEPAD_DPAD_LEFT)
-        InjectControllerKey(apOverlay, VK_LEFT);
-    else if (triggered & XINPUT_GAMEPAD_DPAD_RIGHT)
-        InjectControllerKey(apOverlay, VK_RIGHT);
-    if (pressed & XINPUT_GAMEPAD_A)
-        InjectControllerKey(apOverlay, VK_SPACE);
-    if (pressed & XINPUT_GAMEPAD_B)
-        InjectControllerKey(apOverlay, VK_ESCAPE);
+    // The overlay's GamepadNavigationService owns what each button means
+    // (spatial focus, back, section switching, value changes, prompts), so
+    // actions are sent by name rather than as synthetic keys.
+    bool any = false;
+    const auto send = [&](const char* acAction, bool aRepeat)
+    {
+        auto pArguments = CefListValue::Create();
+        pArguments->SetString(0, acAction);
+        pArguments->SetBool(1, aRepeat);
+        apOverlay->ExecuteAsync("gamepadInput", pArguments);
+        any = true;
+    };
+    const auto direction = [&](WORD aBit, const char* acAction)
+    {
+        if (pressed & aBit)
+            send(acAction, false);
+        else if (repeated & aBit)
+            send(acAction, true);
+    };
+    // One vertical and one horizontal step at most per poll.
+    if ((pressed | repeated) & XINPUT_GAMEPAD_DPAD_UP)
+        direction(XINPUT_GAMEPAD_DPAD_UP, "up");
+    else
+        direction(XINPUT_GAMEPAD_DPAD_DOWN, "down");
+    if ((pressed | repeated) & XINPUT_GAMEPAD_DPAD_LEFT)
+        direction(XINPUT_GAMEPAD_DPAD_LEFT, "left");
+    else
+        direction(XINPUT_GAMEPAD_DPAD_RIGHT, "right");
 
-    if (triggered || (pressed & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B)))
+    constexpr std::pair<WORD, const char*> cButtons[]{
+        {XINPUT_GAMEPAD_A, "a"}, {XINPUT_GAMEPAD_B, "b"}, {XINPUT_GAMEPAD_X, "x"}, {XINPUT_GAMEPAD_Y, "y"},
+        {XINPUT_GAMEPAD_LEFT_SHOULDER, "lb"}, {XINPUT_GAMEPAD_RIGHT_SHOULDER, "rb"},
+        {XINPUT_GAMEPAD_START, "start"}, {XINPUT_GAMEPAD_BACK, "view"},
+        {XINPUT_GAMEPAD_LEFT_THUMB, "ls"}, {XINPUT_GAMEPAD_RIGHT_THUMB, "rs"}};
+    for (const auto& [bit, name] : cButtons)
+        if (pressed & bit)
+            send(name, false);
+
+    static bool s_navLeftTrigger = false;
+    static bool s_navRightTrigger = false;
+    if (leftTrigger && !s_navLeftTrigger)
+        send("lt", false);
+    if (rightTrigger && !s_navRightTrigger)
+        send("rt", false);
+    s_navLeftTrigger = leftTrigger;
+    s_navRightTrigger = rightTrigger;
+
+    // Right stick scrolls the focused panel, proportional to deflection.
+    static auto s_lastScroll = now;
+    const float ry = state.Gamepad.sThumbRY / 32767.f;
+    const float deadzone = XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE / 32767.f;
+    if (std::abs(ry) > deadzone && now - s_lastScroll >= 16ms)
+    {
+        const float seconds = std::min(0.1f, std::chrono::duration<float>(now - s_lastScroll).count());
+        const float amount = (std::abs(ry) - deadzone) / (1.f - deadzone);
+        auto pArguments = CefListValue::Create();
+        pArguments->SetDouble(0, -std::copysign(amount * amount * 1400.f * seconds, ry));
+        apOverlay->ExecuteAsync("gamepadScroll", pArguments);
+        s_lastScroll = now;
+        any = true;
+    }
+    else if (std::abs(ry) <= deadzone)
+        s_lastScroll = now;
+
+    if (any)
     {
         InputService::NotifyControllerInput();
         if (const auto client = apOverlay->GetClient())

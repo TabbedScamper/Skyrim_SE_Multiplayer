@@ -1,0 +1,27 @@
+<ng-container *ngIf="nav.active$ | async">
+  <div class="prompts" *ngIf="nav.prompts$ | async as prompts" [class.empty]="!prompts.length" role="note" aria-label="Controller buttons">
+    <span class="prompt" *ngFor="let prompt of prompts; trackBy: trackPrompt">
+      <ng-container *ngFor="let glyph of glyphs(prompt.button, nav.model$ | async)">
+        <svg *ngIf="glyph.kind === 'face'" class="glyph face" viewBox="0 0 28 28" aria-hidden="true">
+          <circle cx="14" cy="14" r="12.5" />
+          <text *ngIf="glyph.text" x="14" y="19.2">{{ glyph.text }}</text>
+          <path *ngIf="glyph.symbol === 'cross'" class="symbol" d="M9,9 L19,19 M19,9 L9,19" />
+          <circle *ngIf="glyph.symbol === 'circle'" class="symbol" cx="14" cy="14" r="5.5" />
+          <rect *ngIf="glyph.symbol === 'square'" class="symbol" x="9" y="9" width="10" height="10" />
+          <path *ngIf="glyph.symbol === 'triangle'" class="symbol" d="M14,7.8 L20,18.6 L8,18.6 Z" />
+        </svg>
+        <span *ngIf="glyph.kind === 'pill'" class="glyph pill">{{ glyph.text }}</span>
+        <svg *ngIf="glyph.kind === 'dpad-lr'" class="glyph dpad" viewBox="0 0 40 28" aria-hidden="true">
+          <path class="arm" d="M2,9 h12 l6,5 l-6,5 h-12 Z M38,9 h-12 l-6,5 l6,5 h12 Z" />
+          <path class="arrow" d="M5,14 l5,-3.5 v7 Z M35,14 l-5,-3.5 v7 Z" />
+        </svg>
+        <svg *ngIf="glyph.kind === 'stick'" class="glyph face" viewBox="0 0 28 28" aria-hidden="true">
+          <circle cx="14" cy="14" r="12.5" />
+          <circle class="ring" cx="14" cy="14" r="9" />
+          <text x="14" y="18.6" class="small">{{ glyph.text }}</text>
+        </svg>
+      </ng-container>
+      <span class="label">{{ prompt.label }}</span>
+    </span>
+  </div>
+</ng-container>

@@ -1,4 +1,4 @@
-import { Component, EventEmitter, HostListener, OnDestroy, OnInit, Output } from '@angular/core';
+import { Component, EventEmitter, HostBinding, HostListener, OnDestroy, OnInit, Output } from '@angular/core';
 import { Subject, takeUntil } from 'rxjs';
 import { CoopLobbyState } from '../../models/coop-lobby-state';
 import { SteamLobbyState } from '../../models/steam-lobby-state';
@@ -64,6 +64,9 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
     this.destroy$.complete();
   }
 
+  /** Controller navigation surface (GamepadNavigationService). Arrow keys move spatially there. */
+  @HostBinding('attr.data-nav-scope') readonly navScope = '';
+
   @HostListener('document:keydown', ['$event'])
   public navigateWithKeyboard(event: KeyboardEvent): void {
     if (event.key === 'Escape' || event.key === 'Esc') {
@@ -83,23 +86,6 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
       return;
     }
 
-    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-
-    if (active?.tagName === 'INPUT' && !['button', 'checkbox', 'radio'].includes(active.type)) return;
-
-    const controls = Array.from(document.querySelectorAll<HTMLElement>(
-      '.coop-lobby button:not(:disabled), .coop-lobby input:not(:disabled), .coop-lobby summary'))
-      .filter(control => control.offsetParent !== null);
-    if (controls.length === 0) return;
-
-    const current = controls.indexOf(document.activeElement as HTMLElement);
-    const direction = event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1;
-    const next = current < 0
-      ? (direction > 0 ? 0 : controls.length - 1)
-      : (current + direction + controls.length) % controls.length;
-    controls[next].focus();
-    event.preventDefault();
-    event.stopPropagation();
   }
 
   public host(): void {

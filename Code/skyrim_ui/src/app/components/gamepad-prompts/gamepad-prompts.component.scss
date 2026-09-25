@@ -1,0 +1,116 @@
+// Skyrim's own prompt row: white glyphs and small-caps labels on a dark band.
+:host {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.prompts {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.6rem;
+  padding: 1.6rem 1rem 1.1rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.85) 20%, rgba(0, 0, 0, 0));
+  animation: rise 160ms ease-out;
+
+  &.empty {
+    display: none;
+  }
+}
+
+.prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.label {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: max(13px, 0.95em);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-shadow: 0 1px 3px #000;
+}
+
+.glyph {
+  flex: 0 0 auto;
+  filter: drop-shadow(0 1px 2px #000);
+}
+
+svg.face {
+  width: 1.9rem;
+  height: 1.9rem;
+  min-width: 26px;
+  min-height: 26px;
+
+  circle {
+    fill: rgba(0, 0, 0, 0.55);
+    stroke: #fff;
+    stroke-width: 1.6;
+  }
+
+  .ring {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.45);
+    stroke-width: 1;
+  }
+
+  text {
+    fill: #fff;
+    font-size: 15px;
+    font-weight: bold;
+    text-anchor: middle;
+
+    &.small {
+      font-size: 13px;
+    }
+  }
+
+  .symbol {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 1.8;
+  }
+}
+
+svg.dpad {
+  width: 2.7rem;
+  height: 1.9rem;
+  min-width: 37px;
+  min-height: 26px;
+
+  .arm {
+    fill: rgba(0, 0, 0, 0.55);
+    stroke: #fff;
+    stroke-width: 1.4;
+    stroke-linejoin: round;
+  }
+
+  .arrow {
+    fill: #fff;
+  }
+}
+
+.pill {
+  min-width: 2.2rem;
+  padding: 0.12rem 0.55rem;
+  border: 1.6px solid #fff;
+  border-radius: 0.8rem 0.8rem 0.35rem 0.35rem;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: max(13px, 0.8em);
+  font-weight: bold;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+}
