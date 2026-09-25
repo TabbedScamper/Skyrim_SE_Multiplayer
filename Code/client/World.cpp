@@ -27,6 +27,7 @@
 #include <Services/GameTestService.h>
 #include <Services/CameraService.h>
 #include <Services/SceneTimelineService.h>
+#include <Services/CorpseRagdollService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -157,6 +158,7 @@ World::World()
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<CorpseRagdollService>(*this, m_dispatcher, m_transport);
     ctx().emplace<ActorValueService>(*this, m_dispatcher, m_transport);
     ctx().emplace<InventoryService>(*this, m_dispatcher, m_transport);
     ctx().emplace<MagicService>(*this, m_dispatcher, m_transport);

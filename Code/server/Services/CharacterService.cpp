@@ -40,6 +40,8 @@
 #include <Messages/SubtitleRequest.h>
 #include <Messages/NotifySubtitle.h>
 #include <Messages/NotifyActorTeleport.h>
+#include <Messages/CorpseRagdollRequest.h>
+#include <Messages/NotifyCorpseRagdoll.h>
 
 #include <Setting.h>
 namespace
@@ -68,6 +70,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher)
     , m_removeCharacterConnection(aDispatcher.sink<CharacterRemoveEvent>().connect<&CharacterService::OnCharacterRemoveEvent>(this))
     , m_characterSpawnedConnection(aDispatcher.sink<CharacterSpawnedEvent>().connect<&CharacterService::OnCharacterSpawned>(this))
     , m_referenceMovementSnapshotConnection(aDispatcher.sink<PacketEvent<ClientReferencesMoveRequest>>().connect<&CharacterService::OnReferencesMoveRequest>(this))
+    , m_corpseRagdollConnection(aDispatcher.sink<PacketEvent<CorpseRagdollRequest>>().connect<&CharacterService::OnCorpseRagdoll>(this))
     , m_factionsChangesConnection(aDispatcher.sink<PacketEvent<RequestFactionsChanges>>().connect<&CharacterService::OnFactionsChanges>(this))
     , m_mountConnection(aDispatcher.sink<PacketEvent<MountRequest>>().connect<&CharacterService::OnMountRequest>(this))
     , m_newPackageConnection(aDispatcher.sink<PacketEvent<NewPackageRequest>>().connect<&CharacterService::OnNewPackageRequest>(this))
@@ -461,6 +464,32 @@ void CharacterService::OnCharacterSpawned(const CharacterSpawnedEvent& acEvent) 
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
 
     GameServer::Get()->GetWorld().GetScriptService().HandleCharacterSpawn(acEvent.Entity);
+}
+
+void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& acMessage) const noexcept
+{
+    // Only the corpse's owner defines its ragdoll; relay a complete, sane body set or nothing.
+    OwnerView<CellIdComponent> view(m_world, acMessage.GetSender());
+    const auto entity = static_cast<entt::entity>(acMessage.Packet.ServerId);
+    if (view.find(entity) == std::end(view))
+        return;
+    const auto& bodies = acMessage.Packet.Bodies;
+    if (bodies.empty() || bodies.size() > CorpseRagdollRequest::kMaxBodies)
+        return;
+    for (const auto& body : bodies)
+    {
+        float norm = 0.f;
+        for (const float value : body.Rotation)
+            norm += value * value;
+        if (!std::all_of(std::begin(body.Position), std::end(body.Position), [](float v) { return std::isfinite(v) && std::abs(v) < 2000.f; }) ||
+            !std::isfinite(norm) || std::abs(norm - 1.f) > 0.01f)
+            return;
+    }
+
+    NotifyCorpseRagdoll notify{};
+    notify.ServerId = acMessage.Packet.ServerId;
+    notify.Bodies = bodies;
+    GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
 }
 
 void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReferencesMoveRequest>& acMessage) const noexcept
