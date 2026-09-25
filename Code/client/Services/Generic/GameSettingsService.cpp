@@ -32,22 +32,12 @@ float Clamp(float aValue, float aMinimum, float aMaximum)
     return std::max(aMinimum, std::min(aValue, aMaximum));
 }
 
-void SetSoundCategoryVolume(TESForm* apCategory, float aValue)
+// Same call the vanilla Audio menu makes (OptionChange with the category form
+// ID as option). Setting the category directly only stored the value: live
+// sounds, including the menu music, kept their level.
+void SetSoundCategoryVolume(uint32_t aCategoryFormId, float aValue)
 {
-    if (!apCategory)
-        return;
-
-    // BGSSoundCategory's BSISoundCategory interface begins at +0x30 in the
-    // verified CommonLibSSE-NG AE layout. Virtual slot 3 is the engine's
-    // SetCategoryVolume method used by the vanilla Audio options page. Unlike
-    // changing fValN/fAudioMasterVolume, this updates the active mixer graph.
-    auto* pInterface = reinterpret_cast<uint8_t*>(apCategory) + 0x30;
-    auto* pVtable = *reinterpret_cast<uintptr_t**>(pInterface);
-    if (!pVtable)
-        return;
-
-    using TSetCategoryVolume = void(void*, float);
-    reinterpret_cast<TSetCategoryVolume*>(pVtable[3])(pInterface, Clamp(aValue, 0.f, 1.f));
+    AudioPreview::SetCategoryVolumeVanilla(aCategoryFormId, Clamp(aValue, 0.f, 1.f));
 }
 
 // The native Journal Menu OptionChange handler has a dedicated path for the
@@ -795,7 +785,7 @@ void GameSettingsService::ApplyRuntime(const GameSettingsSnapshot& acSettings, b
         const auto key = GetAudioValueKey(path, category);
         if (!key.empty())
             SetFloatSetting(key.c_str(), Clamp(value, 0.f, 1.f));
-        SetSoundCategoryVolume(TESForm::GetById(category), value);
+        SetSoundCategoryVolume(category, value);
     }
     SetFloatSetting("fGamma:Display", Clamp(acSettings.Gamma, 0.5f, 1.5f));
     // Address Library 388988 is the live fGamma data used by the vanilla

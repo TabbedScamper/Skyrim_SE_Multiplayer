@@ -3,9 +3,7 @@
 #include <Games/Skyrim/Audio/AudioPreview.h>
 
 #include <BSGraphics/BSGraphicsRenderer.h>
-#include <Camera/PlayerCamera.h>
 #include <Forms/TESForm.h>
-#include <NetImmerse/NiNode.h>
 
 #include <random>
 #include <vector>
@@ -94,24 +92,18 @@ void* CategoryInterface(uint32_t aFormId) noexcept
     return pForm ? reinterpret_cast<uint8_t*>(pForm) + 0x30 : nullptr;
 }
 
-float GetCategoryVolume(void* apInterface) noexcept
+void SetCategoryVolume(uint32_t aFormId, float aValue) noexcept
 {
-    auto* pVtable = *reinterpret_cast<uintptr_t**>(apInterface);
-    return reinterpret_cast<float (*)(void*)>(pVtable[2])(apInterface);
-}
-
-void SetCategoryVolume(void* apInterface, float aValue) noexcept
-{
-    auto* pVtable = *reinterpret_cast<uintptr_t**>(apInterface);
-    reinterpret_cast<void (*)(void*, float)>(pVtable[3])(apInterface, aValue);
+    AudioPreview::SetCategoryVolumeVanilla(aFormId, aValue);
 }
 
 void RestoreMuted() noexcept
 {
+    const bool any = !s_state.Muted.empty();
     for (const auto& [formId, volume] : s_state.Muted)
-        if (auto* pInterface = CategoryInterface(formId))
-            SetCategoryVolume(pInterface, volume);
+        SetCategoryVolume(formId, volume);
     s_state.Muted.clear();
+    (void)any;
 }
 
 void MuteOthers(const std::string& acChannel) noexcept
@@ -121,8 +113,9 @@ void MuteOthers(const std::string& acChannel) noexcept
     {
         if (auto* pInterface = CategoryInterface(formId))
         {
-            s_state.Muted.emplace_back(formId, GetCategoryVolume(pInterface));
-            SetCategoryVolume(pInterface, 0.f);
+            // The user-set level (form+0x50), not the effective product with parents.
+            s_state.Muted.emplace_back(formId, *reinterpret_cast<const float*>(static_cast<uint8_t*>(pInterface) + 0x20));
+            SetCategoryVolume(formId, 0.f);
         }
     }
 }
@@ -136,15 +129,21 @@ void StopSound() noexcept
     s_state.Handle = {};
 }
 
-void PlayDescriptor(const char* apEditorId) noexcept
+// 2D output models (Skyrim.esm SOPM records without an attenuation block):
+// previews play "in the head" like UI sounds, independent of any camera or
+// listener position (the title screen has no gameplay camera).
+constexpr uint32_t kOutputStereo = 0x0007EDCA;     // SOMStereo
+constexpr uint32_t kOutputDialogue2D = 0x000B5183; // SOMDialogue2D
+
+void PlayDescriptor(const char* apEditorId, uint32_t aOutputModel = kOutputStereo) noexcept
 {
     using TGetSingleton = void* (*)();
     using TGetByName = void (*)(void*, SoundHandle&, const char*, uint32_t);
-    using TSetPosition = bool (*)(SoundHandle*, NiPoint3);
+    using TSetOutputModel = void (*)(SoundHandle*, const void*);
     using TPlay = bool (*)(SoundHandle*);
     static VersionDbPtr<void> s_getSingleton(67652); // BSAudioManager::GetSingleton
     static VersionDbPtr<void> s_getByName(67665);    // BSAudioManager::GetSoundHandleByName
-    static VersionDbPtr<void> s_setPosition(67631);  // BSSoundHandle::SetPosition
+    static VersionDbPtr<void> s_setOutputModel(67624); // BSSoundHandle::SetOutputModel
     static VersionDbPtr<void> s_play(67616);         // BSSoundHandle::Play
 
     auto* pManager = reinterpret_cast<TGetSingleton>(s_getSingleton.GetPtr())();
@@ -158,9 +157,9 @@ void PlayDescriptor(const char* apEditorId) noexcept
         spdlog::warn("Audio preview: sound descriptor {} not found", apEditorId);
         return;
     }
-    // At the listener, so 3D attenuation never silences it (no player on the title screen).
-    if (auto* pCamera = PlayerCamera::Get(); pCamera && pCamera->cameraNode)
-        reinterpret_cast<TSetPosition>(s_setPosition.GetPtr())(&handle, pCamera->cameraNode->world.translate);
+    // BGSSoundOutput's BSISoundOutputModel interface is at +0x20 (CommonLibSSE-NG).
+    if (auto* pOutput = TESForm::GetById(aOutputModel))
+        reinterpret_cast<TSetOutputModel>(s_setOutputModel.GetPtr())(&handle, reinterpret_cast<uint8_t*>(pOutput) + 0x20);
     reinterpret_cast<TPlay>(s_play.GetPtr())(&handle);
     s_state.Handle = handle; // one-shots overlap naturally; only the latest is faded on stop
 }
@@ -190,7 +189,7 @@ std::chrono::milliseconds PlayNext(const std::string& acChannel) noexcept
     }
     if (channel == "voice")
     {
-        PlayDescriptor(Pick(kVoiceLines));
+        PlayDescriptor(Pick(kVoiceLines), kOutputDialogue2D);
         return std::chrono::milliseconds(std::uniform_int_distribution<int>(2600, 3400)(Rng()));
     }
     return 500ms; // music: nothing to play, the current track is the preview
@@ -226,10 +225,42 @@ void KeepAlive(const std::string& acChannel) noexcept
         // A slider change re-applies every category volume; keep the others silent
         // (their recorded volumes are what Stop() restores).
         for (const auto& [formId, volume] : s_state.Muted)
-            if (auto* pInterface = CategoryInterface(formId))
-                SetCategoryVolume(pInterface, 0.f);
+            SetCategoryVolume(formId, 0.f);
     }
     s_state.Deadline = now + 1500ms;
+}
+
+void SetCategoryVolumeVanilla(uint32_t aCategoryFormId, float aValue) noexcept
+{
+    // Scaleform FxDelegate call layout used by the handler (see SetMasterVolume
+    // in GameSettingsService): args[0] option id, args[1] value, as doubles.
+    struct Arguments
+    {
+        uint8_t Padding0[0x10]{};
+        double OptionId{};
+        uint8_t Padding1[0x10]{};
+        double Value{};
+    } arguments;
+    struct Callback
+    {
+        uint8_t Padding[0x28]{};
+        void* Args{};
+    } callback;
+    arguments.OptionId = static_cast<double>(aCategoryFormId);
+    arguments.Value = static_cast<double>(std::clamp(aValue, 0.f, 1.f));
+    callback.Args = &arguments;
+    static VersionDbPtr<void> s_optionChange(53310);
+    reinterpret_cast<void (*)(void*)>(s_optionChange.GetPtr())(&callback);
+}
+
+void NotifyCategoryVolumesChanged() noexcept
+{
+    using TGetSingleton = void* (*)();
+    using TCompose = void (*)(void*, uint32_t, uint64_t, uint64_t, uint64_t);
+    static VersionDbPtr<void> s_getSingleton(67652); // BSAudioManager::GetSingleton
+    static VersionDbPtr<void> s_compose(67716);      // BSAudioManager message wrapper
+    if (auto* pManager = reinterpret_cast<TGetSingleton>(s_getSingleton.GetPtr())())
+        reinterpret_cast<TCompose>(s_compose.GetPtr())(pManager, 0x10, 0, 0, 0);
 }
 
 void Stop() noexcept

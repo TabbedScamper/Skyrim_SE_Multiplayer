@@ -20,4 +20,16 @@ void KeepAlive(const std::string& acChannel) noexcept;
 void Stop() noexcept;
 // Timer callback.
 void Tick() noexcept;
+
+// Tells the audio thread to re-apply category volumes to sounds already
+// playing. Setting a BGSSoundCategory volume only stores it; the vanilla
+// Journal OptionChange handler (ID 53310, default case) follows every
+// category change with BSAudioManager message 0x10 (ID 67716). Without it a
+// playing track (e.g. the menu music) keeps its old level.
+void NotifyCategoryVolumesChanged() noexcept;
+
+// Sets a BGSSoundCategory's volume through the vanilla Journal OptionChange
+// handler (ID 53310): its default case takes the category form ID as the
+// option number. Same path the vanilla Audio menu uses; master uses option 27.
+void SetCategoryVolumeVanilla(uint32_t aCategoryFormId, float aValue) noexcept;
 } // namespace AudioPreview
