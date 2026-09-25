@@ -106,6 +106,39 @@ std::vector<MonitorDescription> GetMonitors()
     return monitors;
 }
 
+// Index into GetMonitors() of the monitor showing most of the window.
+int MonitorIndexOf(HWND aWindow)
+{
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(MonitorFromWindow(aWindow, MONITOR_DEFAULTTONEAREST), &info))
+        return 0;
+    const auto monitors = GetMonitors();
+    for (size_t i = 0; i < monitors.size(); ++i)
+        if (monitors[i].Name == info.szDevice)
+            return static_cast<int>(i);
+    return 0;
+}
+
+// Where the framed window was last put, kept in [SkyrimTogether] of SkyrimPrefs.ini.
+constexpr int cNoWindowOrigin = INT_MIN;
+
+std::filesystem::path PrefsFile()
+{
+    wchar_t userProfile[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH))
+        return std::filesystem::path(userProfile) / L"Documents" / L"My Games" / L"Skyrim Special Edition" / L"SkyrimPrefs.ini";
+    return L"SkyrimPrefs.ini";
+}
+
+// A saved origin is reused only while the window's title bar would still be
+// on a screen (a monitor may have been unplugged or rearranged since).
+bool IsTitleBarOnScreen(int aX, int aY, int aOuterWidth)
+{
+    const RECT titleBar{aX + 40, aY, aX + std::max(aOuterWidth - 40, 80), aY + 24};
+    return MonitorFromRect(&titleBar, MONITOR_DEFAULTTONULL) != nullptr;
+}
+
 bool IsPlausibleWindowedSize(const GameSettingsSnapshot& acSettings)
 {
     const auto monitors = GetMonitors();
@@ -620,10 +653,9 @@ void GameSettingsService::OnMainLoop() noexcept
                             AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
                             const int outerWidth = windowRect.right - windowRect.left;
                             const int outerHeight = windowRect.bottom - windowRect.top;
-                            const int x = monitorInfo.rcWork.left +
-                                ((monitorInfo.rcWork.right - monitorInfo.rcWork.left) - outerWidth) / 2;
-                            const int y = monitorInfo.rcWork.top +
-                                ((monitorInfo.rcWork.bottom - monitorInfo.rcWork.top) - outerHeight) / 2;
+                            const auto origin = WindowedOrigin(monitorInfo.rcWork, outerWidth, outerHeight);
+                            const int x = origin.x;
+                            const int y = origin.y;
                             SetWindowLongPtrW(pWindow->hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
                             SetWindowPos(pWindow->hWnd, HWND_TOP, x, y, outerWidth, outerHeight,
                                 SWP_FRAMECHANGED | SWP_SHOWWINDOW);
@@ -660,7 +692,11 @@ void GameSettingsService::OnMainLoop() noexcept
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("displayPreviewReverted");
     }
 
-    if (!m_pendingFullResize && !m_displayPreviewActive)
+    // The timer is the only thing that runs this, so it must outlive the
+    // resize guard too: stopping it early left m_programmaticDisplayChange set
+    // for the rest of the session, and every later move or resize by the
+    // player was ignored.
+    if (!m_pendingFullResize && !m_displayPreviewActive && !m_programmaticDisplayChange)
         if (auto* pWindow = BSGraphics::GetMainWindow(); pWindow && pWindow->hWnd)
             KillTimer(pWindow->hWnd, cGameSettingsTimerId);
 }
@@ -761,6 +797,9 @@ GameSettingsSnapshot GameSettingsService::ReadSettings() const noexcept
         }
         result.VSync = pRenderer->uiPresentInterval != 0;
     }
+    // Borderless and fullscreen open on the monitor the game is on now.
+    if (auto* pWindow = BSGraphics::GetMainWindow(); pWindow && pWindow->hWnd)
+        result.Monitor = MonitorIndexOf(pWindow->hWnd);
 
     return result;
 }
@@ -843,8 +882,9 @@ void GameSettingsService::ApplyDisplay(const GameSettingsSnapshot& acSettings) n
         AdjustWindowRect(&windowRect, WS_OVERLAPPEDWINDOW, FALSE);
         const int outerWidth = windowRect.right - windowRect.left;
         const int outerHeight = windowRect.bottom - windowRect.top;
-        const int x = bounds.left + ((bounds.right - bounds.left) - outerWidth) / 2;
-        const int y = bounds.top + ((bounds.bottom - bounds.top) - outerHeight) / 2;
+        const auto origin = WindowedOrigin(bounds, outerWidth, outerHeight);
+        const int x = origin.x;
+        const int y = origin.y;
         SetWindowLongPtrW(pWindow->hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
         SetWindowPos(pWindow->hWnd, HWND_TOP, x, y, outerWidth, outerHeight, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     }
@@ -965,8 +1005,58 @@ void GameSettingsService::SetBoolSetting(const char* acName, bool aValue) const 
 
 std::filesystem::path GameSettingsService::GetPrefsPath() const noexcept
 {
-    wchar_t userProfile[MAX_PATH]{};
-    if (GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH))
-        return std::filesystem::path(userProfile) / L"Documents" / L"My Games" / L"Skyrim Special Edition" / L"SkyrimPrefs.ini";
-    return L"SkyrimPrefs.ini";
+    return PrefsFile();
+}
+
+bool GameSettingsService::SavedWindowedOrigin(int& aX, int& aY, int aOuterWidth) noexcept
+{
+    const auto path = PrefsFile();
+    const int x = GetPrivateProfileIntW(L"SkyrimTogether", L"iWindowX", cNoWindowOrigin, path.c_str());
+    const int y = GetPrivateProfileIntW(L"SkyrimTogether", L"iWindowY", cNoWindowOrigin, path.c_str());
+    if (x == cNoWindowOrigin || y == cNoWindowOrigin || !IsTitleBarOnScreen(x, y, aOuterWidth))
+        return false;
+    aX = x;
+    aY = y;
+    return true;
+}
+
+POINT GameSettingsService::WindowedOrigin(const RECT& acBounds, int aOuterWidth, int aOuterHeight) const noexcept
+{
+    int x = 0, y = 0;
+    if (SavedWindowedOrigin(x, y, aOuterWidth))
+        return {x, y};
+    return {acBounds.left + ((acBounds.right - acBounds.left) - aOuterWidth) / 2,
+        acBounds.top + ((acBounds.bottom - acBounds.top) - aOuterHeight) / 2};
+}
+
+void GameSettingsService::OnWindowPlacementChanged(UINT aMessage) noexcept
+{
+    if (aMessage == WM_ENTERSIZEMOVE)
+    {
+        m_inSizeMove = true;
+        return;
+    }
+    if (aMessage == WM_EXITSIZEMOVE)
+        m_inSizeMove = false;
+    else if (m_inSizeMove)
+        return; // saved once the drag ends; WM_WINDOWPOSCHANGED alone covers keyboard snaps
+
+    // Only where the player put a framed window: our own mode switches and
+    // Skyrim's transitions are not a choice of position.
+    auto* pWindow = BSGraphics::GetMainWindow();
+    if (m_programmaticDisplayChange || m_pendingFullResize || !pWindow || !pWindow->hWnd)
+        return;
+    const auto style = static_cast<DWORD>(GetWindowLongPtrW(pWindow->hWnd, GWL_STYLE));
+    if ((style & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW || IsIconic(pWindow->hWnd) || IsZoomed(pWindow->hWnd))
+        return;
+    RECT rect{};
+    if (!GetWindowRect(pWindow->hWnd, &rect) || (rect.left == m_savedWindowX && rect.top == m_savedWindowY))
+        return;
+
+    m_savedWindowX = rect.left;
+    m_savedWindowY = rect.top;
+    const auto path = GetPrefsPath();
+    WriteInt(path, L"SkyrimTogether", L"iWindowX", rect.left);
+    WriteInt(path, L"SkyrimTogether", L"iWindowY", rect.top);
+    spdlog::info("Remembered windowed position {},{}", rect.left, rect.top);
 }

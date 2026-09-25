@@ -64,9 +64,15 @@ struct GameSettingsService
     void QueueAudioPreviewStop() noexcept;
     void OnMainLoop() noexcept;
     void OnWindowSizeChanged(WPARAM aSizeType) noexcept;
+    // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE / WM_WINDOWPOSCHANGED: remembers where
+    // the player puts the framed window so windowed mode comes back there.
+    void OnWindowPlacementChanged(UINT aMessage) noexcept;
+    // The remembered framed-window origin, if its title bar is still on a screen.
+    static bool SavedWindowedOrigin(int& aX, int& aY, int aOuterWidth) noexcept;
 
 private:
     void WakeWindowThread() noexcept;
+    POINT WindowedOrigin(const RECT& acBounds, int aOuterWidth, int aOuterHeight) const noexcept;
     GameSettingsSnapshot ReadSettings() const noexcept;
     void ApplyRuntime(const GameSettingsSnapshot& acSettings, bool aDisplay) noexcept;
     void ApplyDisplay(const GameSettingsSnapshot& acSettings) noexcept;
@@ -95,6 +101,9 @@ private:
     uint32_t m_pendingResizeUpdates{0};
     uint32_t m_resizeEventGuardUpdates{0};
     bool m_programmaticDisplayChange{false};
+    bool m_inSizeMove{false};
+    int m_savedWindowX{INT_MIN};
+    int m_savedWindowY{INT_MIN};
     bool m_feedbackPromptPending{false};
     std::chrono::steady_clock::time_point m_feedbackPromptDeadline{};
 };

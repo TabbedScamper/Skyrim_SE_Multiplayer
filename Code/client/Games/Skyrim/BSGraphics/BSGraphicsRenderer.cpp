@@ -93,6 +93,9 @@ LRESULT CALLBACK Hook_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
 
     if (uMsg == WM_SIZE && entt::locator<World>::has_value())
         World::Get().GetGameSettingsService().OnWindowSizeChanged(wParam);
+    if ((uMsg == WM_ENTERSIZEMOVE || uMsg == WM_EXITSIZEMOVE || uMsg == WM_WINDOWPOSCHANGED) &&
+        entt::locator<World>::has_value())
+        World::Get().GetGameSettingsService().OnWindowPlacementChanged(uMsg);
 
     // Skyrim may toggle ShowCursor inside its own focus handling, so the
     // pointer owner re-applies its rule after the real WndProc has finished.
@@ -111,6 +114,21 @@ void Hook_Renderer_Init(Renderer* self, BSGraphics::RendererInitOSData* aOSData,
 
     RealWndProc = aOSData->pWndProc;
     aOSData->pWndProc = Hook_WndProc;
+
+    // A windowed game opens where the player last left it (Renderer::Init, ID
+    // 77226, passes iX/iY straight to CreateWindowExA).
+    if (aFBData && !aFBData->bFullScreen && !aFBData->bBorderlessWindow)
+    {
+        RECT outer{0, 0, static_cast<LONG>(aFBData->uiWidth), static_cast<LONG>(aFBData->uiHeight)};
+        AdjustWindowRect(&outer, WS_OVERLAPPEDWINDOW, FALSE);
+        int x = 0, y = 0;
+        if (GameSettingsService::SavedWindowedOrigin(x, y, outer.right - outer.left))
+        {
+            auto* pProperties = const_cast<BSGraphics::ApplicationWindowProperties*>(aFBData);
+            pProperties->iX = x;
+            pProperties->iY = y;
+        }
+    }
 
     Renderer_Init(self, aOSData, aFBData, aOut);
 

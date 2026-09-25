@@ -1287,3 +1287,10 @@ enabled.
 ## 2026-09-24 one-object Havok replay prototype
 
 - Reviewed the [Skyrim Together source project](https://github.com/tiltedphoques/TiltedEvolution) and [SkyMP source project](https://github.com/skyrim-multiplayer/skymp) as relevant open multiplayer references, then inspected the exact 1.7.104 executable functions described in `docs/reverse-engineering/HAVOK_PARITY.md`. The old follower implementation includes an opt-in pre-step one-object kinematic probe; it does not yet provide general owner-driven Havok parity. New mode 4 is source-only and opt-in. It uses the exe's linear/angular velocity setters (IDs `78089`/`78090`) instead of directly snapping a body inside a physics step. No live item or ragdoll parity is claimed.
+
+## 2026-09-25 windowed position is remembered
+
+- `Renderer::Init` (VA `0x141007B70`, Address Library ID `77226`) creates the game window with `CreateWindowExA` at `ApplicationWindowProperties::iX/iY` (the `iLocation X/Y:Display` settings), so `Hook_Renderer_Init` sets those from the saved origin before calling it. Only a windowed launch is changed; borderless and fullscreen keep the engine's placement.
+- The saved origin is `[SkyrimTogether] iWindowX/iWindowY` in SkyrimPrefs.ini, written when the player finishes moving the framed window (`WM_EXITSIZEMOVE`, or `WM_WINDOWPOSCHANGED` outside a drag for keyboard snaps). Programmatic mode switches, minimised and maximised windows are not recorded. It is reused only while its title bar would still intersect a monitor (`MonitorFromRect`, `MONITOR_DEFAULTTONULL`), otherwise the old centring applies.
+- `GameSettingsService::OnMainLoop` runs only from the settings timer, and killed that timer in the same pass that finished a resize, leaving `m_programmaticDisplayChange` set for the rest of the session. Every later player move and resize (`OnWindowSizeChanged`) was then ignored. The timer now runs until that guard clears.
+- Measured on the host PC (5120x1440): window moved to 300,120; borderless preview gave 0,0 5120x1440; back to windowed gave 300,120; a relaunch opened at 300,120.
