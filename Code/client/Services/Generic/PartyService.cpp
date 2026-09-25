@@ -1,3 +1,4 @@
+#include <Services/CreatorTogether.h>
 #include <Messages/LeaderControlRequest.h>
 #include <Messages/NotifyLeaderControl.h>
 #include <Services/PlayerCollision.h>
@@ -257,9 +258,11 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     // server-confirmed barrier releases every follower together for gameplay.
     // The MQ101 threshold applies only to the vanilla New Game onboarding;
     // ordinary continued campaigns use the native loaded-cell/control state.
+    // New Game: Done in the creator counts although the creator stays open (CreatorTogether holds it).
+    const bool creatorDone = CreatorTogether::IsDone();
     if (m_inParty && m_sessionState == 2 && !m_gameplayReadySent &&
         !m_worldGateHeld && !m_waitingForWorldReady && pUI &&
-        !creatorOpen && !pUI->GetMenuOpen(BSFixedString("Loading Menu")))
+        (!creatorOpen || creatorDone) && !pUI->GetMenuOpen(BSFixedString("Loading Menu")))
     {
         auto* pPlayer = PlayerCharacter::Get();
         auto* pControls = PlayerControls::GetInstance();
@@ -282,6 +285,11 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
             spdlog::info("Reached shared-campaign gameplay barrier for epoch {}", m_startEpoch);
         }
     }
+
+    // Character creation together: hold Done until every player is done, then close together.
+    CreatorTogether::Update(m_world, m_inParty && m_campaignMode == 1 && m_sessionState == 2, creatorOpen);
+    if (m_sessionState >= 3)
+        CreatorTogether::Release();
 
     // Leader: tell the party whether this character is free (no intro or cutscene holding it), on
     // every change and every 5 s. Players pass through each other until it is.

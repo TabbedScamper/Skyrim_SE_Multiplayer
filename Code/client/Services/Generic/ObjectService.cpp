@@ -2447,7 +2447,7 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
         const bool moved = bodyMoved || referenceMoved;
         previous.Position = pReference->position;
         previous.Rotation = pReference->rotation;
-        if (keyframed && moved)
+        if (keyframed && moved && !previous.StreamedDynamic)
         {
             // Animating on its own: track it, send nothing until it has rested for 5 s.
             std::copy(std::begin(body.State.transform), std::end(body.State.transform),
@@ -2473,6 +2473,8 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
         if (!passive)
         {
             update.MotionType = 3;
+            if (!keyframed)
+                previous.StreamedDynamic = true;
             update.LinearVelocity = {body.State.linearVelocity[0],
                 body.State.linearVelocity[1], body.State.linearVelocity[2]};
             std::copy(std::begin(body.State.transform),

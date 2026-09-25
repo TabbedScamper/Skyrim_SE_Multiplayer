@@ -283,6 +283,9 @@ private:
         std::chrono::steady_clock::time_point LastSent{};
         bool HasMoved{};
         bool HasBodyState{};
+        // Sent as a simulated body before: the followers steer their copy to it, so it keeps
+        // being sent when a scene makes it keyframed (the intro carts pulled into place on arrival).
+        bool StreamedDynamic{};
     };
     struct RemoteReferencePose
     {

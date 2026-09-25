@@ -11,6 +11,7 @@
 #include <PlayerCharacter.h>
 #include <Services/ObjectService.h>
 #include <Services/CharacterService.h>
+#include <Services/CreatorTogether.h>
 
 void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aTick) noexcept
 {
@@ -46,13 +47,10 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // not inside it (everyone creates on the same spot).
     NiPoint3 creatorOffset{};
     float creatorHeading = 0.f;
-    const bool creatorPreview = apActor && CharacterService::GetCreatorDisplayOffset(apActor->formID, creatorOffset, creatorHeading);
-    if (creatorPreview)
-    {
-        position.x = PlayerCharacter::Get()->position.x + creatorOffset.x;
-        position.y = PlayerCharacter::Get()->position.y + creatorOffset.y;
-        position.z = PlayerCharacter::Get()->position.z;
-    }
+    (void)creatorOffset;
+    // In the character creator every player's character stands on this player's spot (the one
+    // being viewed is visible; see CreatorTogether).
+    const bool creatorPreview = apActor && CreatorTogether::GetDisplay(apActor->formID, position, creatorHeading);
 
     aInterpolationComponent.Position = position;
 
