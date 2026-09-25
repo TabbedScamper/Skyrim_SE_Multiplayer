@@ -44,6 +44,7 @@
 #include <Games/Skyrim/Havok/VisualPoseMailbox.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/EngineFixes.h>
+#include <Services/PlayerCollision.h>
 #include <AI/AIProcess.h>
 #include <Forms/TESPackage.h>
 #include <Messages/ClientReferencesMoveRequest.h>
@@ -403,6 +404,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     {
         s_nextPoseRegistryMs = registryNow + 250;
         PoseCopyAuthority::RefreshRegistry(m_world);
+        PlayerCollision::Update(m_world);
     }
 
     // Discovery emits ActorAddedEvent only once per high-process lifetime.
@@ -1555,12 +1557,14 @@ void CharacterService::OnNotifyNewPackage(const NotifyNewPackage& acMessage) con
             SetPlayerAIDriven(pPlayer, true);
             pPlayer->SetPackage(pPackage);
             s_mirroringLeaderPackage = true;
+            PlayerCollision::SetMirroringScript(true);
             spdlog::info("Follower player follows the leader's scripted package {:X}", packageId);
         }
         else if (pPlayer && s_mirroringLeaderPackage)
         {
             SetPlayerAIDriven(pPlayer, false);
             s_mirroringLeaderPackage = false;
+            PlayerCollision::SetMirroringScript(false);
             spdlog::info("Follower player released from the leader's scripted package");
         }
         return;
