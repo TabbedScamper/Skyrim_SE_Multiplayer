@@ -6,10 +6,16 @@
 
 #include <Game/Animation/ActionReplayCache.h>
 #include <Structs/ActionEvent.h>
+#include <Structs/EvaluatedPoseSnapshot.h>
+#include <Structs/VisualBoneSnapshot.h>
 
 struct AnimationComponent
 {
     Vector<ActionEvent> Actions;
     ActionEvent CurrentAction;
     ActionReplayCache ActionsReplayCache;
+    EvaluatedPoseSnapshot EvaluatedPose;
+    bool EvaluatedPosePending{};
+    VisualBoneSnapshot VisualBones;
+    bool VisualBonesPending{};
 };

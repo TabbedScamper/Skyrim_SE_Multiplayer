@@ -1,6 +1,7 @@
 #pragma once
 
 struct hkEventContext;
+struct hkEventType;
 
 struct hkbGenerator
 {

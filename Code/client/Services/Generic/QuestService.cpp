@@ -179,6 +179,30 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
 {
     ModSystem& modSystem = World::Get().GetModSystem();
     uint32_t formId = modSystem.GetGameId(aUpdate.Id);
+    const auto& party = m_world.GetPartyService();
+    const auto expectedEpoch = party.GetStartEpoch();
+    if (party.IsInParty() && expectedEpoch != 0 &&
+        (aUpdate.AuthorityEpoch != expectedEpoch || aUpdate.Revision == 0))
+    {
+        RecordDebugEvent("rejected_quest_epoch", formId, aUpdate.Stage, false);
+        spdlog::warn("Rejected quest update form={:X} revision={} epoch={} expectedEpoch={}",
+            formId, aUpdate.Revision, aUpdate.AuthorityEpoch, expectedEpoch);
+        return;
+    }
+    if (m_appliedQuestEpoch != aUpdate.AuthorityEpoch)
+    {
+        m_appliedQuestRevisions.clear();
+        m_appliedQuestEpoch = aUpdate.AuthorityEpoch;
+    }
+    if (aUpdate.Revision != 0)
+    {
+        const auto it = m_appliedQuestRevisions.find(formId);
+        if (it != m_appliedQuestRevisions.end() && aUpdate.Revision <= it->second)
+        {
+            RecordDebugEvent("rejected_quest_revision", formId, aUpdate.Stage, false);
+            return;
+        }
+    }
     RecordDebugEvent("remote_update", formId, aUpdate.Stage, true);
     TESQuest* pQuest = Cast<TESQuest>(TESForm::GetById(formId));
     if (!pQuest)
@@ -194,6 +218,7 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
                      aUpdate.ClientQuestType, formId, pQuest->fullName.value.AsAscii());
     }
 
+    ScopedQuestOverride remoteQuestApply;
     bool bResult = false;
     switch (aUpdate.Status)
     {
@@ -219,6 +244,8 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
 
     if (!bResult)
         spdlog::error("Failed to update the client quest state, quest: {:X}, stage: {}, status: {}", formId, aUpdate.Stage, aUpdate.Status);
+    else if (aUpdate.Revision != 0)
+        m_appliedQuestRevisions[formId] = aUpdate.Revision;
 }
 
 void QuestService::RecordDebugEvent(const char* acKind, uint32_t aFormId, uint16_t aStage,

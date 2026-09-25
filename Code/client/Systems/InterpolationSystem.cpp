@@ -28,15 +28,15 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     const auto& first = *(movements.begin());
     const auto& second = *(++movements.begin());
 
-    // Calculate delta movement since last update
-    auto delta = 0.0001f;
-    const auto tickDelta = static_cast<float>(second.Tick - first.Tick);
-    if (tickDelta > 0.f)
-    {
-        delta = 1.f / tickDelta * static_cast<float>(aTick - first.Tick);
-    }
-
-    delta = TiltedPhoques::Min(delta, 1.0f);
+    // Clamp before subtracting unsigned network ticks. A presentation tick
+    // before the first point must not wrap into a huge positive delta and
+    // jump the remote actor to its future sample.
+    float delta = 0.f;
+    if (aTick >= second.Tick)
+        delta = 1.f;
+    else if (aTick > first.Tick && second.Tick > first.Tick)
+        delta = static_cast<float>(aTick - first.Tick) /
+            static_cast<float>(second.Tick - first.Tick);
 
     const NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
 
@@ -46,12 +46,20 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     if (!apActor)
         return;
 
+    // Once Skyrim has made a remote actor a corpse, Havok owns its physical
+    // pose. Keep consuming the network timeline above for identity/spawn
+    // bookkeeping, but do not teleport the dead reference or reload its
+    // movement graph every presentation frame.
+    if (apActor->actorState.IsDeadState())
+        return;
+
     apActor->ForcePosition(position);
-    apActor->LoadAnimationVariables(second.Variables);
+    const auto& discrete = aTick >= second.Tick ? second : first;
+    apActor->LoadAnimationVariables(discrete.Variables);
 
     if (apActor->currentProcess && apActor->currentProcess->middleProcess)
     {
-        apActor->currentProcess->middleProcess->direction = second.Direction;
+        apActor->currentProcess->middleProcess->direction = discrete.Direction;
     }
 
     auto rotA = first.Rotation;

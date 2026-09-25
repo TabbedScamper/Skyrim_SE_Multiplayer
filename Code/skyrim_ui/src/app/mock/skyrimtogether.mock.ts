@@ -162,6 +162,10 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
 
   setSteamSessionAccess(_open: boolean, _password: string): void {}
 
+  setCoopGameplaySettings(difficulty: number, pvpEnabled: boolean): void {
+    this.emit('coopGameplaySettings', difficulty, pvpEnabled, true, false);
+  }
+
   connectJoinedSteamSession(_password: string): void {}
 
   requestGameSettings(): void {

@@ -313,16 +313,20 @@ AnimationGraphDescriptor_Master_Behavior::AnimationGraphDescriptor_Master_Behavi
         AnimationGraphDescriptor(
             {kbEquipOk, kbMotionDriven, kIsBeastRace, kIsSneaking, kIsBleedingOut, kIsCastingDual, kIs1HM, kIsCastingRight, kIsCastingLeft, kIsBlockHit, kIsPlayer, kIsNPC, kbIsSynced, kbVoiceReady, kbWantCastLeft, kbWantCastRight, kbWantCastVoice, kb1HM_MLh_attack, kb1HMCombat, kbAnimationDriven,
              kbCastReady, kIsAttacking, kbAllowRotation, kbMagicDraw, kbMLh_Ready, kbMRh_Ready, kbInMoveState, kbSprintOK, kbIdlePlaying, kbIsDialogueExpressive, kbAnimObjectLoaded, kbEquipUnequip, kbAttached, kbIsH2HSolo, kbHeadTracking, kbIsRiding, kbTalkable, kbRitualSpellActive, kbInJumpState,
-             kbHeadTrackSpine, kbLeftHandAttack, kbIsInMT, kbHumanoidFootIKEnable, kbHumanoidFootIKDisable, kbStaggerPlayerOverride, kbNoStagger, kbIsStaffLeftCasting, kbPerkShieldCharge, kbPerkQuickShot, kIsBlocking, kIsBashing, kIsStaggering, kIsRecoiling, kIsEquipping, kIsUnequipping,
+             kbHeadTrackSpine, kbHeadTrackingOn, kbCanHeadTrack, kbDisableHeadTrack, kbNoHeadTrack, kbLeftHandAttack, kbIsInMT, kbHumanoidFootIKEnable, kbHumanoidFootIKDisable, kbStaggerPlayerOverride, kbNoStagger, kbIsStaffLeftCasting, kbPerkShieldCharge, kbPerkQuickShot, kIsBlocking, kIsBashing, kIsStaggering, kIsRecoiling, kIsEquipping, kIsUnequipping,
              kisInFurniture, kbNeutralState, kbBowDrawn,
+             kLookAtOutOfRange, kbWantMountedWeaponAnims,
              // TODO: this was added extra for spell cast sync
              kPitchOverride, kNotCasting},
-            {kTurnDelta, kDirection, kSpeedSampled, kweapAdj, kSpeed,
+            {kTurnDelta, kTurnDeltaDamped, kturnSpeedMult, kDirection,
+             kSpeedSampled, kweapAdj, kSpeed,
              // TODO: this was added extra for spell cast sync
-             kCastBlend, kPitchOffset, kSpeedDamped, kPitch, kVelocityZ, k1stPRot, k1stPRotDamped, kCastBlendDamped},
+             kCastBlend, kPitchOffset, kSpeedDamped, kPitch, kVelocityZ, k1stPRot, k1stPRotDamped, kCastBlendDamped,
+             kLookAtOnGain, kLookAtOffGain, kLookAtEyeOnGain, kLookAtEyeOffGain,
+             kweaponSpeedMult, kbodyMorphWeight, kbodyMorphMuscular},
             {kiRightHandEquipped, kiLeftHandEquipped, ki1HMState, kiState, kiLeftHandType, kiRightHandType, kiSyncIdleLocomotion, kiSyncForwardState, kiSyncTurnState, kiIsInSneak, kiWantBlock, kiRegularAttack,
              // TODO: this was added extra for spell cast sync
-             ktestint, kcurrentDefaultState}));
+             ktestint, kcurrentDefaultState, kiWantMountedWeaponAnims}));
 }
 
 /*

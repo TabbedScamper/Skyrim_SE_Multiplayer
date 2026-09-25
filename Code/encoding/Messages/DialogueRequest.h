@@ -16,8 +16,9 @@ struct DialogueRequest final : ClientMessage
     void SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept override;
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
 
-    bool operator==(const DialogueRequest& acRhs) const noexcept { return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && SoundFilename == acRhs.SoundFilename; }
+    bool operator==(const DialogueRequest& acRhs) const noexcept { return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && SoundFilename == acRhs.SoundFilename; }
 
     uint32_t ServerId{};
+    uint64_t Tick{};
     TiltedPhoques::String SoundFilename{};
 };

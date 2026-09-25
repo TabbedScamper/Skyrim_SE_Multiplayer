@@ -5,6 +5,17 @@ Upstream branch/commit fields say `dev (SHA unpinned)` where not yet pinned.
 
 ## Engine / scripting reference libraries
 
+- **Wah Krah Jol**: https://github.com/realfakenerd/wah-krah-jol
+  - Local research clone: `C:\Users\mwalt\SkyrimResearch\wah-krah-jol`, commit
+    `2105bfd468d23bbddd54c74d898bfc11fd798f21`. License: MIT OR Apache-2.0.
+  - Relevant source: `crates/converter/src/esm` (record/VMAD/SQLite conversion),
+    `crates/converter/src/script.rs` (PEX parsing/CFG/IR/Luau), `crates/engine/src/app.rs`
+    (current Bevy renderer and streaming), `crates/dummy-content` (synthetic tests).
+  - Reuse: format/conformance-test reference after license review; not a native
+    Skyrim SE function map or 1:1 runtime. Gameplay, HKX/Havok, quests, and
+    multiplayer remain unimplemented or roadmap-scale in this inspected tree.
+    See `docs/OPEN_ENGINE_FEASIBILITY.md` for the integration boundary.
+
 - **CommonLibSSE-NG** — https://github.com/CharmedBaryon/CommonLibSSE-NG
   - Local snapshot: `b93280e832f263dbef44e44cbe2936622a02f91a`. License: MIT.
   - Relevant: `RE/M/MistMenu.h`, `RE/U/UI3DSceneManager.h/.cpp`,
@@ -63,6 +74,43 @@ Upstream branch/commit fields say `dev (SHA unpinned)` where not yet pinned.
   Relevant: menu-camera fixes must use the live `NiCamera` frustum/aspect.
 - **Nexus 32:9 interface notes** (mod 98700) and **STR widescreen report**
   (Mod-Compatibility #20): aspect-specific UI assets are established practice.
+
+## Inspection pass 2026-09-23 (bodies actually opened this run)
+
+- **CommonLibSSE-NG @ `b93280e832f263dbef44e44cbe2936622a02f91a`
+  (MIT, LICENSE first line verified local)** — headers read from
+  `AnalysisTools/repos/CommonLibSSE-NG`: `include/RE/P/PlayerCamera.h`
+  (13-state enum, `cameraStates[13]+0xB8`, size `0x168`),
+  `include/RE/T/TESCamera.h` (`currentState+0x28`, size `0x38`),
+  `include/RE/T/TESCameraState.h` (Begin/End/Update vtable `01/02/03`),
+  `include/RE/B/bhkRigidBody.h` (Get/Set slots `0x33–0x3B`, constraint
+  array `+0x28`), `include/RE/B/bhkWorld.h` (`worldLock+0xC598`,
+  world-scale IDs `(231896, 188105)` / `(230692, 187407)`),
+  `include/RE/B/BGSSaveLoadGame.h` (singleton `(516851, 403330)`,
+  `GetChange (34655, 35577)`), `include/RE/B/BGSScene.h`
+  (`isPlaying+0xB0`, `kActive`), `include/RE/I/IAnimationGraphManagerHolder.h`
+  (Notify `01`, manager `02/03`, graph vars `10–12`), plus greps over
+  `include/RE/T/TESQuest.h` (`GetCurrentStageID` present, no `SetStage`
+  ID) and `TESTopicInfo.h` (`GetDialogueData`). Zero hits for
+  `CartTether` across `include/RE/B/*.h`. Full seam write-up:
+  [NATIVE_AUTHORITY_SEAMS](NATIVE_AUTHORITY_SEAMS.md).
+- **CommonLibSSE-NG `main` (upstream fetch)** —
+  `https://raw.githubusercontent.com/CharmedBaryon/CommonLibSSE-NG/main/include/RE/P/PlayerCamera.h`
+  (200 OK, 3915 bytes) is byte-identical to the `b93280e` pin: no drift
+  for this header. Commit SHA of `main` itself not pinned; treat as a
+  point check, not a new pin.
+- **SmoothCam** — https://github.com/mwilsnd/SkyrimSE-SmoothCam
+  (Reported, from web search this run): third-person camera mod with
+  per-camera-state interception and FOV handling; source not opened,
+  commit/license unpinned — architectural reference only.
+- **Local repo read (not a reusable source)**: dirty
+  `Code/server/Services/QuestService.cpp:31–92` confirms the
+  leader-only gate + `quest:{player}:{txid}` ledger commit +
+  duplicate-drop already implemented; read-only, unmodified.
+- Local clone pins inventoried (directory + `git log`, bodies not
+  opened): TiltedEvolution-rwf `a7d0615`, Acheron-NG `59f7446`, skymp
+  `f926944`, Champollion `fd3798c`, skse64 `25b7235`, SkyrimMCP
+  `82a0a80`, skyui `8354287`, SSEDisplayTweaks `41668a7`.
 
 ## Docs / specs
 

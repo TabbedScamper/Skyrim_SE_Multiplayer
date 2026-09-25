@@ -67,7 +67,7 @@ $startMenuScript = Join-Path $scriptsRoot '__Packages\StartMenu.as'
 $text = [IO.File]::ReadAllText($startMenuScript)
 $text = Assert-Replace $text `
     '   static var OUNCE_DATA_TRANSFER_INDEX = 12;' `
-    "   static var OUNCE_DATA_TRANSFER_INDEX = 12;`r`n   static var SKYRIM_SEAMLESS_COOP_INDEX = 13;`r`n   static var SKYRIM_SEAMLESS_OPTIONS_INDEX = 14;`r`n   var SkyrimSeamlessStageWidth = -1;`r`n   var SkyrimSeamlessStageHeight = -1;" `
+    "   static var OUNCE_DATA_TRANSFER_INDEX = 12;`r`n   static var SKYRIM_SEAMLESS_COOP_INDEX = 13;`r`n   static var SKYRIM_SEAMLESS_OPTIONS_INDEX = 14;`r`n   var SkyrimSeamlessStageWidth = -1;`r`n   var SkyrimSeamlessStageHeight = -1;`r`n   var SkyrimSeamlessPendingLaunchMode = 0;`r`n   var SkyrimSeamlessConfirmTimer = 0;" `
     'menu index declaration'
 $text = Assert-Replace $text `
     '      this.onEnterFrame = null;' `
@@ -95,19 +95,52 @@ $afterLayout = @'
    }
    function SkyrimSeamlessWatchLayout()
    {
-      if(_root.SkyrimSeamlessLaunchMode == 1)
+      if(this.SkyrimSeamlessPendingLaunchMode == 0 && _root.SkyrimSeamlessLaunchMode == 1)
       {
          _root.SkyrimSeamlessLaunchMode = 0;
+         this.SkyrimSeamlessPendingLaunchMode = 1;
+         this.SkyrimSeamlessSelectNativeEntry(StartMenu.NEW_INDEX);
          gfx.io.GameDelegate.call("NEW",[]);
+         gfx.io.GameDelegate.call("PlaySound",["UIMenuOK"]);
+         this.SkyrimSeamlessConfirmTimer = setInterval(this,"SkyrimSeamlessConfirmLaunch",100);
       }
-      else if(_root.SkyrimSeamlessLaunchMode == 2)
+      else if(this.SkyrimSeamlessPendingLaunchMode == 0 && _root.SkyrimSeamlessLaunchMode == 2)
       {
          _root.SkyrimSeamlessLaunchMode = 0;
+         this.SkyrimSeamlessPendingLaunchMode = 2;
+         this.SkyrimSeamlessSelectNativeEntry(StartMenu.CONTINUE_INDEX);
          gfx.io.GameDelegate.call("CONTINUE",[]);
+         gfx.io.GameDelegate.call("PlaySound",["UIMenuOK"]);
+         this.SkyrimSeamlessConfirmTimer = setInterval(this,"SkyrimSeamlessConfirmLaunch",100);
       }
       if(this.SkyrimSeamlessStageWidth != Stage.visibleRect.width || this.SkyrimSeamlessStageHeight != Stage.visibleRect.height)
       {
          this.SkyrimSeamlessRefreshLayout();
+      }
+   }
+   function SkyrimSeamlessSelectNativeEntry(aEntryIndex)
+   {
+      var i = 0;
+      while(i < this.MainList.entryList.length)
+      {
+         if(this.MainList.entryList[i].index == aEntryIndex)
+         {
+            this.MainList.disableSelection = false;
+            this.MainList.selectedIndex = i;
+            return true;
+         }
+         i++;
+      }
+      return false;
+   }
+   function SkyrimSeamlessConfirmLaunch()
+   {
+      if(this.SkyrimSeamlessPendingLaunchMode != 0 && this.strCurrentState == StartMenu.MAIN_CONFIRM_STATE && this.ShouldProcessInputs)
+      {
+         clearInterval(this.SkyrimSeamlessConfirmTimer);
+         this.SkyrimSeamlessConfirmTimer = 0;
+         this.SkyrimSeamlessPendingLaunchMode = 0;
+         this.onAcceptPress();
       }
    }
    function InitExtensions()

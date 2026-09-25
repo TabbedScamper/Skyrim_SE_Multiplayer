@@ -84,7 +84,16 @@ function Invoke-Cdp([string]$Action, [string]$OutputPath = '') {
 
 function Save-Checkpoint([string]$Name) {
     $native = Invoke-Native 'snapshot'
-    $game = Invoke-Native 'game_snapshot'
+    $requested = Invoke-Native 'request_game_snapshot'
+    $deadline = (Get-Date).AddSeconds(5)
+    do {
+        $game = Invoke-Native 'game_snapshot'
+        if ($game.game.worldTick -ge $requested.targetTick) { break }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $deadline)
+    if ($game.game.worldTick -lt $requested.targetTick) {
+        throw 'Native game snapshot did not refresh for checkpoint.'
+    }
     $cef = Invoke-Cdp 'snapshot'
     $bundle = Invoke-Native 'capture_bundle'
     Invoke-Cdp 'screenshot' (Join-Path $artifactRoot "$Name-cef.png") | Out-Null

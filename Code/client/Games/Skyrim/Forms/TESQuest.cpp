@@ -1,8 +1,53 @@
 #include <Forms/TESQuest.h>
 
 #include <Services/PapyrusService.h>
+#include <Services/QuestService.h>
+#include <Services/PartyService.h>
 
 #include <Games/Overrides.h>
+#include <World.h>
+#include <atomic>
+
+namespace
+{
+TP_THIS_FUNCTION(TNativeSetStage, bool, TESQuest, uint16_t);
+TNativeSetStage* RealNativeSetStage = nullptr;
+
+bool TP_MAKE_THISCALL(HookNativeSetStage, TESQuest, uint16_t aStage)
+{
+    static std::atomic<uint32_t> s_samples{0};
+    const auto sample = s_samples.fetch_add(1, std::memory_order_relaxed);
+    const bool isIntroQuest = apThis->formID == 0x0003372B;
+    if (sample < 128 || isIntroQuest)
+    {
+        const auto& party = World::Get().GetPartyService();
+        spdlog::info("Native quest stage enter form={:X} from={} to={} party={} leader={} override={} tick={}",
+            apThis->formID, apThis->currentStage, aStage, party.IsInParty(), party.IsLeader(),
+            ScopedQuestOverride::IsOverriden(), GetTickCount64());
+    }
+
+    // A follower's Papyrus/scene VM is not the shared campaign authority.
+    // The leader's sequenced NotifyQuestUpdate is the only permitted stage
+    // writer while a shared campaign is loading or running. Local-only quests
+    // remain native and the scoped host apply passes through this same hook.
+    const auto& party = World::Get().GetPartyService();
+    if (party.IsInParty() && !party.IsLeader() && party.GetStartEpoch() != 0 &&
+        party.GetSessionState() >= 1 && !ScopedQuestOverride::IsOverriden() &&
+        !QuestService::IsNonSyncableQuest(apThis))
+    {
+        static std::atomic<uint32_t> s_suppressedSamples{0};
+        if (s_suppressedSamples.fetch_add(1, std::memory_order_relaxed) < 128)
+            spdlog::info("Suppressed follower-local quest stage form={:X} from={} to={} epoch={}",
+                apThis->formID, apThis->currentStage, aStage, party.GetStartEpoch());
+        return false;
+    }
+
+    const bool result = TiltedPhoques::ThisCall(RealNativeSetStage, apThis, aStage);
+    if (sample < 128 || isIntroQuest)
+        spdlog::info("Native quest stage leave form={:X} stage={} result={}", apThis->formID, apThis->currentStage, result);
+    return result;
+}
+}
 
 TESObjectREFR* TESQuest::GetAliasedRef(uint32_t aAliasID) noexcept
 {
@@ -116,6 +161,9 @@ void TESQuest::SetStopped()
 static TiltedPhoques::Initializer s_questInitHooks(
     []()
     {
+        POINTER_SKYRIMSE(TNativeSetStage, nativeSetStage, 25004);
+        RealNativeSetStage = nativeSetStage.Get();
+        TP_HOOK(&RealNativeSetStage, HookNativeSetStage);
         // kill quest init in cold blood
         // TiltedPhoques::Write<uint8_t>(25003, 0xC3);
     });

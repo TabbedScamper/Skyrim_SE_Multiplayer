@@ -1,5 +1,6 @@
 
 #include <BSGraphics/BSGraphicsRenderer.h>
+#include <Games/Skyrim/BSInput/InputPollDiagnostic.h>
 #include <Services/OverlayService.h>
 #include <World.h>
 
@@ -9,6 +10,7 @@ void (*BSInputDeviceManager_PollInputDevices)(BSInputDeviceManager*, float) = nu
 
 void Hook_BSInputDeviceManager_PollInputDevices(BSInputDeviceManager* inputDeviceMgr, float afDelta)
 {
+    g_inputPollDiagnostic.Calls.fetch_add(1, std::memory_order_relaxed);
     // The modal CEF overlay owns all input while active. Its controller bridge
     // polls XInput independently, so allowing Skyrim to poll here would send
     // the same D-pad/A press to the native menu underneath the options page.
@@ -17,10 +19,23 @@ void Hook_BSInputDeviceManager_PollInputDevices(BSInputDeviceManager* inputDevic
     if (overlayActive)
         s_resumeGameInputAt = std::chrono::steady_clock::now() + 250ms;
 
-    if (!BSGraphics::GetMainWindow()->IsForeground() || overlayActive ||
-        std::chrono::steady_clock::now() < s_resumeGameInputAt)
+    if (!BSGraphics::GetMainWindow()->IsForeground())
+    {
+        g_inputPollDiagnostic.Unfocused.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
+    if (overlayActive)
+    {
+        g_inputPollDiagnostic.OverlayActive.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (std::chrono::steady_clock::now() < s_resumeGameInputAt)
+    {
+        g_inputPollDiagnostic.ResumeDelay.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
+    g_inputPollDiagnostic.Forwarded.fetch_add(1, std::memory_order_relaxed);
     BSInputDeviceManager_PollInputDevices(inputDeviceMgr, afDelta);
 }
 

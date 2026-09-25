@@ -27,6 +27,16 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
 
     if (!pExtension->IsRemote() || g_forceAnimation)
     {
+        const char* pEventName = apAction->eventName.AsAscii();
+        if (!g_forceAnimation && pActor->formID == 0x14 && pEventName &&
+            strstr(pEventName, "WalkingCamera") != nullptr)
+        {
+            spdlog::info("Local player walking-camera action event={} tick={} idleForm={:08X} "
+                "targetForm={:08X} caller={}", pEventName, GetTickCount64(),
+                apAction->idleForm ? apAction->idleForm->formID : 0,
+                apAction->target ? apAction->target->formID : 0,
+                fmt::ptr(_ReturnAddress()));
+        }
         ActionEvent action;
         action.State1 = pActor->actorState.flags1;
         action.State2 = pActor->actorState.flags2;
@@ -54,6 +64,7 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
         if (res)
         {
             pExtension->LatestAnimation = action;
+            pExtension->LatestAnimationDispatch = 0;
         }
 
         World::Get().GetRunner().Trigger(action);

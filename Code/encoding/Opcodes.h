@@ -56,6 +56,10 @@ enum ClientOpcode : unsigned char
     kPartyReadyRequest,
     kPartyStartRequest,
     kPartySessionSettingsRequest,
+    kPartyGameplaySettingsRequest,
+    kPhysicsReferencesMoveRequest,
+    kCameraStateRequest,
+    kSceneTimelineRequest,
     kClientOpcodeMax
 };
 
@@ -115,5 +119,8 @@ enum ServerOpcode : unsigned char
     kNotifySetWaypoint,
     kNotifyRemoveWaypoint,
     kNotifySetTimeResult,
+    kNotifyPhysicsReferencesMove,
+    kNotifyCameraState,
+    kNotifySceneTimeline,
     kServerOpcodeMax
 };

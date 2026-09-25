@@ -57,6 +57,7 @@ const snapshotExpression = `(() => {
   return {
     url: location.href,
     title: document.title,
+    bodyText: document.body.innerText.replace(/\\s+/g, ' ').trim(),
     settingsVisible: !!document.querySelector('app-settings'),
     active: active ? { tag: active.tagName, id: active.id || null, text: active.textContent?.trim() || null } : null,
     dropdowns,
@@ -92,6 +93,19 @@ if (action === 'snapshot') {
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
   await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
   result = { key: 'Enter' };
+} else if (action === 'click-button') {
+  const label = outputPath ?? '';
+  const evaluated = await call('Runtime.evaluate', {
+    expression: `(() => {
+      const label = ${JSON.stringify(label)};
+      const button = [...document.querySelectorAll('button')].find(item => item.textContent?.trim() === label && !item.disabled);
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`,
+    returnByValue: true
+  });
+  result = { label, clicked: evaluated.result.value };
 } else {
   throw new Error(`Unknown CDP action: ${action}`);
 }

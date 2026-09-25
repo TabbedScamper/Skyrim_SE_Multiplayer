@@ -1,4 +1,5 @@
 #include <chrono>
+#include <array>
 #include <mutex>
 #include <optional>
 
@@ -21,6 +22,18 @@
 #include <Messages/NotifyPartyInfo.h>
 #include <Messages/NotifyPartyJoined.h>
 #include <Messages/NotifyQuestUpdate.h>
+#include <Messages/NotifyCameraState.h>
+#include <Messages/CameraStateRequest.h>
+#include <Messages/NotifySceneTimeline.h>
+#include <Messages/SceneTimelineRequest.h>
+#include <Messages/NotifyPhysicsReferencesMove.h>
+#include <Messages/PhysicsReferencesMoveRequest.h>
+#include <Messages/EnterInteriorCellRequest.h>
+#include <Messages/AssignCharacterRequest.h>
+#include <Messages/AssignCharacterResponse.h>
+#include <Messages/CharacterSpawnRequest.h>
+#include <Messages/RequestOwnershipClaim.h>
+#include <Messages/NotifyOwnershipTransfer.h>
 #include <Messages/PartyCreateRequest.h>
 #include <Messages/PartyReadyRequest.h>
 #include <Messages/PartyStartRequest.h>
@@ -30,9 +43,12 @@
 
 #include <functional>
 #include <iostream>
+#include <memory>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 using TiltedPhoques::Buffer;
@@ -173,6 +189,58 @@ struct ProtocolBot final : TiltedPhoques::Client
             QuestUpdateCount++;
             break;
         }
+        case NotifyCameraState::Opcode:
+        {
+            const auto& update = static_cast<const NotifyCameraState&>(*message);
+            LastCameraSnapshot = update.Snapshot;
+            CameraUpdateCount++;
+            break;
+        }
+        case NotifySceneTimeline::Opcode:
+        {
+            const auto& update = static_cast<const NotifySceneTimeline&>(*message);
+            LastSceneSnapshot = update.Snapshot;
+            SceneUpdateCount++;
+            break;
+        }
+        case NotifyPhysicsReferencesMove::Opcode:
+        {
+            const auto& update = static_cast<const NotifyPhysicsReferencesMove&>(*message);
+            LastPhysicsTick = update.Tick;
+            LastPhysicsEpoch = update.AuthorityEpoch;
+            LastPhysicsCount = update.Updates.size();
+            if (!update.Updates.empty())
+                LastPhysicsBodyTransform = update.Updates.front().BodyTransform;
+            PhysicsUpdateCount++;
+            break;
+        }
+        case AssignCharacterResponse::Opcode:
+        {
+            const auto& response = static_cast<const AssignCharacterResponse&>(*message);
+            LastAssignedServerId = response.ServerId;
+            LastAssignedCookie = response.Cookie;
+            LastAssignedOwner = response.Owner;
+            LastAssignedEpoch = response.OwnershipEpoch;
+            AssignmentCount++;
+            break;
+        }
+        case NotifyOwnershipTransfer::Opcode:
+        {
+            const auto& transfer = static_cast<const NotifyOwnershipTransfer&>(*message);
+            LastTransferServerId = transfer.ServerId;
+            LastTransferOwnerId = transfer.OwnerPlayerId;
+            LastTransferEpoch = transfer.OwnershipEpoch;
+            OwnershipTransferCount++;
+            break;
+        }
+        case CharacterSpawnRequest::Opcode:
+        {
+            const auto& spawn = static_cast<const CharacterSpawnRequest&>(*message);
+            LastSpawnServerId = spawn.ServerId;
+            LastSpawnEpoch = spawn.OwnershipEpoch;
+            SpawnCount++;
+            break;
+        }
         default: break;
         }
     }
@@ -207,6 +275,27 @@ struct ProtocolBot final : TiltedPhoques::Client
     uint64_t LastQuestRevision{};
     uint64_t LastQuestAuthorityEpoch{};
     uint32_t QuestUpdateCount{};
+    CameraStateSnapshot LastCameraSnapshot{};
+    uint32_t CameraUpdateCount{};
+    SceneTimelineSnapshot LastSceneSnapshot{};
+    uint32_t SceneUpdateCount{};
+    uint64_t LastPhysicsTick{};
+    uint64_t LastPhysicsEpoch{};
+    size_t LastPhysicsCount{};
+    std::array<float, 16> LastPhysicsBodyTransform{};
+    uint32_t PhysicsUpdateCount{};
+    uint32_t LastAssignedServerId{};
+    uint32_t LastAssignedCookie{};
+    bool LastAssignedOwner{};
+    uint32_t LastAssignedEpoch{};
+    uint32_t AssignmentCount{};
+    uint32_t LastTransferServerId{};
+    uint32_t LastTransferOwnerId{};
+    uint32_t LastTransferEpoch{};
+    uint32_t OwnershipTransferCount{};
+    uint32_t LastSpawnServerId{};
+    uint32_t LastSpawnEpoch{};
+    uint32_t SpawnCount{};
 };
 
 bool PumpUntil(std::initializer_list<ProtocolBot*> aBots, const std::function<bool()>& acPredicate, std::chrono::milliseconds aTimeout)
@@ -234,6 +323,83 @@ int main(int argc, char** argv)
     const std::string endpoint = argc > 1 ? argv[1] : "127.0.0.1:10578";
     const std::string scenario = argc > 2 ? argv[2] : "join";
     const bool useSyntheticManifest = argc > 3 && std::string_view(argv[3]) == "synthetic-plugin";
+
+    if (scenario == "five-player-smoke")
+    {
+        std::vector<std::unique_ptr<ProtocolBot>> bots;
+        bots.reserve(5);
+        for (int i = 0; i < 5; ++i)
+        {
+            auto bot = std::make_unique<ProtocolBot>("ScalePlayer" + std::to_string(i + 1), useSyntheticManifest);
+            if (!bot->Connect(endpoint))
+            {
+                PrintResult("five-player-smoke", false, "one of five transport connections failed");
+                return 1;
+            }
+            bots.push_back(std::move(bot));
+        }
+        const auto pumpFive = [&](const std::function<bool()>& acPredicate, std::chrono::milliseconds aTimeout)
+        {
+            const auto deadline = std::chrono::steady_clock::now() + aTimeout;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                for (auto& bot : bots)
+                    bot->Update();
+                if (acPredicate())
+                    return true;
+                std::this_thread::sleep_for(1ms);
+            }
+            return false;
+        };
+        if (!pumpFive([&] {
+                for (const auto& bot : bots)
+                    if (!bot->Authenticated) return false;
+                return true;
+            }, 10s))
+        {
+            PrintResult("five-player-smoke", false, "five clients did not authenticate");
+            return 1;
+        }
+        PartyCreateRequest createParty;
+        bots.front()->SendMessage(createParty);
+        if (!pumpFive([&] {
+                for (const auto& bot : bots)
+                    if (bot->PartySize != 5 || bot->LeaderPlayerId != bots.front()->PlayerId) return false;
+                return true;
+            }, 10s))
+        {
+            PrintResult("five-player-smoke", false, "five clients did not converge in one party");
+            return 1;
+        }
+        PartyReadyRequest ready;
+        ready.Ready = true;
+        for (auto& bot : bots)
+            bot->SendMessage(ready);
+        if (!pumpFive([&] {
+                for (const auto& bot : bots)
+                    if (bot->ReadyCount != 5) return false;
+                return true;
+            }, 10s))
+        {
+            PrintResult("five-player-smoke", false, "five-player ready barrier did not converge");
+            return 1;
+        }
+        PartyStartRequest start;
+        start.Mode = PartyStartRequest::kNew;
+        start.Launch = true;
+        bots.front()->SendMessage(start);
+        const bool launched = pumpFive([&] {
+            const auto epoch = bots.front()->StartEpoch;
+            if (epoch == 0) return false;
+            for (const auto& bot : bots)
+                if (bot->SessionState != 1 || bot->StartEpoch != epoch) return false;
+            return true;
+        }, 10s);
+        PrintResult("five-player-smoke", launched,
+            launched ? "five clients joined, readied, and entered one shared start epoch" :
+                "five clients did not enter one shared start epoch");
+        return launched ? 0 : 1;
+    }
 
     if (scenario == "distributed-host" || scenario == "distributed-follower")
     {
@@ -386,6 +552,518 @@ int main(int argc, char** argv)
             "lobby-ready-barrier", started,
             started ? "server enforced host-only launch and released both ready clients on one start epoch" : "ready clients did not converge on one start epoch");
         return started ? 0 : 1;
+    }
+
+    if (scenario == "camera-authority")
+    {
+        PartyReadyRequest ready;
+        ready.Ready = true;
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] { return leader.ReadyCount == 2 && follower.ReadyCount == 2; }, 5s))
+        {
+            PrintResult("camera-authority", false, "party did not reach the ready barrier");
+            return 1;
+        }
+
+        PartyStartRequest start;
+        start.Mode = PartyStartRequest::kNew;
+        start.Launch = true;
+        leader.SendMessage(start);
+        if (!PumpUntil({&leader, &follower}, [&] {
+                return leader.SessionState == 1 && follower.SessionState == 1 &&
+                    leader.StartEpoch > 0 && leader.StartEpoch == follower.StartEpoch;
+            }, 5s))
+        {
+            PrintResult("camera-authority", false, "party did not enter the loading epoch");
+            return 1;
+        }
+
+        // The same ready request is the world-loaded barrier while a campaign
+        // is launching. Both peers must cross it before presentation packets
+        // become eligible for relay.
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] {
+                return leader.SessionState == 2 && follower.SessionState == 2;
+            }, 5s))
+        {
+            PrintResult("camera-authority", false, "party did not reach the running session state");
+            return 1;
+        }
+
+        CameraStateRequest camera;
+        camera.Snapshot.Tick = 100;
+        camera.Snapshot.AuthorityEpoch = leader.StartEpoch;
+        camera.Snapshot.Position = {12.f, -34.f, 56.f};
+        camera.Snapshot.Rotation = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+        camera.Snapshot.Scale = 1.f;
+        camera.Snapshot.Fov = 70.f;
+        camera.Snapshot.StateId = 8;
+        leader.SendMessage(camera);
+        const bool relayed = PumpUntil({&leader, &follower}, [&] {
+            return follower.CameraUpdateCount == 1 && follower.LastCameraSnapshot == camera.Snapshot;
+        }, 5s);
+
+        camera.Snapshot.Tick = 101;
+        camera.Snapshot.Position.x = 999.f;
+        follower.SendMessage(camera);
+        const auto rejectionDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < rejectionDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool rejectedFollower = leader.CameraUpdateCount == 0;
+        leader.SendMessage(ready);
+        const auto firstReadyDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < firstReadyDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool heldForFollower = leader.SessionState == 2 && follower.SessionState == 2;
+        follower.SendMessage(ready);
+        const bool gameplayReleased = PumpUntil({&leader, &follower}, [&] {
+            return leader.SessionState == 3 && follower.SessionState == 3;
+        }, 5s);
+        camera.Snapshot.Tick = 102;
+        leader.SendMessage(camera);
+        const auto gameplayDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < gameplayDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool cameraStopped = follower.CameraUpdateCount == 1;
+        const bool passed = relayed && rejectedFollower && heldForFollower &&
+            gameplayReleased && cameraStopped;
+        PrintResult("camera-authority", passed,
+            passed ? "leader cinematic camera relayed, then all-member gameplay barrier stopped camera authority" :
+                "camera authority or gameplay handoff barrier failed");
+        return passed ? 0 : 1;
+    }
+
+    if (scenario == "scene-authority")
+    {
+        PartyReadyRequest ready;
+        ready.Ready = true;
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] { return leader.ReadyCount == 2 && follower.ReadyCount == 2; }, 5s))
+        {
+            PrintResult("scene-authority", false, "party did not reach the ready barrier");
+            return 1;
+        }
+
+        PartyStartRequest start;
+        start.Mode = PartyStartRequest::kNew;
+        start.Launch = true;
+        leader.SendMessage(start);
+        if (!PumpUntil({&leader, &follower}, [&] {
+                return leader.SessionState == 1 && follower.SessionState == 1 &&
+                    leader.StartEpoch > 0 && leader.StartEpoch == follower.StartEpoch;
+            }, 5s))
+        {
+            PrintResult("scene-authority", false, "party did not enter the loading epoch");
+            return 1;
+        }
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] {
+                return leader.SessionState == 2 && follower.SessionState == 2;
+            }, 5s))
+        {
+            PrintResult("scene-authority", false, "party did not reach the running session state");
+            return 1;
+        }
+
+        SceneTimelineRequest scene;
+        scene.Snapshot.Tick = 100;
+        scene.Snapshot.AuthorityEpoch = leader.StartEpoch;
+        scene.Snapshot.TransactionId = 1;
+        scene.Snapshot.SceneId = GameId{1, 0xBECD4};
+        scene.Snapshot.QuestId = GameId{1, 0x3372B};
+        scene.Snapshot.RawPhaseWord = 1;
+        scene.Snapshot.Playing = true;
+        leader.SendMessage(scene);
+        const bool relayed = PumpUntil({&leader, &follower}, [&] {
+            return follower.SceneUpdateCount == 1 &&
+                follower.LastSceneSnapshot.SceneId == scene.Snapshot.SceneId &&
+                follower.LastSceneSnapshot.QuestId == scene.Snapshot.QuestId &&
+                follower.LastSceneSnapshot.ServerSequence > 0;
+        }, 5s);
+
+        // Test each rejected write separately; pump after each so an accepted
+        // packet cannot be hidden by a later, valid packet.
+        const auto pumpBriefly = [&] {
+            const auto deadline = std::chrono::steady_clock::now() + 250ms;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                leader.Update();
+                follower.Update();
+                std::this_thread::sleep_for(1ms);
+            }
+        };
+        follower.SendMessage(scene);
+        pumpBriefly();
+        const bool rejectedFollower = leader.SceneUpdateCount == 0 && follower.SceneUpdateCount == 1;
+
+        scene.Snapshot.TransactionId = 2;
+        scene.Snapshot.AuthorityEpoch = leader.StartEpoch - 1;
+        leader.SendMessage(scene);
+        pumpBriefly();
+        const bool rejectedStaleEpoch = follower.SceneUpdateCount == 1;
+
+        scene.Snapshot.AuthorityEpoch = leader.StartEpoch;
+        scene.Snapshot.TransactionId = 1;
+        leader.SendMessage(scene);
+        pumpBriefly();
+        const bool rejectedDuplicate = follower.SceneUpdateCount == 1;
+
+        scene.Snapshot.TransactionId = 2;
+        scene.Snapshot.RawPhaseWord = 2;
+        leader.SendMessage(scene);
+        const bool nextRelayed = PumpUntil({&leader, &follower}, [&] {
+            return follower.SceneUpdateCount == 2 && follower.LastSceneSnapshot.RawPhaseWord == 2 &&
+                follower.LastSceneSnapshot.ServerSequence > 1;
+        }, 5s);
+        const bool passed = relayed && rejectedFollower && rejectedStaleEpoch && rejectedDuplicate && nextRelayed;
+        PrintResult("scene-authority", passed,
+            passed ? "leader scenes relayed in sequence; follower, stale epoch, and duplicate writes rejected" :
+                "scene relay or authority validation failed");
+        return passed ? 0 : 1;
+    }
+
+    if (scenario == "physics-authority")
+    {
+        PartyReadyRequest ready;
+        ready.Ready = true;
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] { return leader.ReadyCount == 2 && follower.ReadyCount == 2; }, 5s))
+        {
+            PrintResult("physics-authority", false, "party did not reach the ready barrier");
+            return 1;
+        }
+        PartyStartRequest start;
+        start.Mode = PartyStartRequest::kNew;
+        start.Launch = true;
+        leader.SendMessage(start);
+        if (!PumpUntil({&leader, &follower}, [&] {
+                return leader.SessionState == 1 && follower.SessionState == 1 &&
+                    leader.StartEpoch > 0 && leader.StartEpoch == follower.StartEpoch;
+            }, 5s))
+        {
+            PrintResult("physics-authority", false, "party did not enter the loading epoch");
+            return 1;
+        }
+        leader.SendMessage(ready);
+        follower.SendMessage(ready);
+        if (!PumpUntil({&leader, &follower}, [&] {
+                return leader.SessionState == 2 && follower.SessionState == 2;
+            }, 5s))
+        {
+            PrintResult("physics-authority", false, "party did not reach the running session state");
+            return 1;
+        }
+
+        PhysicsReferencesMoveRequest physics;
+        physics.Tick = 100;
+        PhysicsReferenceUpdate pose;
+        pose.Id = GameId{1, 0x1234};
+        pose.Position = {12.f, -34.f, 56.f};
+        pose.MotionType = 3;
+        pose.BodyTransform = {1.f, 0.f, 0.f, 0.f,
+            0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f,
+            12.f / 70.f, -34.f / 70.f, 56.f / 70.f, 1.f};
+        physics.Updates.push_back(pose);
+
+        EnterInteriorCellRequest leaderCell;
+        leaderCell.CellId = GameId{1, 0x100};
+        EnterInteriorCellRequest followerCell;
+        followerCell.CellId = GameId{1, 0x200};
+        leader.SendMessage(leaderCell);
+        follower.SendMessage(followerCell);
+        const auto cellUpdateDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < cellUpdateDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        leader.SendMessage(physics);
+        const auto separationDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < separationDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool suppressedAcrossCells = follower.PhysicsUpdateCount == 0;
+
+        follower.SendMessage(leaderCell);
+        const auto reentryDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < reentryDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        physics.Tick = 101;
+        leader.SendMessage(physics);
+        const bool relayed = PumpUntil({&leader, &follower}, [&] {
+            return follower.PhysicsUpdateCount == 1 && follower.LastPhysicsTick == 101 &&
+                follower.LastPhysicsEpoch == leader.StartEpoch && follower.LastPhysicsCount == 1 &&
+                follower.LastPhysicsBodyTransform == pose.BodyTransform;
+        }, 5s);
+        physics.Tick = 102;
+        follower.SendMessage(physics);
+        const auto rejectionDeadline = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < rejectionDeadline)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool rejectedFollower = leader.PhysicsUpdateCount == 0;
+        const bool passed = suppressedAcrossCells && relayed && rejectedFollower;
+        PrintResult("physics-authority", passed,
+            passed ? "distant cell suppressed, nearby leader snapshot relayed, follower write rejected" :
+                "physics cell scoping, relay, or leader-only authority validation failed");
+        return passed ? 0 : 1;
+    }
+
+    if (scenario == "temporary-actor-identity")
+    {
+        EnterInteriorCellRequest cell;
+        cell.CellId = GameId{1, 0x100};
+        leader.SendMessage(cell);
+        follower.SendMessage(cell);
+        const auto settleUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < settleUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+
+        AssignCharacterRequest native;
+        native.Cookie = 501;
+        native.ReferenceId = GameId{std::numeric_limits<uint32_t>::max(), 0x1001};
+        native.FormId = GameId{1, 0x23456};
+        native.CellId = cell.CellId;
+        native.Position = glm::vec3{100.f, 200.f, 300.f};
+        leader.SendMessage(native);
+        if (!PumpUntil({&leader, &follower}, [&] { return leader.AssignmentCount == 1; }, 5s))
+        {
+            PrintResult("temporary-actor-identity", false, "leader temporary actor was not assigned");
+            return 1;
+        }
+        const auto firstServerId = leader.LastAssignedServerId;
+        const auto firstEpoch = leader.LastAssignedEpoch;
+
+        native.Cookie = 502;
+        native.ReferenceId.BaseId = 0x2001; // Another process's FF reference.
+        // A scripted actor may travel well beyond the old 64-unit gate
+        // before its native counterpart is registered by the other client.
+        native.Position = glm::vec3{250.f, 200.f, 300.f};
+        follower.SendMessage(native);
+        const bool reconciled = PumpUntil({&leader, &follower}, [&] {
+            return follower.AssignmentCount == 1;
+        }, 5s) && follower.LastAssignedServerId == firstServerId &&
+            follower.LastAssignedEpoch == firstEpoch && !follower.LastAssignedOwner;
+
+        native.Cookie = 503;
+        native.ReferenceId.BaseId = 0x1002;
+        leader.SendMessage(native); // Same source may have two genuine actors.
+        const bool distinctSameSource = PumpUntil({&leader, &follower}, [&] {
+            return leader.AssignmentCount == 2;
+        }, 5s) && leader.LastAssignedServerId != firstServerId && leader.LastAssignedOwner;
+
+        native.Cookie = 504;
+        native.ReferenceId.BaseId = 0x2002;
+        native.FormId.BaseId = 0x23457; // A different NPC base at the same marker.
+        follower.SendMessage(native);
+        const bool distinctBase = PumpUntil({&leader, &follower}, [&] {
+            return follower.AssignmentCount == 2;
+        }, 5s) && follower.LastAssignedServerId != firstServerId && follower.LastAssignedOwner;
+
+        const bool passed = reconciled && distinctSameSource && distinctBase;
+        PrintResult("temporary-actor-identity", passed,
+            passed ? "cross-client FF references reconciled; same-source and different-base NPCs remained distinct" :
+                "temporary actor identity or distinct-actor separation failed");
+        return passed ? 0 : 1;
+    }
+
+    if (scenario == "mount-leader-affinity")
+    {
+        EnterInteriorCellRequest leaderCell;
+        leaderCell.CellId = GameId{1, 0x100};
+        EnterInteriorCellRequest followerCell;
+        followerCell.CellId = GameId{1, 0x200};
+        leader.SendMessage(leaderCell);
+        follower.SendMessage(followerCell);
+        const auto settleUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < settleUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+
+        AssignCharacterRequest mount;
+        mount.Cookie = 64;
+        mount.ReferenceId = GameId{1, 0x12364};
+        mount.FormId = GameId{1, 0x23464};
+        mount.CellId = followerCell.CellId;
+        mount.IsMount = true;
+        follower.SendMessage(mount);
+        if (!PumpUntil({&leader, &follower}, [&] { return follower.AssignmentCount > 0; }, 5s) ||
+            !follower.LastAssignedOwner || follower.LastAssignedEpoch == 0)
+        {
+            PrintResult("mount-leader-affinity", false, "follower did not receive the separated-cell mount lease");
+            return 1;
+        }
+
+        RequestOwnershipClaim claim;
+        claim.ServerId = follower.LastAssignedServerId;
+        claim.ExpectedOwnershipEpoch = follower.LastAssignedEpoch;
+        leader.SendMessage(followerCell);
+        const auto enterUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < enterUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        leader.SendMessage(claim);
+        const bool leaderClaimed = PumpUntil({&leader, &follower}, [&] {
+            return follower.OwnershipTransferCount == 1 &&
+                follower.LastTransferServerId == claim.ServerId &&
+                follower.LastTransferOwnerId == leader.PlayerId &&
+                follower.LastTransferEpoch > claim.ExpectedOwnershipEpoch;
+        }, 5s);
+
+        claim.ExpectedOwnershipEpoch = follower.LastTransferEpoch;
+        follower.SendMessage(claim);
+        const auto rejectionUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < rejectionUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool followerRejected = follower.OwnershipTransferCount == 1;
+        const bool passed = leaderClaimed && followerRejected;
+        PrintResult("mount-leader-affinity", passed,
+            passed ? "leader claimed nearby mount; follower could not reclaim it" :
+                "mount authority failed to converge on the leader");
+        return passed ? 0 : 1;
+    }
+
+    if (scenario == "separated-cell-lease")
+    {
+        EnterInteriorCellRequest leaderCell;
+        leaderCell.CellId = GameId{1, 0x100};
+        EnterInteriorCellRequest followerCell;
+        followerCell.CellId = GameId{1, 0x200};
+        leader.SendMessage(leaderCell);
+        follower.SendMessage(followerCell);
+        const auto settleUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < settleUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+
+        AssignCharacterRequest discovered;
+        discovered.Cookie = 42;
+        discovered.ReferenceId = GameId{1, 0x12345};
+        discovered.FormId = GameId{1, 0x23456};
+        discovered.CellId = followerCell.CellId;
+        follower.SendMessage(discovered);
+        if (!PumpUntil({&leader, &follower}, [&] { return follower.AssignmentCount > 0; }, 5s) ||
+            follower.LastAssignedCookie != discovered.Cookie || !follower.LastAssignedOwner ||
+            follower.LastAssignedEpoch == 0)
+        {
+            PrintResult("separated-cell-lease", false,
+                "follower assignment count=" + std::to_string(follower.AssignmentCount) +
+                " cookie=" + std::to_string(follower.LastAssignedCookie) +
+                " owner=" + std::to_string(follower.LastAssignedOwner) +
+                " server=" + std::to_string(follower.LastAssignedServerId) +
+                " epoch=" + std::to_string(follower.LastAssignedEpoch) +
+                " parseFailure=" + std::to_string(follower.ParseFailure));
+            return 1;
+        }
+
+        RequestOwnershipClaim claim;
+        claim.ServerId = follower.LastAssignedServerId;
+        claim.ExpectedOwnershipEpoch = follower.LastAssignedEpoch;
+        leader.SendMessage(claim);
+        const auto rejectedUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < rejectedUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool distantHostRejected = follower.OwnershipTransferCount == 0;
+
+        leader.SendMessage(followerCell);
+        const auto enterUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < enterUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        leader.SendMessage(claim);
+        const bool reclaimed = PumpUntil({&leader, &follower}, [&] {
+            return follower.OwnershipTransferCount > 0 &&
+                follower.LastTransferServerId == claim.ServerId &&
+                follower.LastTransferOwnerId == leader.PlayerId &&
+                follower.LastTransferEpoch > claim.ExpectedOwnershipEpoch;
+        }, 5s);
+
+        follower.SendMessage(claim);
+        const auto staleUntil = std::chrono::steady_clock::now() + 250ms;
+        while (std::chrono::steady_clock::now() < staleUntil)
+        {
+            leader.Update();
+            follower.Update();
+            std::this_thread::sleep_for(1ms);
+        }
+        const bool staleRejected = follower.OwnershipTransferCount == 1;
+        discovered.Cookie = 43;
+        discovered.ReferenceId = GameId{1, 0x12346};
+        const uint32_t priorSpawns = leader.SpawnCount;
+        follower.SendMessage(discovered);
+        const bool sameCellSpawned = PumpUntil({&leader, &follower}, [&] {
+            return follower.AssignmentCount == 2 && leader.SpawnCount > priorSpawns &&
+                leader.LastSpawnServerId == follower.LastAssignedServerId &&
+                leader.LastSpawnEpoch == follower.LastAssignedEpoch && follower.LastAssignedOwner;
+        }, 5s);
+        if (sameCellSpawned)
+        {
+            claim.ServerId = leader.LastSpawnServerId;
+            claim.ExpectedOwnershipEpoch = leader.LastSpawnEpoch;
+            leader.SendMessage(claim);
+        }
+        const bool nearbyHostReclaimed = sameCellSpawned && PumpUntil({&leader, &follower}, [&] {
+            return follower.LastTransferServerId == claim.ServerId &&
+                follower.LastTransferOwnerId == leader.PlayerId &&
+                follower.LastTransferEpoch > claim.ExpectedOwnershipEpoch;
+        }, 5s);
+        const bool passed = distantHostRejected && reclaimed && staleRejected && nearbyHostReclaimed;
+        PrintResult("separated-cell-lease", passed,
+            passed ? "distant follower lease and nearby host spawn/claim both converged; stale epoch rejected" :
+                "cell lease, initial host spawn/claim, or stale epoch validation failed");
+        return passed ? 0 : 1;
     }
 
     if (scenario == "session-access-authority")

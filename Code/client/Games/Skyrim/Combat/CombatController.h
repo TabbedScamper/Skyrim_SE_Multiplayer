@@ -9,6 +9,19 @@ struct CombatTargetSelector;
 
 struct CombatController
 {
+    struct TargetAuthorityTrialDiagnostics
+    {
+        uint32_t ActorFormId{};
+        uint64_t Calls{};
+        uint64_t Overrides{};
+        uint32_t LastRequestedFormId{};
+        uint32_t LastPresentedFormId{};
+        uint32_t LastNativeFormId{};
+        uintptr_t LastCallerRva{};
+    };
+
+    static void SetTargetAuthorityTrialActor(uint32_t aActorFormId) noexcept;
+    static TargetAuthorityTrialDiagnostics GetTargetAuthorityTrialDiagnostics() noexcept;
     void SetTarget(Actor* apTarget);
     void UpdateTarget();
 

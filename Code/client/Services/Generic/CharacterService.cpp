@@ -41,6 +41,7 @@
 #include <Messages/AssignCharacterRequest.h>
 #include <Messages/AssignCharacterResponse.h>
 #include <Messages/ServerReferencesMoveRequest.h>
+#include <Games/Skyrim/Havok/VisualPoseMailbox.h>
 #include <Messages/ClientReferencesMoveRequest.h>
 #include <Messages/CharacterSpawnRequest.h>
 #include <Messages/RequestFactionsChanges.h>
@@ -65,6 +66,7 @@
 
 #include <World.h>
 #include <Games/TES.h>
+#include <Combat/CombatController.h>
 
 CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -110,6 +112,96 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
     m_partyJoinedConnection = aDispatcher.sink<PartyJoinedEvent>().connect<&CharacterService::OnPartyJoinedEvent>(this);
 }
 
+void CharacterService::SetPresentationDelayMs(uint32_t aDelayMs) noexcept
+{
+    m_presentationDelayMs.store(aDelayMs, std::memory_order_release);
+}
+
+uint32_t CharacterService::GetPresentationDelayMs() const noexcept
+{
+    return m_presentationDelayMs.load(std::memory_order_acquire);
+}
+
+void CharacterService::SetVehicleTrialRiderId(uint32_t aRiderId) noexcept
+{
+    m_vehicleTrialRiderId.store(aRiderId, std::memory_order_release);
+}
+
+uint32_t CharacterService::GetVehicleTrialRiderId() const noexcept
+{
+    return m_vehicleTrialRiderId.load(std::memory_order_acquire);
+}
+
+uint64_t CharacterService::GetVehicleTrialCalls() const noexcept
+{
+    return m_vehicleTrialCalls;
+}
+
+uint64_t CharacterService::GetVehicleTrialImmediateSeats() const noexcept
+{
+    return m_vehicleTrialImmediateSeats;
+}
+
+uint32_t CharacterService::GetVehicleTrialImmediateHandle() const noexcept
+{
+    return m_vehicleTrialImmediateHandle;
+}
+
+CharacterService::MountDiagnostic CharacterService::GetMountDiagnostic() const noexcept
+{
+    return {static_cast<uint32_t>(m_pendingMounts.size()),
+        m_mountNotifications, m_mountWaitedFor3D, m_mountApplied,
+        m_mountSeated, m_mountRejected, m_lastMountRiderId, m_lastMountId};
+}
+
+CharacterService::LocalPoseProductionDiagnostic
+CharacterService::GetLocalPoseProductionDiagnostic() const noexcept
+{
+    return {m_localPoseBatches.load(std::memory_order_relaxed),
+        m_localPoseActors.load(std::memory_order_relaxed),
+        m_localPoseTotalUs.load(std::memory_order_relaxed),
+        m_localPoseMaxActorUs.load(std::memory_order_relaxed),
+        m_localPoseLastBatchUs.load(std::memory_order_relaxed),
+        m_localPoseLastBatchActors.load(std::memory_order_relaxed)};
+}
+
+Vector<CharacterService::MountRelationDiagnostic>
+CharacterService::GetPendingMountRelations() const noexcept
+{
+    Vector<MountRelationDiagnostic> relations;
+    relations.reserve(m_pendingMounts.size());
+    for (const auto& [riderId, pending] : m_pendingMounts)
+    {
+        auto* pRider = Utils::GetByServerId<Actor>(riderId);
+        auto* pMount = Utils::GetByServerId<Actor>(pending.MountId);
+        const auto native = pRider ? pRider->GetNativeMountState() :
+            Actor::NativeMountState{};
+        relations.push_back({riderId, pending.MountId,
+            pRider ? pRider->formID : 0,
+            pMount ? pMount->formID : 0,
+            pRider ? pRider->GetNativeMountFormId() : 0,
+            pRider ? pRider->someRefrHandle : 0,
+            native.HorseExtra, native.HorseHandle,
+            native.InteractionExtra, native.InteractionPointerPresent,
+            native.InteractionActorHandle, native.InteractionTargetHandle,
+            pRider && pRider->GetNiNode(),
+            pMount && pMount->GetNiNode(),
+            pending.WasSeated, pending.Attempts});
+    }
+    return relations;
+}
+
+void CharacterService::ClearMountRelationsForServerId(uint32_t aServerId) noexcept
+{
+    for (auto it = m_pendingMounts.begin(); it != m_pendingMounts.end();)
+    {
+        if (it->first == aServerId || it->second.MountId == aServerId)
+            it = m_pendingMounts.erase(it);
+        else
+            ++it;
+    }
+}
+
 void CharacterService::DeleteRemoteEntityComponents(entt::entity aEntity) const noexcept
 {
     m_world.remove<FaceGenComponent, InterpolationComponent, RemoteAnimationComponent, RemoteComponent, CacheComponent, WaitingFor3D, PlayerComponent>(aEntity);
@@ -125,7 +217,7 @@ void CharacterService::DeclineOwnership(const uint32_t aServerId, const uint32_t
 }
 
 void CharacterService::ReconcileActorData(
-    const entt::entity aEntity, Actor* apActor, const uint32_t aOwnershipEpoch, const ActorData& acActorData, const bool aApplyInventory, const bool aIsLocalOwner) noexcept
+    const entt::entity aEntity, Actor* apActor, const uint32_t aOwnershipEpoch, const ActorData& acActorData, const bool aApplyInventory, const bool aIsLocalOwner, const bool aInitialNativeAssignment) noexcept
 {
     if (auto* pWaitingFor3D = m_world.try_get<WaitingFor3D>(aEntity))
     {
@@ -144,7 +236,21 @@ void CharacterService::ReconcileActorData(
     if (aApplyInventory)
     {
         const Inventory currentInventory = apActor->GetActorInventory();
-        if (currentInventory.Entries != acActorData.InitialInventory.Entries || currentInventory.CurrentMagicEquipment != acActorData.InitialInventory.CurrentMagicEquipment)
+        // A native actor can equip its default outfit after the discovery
+        // snapshot was sent.  An empty assignment snapshot is not evidence
+        // that the host deliberately stripped that actor: RemoveAllItems()
+        // here would erase the outfit on both the owner and its peers.
+        const bool incompleteSnapshot = aInitialNativeAssignment && !acActorData.IsDead &&
+            acActorData.InitialInventory.Entries.empty() &&
+            !currentInventory.Entries.empty();
+        if (incompleteSnapshot)
+        {
+            spdlog::warn("Preserved native inventory for actor {:X}: empty assignment snapshot, {} current entries",
+                apActor->formID, currentInventory.Entries.size());
+            if (currentInventory.CurrentMagicEquipment != acActorData.InitialInventory.CurrentMagicEquipment)
+                apActor->SetMagicEquipment(acActorData.InitialInventory.CurrentMagicEquipment);
+        }
+        else if (currentInventory.Entries != acActorData.InitialInventory.Entries || currentInventory.CurrentMagicEquipment != acActorData.InitialInventory.CurrentMagicEquipment)
             apActor->SetActorInventory(acActorData.InitialInventory);
     }
 
@@ -266,7 +372,7 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
     auto& formIdComponent = view.get<FormIdComponent>(cId);
     CancelServerAssignment(*entityIt, formIdComponent.Id);
 
-    m_world.remove<EarlyAnimationBufferComponent>(cId);
+    m_world.remove<EarlyAnimationBufferComponent, DeferredAssignmentComponent>(cId);
 
     if (m_world.all_of<FormIdComponent>(cId))
         m_world.remove<FormIdComponent>(cId);
@@ -279,10 +385,37 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    // Discovery emits ActorAddedEvent only once per high-process lifetime.
+    // New Game can expose the player (and scene actors) before their cell is
+    // attached, so an assignment deferred then otherwise never retries.
+    // Revisit only still-unassigned actors, at a bounded cadence.
+    const auto nowMs = GetTickCount64();
+    if (m_transport.IsOnline() && nowMs >= m_nextDeferredAssignmentRetryMs)
+    {
+        m_nextDeferredAssignmentRetryMs = nowMs + 1000;
+        auto unassigned = m_world.view<FormIdComponent, DeferredAssignmentComponent>(entt::exclude<
+            ObjectComponent, RemoteComponent, LocalComponent,
+            WaitingForAssignmentComponent>);
+        Vector<entt::entity> deferred(unassigned.begin(), unassigned.end());
+        for (const auto entity : deferred)
+        {
+            const auto formId = m_world.get<FormIdComponent>(entity).Id;
+            auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+            if (pActor && pActor->parentCell && !pActor->IsDeleted())
+            {
+                m_world.remove<DeferredAssignmentComponent>(entity);
+                spdlog::info("Retrying deferred cell assignment for actor {:X}", formId);
+                ProcessNewEntity(entity);
+            }
+        }
+    }
     RunSpawnUpdates();
+    RunLocalMountUpdates();
+    RunPendingMounts();
     RunLocalUpdates();
     RunFactionsUpdates();
     RunRemoteUpdates();
+    RunPresentationEvents();
     RunExperienceUpdates();
     ApplyCachedWeaponDraws(acUpdateEvent);
     ProcessLeveledConforms();
@@ -311,8 +444,17 @@ void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const
     }
 }
 
-void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) const noexcept
+void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept
 {
+    m_nextDeferredAssignmentRetryMs = 0;
+    VisualPoseMailbox::SetPresentationTick(0);
+    VisualPoseMailbox::SetApplyEnabled(false);
+    VisualPoseMailbox::SetApplyFormId(0);
+    m_pendingVoices.clear();
+    m_pendingSubtitles.clear();
+    m_pendingMounts.clear();
+    m_vehicleTrialRiderId.store(0, std::memory_order_release);
+    m_localMountSent.clear();
     auto remoteView = m_world.view<FormIdComponent, RemoteComponent>();
     for (auto entity : remoteView)
     {
@@ -322,13 +464,16 @@ void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEve
         if (!pActor)
             continue;
 
+        VisualPoseMailbox::Clear(&pActor->animationGraphHolder);
+
         if (pActor->GetExtension()->IsRemotePlayer())
             pActor->Delete();
         else
             pActor->GetExtension()->SetRemote(false);
     }
 
-    m_world.clear<WaitingForAssignmentComponent, LocalComponent, RemoteComponent>();
+    m_world.clear<WaitingForAssignmentComponent, DeferredAssignmentComponent,
+        LocalComponent, RemoteComponent>();
 
     for (const auto& [formId, pickFormId] : m_pendingLeveledConforms)
     {
@@ -424,7 +569,9 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         spdlog::info("Received local actor, form id: {:X}", pActor->formID);
 
         pActor->GetExtension()->SetRemote(true);
-        ReconcileActorData(cEntity, pActor, acMessage.OwnershipEpoch, actorData, true, true);
+        // The owner's assignment echoes an earlier snapshot of this very
+        // actor.  Its live native inventory is newer than that echo.
+        ReconcileActorData(cEntity, pActor, acMessage.OwnershipEpoch, actorData, false, true);
 
         auto& localAnimationComponent = m_world.emplace_or_replace<LocalAnimationComponent>(cEntity);
 
@@ -446,6 +593,50 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
     {
         spdlog::info("Received remote actor, form id: {:X}, isweapondrawn: {}", pActor->formID, acMessage.IsWeaponDrawn);
 
+        // A server spawn may beat the reply to this native temporary actor's
+        // assignment. Keep the native reference (and its quest alias/scripts)
+        // and retire only the synthetic proxy for the same server entity.
+        if (pActor->IsTemporary())
+        {
+            // The synthetic proxy may still be waiting for ActorAddedEvent,
+            // so it can have only RemoteComponent::CachedRefId at this point.
+            // Requiring FormIdComponent missed that race and left two actors
+            // bound to one server ID on the follower.
+            const auto remotes = m_world.view<RemoteComponent>();
+            Vector<entt::entity> duplicateProxies;
+            for (const auto candidate : remotes)
+            {
+                if (candidate != cEntity && remotes.get<RemoteComponent>(candidate).Id == acMessage.ServerId)
+                    duplicateProxies.push_back(candidate);
+            }
+            for (const auto proxy : duplicateProxies)
+            {
+                const auto* pProxyForm = m_world.try_get<FormIdComponent>(proxy);
+                const uint32_t proxyFormId = pProxyForm ? pProxyForm->Id :
+                    m_world.get<RemoteComponent>(proxy).CachedRefId;
+                auto* pProxy = Cast<Actor>(TESForm::GetById(proxyFormId));
+                if (!pProxy || !pProxy->IsTemporary() || proxyFormId == pActor->formID)
+                    continue;
+                DeleteRemoteEntityComponents(proxy);
+                VisualPoseMailbox::Clear(&pProxy->animationGraphHolder);
+                DeleteTempActor(proxyFormId);
+                if (!pProxyForm && m_world.valid(proxy) && m_world.orphan(proxy))
+                    m_world.destroy(proxy);
+                spdlog::info("Retired early temporary proxy {:X} for native {:X}, server {:X}",
+                    proxyFormId, pActor->formID, acMessage.ServerId);
+            }
+        }
+
+        const auto mountBefore = pActor->GetNativeMountState();
+        const bool traceMountedAssignment = mountBefore.InteractionExtra ||
+            mountBefore.HorseExtra;
+        if (traceMountedAssignment)
+            spdlog::info("Mounted actor assignment before reconcile {:X}: nativeMount={:X} interaction={} horse={} at=({}, {}, {}) target=({}, {}, {})",
+                pActor->formID, pActor->GetNativeMountFormId(),
+                mountBefore.InteractionExtra, mountBefore.HorseExtra,
+                pActor->position.x, pActor->position.y, pActor->position.z,
+                acMessage.Position.x, acMessage.Position.y, acMessage.Position.z);
+
         m_world.emplace_or_replace<RemoteComponent>(cEntity, acMessage.ServerId, formIdComponent->Id, acMessage.OwnershipEpoch);
 
         pActor->GetExtension()->SetRemote(true);
@@ -459,16 +650,29 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         m_world.emplace_or_replace<ReplayedActionsDebugComponent>(cEntity, acMessage.ActionsToReplay);
 #endif
 
-        ReconcileActorData(cEntity, pActor, acMessage.OwnershipEpoch, actorData, true, false);
+        ReconcileActorData(cEntity, pActor, acMessage.OwnershipEpoch, actorData, true, false,
+            !acMessage.InventoryAuthoritative);
+
+        if (traceMountedAssignment)
+            spdlog::info("Mounted actor assignment after reconcile {:X}: nativeMount={:X} interaction={}",
+                pActor->formID, pActor->GetNativeMountFormId(),
+                pActor->GetNativeMountState().InteractionExtra);
 
         MoveActor(pActor, acMessage.WorldSpaceId, acMessage.CellId, acMessage.Position);
+
+        if (traceMountedAssignment)
+            spdlog::info("Mounted actor assignment after move {:X}: nativeMount={:X} interaction={}",
+                pActor->formID, pActor->GetNativeMountFormId(),
+                pActor->GetNativeMountState().InteractionExtra);
 
         // The owner's leveled pick rides the assignment response for actors we discovered ourselves
         ApplyLeveledNpcPick(pActor, acMessage.LeveledNpcPickId);
     }
+    if (!acMessage.Owner && acMessage.MountedOnServerId)
+        m_pendingMounts[acMessage.ServerId] = {acMessage.MountedOnServerId, 0, 0};
 }
 
-void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) const noexcept
+void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
     if (acMessage.OwnershipEpoch == 0)
     {
@@ -612,6 +816,9 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay);
 
+    if (acMessage.MountedOnServerId)
+        m_pendingMounts[acMessage.ServerId] = {acMessage.MountedOnServerId, 0, 0};
+
 #if (!IS_MASTER)
     m_world.emplace_or_replace<ReplayedActionsDebugComponent>(*entity, acMessage.ActionsToReplay);
 #endif
@@ -632,6 +839,19 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         auto& animationComponent = view.get<RemoteAnimationComponent>(*itor);
         const auto& movement = update.UpdatedMovement;
 
+        if (acMessage.Tick >= interpolationComponent.AuthorityTick)
+        {
+            const auto positionStep = glm::vec3(movement.Position) -
+                interpolationComponent.AuthorityPosition;
+            if (!interpolationComponent.AuthorityTick ||
+                glm::dot(positionStep, positionStep) > 64.f)
+                interpolationComponent.AuthorityStableSinceTick = acMessage.Tick;
+            interpolationComponent.AuthorityTick = acMessage.Tick;
+            interpolationComponent.AuthorityCellId = movement.CellId;
+            interpolationComponent.AuthorityWorldSpaceId = movement.WorldSpaceId;
+            interpolationComponent.AuthorityPosition = movement.Position;
+        }
+
         InterpolationComponent::TimePoint point;
         point.Tick = acMessage.Tick;
         point.Position = movement.Position;
@@ -640,16 +860,59 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         point.Direction = movement.Direction;
 
         InterpolationSystem::AddPoint(interpolationComponent, point);
+        if (acMessage.Tick >= animationComponent.LastReceivedCombatTargetTick)
+        {
+            animationComponent.LastReceivedCombatTargetTick = acMessage.Tick;
+            auto& targets = animationComponent.CombatTargetTimePoints;
+            const uint32_t lastTargetId = targets.empty() ?
+                animationComponent.DesiredCombatTargetServerId :
+                targets.back().ServerId;
+            if (lastTargetId != update.CombatTargetServerId ||
+                (!animationComponent.DesiredCombatTargetTick && targets.empty()))
+            {
+                targets.push_back({acMessage.Tick, update.CombatTargetServerId});
+                if (targets.size() > 32)
+                    targets.pop_front();
+            }
+        }
 
         for (const auto& action : update.ActionEvents)
         {
             animationComponent.TimePoints.push_back(action);
+            animationComponent.LastReceivedAction = action;
+        }
+
+        if (!update.EvaluatedPose.Bones.empty() &&
+            acMessage.Tick >= animationComponent.EvaluatedPoseTick)
+        {
+            animationComponent.EvaluatedPose = update.EvaluatedPose;
+            animationComponent.EvaluatedPoseTick = acMessage.Tick;
+        }
+        if (!update.VisualBones.Bones.empty() &&
+            acMessage.Tick >= animationComponent.VisualBonesTick)
+        {
+            animationComponent.VisualBones = update.VisualBones;
+            animationComponent.VisualBonesTick = acMessage.Tick;
+            if (const auto* pFormId = m_world.try_get<FormIdComponent>(*itor))
+            {
+                if (auto* pActor = Cast<Actor>(TESForm::GetById(pFormId->Id)))
+                {
+                    const auto* pExtension = pActor->GetExtension();
+                    VisualPoseMailbox::Publish(&pActor->animationGraphHolder,
+                        pActor, pActor->formID,
+                        view.get<RemoteComponent>(*itor).OwnershipEpoch,
+                        pExtension ? pExtension->GraphDescriptorHash : 0,
+                        update.VisualBones);
+                }
+            }
         }
     }
 }
 
 void CharacterService::OnActionEvent(const ActionEvent& acActionEvent) const noexcept
 {
+    auto* pActionActor = Cast<Actor>(TESForm::GetById(acActionEvent.ActorId));
+    auto* pActionExtension = pActionActor ? pActionActor->GetExtension() : nullptr;
     auto view = m_world.view<LocalAnimationComponent, FormIdComponent>();
     const auto itor = std::find_if(std::begin(view), std::end(view), [id = acActionEvent.ActorId, view](entt::entity entity) { return view.get<FormIdComponent>(entity).Id == id; });
 
@@ -658,6 +921,8 @@ void CharacterService::OnActionEvent(const ActionEvent& acActionEvent) const noe
         auto& localComponent = view.get<LocalAnimationComponent>(*itor);
 
         localComponent.Append(acActionEvent);
+        if (pActionExtension)
+            pActionExtension->LatestAnimationDispatch = 1;
     }
     else if (m_transport.IsOnline())
     {
@@ -669,8 +934,14 @@ void CharacterService::OnActionEvent(const ActionEvent& acActionEvent) const noe
         if (itor != std::end(view))
         {
             view.get<EarlyAnimationBufferComponent>(*itor).Actions.push_back(acActionEvent);
+            if (pActionExtension)
+                pActionExtension->LatestAnimationDispatch = 2;
         }
+        else if (pActionExtension)
+            pActionExtension->LatestAnimationDispatch = 3;
     }
+    else if (pActionExtension)
+        pActionExtension->LatestAnimationDispatch = 3;
 }
 
 void CharacterService::OnFactionsChanges(const NotifyFactionsChanges& acEvent) const noexcept
@@ -736,6 +1007,18 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
     }
 
     const entt::entity cEntity = *entity;
+    if (const auto* pOldForm = m_world.try_get<FormIdComponent>(cEntity))
+    {
+        if (auto* pOldActor = Cast<Actor>(TESForm::GetById(pOldForm->Id)))
+            VisualPoseMailbox::Clear(&pOldActor->animationGraphHolder);
+    }
+    if (auto* pRemoteAnimation = m_world.try_get<RemoteAnimationComponent>(cEntity))
+    {
+        pRemoteAnimation->EvaluatedPose = {};
+        pRemoteAnimation->EvaluatedPoseTick = 0;
+        pRemoteAnimation->VisualBones = {};
+        pRemoteAnimation->VisualBonesTick = 0;
+    }
     const auto* pFormIdComponent = m_world.try_get<FormIdComponent>(cEntity);
     Actor* pActor = pFormIdComponent ? Cast<Actor>(TESForm::GetById(pFormIdComponent->Id)) : nullptr;
 
@@ -812,8 +1095,10 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
     spdlog::info("Actor {:X} is now owned by player {:X} at epoch {}", acMessage.ServerId, acMessage.OwnerPlayerId, acMessage.OwnershipEpoch);
 }
 
-void CharacterService::OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) const noexcept
+void CharacterService::OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) noexcept
 {
+    ClearMountRelationsForServerId(acMessage.ServerId);
+    m_localMountSent.erase(acMessage.ServerId);
     auto view = m_world.view<RemoteComponent>();
 
     const auto itor = std::find_if(std::begin(view), std::end(view), [id = acMessage.ServerId, view](entt::entity entity) { return view.get<RemoteComponent>(entity).Id == id; });
@@ -823,6 +1108,8 @@ void CharacterService::OnRemoveCharacter(const NotifyRemoveCharacter& acMessage)
         if (auto* pFormIdComponent = m_world.try_get<FormIdComponent>(*itor))
         {
             Actor* pActor = Cast<Actor>(TESForm::GetById(pFormIdComponent->Id));
+            if (pActor)
+                VisualPoseMailbox::Clear(&pActor->animationGraphHolder);
             if (pActor && pActor->IsTemporary())
                 CharacterService::DeleteTempActor(pFormIdComponent->Id);
             else if (pActor)
@@ -949,40 +1236,192 @@ void CharacterService::OnMountEvent(const MountEvent& acEvent) const noexcept
     request.MountId = mountServerId;
     request.MountOwnershipEpoch = mountOwnershipEpoch;
 
+    auto* pRider = Cast<Actor>(TESForm::GetById(acEvent.RiderID));
+    const auto native = pRider ? pRider->GetNativeMountState() : Actor::NativeMountState{};
+    spdlog::info(
+        "Native mount package event: rider {:X}, server {:X}, horse {:X}, horse server {:X}, observed native horse {:X}, interaction={}, horseExtra={}",
+        acEvent.RiderID, request.RiderId, acEvent.MountID, request.MountId,
+        pRider ? pRider->GetNativeMountFormId() : 0,
+        native.InteractionExtra, native.HorseExtra);
+
     m_transport.Send(request);
 }
 
-void CharacterService::OnNotifyMount(const NotifyMount& acMessage) const noexcept
+void CharacterService::OnNotifyMount(const NotifyMount& acMessage) noexcept
 {
-    auto remoteView = m_world.view<RemoteComponent, FormIdComponent>();
-
-    const auto riderIt = std::find_if(std::begin(remoteView), std::end(remoteView), [remoteView, Id = acMessage.RiderId](auto entity) { return remoteView.get<RemoteComponent>(entity).Id == Id; });
-
-    if (riderIt == std::end(remoteView))
+    ++m_mountNotifications;
+    m_lastMountRiderId = acMessage.RiderId;
+    m_lastMountId = acMessage.MountId;
+    spdlog::info("Received mount relation: rider {:X}, horse {:X}, tick {}",
+        acMessage.RiderId, acMessage.MountId, GetTickCount64());
+    if (!acMessage.RiderId)
+        return;
+    if (!acMessage.MountId)
     {
-        spdlog::warn("Rider with remote id {:X} not found.", acMessage.RiderId);
+        m_pendingMounts.erase(acMessage.RiderId);
         return;
     }
-
-    auto& riderFormIdComponent = remoteView.get<FormIdComponent>(*riderIt);
-    TESForm* pRiderForm = TESForm::GetById(riderFormIdComponent.Id);
-    Actor* pRider = Cast<Actor>(pRiderForm);
-    if (!pRider)
+    if (acMessage.RiderId == acMessage.MountId)
         return;
+    // Actor ownership assignment and 3D creation may lag this one-shot
+    // network event. Keep the latest relation until both scene nodes exist.
+    m_pendingMounts[acMessage.RiderId] = {acMessage.MountId, 0, 0, 0, false};
+}
 
-    const auto mountIt = std::find_if(std::begin(remoteView), std::end(remoteView), [remoteView, Id = acMessage.MountId](auto entity) { return remoteView.get<RemoteComponent>(entity).Id == Id; });
-    if (mountIt == std::end(remoteView))
+void CharacterService::RunPendingMounts() noexcept
+{
+    const auto now = GetTickCount64();
+    for (auto it = m_pendingMounts.begin(); it != m_pendingMounts.end();)
     {
-        spdlog::warn("Cannot apply mount update because mount {:X} is unavailable", acMessage.MountId);
-        return;
+        auto& pending = it->second;
+        if (now < pending.NextAttemptMs)
+        {
+            ++it;
+            continue;
+        }
+        auto* pRider = Utils::GetByServerId<Actor>(it->first);
+        auto* pMount = Utils::GetByServerId<Actor>(pending.MountId);
+        if (!pRider || !pMount || !pRider->GetNiNode() ||
+            !pMount->GetNiNode())
+        {
+            ++m_mountWaitedFor3D;
+            pending.NextAttemptMs = now + 100;
+            ++it;
+            continue;
+        }
+        if (pRider->GetNativeMountFormId() == pMount->formID)
+        {
+            // The engine must continue processing a remotely owned rider's
+            // mounted state; stopping at the first seated frame can undo it.
+            if (!pending.WasSeated)
+                ++m_mountSeated;
+            pending.WasSeated = true;
+            pending.NextAttemptMs = now + 100;
+            ++it;
+            continue;
+        }
+        if (it->first == m_vehicleTrialRiderId.load(std::memory_order_acquire) &&
+            !pending.VehicleTrialAttempted &&
+            pRider->GetExtension()->IsRemote())
+        {
+            if (pRider->SetNativeVehicle(pMount))
+            {
+                pending.VehicleTrialAttempted = true;
+                ++m_vehicleTrialCalls;
+                m_vehicleTrialImmediateHandle = pRider->someRefrHandle;
+                if (pRider->GetNativeMountFormId() == pMount->formID)
+                    ++m_vehicleTrialImmediateSeats;
+                pending.NextAttemptMs = now + 1000;
+                ++it;
+                continue;
+            }
+        }
+        // A successful start merely queues the engine package. Give native
+        // processing time to seat the rider before re-initiating it.
+        if (pending.StartedAtMs && now - pending.StartedAtMs < 5000)
+        {
+            pending.NextAttemptMs = now + 100;
+            ++it;
+            continue;
+        }
+        const bool started = pRider->InitiateMountPackage(pMount);
+        if (pending.Attempts < 8)
+            spdlog::info("Deferred native mount rider {:X} horse {:X}: started={} riderProcess={} horseProcess={} nativeMount={:X} interaction={} attempt={}",
+                pRider->formID, pMount->formID, started,
+                pRider->currentProcess != nullptr,
+                pMount->currentProcess != nullptr,
+                pRider->GetNativeMountFormId(),
+                pRider->GetNativeMountState().InteractionExtra,
+                pending.Attempts + 1);
+        if (started)
+        {
+            ++m_mountApplied;
+            pending.StartedAtMs = now;
+            pending.NextAttemptMs = now + 100;
+            spdlog::info("Started deferred mount rider {:X} horse {:X} after {} attempts",
+                it->first, pending.MountId, pending.Attempts + 1);
+            ++it;
+            continue;
+        }
+        ++pending.Attempts;
+        ++m_mountRejected;
+        pending.NextAttemptMs = now + 500;
+        ++it;
     }
+}
 
-    const auto& mountFormIdComponent = remoteView.get<FormIdComponent>(*mountIt);
-    Actor* pMount = Cast<Actor>(TESForm::GetById(mountFormIdComponent.Id));
-    if (!pMount)
+void CharacterService::RunLocalMountUpdates() noexcept
+{
+    if (!m_transport.IsConnected())
         return;
 
-    pRider->InitiateMountPackage(pMount);
+    const auto now = GetTickCount64();
+    if (now - m_lastLocalMountPollMs < 200)
+        return;
+    m_lastLocalMountPollMs = now;
+
+    const auto view = m_world.view<LocalComponent, FormIdComponent>();
+    for (const auto entity : view)
+    {
+        const auto& owner = view.get<LocalComponent>(entity);
+        const auto& form = view.get<FormIdComponent>(entity);
+        auto* pRider = Cast<Actor>(TESForm::GetById(form.Id));
+        if (!pRider || !pRider->GetNiNode())
+            continue;
+
+        auto& state = m_localMountSent[owner.Id];
+        if (state.OwnershipEpoch != owner.OwnershipEpoch)
+        {
+            state = {};
+            state.OwnershipEpoch = owner.OwnershipEpoch;
+        }
+
+        const uint32_t nativeMountFormId = pRider->GetNativeMountFormId();
+        uint32_t mountId = 0;
+        uint32_t mountEpoch = 0;
+        if (nativeMountFormId)
+        {
+            state.ZeroObservedAtMs = 0;
+            auto token = Utils::GetLocalOwnershipToken(nativeMountFormId);
+            if (!token)
+                token = Utils::GetRemoteOwnershipToken(nativeMountFormId);
+            if (!token)
+                continue; // The horse may not have a server identity yet.
+            mountId = token->ServerId;
+            mountEpoch = token->OwnershipEpoch;
+        }
+        else
+        {
+            if (!state.MountId)
+                continue;
+            if (!state.ZeroObservedAtMs)
+                state.ZeroObservedAtMs = now;
+            if (now - state.ZeroObservedAtMs < 300)
+                continue;
+        }
+
+        if (mountId == state.MountId && now - state.LastSentMs < 2000)
+            continue;
+
+        if (mountId != state.MountId)
+        {
+            const auto native = pRider->GetNativeMountState();
+            spdlog::info(
+                "Network-resolved native mount transition: rider {:X}, server {:X}, epoch {}, previous horse {:X}, observed horse {:X}, interaction={}, horseExtra={}, zeroForMs={}",
+                pRider->formID, owner.Id, owner.OwnershipEpoch, state.MountId,
+                mountId, native.InteractionExtra, native.HorseExtra,
+                mountId || !state.ZeroObservedAtMs ? 0 : now - state.ZeroObservedAtMs);
+        }
+
+        MountRequest request{};
+        request.RiderId = owner.Id;
+        request.RiderOwnershipEpoch = owner.OwnershipEpoch;
+        request.MountId = mountId;
+        request.MountOwnershipEpoch = mountEpoch;
+        m_transport.Send(request);
+        state.MountId = mountId;
+        state.LastSentMs = now;
+    }
 }
 
 void CharacterService::OnInitPackageEvent(const InitPackageEvent& acEvent) const noexcept
@@ -1078,6 +1517,7 @@ void CharacterService::OnDialogueEvent(const DialogueEvent& acEvent) noexcept
 
     DialogueRequest request{};
     request.ServerId = serverIdRes.value();
+    request.Tick = m_transport.GetClock().GetCurrentTick();
     request.SoundFilename = acEvent.VoiceFile;
 
     m_transport.Send(request);
@@ -1085,13 +1525,11 @@ void CharacterService::OnDialogueEvent(const DialogueEvent& acEvent) noexcept
 
 void CharacterService::OnNotifyDialogue(const NotifyDialogue& acMessage) noexcept
 {
-    // A member can initiate dialogue with an NPC owned by this client.
-    Actor* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
-    if (!pActor)
-        return;
-
-    pActor->StopCurrentDialogue(true);
-    pActor->SpeakSound(acMessage.SoundFilename.c_str());
+    // Voice and remote actor animation share a presentation clock. Playing
+    // immediately on packet arrival makes the voice lead the buffered pose.
+    if (m_pendingVoices.size() >= 64)
+        m_pendingVoices.erase(m_pendingVoices.begin());
+    m_pendingVoices.push_back({acMessage.ServerId, acMessage.Tick, acMessage.SoundFilename});
 }
 
 void CharacterService::OnSubtitleEvent(const SubtitleEvent& acEvent) noexcept
@@ -1114,6 +1552,7 @@ void CharacterService::OnSubtitleEvent(const SubtitleEvent& acEvent) noexcept
 
     SubtitleRequest request{};
     request.ServerId = serverIdRes.value();
+    request.Tick = m_transport.GetClock().GetCurrentTick();
     request.Text = acEvent.Text;
     request.TopicFormId = acEvent.TopicFormID;
 
@@ -1122,15 +1561,56 @@ void CharacterService::OnSubtitleEvent(const SubtitleEvent& acEvent) noexcept
 
 void CharacterService::OnNotifySubtitle(const NotifySubtitle& acMessage) noexcept
 {
-    Actor* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
-    if (!pActor)
-        return;
+    if (m_pendingSubtitles.size() >= 64)
+        m_pendingSubtitles.erase(m_pendingSubtitles.begin());
+    m_pendingSubtitles.push_back({acMessage.ServerId, acMessage.Tick, acMessage.TopicFormId, acMessage.Text});
+}
 
-    // This is only for fallout 4
-    TESTopicInfo* pInfo = nullptr;
-    pInfo = Cast<TESTopicInfo>(TESForm::GetById(acMessage.TopicFormId));
+void CharacterService::RunPresentationEvents() noexcept
+{
+    const uint64_t presentationDelayMs = GetPresentationDelayMs();
+    const auto now = m_transport.GetClock().GetCurrentTick();
+    const auto presentationTick = now > presentationDelayMs ? now - presentationDelayMs : 0;
 
-    SubtitleManager::Get()->ShowSubtitle(pActor, acMessage.Text.c_str(), pInfo);
+    for (auto it = m_pendingVoices.begin(); it != m_pendingVoices.end();)
+    {
+        if (it->Tick > presentationTick)
+        {
+            ++it;
+            continue;
+        }
+
+        if (Actor* pActor = Utils::GetByServerId<Actor>(it->ServerId))
+        {
+            static uint32_t replayProbeCount = 0;
+            if (replayProbeCount++ < 96)
+                spdlog::info("Network voice replay actor {:X} hostTick={} presentationTick={} file={}",
+                    pActor->formID, it->Tick, presentationTick, it->Filename.c_str());
+
+            // Preserve a remote NPC's silent local scene handle and native
+            // completion semantics; only its owner replay is audible.
+            if (!pActor->GetExtension()->IsRemote())
+                pActor->StopCurrentDialogue(true);
+            pActor->SpeakSound(it->Filename.c_str());
+        }
+        it = m_pendingVoices.erase(it);
+    }
+
+    for (auto it = m_pendingSubtitles.begin(); it != m_pendingSubtitles.end();)
+    {
+        if (it->Tick > presentationTick)
+        {
+            ++it;
+            continue;
+        }
+
+        if (Actor* pActor = Utils::GetByServerId<Actor>(it->ServerId))
+        {
+            auto* pInfo = Cast<TESTopicInfo>(TESForm::GetById(it->TopicFormId));
+            SubtitleManager::Get()->ShowSubtitle(pActor, it->Text.c_str(), pInfo);
+        }
+        it = m_pendingSubtitles.erase(it);
+    }
 }
 
 void CharacterService::OnNotifyActorTeleport(const NotifyActorTeleport& acMessage) noexcept
@@ -1163,7 +1643,7 @@ void CharacterService::OnPartyJoinedEvent(const PartyJoinedEvent& acEvent) noexc
     }
 }
 
-void CharacterService::MoveActor(const Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
+void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
 {
     TESObjectCELL* pCell = nullptr;
     if (!acWorldSpaceId)
@@ -1189,6 +1669,13 @@ void CharacterService::MoveActor(const Actor* apActor, const GameId& acWorldSpac
         return;
     }
 
+    // Moving either participant of an active native interaction through
+    // MoveTo tears down both RefrInteraction links, even in the same cell.
+    // Keep the pair intact; ordinary host position updates use interpolation.
+    if (apActor->GetParentCellEx() == pCell &&
+        apActor->GetNativeMountState().InteractionExtra)
+        return;
+
     apActor->MoveTo(pCell, acPosition);
 }
 
@@ -1210,9 +1697,14 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
     {
         // TODO(cosideci): don't just take all actors (i.e. from other parties),
         // maybe check it server side, add a variable to the request.
-        if (m_world.GetPartyService().IsLeader() && !pActor->IsTemporary() && !pActor->IsMount())
+        const auto& party = m_world.GetPartyService();
+        if (party.IsInParty() && !pActor->IsTemporary() &&
+            (!pActor->IsMount() || party.IsLeader()))
         {
-            spdlog::info("Sending ownership claim for actor {:X} with server id {:X}", pActor->formID, pRemoteComponent->Id);
+            // Rider and mount must share a simulator before the first native
+            // mount event. A leader in range may claim mounts; followers still
+            // receive cell leases only when the leader is unavailable.
+            spdlog::info("Requesting cell-validated ownership for actor {:X} with server id {:X}", pActor->formID, pRemoteComponent->Id);
 
             RequestOwnership(pActor->formID, pRemoteComponent->Id, aEntity);
         }
@@ -1257,9 +1749,20 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
         return;
     }
 
-    if (!m_world.GetModSystem().GetServerModId(pActor->parentCell->formID, message.CellId))
+    // Actors discovered during the New Game transition can exist before the
+    // engine has attached them to a cell. They will be visited again once the
+    // cell is ready, so defer assignment instead of dereferencing null.
+    const auto* pParentCell = pActor->parentCell;
+    if (!pParentCell)
     {
-        spdlog::error("Server cell id not found for cell id {:X}", pActor->parentCell->formID);
+        m_world.emplace_or_replace<DeferredAssignmentComponent>(aEntity);
+        spdlog::debug("Deferring server assignment for actor {:X}: no parent cell yet", pActor->formID);
+        return;
+    }
+
+    if (!m_world.GetModSystem().GetServerModId(pParentCell->formID, message.CellId))
+    {
+        spdlog::error("Server cell id not found for cell id {:X}", pParentCell->formID);
         return;
     }
 
@@ -1704,7 +2207,7 @@ void CharacterService::ProcessLeveledConforms() noexcept
 void CharacterService::RunLocalUpdates() const noexcept
 {
     static std::chrono::steady_clock::time_point lastSendTimePoint;
-    constexpr auto cDelayBetweenSnapshots = 100ms;
+    constexpr auto cDelayBetweenSnapshots = 50ms;
 
     const auto now = std::chrono::steady_clock::now();
     if (now - lastSendTimePoint < cDelayBetweenSnapshots)
@@ -1717,25 +2220,86 @@ void CharacterService::RunLocalUpdates() const noexcept
 
     auto animatedLocalView = m_world.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
 
+    size_t actorCount = 0;
+    for (auto entity : animatedLocalView)
+        ++actorCount;
+    static size_t nextPoseActor = 0;
+    const size_t firstPoseActor = actorCount ? nextPoseActor % actorCount : 0;
+    size_t actorIndex = 0;
+    uint64_t selectedSerializeUs = 0;
+    uint32_t selectedActors = 0;
+
     for (auto entity : animatedLocalView)
     {
         auto& localComponent = animatedLocalView.get<LocalComponent>(entity);
         auto& animationComponent = animatedLocalView.get<LocalAnimationComponent>(entity);
         auto& formIdComponent = animatedLocalView.get<FormIdComponent>(entity);
 
-        AnimationSystem::Serialize(m_world, message, localComponent, animationComponent, formIdComponent);
+        // Bounded pose cadence trial: at most four full poses per 50 ms
+        // movement snapshot. The client transport buffer is 64 KiB, so do
+        // not include an unbounded number of full 99-bone actor poses here.
+        // A production stream still needs priority, compression, and a
+        // post-animation capture seam before enabling visual writes by default.
+        const bool capturePose = actorCount &&
+            ((actorIndex + actorCount - firstPoseActor) % actorCount) < 4;
+        const auto serializeStarted = capturePose ?
+            std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        AnimationSystem::Serialize(m_world, message, localComponent,
+            animationComponent, formIdComponent, capturePose);
+        if (capturePose)
+        {
+            // This selected call includes pose capture and ordinary movement
+            // serialization; it is a cheap upper bound for pose production.
+            const auto elapsedUs = static_cast<uint32_t>((std::min)(
+                int64_t{UINT32_MAX}, std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - serializeStarted).count()));
+            selectedSerializeUs += elapsedUs;
+            ++selectedActors;
+            auto previousMax = m_localPoseMaxActorUs.load(std::memory_order_relaxed);
+            while (elapsedUs > previousMax &&
+                !m_localPoseMaxActorUs.compare_exchange_weak(previousMax, elapsedUs,
+                    std::memory_order_relaxed)) {}
+        }
+        ++actorIndex;
     }
+
+    nextPoseActor += 4;
+    m_localPoseBatches.fetch_add(1, std::memory_order_relaxed);
+    m_localPoseActors.fetch_add(selectedActors, std::memory_order_relaxed);
+    m_localPoseTotalUs.fetch_add(selectedSerializeUs, std::memory_order_relaxed);
+    const auto batchUs = static_cast<uint32_t>((std::min)(
+        uint64_t{UINT32_MAX}, selectedSerializeUs));
+    m_localPoseLastBatchUs.store(batchUs, std::memory_order_relaxed);
+    m_localPoseLastBatchActors.store(selectedActors, std::memory_order_relaxed);
 
     m_transport.Send(message);
 }
 
 void CharacterService::RunRemoteUpdates() noexcept
 {
-    // Delay by 300ms to let the interpolation system accumulate interpolation points
-    const auto tick = m_transport.GetClock().GetCurrentTick() - 300;
+    // Keep actor, visual-pose, voice, and subtitle playback on one timeline.
+    const auto now = m_transport.GetClock().GetCurrentTick();
+    const auto delay = static_cast<uint64_t>(GetPresentationDelayMs());
+    const auto tick = now > delay ? now - delay : 0;
+    VisualPoseMailbox::SetPresentationTick(tick);
 
     // Interpolation has to keep running even if the actor is not in view, otherwise we will never know if we need to spawn it
     auto interpolatedEntities = m_world.view<RemoteComponent, InterpolationComponent>();
+    static uint64_t s_lastCorpseCorrectionMs = 0;
+    if (now < s_lastCorpseCorrectionMs)
+        s_lastCorpseCorrectionMs = 0;
+    struct PendingCorpseCorrection
+    {
+        uint32_t ActorId{};
+        uint32_t PriorCellId{};
+        uint32_t TargetCellId{};
+        uint32_t Attempt{};
+        float Error{};
+        GameId WorldSpaceId{};
+        GameId CellId{};
+        Vector3_NetQuantize Position{};
+    };
+    std::optional<PendingCorpseCorrection> pendingCorpseCorrection;
 
     for (auto entity : interpolatedEntities)
     {
@@ -1750,6 +2314,111 @@ void CharacterService::RunRemoteUpdates() noexcept
         }
 
         InterpolationSystem::Update(pActor, interpolationComponent, tick);
+
+        // Dead remote actors no longer receive per-frame ForcePosition: that
+        // fought their ragdolls. Reconcile only a settled owner corpse that
+        // ended in a different loaded cell or drifted far from the owner.
+        if (pendingCorpseCorrection || !pActor ||
+            !pActor->actorState.IsDeadState() ||
+            !pActor->GetNiNode() || !interpolationComponent.AuthorityCellId ||
+            !interpolationComponent.AuthorityTick ||
+            now < interpolationComponent.AuthorityStableSinceTick + 1000 ||
+            now < s_lastCorpseCorrectionMs + 250 ||
+            now < interpolationComponent.AuthorityTick ||
+            now - interpolationComponent.AuthorityTick > 2000 ||
+            pActor->GetNativeMountState().InteractionExtra)
+            continue;
+
+        auto* pExtension = pActor->GetExtension();
+        if (pExtension && pExtension->IsPlayer())
+            continue;
+
+        auto* pPlayer = PlayerCharacter::Get();
+        if (!pPlayer)
+            continue;
+        const uint32_t targetCellId = m_world.GetModSystem().GetGameId(
+            interpolationComponent.AuthorityCellId);
+        if (!targetCellId)
+            continue;
+        if (interpolationComponent.AuthorityWorldSpaceId)
+        {
+            const uint32_t targetWorldId = m_world.GetModSystem().GetGameId(
+                interpolationComponent.AuthorityWorldSpaceId);
+            auto* pWorldSpace = pPlayer->GetWorldSpace();
+            if (!targetWorldId || !pWorldSpace ||
+                pWorldSpace->formID != targetWorldId)
+                continue;
+            const auto corpseCoords = GridCellCoords::CalculateGridCellCoords(
+                interpolationComponent.AuthorityPosition.x,
+                interpolationComponent.AuthorityPosition.y);
+            const auto* pTES = TES::Get();
+            if (!pTES || !GridCellCoords::IsCellInGridCell(corpseCoords,
+                    {pTES->centerGridX, pTES->centerGridY}, false))
+                continue;
+        }
+        else
+        {
+            auto* pPlayerCell = pPlayer->GetParentCellEx();
+            if (!pPlayerCell || pPlayerCell->formID != targetCellId)
+                continue;
+        }
+
+        auto* pCurrentCell = pActor->GetParentCellEx();
+        const auto positionError = pActor->position - NiPoint3{
+            interpolationComponent.AuthorityPosition};
+        const float errorSquared = positionError.x * positionError.x +
+            positionError.y * positionError.y + positionError.z * positionError.z;
+        // Exterior parent-cell IDs can lag ragdoll movement across a grid
+        // boundary. Exterior corrections follow the owner's position, not
+        // that potentially stale parent-cell field.
+        const bool cellMismatch = !pCurrentCell ||
+            pCurrentCell->formID != targetCellId;
+        if (errorSquared <= 128.f * 128.f &&
+            (interpolationComponent.AuthorityWorldSpaceId || !cellMismatch))
+            continue;
+        const auto correctionStep = interpolationComponent.AuthorityPosition -
+            interpolationComponent.LastCorpseCorrectionPosition;
+        const bool sameTarget =
+            interpolationComponent.LastCorpseCorrectionCellId == targetCellId &&
+            glm::dot(correctionStep, correctionStep) <= 16.f * 16.f;
+        if (!sameTarget)
+            interpolationComponent.CorpseCorrectionAttemptsForTarget = 0;
+        if (interpolationComponent.CorpseCorrectionAttemptsForTarget >= 2 ||
+            (sameTarget && now <
+                interpolationComponent.LastCorpseCorrectionTick + 5000))
+            continue;
+
+        const uint32_t actorId = pActor->formID;
+        const uint32_t priorCellId = pCurrentCell ? pCurrentCell->formID : 0;
+        interpolationComponent.LastCorpseCorrectionTick = now;
+        interpolationComponent.LastCorpseCorrectionCellId = targetCellId;
+        interpolationComponent.LastCorpseCorrectionPosition =
+            interpolationComponent.AuthorityPosition;
+        ++interpolationComponent.CorpseCorrectionAttempts;
+        ++interpolationComponent.CorpseCorrectionAttemptsForTarget;
+        s_lastCorpseCorrectionMs = now;
+        Vector3_NetQuantize targetPosition;
+        targetPosition = interpolationComponent.AuthorityPosition;
+        pendingCorpseCorrection = PendingCorpseCorrection{actorId, priorCellId,
+            targetCellId, interpolationComponent.CorpseCorrectionAttempts,
+            std::sqrt(errorSquared),
+            interpolationComponent.AuthorityWorldSpaceId,
+            interpolationComponent.AuthorityCellId, targetPosition};
+    }
+
+    if (pendingCorpseCorrection)
+    {
+        const auto& correction = *pendingCorpseCorrection;
+        auto* pActor = Cast<Actor>(TESForm::GetById(correction.ActorId));
+        if (pActor && pActor->GetExtension()->IsRemote() &&
+            pActor->actorState.IsDeadState())
+        {
+            MoveActor(pActor, correction.WorldSpaceId, correction.CellId,
+                correction.Position);
+            spdlog::info("Corpse cell correction actor={:X} sourceCell={:X} hostCell={:X} error={} attempt={}",
+                correction.ActorId, correction.PriorCellId,
+                correction.TargetCellId, correction.Error, correction.Attempt);
+        }
     }
 
     auto animatedView = m_world.view<RemoteComponent, RemoteAnimationComponent, FormIdComponent>();
@@ -1764,7 +2433,63 @@ void CharacterService::RunRemoteUpdates() noexcept
         if (!pActor)
             continue;
 
+        auto& targetPoints = animationComponent.CombatTargetTimePoints;
+        while (!targetPoints.empty() && targetPoints.front().Tick <= tick)
+        {
+            animationComponent.DesiredCombatTargetTick = targetPoints.front().Tick;
+            animationComponent.DesiredCombatTargetServerId =
+                targetPoints.front().ServerId;
+            targetPoints.pop_front();
+        }
+        if (animationComponent.DesiredCombatTargetServerId == 0xFFFFFFFFu)
+        {
+            if (auto* pExtension = pActor->GetExtension())
+                pExtension->PresentedCombatTargetFormId.store(
+                    0xFFFFFFFFu, std::memory_order_release);
+        }
+
+        // A target choice is a small authoritative input to combat and gaze.
+        // Keep it on the movement presentation timeline. An unresolved owner
+        // target must not be mistaken for "none" on the follower.
+        if (animationComponent.DesiredCombatTargetTick &&
+            animationComponent.DesiredCombatTargetTick <= tick &&
+            animationComponent.DesiredCombatTargetServerId != 0xFFFFFFFFu &&
+            pActor->pCombatController &&
+            (animationComponent.LastCombatTargetApplyTick == 0 ||
+                now - animationComponent.LastCombatTargetApplyTick >= 100))
+        {
+            Actor* pDesiredTarget = animationComponent.DesiredCombatTargetServerId ?
+                Utils::GetByServerId<Actor>(
+                    animationComponent.DesiredCombatTargetServerId) : nullptr;
+            if (!animationComponent.DesiredCombatTargetServerId || pDesiredTarget)
+            {
+                if (auto* pExtension = pActor->GetExtension();
+                    pExtension && !pExtension->IsPlayer())
+                    pExtension->PresentedCombatTargetFormId.store(
+                        pDesiredTarget ? pDesiredTarget->formID : 0,
+                        std::memory_order_release);
+                auto* pNativeTarget = Cast<Actor>(TESObjectREFR::GetByHandle(
+                    pActor->pCombatController->targetHandle));
+                if (pNativeTarget != pDesiredTarget)
+                {
+                    animationComponent.LastCombatTargetApplyDesiredFormId =
+                        pDesiredTarget ? pDesiredTarget->formID : 0;
+                    animationComponent.LastCombatTargetApplyBeforeFormId =
+                        pNativeTarget ? pNativeTarget->formID : 0;
+                    pActor->SetCombatTargetEx(pDesiredTarget);
+                    auto* pAfterTarget = Cast<Actor>(TESObjectREFR::GetByHandle(
+                        pActor->pCombatController->targetHandle));
+                    animationComponent.LastCombatTargetApplyAfterFormId =
+                        pAfterTarget ? pAfterTarget->formID : 0;
+                    animationComponent.LastCombatTargetApplyTick = now;
+                }
+            }
+        }
+
         AnimationSystem::Update(m_world, pActor, animationComponent, tick);
+        // The opt-in presenter writes only after the native graph update.
+        // A second write here ran before later native animation jobs and
+        // caused host/local pose oscillation and severe per-frame work.
     }
 
     auto facegenView = m_world.view<FormIdComponent, FaceGenComponent>();

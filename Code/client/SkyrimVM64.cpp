@@ -1,5 +1,6 @@
 #include <TiltedOnlinePCH.h>
 #include "TiltedOnlineApp.h"
+#include "GameLoopDiagnostic.h"
 #include <Misc/GameVM.h>
 
 extern std::unique_ptr<TiltedOnlineApp> g_appInstance;
@@ -16,10 +17,22 @@ static TVMDestructor* VMDestructor = nullptr;
 
 int TP_MAKE_THISCALL(HookVMUpdate, GameVM, float a2)
 {
-    if (apThis->inactive == 0)
+    RecordGameVmHookEntry();
+    const bool active = apThis->inactive == 0;
+    const auto entry = std::chrono::steady_clock::now();
+    if (active)
         g_appInstance->Update();
-
-    return TiltedPhoques::ThisCall(VMUpdate, apThis, a2);
+    const auto afterApp = std::chrono::steady_clock::now();
+    const auto result = TiltedPhoques::ThisCall(VMUpdate, apThis, a2);
+    const auto afterOriginal = std::chrono::steady_clock::now();
+    const auto appUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        afterApp - entry).count();
+    const auto originalUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        afterOriginal - afterApp).count();
+    RecordGameVmHookCall(active, static_cast<uint32_t>((std::min)(
+        int64_t{UINT32_MAX}, appUs)), static_cast<uint32_t>((std::min)(
+        int64_t{UINT32_MAX}, originalUs)));
+    return result;
 }
 
 short TP_MAKE_THISCALL(HookMainLoop, Main)

@@ -281,6 +281,7 @@ void TransportService::HandleConnected(const ConnectedEvent& acEvent) noexcept
 void TransportService::HandleDisconnected(const DisconnectedEvent& acEvent) noexcept
 {
     m_localPlayerId = NULL;
+    m_authorityEpoch.store(0, std::memory_order_release);
 }
 
 void TransportService::HandleAuthenticationResponse(const AuthenticationResponse& acMessage) noexcept
@@ -293,9 +294,9 @@ void TransportService::HandleAuthenticationResponse(const AuthenticationResponse
         m_world.SetServerSettings(acMessage.Settings);
         m_campaignId = acMessage.CampaignId;
         m_campaignRevision = acMessage.CampaignRevision;
-        m_authorityEpoch = acMessage.AuthorityEpoch;
+        m_authorityEpoch.store(acMessage.AuthorityEpoch, std::memory_order_release);
 
-        spdlog::info("Joined shared campaign {} at revision {} (authority epoch {})", m_campaignId.c_str(), m_campaignRevision, m_authorityEpoch);
+        spdlog::info("Joined shared campaign {} at revision {} (authority epoch {})", m_campaignId.c_str(), m_campaignRevision, GetAuthorityEpoch());
 
         m_dispatcher.trigger(acMessage.UserMods);
         m_dispatcher.trigger(acMessage.Settings);

@@ -18,6 +18,7 @@
 #include <Games/Skyrim/NetImmerse/BSLightingShaderProperty.h>
 #include <Games/Skyrim/NetImmerse/BSMaskedShaderMaterial.h>
 #include <Games/Memory.h>
+#include <Renderer.h>
 
 __declspec(noinline) NiTriBasedGeom* GetHeadTriBasedGeom(Actor* apActor, uint32_t aPartType)
 {
@@ -83,6 +84,19 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
 
     if (pLightingShader->GetRTTI() == NiMaskedShaderRTTI.Get())
     {
+        // Face tint generation can be queued before the render device has
+        // finished the post-load transition. The native resource helper
+        // calls into ID3D11Device; keep this component pending until its
+        // renderer and texture holder are both available.
+        auto* pRenderer = BGSRenderer::Get();
+        if (!pRenderer || !pRenderer->pD3dDevice ||
+            !pRenderer->pD3dContext || !BGSRenderer::GetDevice() ||
+            !s_textureHolder.Get())
+        {
+            pShaderProperty->DecRef();
+            return;
+        }
+
         BSMaskedShaderMaterial* pMaterial = static_cast<BSMaskedShaderMaterial*>(pLightingShader->material);
 
         BSFixedString name("");

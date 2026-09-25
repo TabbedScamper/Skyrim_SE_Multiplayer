@@ -20,6 +20,8 @@
 #include <Messages/PartyReadyRequest.h>
 #include <Messages/PartyStartRequest.h>
 #include <Messages/PartySessionSettingsRequest.h>
+#include <Messages/PartyGameplaySettingsRequest.h>
+#include <Messages/NotifySettingsChange.h>
 #include <Messages/NotifyPlayerJoined.h>
 
 PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
@@ -36,6 +38,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyReadyConnection(aDispatcher.sink<PacketEvent<PartyReadyRequest>>().connect<&PartyService::OnPartyReady>(this))
     , m_partyStartConnection(aDispatcher.sink<PacketEvent<PartyStartRequest>>().connect<&PartyService::OnPartyStart>(this))
     , m_partySessionSettingsConnection(aDispatcher.sink<PacketEvent<PartySessionSettingsRequest>>().connect<&PartyService::OnPartySessionSettings>(this))
+    , m_partyGameplaySettingsConnection(aDispatcher.sink<PacketEvent<PartyGameplaySettingsRequest>>().connect<&PartyService::OnPartyGameplaySettings>(this))
 {
 }
 
@@ -74,6 +77,20 @@ PartyService::Party* PartyService::GetPlayerParty(Player* const apPlayer) noexce
     }
 
     return nullptr;
+}
+
+ServerSettings PartyService::GetSettingsForPlayer(const Player* apPlayer) const noexcept
+{
+    auto settings = GetSettings();
+    if (const auto partyId = apPlayer->GetParty().JoinedPartyId)
+    {
+        if (const auto* pParty = GetById(*partyId); pParty && pParty->GameplayOverridden)
+        {
+            settings.Difficulty = pParty->GameplaySettings.Difficulty;
+            settings.PvpEnabled = pParty->GameplaySettings.PvpEnabled;
+        }
+    }
+    return settings;
 }
 
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
@@ -115,6 +132,7 @@ void PartyService::OnPartyCreate(const PacketEvent<PartyCreateRequest>& acPacket
     {
         uint32_t partyId = m_nextId++;
         Party& party = m_parties[partyId];
+        party.GameplaySettings = GetSettings();
         party.Members.push_back(player);
         party.LeaderPlayerId = player->GetId();
         inviterPartyComponent.JoinedPartyId = partyId;
@@ -205,15 +223,35 @@ void PartyService::OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) 
 {
     auto* const pPlayer = acPacket.pPlayer;
     auto* const pParty = GetPlayerParty(pPlayer);
-    if (!pParty || pParty->SessionState != 0)
+    if (!pParty || pParty->SessionState > 2)
         return;
 
-    auto& ready = pParty->ReadyPlayerIds;
+    // Before launch this is lobby readiness. During the launch transition the
+    // same acknowledgement means that Skyrim has emitted TESLoadGameEvent and
+    // the client is holding its world at the synchronization barrier.
+    auto& ready = pParty->SessionState == 0 ? pParty->ReadyPlayerIds :
+        pParty->SessionState == 1 ? pParty->LoadedPlayerIds : pParty->GameplayReadyPlayerIds;
     const auto found = std::find(ready.begin(), ready.end(), pPlayer->GetId());
     if (acPacket.Packet.Ready && found == ready.end())
         ready.push_back(pPlayer->GetId());
     else if (!acPacket.Packet.Ready && found != ready.end())
         ready.erase(found);
+    if (pParty->SessionState == 1 && pParty->LoadedPlayerIds.size() == pParty->Members.size() &&
+        std::all_of(pParty->Members.begin(), pParty->Members.end(), [&](const Player* apMember) {
+            return std::find(pParty->LoadedPlayerIds.begin(), pParty->LoadedPlayerIds.end(), apMember->GetId()) != pParty->LoadedPlayerIds.end();
+        }))
+    {
+        pParty->SessionState = 2;
+        spdlog::info("[PartyService]: Every party member reached the world-ready barrier for epoch {}", pParty->StartEpoch);
+    }
+    else if (pParty->SessionState == 2 && pParty->GameplayReadyPlayerIds.size() == pParty->Members.size() &&
+        std::all_of(pParty->Members.begin(), pParty->Members.end(), [&](const Player* apMember) {
+            return std::find(pParty->GameplayReadyPlayerIds.begin(), pParty->GameplayReadyPlayerIds.end(), apMember->GetId()) != pParty->GameplayReadyPlayerIds.end();
+        }))
+    {
+        pParty->SessionState = 3;
+        spdlog::info("[PartyService]: Every party member reached the gameplay barrier for epoch {}", pParty->StartEpoch);
+    }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
 }
 
@@ -244,6 +282,9 @@ void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) 
         }
         pParty->SessionState = 1;
         pParty->StartEpoch = m_nextStartEpoch++;
+        pParty->LoadedPlayerIds.clear();
+        pParty->GameplayReadyPlayerIds.clear();
+        pParty->ReadyPlayerIds.clear();
     }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
 }
@@ -263,6 +304,27 @@ void PartyService::OnPartySessionSettings(const PacketEvent<PartySessionSettings
     pParty->PasswordProtected = request.Open && !request.Password.empty();
     GameServer::Get()->SetSessionPassword(pParty->PasswordProtected ? request.Password : String{});
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
+void PartyService::OnPartyGameplaySettings(const PacketEvent<PartyGameplaySettingsRequest>& acPacket) noexcept
+{
+    auto* const pPlayer = acPacket.pPlayer;
+    auto* const pParty = GetPlayerParty(pPlayer);
+    if (!pParty || pParty->LeaderPlayerId != pPlayer->GetId() ||
+        pParty->SessionState == 1 || pParty->SessionState == 2 ||
+        acPacket.Packet.Difficulty > 5)
+        return;
+
+    pParty->GameplaySettings.Difficulty = acPacket.Packet.Difficulty;
+    pParty->GameplaySettings.PvpEnabled = acPacket.Packet.PvpEnabled;
+    pParty->GameplayOverridden = true;
+
+    NotifySettingsChange notify{};
+    for (auto* pMember : pParty->Members)
+    {
+        notify.Settings = GetSettingsForPlayer(pMember);
+        pMember->Send(notify);
+    }
 }
 
 void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
@@ -293,6 +355,8 @@ void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
 
                 party.Members.push_back(acEvent.pPlayer);
                 party.ReadyPlayerIds.clear();
+                party.LoadedPlayerIds.clear();
+                party.GameplayReadyPlayerIds.clear();
                 party.SessionState = 0;
                 party.StartEpoch = 0;
                 acEvent.pPlayer->GetParty().JoinedPartyId = *playerPartyComponent.JoinedPartyId;
@@ -399,6 +463,8 @@ void PartyService::OnPartyAcceptInvite(const PacketEvent<PartyAcceptInviteReques
 
         party.Members.push_back(pSelf);
         party.ReadyPlayerIds.clear();
+        party.LoadedPlayerIds.clear();
+        party.GameplayReadyPlayerIds.clear();
         party.SessionState = 0;
         party.StartEpoch = 0;
         selfPartyComponent.JoinedPartyId = partyId;
@@ -434,6 +500,8 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
 
         members.erase(std::find(std::begin(members), std::end(members), apPlayer));
         party.ReadyPlayerIds.clear();
+        party.LoadedPlayerIds.clear();
+        party.GameplayReadyPlayerIds.clear();
         party.SessionState = 0;
         party.StartEpoch = 0;
 
@@ -453,6 +521,10 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
         }
 
         pPartyComponent->JoinedPartyId.reset();
+
+        NotifySettingsChange defaults{};
+        defaults.Settings = GetSettings();
+        apPlayer->Send(defaults);
 
         spdlog::debug("[PartyService]: Sending party left event to player.");
         NotifyPartyLeft leftMessage;
@@ -526,4 +598,8 @@ void PartyService::SendPartyJoinedEvent(Party& aParty, Player* aPlayer) noexcept
     }
     spdlog::debug("[PartyService]: Sending party join event to player");
     aPlayer->Send(joinedMessage);
+
+    NotifySettingsChange settings{};
+    settings.Settings = GetSettingsForPlayer(aPlayer);
+    aPlayer->Send(settings);
 }

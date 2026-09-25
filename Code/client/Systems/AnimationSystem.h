@@ -54,7 +54,7 @@ struct AnimationSystem
      * @param animationComponent The local animation component of the actor, used to give the output the server id of the actor.
      * @param formIdComponent The form id component of the actor, used to fetch the actor pointer.
      */
-    static void Serialize(World& aWorld, ClientReferencesMoveRequest& aMovementSnapshot, LocalComponent& localComponent, LocalAnimationComponent& animationComponent, FormIdComponent& formIdComponent);
+    static void Serialize(World& aWorld, ClientReferencesMoveRequest& aMovementSnapshot, LocalComponent& localComponent, LocalAnimationComponent& animationComponent, FormIdComponent& formIdComponent, bool aCapturePose = false);
     /**
      * @brief Serializes the actions to-be-sent.
      *

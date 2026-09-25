@@ -12,6 +12,8 @@ using TiltedPhoques::String;
 struct AuthenticationRequest;
 struct Player;
 struct PartyComponent;
+struct ServerSettings;
+ServerSettings GetSettings();
 
 namespace Resources
 {

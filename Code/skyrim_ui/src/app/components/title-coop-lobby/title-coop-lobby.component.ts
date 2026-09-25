@@ -4,6 +4,7 @@ import { CoopLobbyState } from '../../models/coop-lobby-state';
 import { SteamLobbyState } from '../../models/steam-lobby-state';
 import { ClientService } from '../../services/client.service';
 import { Sound, SoundService } from '../../services/sound.service';
+import { SettingService } from '../../services/setting.service';
 
 @Component({
   selector: 'app-title-coop-lobby',
@@ -24,12 +25,15 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   public sessionPassword = '';
   public joinPassword = '';
   public scan = { complete: false, fileCount: 0, hashed: 0, cached: 0, errors: 0 };
+  public gameplay = { difficulty: 4, pvpEnabled: false, deathSystemEnabled: true, greetingsEnabled: false };
 
   private readonly destroy$ = new Subject<void>();
   private partyOptionsDirty = false;
   private partyOptionsTimer?: number;
+  private gameplayOptionsTimer?: number;
 
-  public constructor(public readonly client: ClientService, private readonly sound: SoundService) {}
+  public constructor(public readonly client: ClientService, private readonly sound: SoundService,
+    public readonly settingService: SettingService) {}
 
   public ngOnInit(): void {
     this.client.connectionStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.connected = value);
@@ -43,6 +47,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
       }
     });
     this.client.deploymentScanStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.scan = value);
+    this.client.coopGameplaySettingsChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.gameplay = { ...value });
     this.client.coopLobbyStateChange.pipe(takeUntil(this.destroy$)).subscribe(value => {
       this.lobby = value;
       this.campaignMode = value.campaignMode || this.campaignMode;
@@ -54,6 +59,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
 
   public ngOnDestroy(): void {
     if (this.partyOptionsTimer !== undefined) window.clearTimeout(this.partyOptionsTimer);
+    if (this.gameplayOptionsTimer !== undefined) window.clearTimeout(this.gameplayOptionsTimer);
     this.destroy$.next();
     this.destroy$.complete();
   }
@@ -126,6 +132,15 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
     }, 200);
   }
 
+  public queueGameplayOptionsSave(): void {
+    if (!this.isLeader()) return;
+    if (this.gameplayOptionsTimer !== undefined) window.clearTimeout(this.gameplayOptionsTimer);
+    this.gameplayOptionsTimer = window.setTimeout(() => {
+      this.gameplayOptionsTimer = undefined;
+      this.client.setCoopGameplaySettings(this.gameplay.difficulty, this.gameplay.pvpEnabled);
+    }, 200);
+  }
+
   public connectWithPassword(): void {
     if (!this.joinPassword) {
       this.sound.play(Sound.Fail);
@@ -154,6 +169,25 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
     this.client.selectSharedCampaign(mode, this.checkpointId.trim());
   }
 
+  public promote(playerId: number): void {
+    if (!this.isLeader() || playerId === this.lobby.leaderId) return;
+    this.sound.play(Sound.Ok);
+    this.client.changePartyLeader(playerId);
+  }
+
+  public memberPlayerId(index: number): number {
+    return this.lobby.playerIds[index] || 0;
+  }
+
+  public campaignLabel(): string {
+    return this.campaignMode === 2 ? 'Continue Shared Campaign' : 'New Shared Campaign';
+  }
+
+  public leaderName(): string {
+    const index = this.lobby.playerIds.indexOf(this.lobby.leaderId);
+    return index >= 0 ? (this.steam.memberNames[index] || 'The host') : 'The host';
+  }
+
   public start(): void {
     this.client.startTogether(this.campaignMode, this.checkpointId.trim());
   }
@@ -163,7 +197,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public canStart(): boolean {
-    return this.isLeader() && this.lobby.playerIds.length === 2 &&
+    return this.isLeader() && this.lobby.playerIds.length >= 2 &&
       this.lobby.readyPlayerIds.length === this.lobby.playerIds.length && this.campaignMode > 0 && this.lobby.sessionState === 0;
   }
 

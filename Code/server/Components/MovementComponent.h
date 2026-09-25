@@ -13,6 +13,7 @@ struct MovementComponent
     glm::vec3 Rotation;
     AnimationVariables Variables;
     float Direction;
+    uint32_t CombatTargetServerId{0xFFFFFFFFu};
 
     bool Sent;
 };

@@ -186,6 +186,7 @@ struct Actor : TESObjectREFR
 
     // Getters
     float GetSpeed() noexcept;
+    static uint64_t GetNullKnockExplosionSkips() noexcept;
     TESForm* GetEquippedWeapon(uint32_t aSlotId) const noexcept;
     TESForm* GetEquippedAmmo() const noexcept;
     Actor* GetCommandingActor() const noexcept;
@@ -236,6 +237,21 @@ struct Actor : TESObjectREFR
     void RemoveFromAllFactions() noexcept;
     void QueueUpdate() noexcept;
     bool InitiateMountPackage(Actor* apMount) noexcept;
+    [[nodiscard]] uint32_t GetNativeMountFormId() noexcept;
+    [[nodiscard]] bool SetNativeVehicle(TESObjectREFR* apVehicle) noexcept;
+    struct NativeMountState
+    {
+        bool HorseExtra{};
+        uint32_t HorseHandle{};
+        bool InteractionExtra{};
+        bool InteractionPointerPresent{};
+        uint32_t InteractionActorHandle{};
+        uint32_t InteractionTargetHandle{};
+    };
+    [[nodiscard]] NativeMountState GetNativeMountState() const noexcept;
+    static void SetRemoteProcessTrial(uint32_t aRiderFormId,
+        uint32_t aMountFormId) noexcept;
+    [[nodiscard]] static uint64_t GetRemoteProcessTrialTicks() noexcept;
     void GenerateMagicCasters() noexcept;
     void DispelAllSpells(bool aNow = false) noexcept;
     void Reset() noexcept;
@@ -378,6 +394,7 @@ static_assert(offsetof(Actor, unk17C) == 0x184);
 static_assert(offsetof(Actor, pCombatController) == 0x160);
 static_assert(offsetof(Actor, magicItems) == 0x1C8);
 static_assert(offsetof(Actor, equippedShout) == 0x1E8);
+static_assert(offsetof(Actor, someRefrHandle) == 0x1F0);
 static_assert(offsetof(Actor, actorLock) == 0x284);
 static_assert(sizeof(Actor) == 0x2B8);
 static_assert(sizeof(Actor::SpellItemEntry) == 0x18);

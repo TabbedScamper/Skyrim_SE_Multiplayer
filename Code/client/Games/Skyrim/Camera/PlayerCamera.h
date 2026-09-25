@@ -13,11 +13,11 @@ struct PlayerCamera : public TESCamera
     void ForceFirstPerson() noexcept;
     void ForceThirdPerson() noexcept;
 
-    float rotZ;
-    float rotX;
-    NiPoint3 pos;
-    float zoom;
-    NiNode* cameraNode;
-    TESCameraState* state;
-    bool unk;
+    [[nodiscard]] TESCameraState* GetStateById(uint8_t aStateId) const noexcept;
+    [[nodiscard]] float GetWorldFov() const noexcept;
+    bool SetWorldFov(float aFov) noexcept;
+
+    // TESCamera owns the camera transform, root node and current state.
+    // Do not redeclare them here: doing so shifts every PlayerCamera access to
+    // a duplicate block that does not exist in Skyrim's native layout.
 };

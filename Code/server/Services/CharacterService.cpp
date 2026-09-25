@@ -3,6 +3,9 @@
 #include <GameServer.h>
 #include <World.h>
 
+#include <atomic>
+#include <vector>
+
 #include <Events/CharacterSpawnedEvent.h>
 #include <Events/CharacterExteriorCellChangeEvent.h>
 #include <Events/CharacterInteriorCellChangeEvent.h>
@@ -42,6 +45,15 @@
 namespace
 {
 Console::Setting bEnableXpSync{"Gameplay:bEnableXpSync", "Syncs combat XP within the party", true};
+
+// A temporary reference's FF form ID is local to one game process. Record
+// which party members have already bound their native copy to this entity.
+struct TemporaryActorProvenance
+{
+    uint64_t CreatedTick{};
+    glm::vec3 CreationPosition{};
+    std::vector<uint32_t> BoundPlayerIds;
+};
 }
 
 CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
@@ -80,6 +92,7 @@ void CharacterService::Serialize(World& aRegistry, entt::entity aEntity, Charact
     apSpawnRequest->IsWeaponDrawn = characterComponent.IsWeaponDrawn();
     apSpawnRequest->IsPlayerSummon = characterComponent.IsPlayerSummon();
     apSpawnRequest->PlayerId = characterComponent.PlayerId;
+    apSpawnRequest->MountedOnServerId = characterComponent.MountedOnServerId;
 
     const auto* pOwnerComponent = aRegistry.try_get<OwnerComponent>(aEntity);
     if (pOwnerComponent)
@@ -191,6 +204,74 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
     const auto isPlayer = (refId.ModId == 0 && refId.BaseId == 0x14);
     const auto isCustom = isPlayer || refId.ModId == std::numeric_limits<uint32_t>::max();
 
+    // Script-spawned NPCs use different FF reference IDs on every client.
+    // Reuse an existing party entity only when one placement is unambiguous;
+    // the response binds the requester's own native, quest-bound reference.
+    if (!isPlayer && isCustom && message.FormId != GameId{} &&
+        !message.IsPlayerSummon && !message.IsMount &&
+        m_world.GetPartyService().IsPlayerInParty(acMessage.pPlayer))
+    {
+        const auto requesterParty = acMessage.pPlayer->GetParty().JoinedPartyId;
+        const auto now = GameServer::Get()->GetTick();
+        const auto candidates = m_world.view<TemporaryActorProvenance, CharacterComponent,
+            CellIdComponent, MovementComponent, OwnerComponent>();
+        entt::entity match = entt::null;
+        bool ambiguous = false;
+        for (const auto candidate : candidates)
+        {
+            const auto& provenance = candidates.get<TemporaryActorProvenance>(candidate);
+            const auto& character = candidates.get<CharacterComponent>(candidate);
+            const auto& cell = candidates.get<CellIdComponent>(candidate);
+            const auto& movement = candidates.get<MovementComponent>(candidate);
+            const auto& owner = candidates.get<OwnerComponent>(candidate);
+            if (!owner.GetOwner() || owner.GetOwner() == acMessage.pPlayer ||
+                owner.GetOwner()->GetParty().JoinedPartyId != requesterParty ||
+                std::find(provenance.BoundPlayerIds.begin(), provenance.BoundPlayerIds.end(),
+                    acMessage.pPlayer->GetId()) != provenance.BoundPlayerIds.end() ||
+                now < provenance.CreatedTick || now - provenance.CreatedTick > 10000 ||
+                character.IsPlayer() || character.IsPlayerSummon() || character.IsMount() ||
+                character.BaseId.Id != message.FormId ||
+                character.LeveledNpcPickId.Id != message.LeveledNpcPickId ||
+                cell.Cell != message.CellId || cell.WorldSpaceId != message.WorldSpaceId)
+                continue;
+
+            // Scene-driven natives can already have walked away by the time
+            // the other machine discovers its copy.  Compare the original
+            // placement as well as the live position.  This remains a
+            // conservative heuristic: two plausible candidates are never
+            // collapsed into one actor.
+            const auto requestedPosition = static_cast<glm::vec3>(message.Position);
+            const auto currentDelta = movement.Position - requestedPosition;
+            const auto creationDelta = provenance.CreationPosition - requestedPosition;
+            constexpr float kMaxPlacementDistanceSquared = 192.f * 192.f;
+            if (glm::dot(currentDelta, currentDelta) > kMaxPlacementDistanceSquared &&
+                glm::dot(creationDelta, creationDelta) > kMaxPlacementDistanceSquared)
+                continue;
+            if (match != entt::null)
+            {
+                ambiguous = true;
+                break;
+            }
+            match = candidate;
+        }
+        if (match != entt::null && !ambiguous)
+        {
+            m_world.get<TemporaryActorProvenance>(match).BoundPlayerIds.push_back(
+                acMessage.pPlayer->GetId());
+            AssignCharacterResponse response{};
+            response.Cookie = message.Cookie;
+            response.Owner = false;
+            PopulateAssignmentResponse(match, response);
+            acMessage.pPlayer->Send(response);
+            spdlog::info("Reconciled temporary actor {:X} from player {:X} to server {:X}",
+                refId.BaseId, acMessage.pPlayer->GetId(), World::ToInteger(match));
+            return;
+        }
+        if (ambiguous)
+            spdlog::warn("Ambiguous temporary NPC placement for player {:X}, base {:X}:{:X}; keeping distinct actors",
+                acMessage.pPlayer->GetId(), message.FormId.ModId, message.FormId.BaseId);
+    }
+
     // Check if id is the player
     if (!isCustom)
     {
@@ -213,7 +294,7 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             auto& ownerComponent = view.get<OwnerComponent>(*itor);
             auto& characterComponent = view.get<CharacterComponent>(*itor);
             const bool isOwner = ownerComponent.GetOwner() == acMessage.pPlayer;
-            const bool transferToLeader = !isOwner && CanClaimOwnership(acMessage.pPlayer, *itor, ownerComponent.OwnershipEpoch, OwnershipTransferReason::LeaderAssignment);
+            const bool transferToDiscoverer = !isOwner && CanClaimOwnership(acMessage.pPlayer, *itor, ownerComponent.OwnershipEpoch, OwnershipTransferReason::LeaderAssignment);
 
             if (!characterComponent.LeveledNpcPickId && message.LeveledNpcPickId != GameId{})
             {
@@ -233,8 +314,11 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             acMessage.pPlayer->Send(response);
 
             // The assignment response establishes a remote component before the grant arrives.
-            if (transferToLeader)
-                TransferOwnership(acMessage.pPlayer, *itor, OwnershipTransferReason::LeaderAssignment);
+            if (transferToDiscoverer)
+                TransferOwnership(acMessage.pPlayer, *itor,
+                    m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer)
+                        ? OwnershipTransferReason::LeaderAssignment
+                        : OwnershipTransferReason::CellLease);
 
             return;
         }
@@ -332,6 +416,15 @@ void CharacterService::OnCharacterRemoveEvent(const CharacterRemoveEvent& acEven
     if (it == view.end())
         return;
 
+    // Mount relations are persistent spawn state. A removed mount must not be
+    // replayed to a late-joining client through another actor's snapshot.
+    for (auto rider : m_world.view<CharacterComponent>())
+    {
+        auto& character = m_world.get<CharacterComponent>(rider);
+        if (character.MountedOnServerId == acEvent.ServerId)
+            character.MountedOnServerId = 0;
+    }
+
     GameServer::Get()->GetWorld().GetScriptService().HandleCharacterDestoy(*it);
 
     NotifyRemoveCharacter response;
@@ -348,11 +441,14 @@ void CharacterService::OnOwnershipClaimRequest(const PacketEvent<RequestOwnershi
 {
     const auto& message = acMessage.Packet;
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
+    const auto reason = m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer)
+        ? OwnershipTransferReason::LeaderClaim
+        : OwnershipTransferReason::CellLease;
 
-    if (!CanClaimOwnership(acMessage.pPlayer, cEntity, message.ExpectedOwnershipEpoch, OwnershipTransferReason::LeaderClaim))
+    if (!CanClaimOwnership(acMessage.pPlayer, cEntity, message.ExpectedOwnershipEpoch, reason))
         return;
 
-    TransferOwnership(acMessage.pPlayer, cEntity, OwnershipTransferReason::LeaderClaim);
+    TransferOwnership(acMessage.pPlayer, cEntity, reason);
 }
 
 void CharacterService::OnCharacterSpawned(const CharacterSpawnedEvent& acEvent) const noexcept
@@ -399,6 +495,17 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         movementComponent.Rotation = glm::vec3(movement.Rotation.x, 0.f, movement.Rotation.y);
         movementComponent.Variables = movement.Variables;
         movementComponent.Direction = movement.Direction;
+        const auto requestedTargetId = update.CombatTargetServerId;
+        if (requestedTargetId == 0 || requestedTargetId == 0xFFFFFFFFu)
+            movementComponent.CombatTargetServerId = requestedTargetId;
+        else
+        {
+            const auto targetEntity = static_cast<entt::entity>(requestedTargetId);
+            movementComponent.CombatTargetServerId =
+                m_world.valid(targetEntity) &&
+                m_world.all_of<CharacterComponent>(targetEntity) ?
+                    requestedTargetId : 0xFFFFFFFFu;
+        }
 
         cellIdComponent.Cell = movement.CellId;
         cellIdComponent.WorldSpaceId = movement.WorldSpaceId;
@@ -416,6 +523,19 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         }
 
         animationComponent.ActionsReplayCache.AppendAll(update.ActionEvents);
+
+        // OwnerView already rejects a non-owner entity. Never relay a pose
+        // until it has also passed the bounded transform validation.
+        if (!update.EvaluatedPose.Bones.empty() && update.EvaluatedPose.IsValid())
+        {
+            animationComponent.EvaluatedPose = update.EvaluatedPose;
+            animationComponent.EvaluatedPosePending = true;
+        }
+        if (!update.VisualBones.Bones.empty() && update.VisualBones.IsValid())
+        {
+            animationComponent.VisualBones = update.VisualBones;
+            animationComponent.VisualBonesPending = true;
+        }
 
         movementComponent.Sent = false;
     }
@@ -447,13 +567,36 @@ void CharacterService::OnMountRequest(const PacketEvent<MountRequest>& acMessage
     const entt::entity cMountEntity = static_cast<entt::entity>(message.MountId);
     const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
     const auto riderIt = view.find(cRiderEntity);
-    const auto mountIt = view.find(cMountEntity);
-
-    if (riderIt == view.end() || mountIt == view.end() || cRiderEntity == cMountEntity)
+    if (riderIt == view.end())
     {
-        spdlog::debug("Rejected mount request from player {:X} because rider {:X} or mount {:X} is invalid", acMessage.pPlayer->GetId(), message.RiderId, message.MountId);
+        spdlog::debug("Rejected mount request from player {:X} because rider {:X} is invalid", acMessage.pPlayer->GetId(), message.RiderId);
         return;
     }
+
+    const auto& riderOwner = view.get<OwnerComponent>(*riderIt);
+    if (riderOwner.GetOwner() != acMessage.pPlayer ||
+        riderOwner.OwnershipEpoch != message.RiderOwnershipEpoch)
+        return;
+
+    auto& rider = view.get<CharacterComponent>(*riderIt);
+    if (message.MountId == 0)
+    {
+        if (!rider.MountedOnServerId)
+            return;
+        spdlog::info("Accepted mount relation cleared: rider {:X}, previous horse {:X}, source player {:X}, rider epoch {}",
+            message.RiderId, rider.MountedOnServerId, acMessage.pPlayer->GetId(), message.RiderOwnershipEpoch);
+        rider.MountedOnServerId = 0;
+        NotifyMount notify{};
+        notify.RiderId = message.RiderId;
+        notify.MountId = 0;
+        if (!GameServer::Get()->SendToPlayersInRange(notify, cRiderEntity, acMessage.GetSender()))
+            spdlog::error("{}: dismount fan-out failed", __FUNCTION__);
+        return;
+    }
+
+    const auto mountIt = view.find(cMountEntity);
+    if (mountIt == view.end() || cRiderEntity == cMountEntity)
+        return;
 
     if (!view.get<CharacterComponent>(*mountIt).IsMount())
     {
@@ -461,9 +604,8 @@ void CharacterService::OnMountRequest(const PacketEvent<MountRequest>& acMessage
         return;
     }
 
-    const auto& riderOwner = view.get<OwnerComponent>(*riderIt);
     const auto& mountOwner = view.get<OwnerComponent>(*mountIt);
-    if (riderOwner.GetOwner() != acMessage.pPlayer || riderOwner.OwnershipEpoch != message.RiderOwnershipEpoch || mountOwner.OwnershipEpoch != message.MountOwnershipEpoch)
+    if (mountOwner.OwnershipEpoch != message.MountOwnershipEpoch)
     {
         spdlog::debug(
             "Rejected stale mount request from player {:X} for rider {:X} at epoch {} and mount {:X} at epoch {}; current epochs are {} and {}",
@@ -479,8 +621,16 @@ void CharacterService::OnMountRequest(const PacketEvent<MountRequest>& acMessage
         return;
     }
 
+    if (rider.MountedOnServerId == message.MountId)
+        return;
+
     if (!TransferOwnership(acMessage.pPlayer, *mountIt, OwnershipTransferReason::Mount))
         return;
+
+    rider.MountedOnServerId = message.MountId;
+    spdlog::info("Accepted mount relation set: rider {:X}, horse {:X}, source player {:X}, rider epoch {}, horse epoch {}",
+        message.RiderId, message.MountId, acMessage.pPlayer->GetId(),
+        message.RiderOwnershipEpoch, message.MountOwnershipEpoch);
 
     NotifyMount notify;
     notify.RiderId = message.RiderId;
@@ -561,6 +711,7 @@ void CharacterService::OnDialogueRequest(const PacketEvent<DialogueRequest>& acM
 
     NotifyDialogue notify{};
     notify.ServerId = message.ServerId;
+    notify.Tick = message.Tick;
     notify.SoundFilename = message.SoundFilename;
 
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
@@ -574,6 +725,7 @@ void CharacterService::OnSubtitleRequest(const PacketEvent<SubtitleRequest>& acM
 
     NotifySubtitle notify{};
     notify.ServerId = message.ServerId;
+    notify.Tick = message.Tick;
     notify.Text = message.Text;
 
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
@@ -607,7 +759,13 @@ void CharacterService::CreateCharacter(const PacketEvent<AssignCharacterRequest>
 
     auto* const pServer = GameServer::Get();
 
-    m_world.emplace<OwnerComponent>(cEntity, acMessage.pPlayer);
+    // The discoverer owns the initial epoch. Assigning a different player here
+    // skips that player's spawn packet (owners are excluded from the broadcast),
+    // so it would have no network entity on which to accept ownership. A nearby
+    // leader receives the spawn, materializes the actor, then claims it at the
+    // next epoch. A separated follower keeps the cell simulation lease.
+    Player* const pOwner = acMessage.pPlayer;
+    m_world.emplace<OwnerComponent>(cEntity, pOwner);
 
     auto& cellIdComponent = m_world.emplace<CellIdComponent>(cEntity, message.CellId);
     if (message.WorldSpaceId != GameId{})
@@ -649,6 +807,31 @@ void CharacterService::CreateCharacter(const PacketEvent<AssignCharacterRequest>
     movementComponent.Rotation = {message.Rotation.x, 0.f, message.Rotation.y};
     movementComponent.Sent = false;
 
+    if (isTemporary && !message.IsPlayerSummon && !message.IsMount && baseId != GameId{})
+    {
+        auto& provenance = m_world.emplace<TemporaryActorProvenance>(cEntity);
+        provenance.CreatedTick = pServer->GetTick();
+        provenance.CreationPosition = static_cast<glm::vec3>(message.Position);
+        provenance.BoundPlayerIds.push_back(acMessage.pPlayer->GetId());
+    }
+
+    if (isTemporary)
+    {
+        static std::atomic<uint32_t> sProvenanceLogs{0};
+        const auto logIndex = sProvenanceLogs.fetch_add(1, std::memory_order_relaxed);
+        if (logIndex < 512)
+            spdlog::info(
+                "Temporary actor provenance: server {:X}, source player {:X}, source reference {:X}:{:X}, base {:X}:{:X}, cell {:X}:{:X}, worldspace {:X}:{:X}, position ({}, {}, {}), mount={}, summon={}, leveled pick {:X}:{:X}",
+                static_cast<uint32_t>(cEntity), acMessage.pPlayer->GetId(), gameId.ModId,
+                gameId.BaseId, baseId.ModId, baseId.BaseId, message.CellId.ModId,
+                message.CellId.BaseId, message.WorldSpaceId.ModId,
+                message.WorldSpaceId.BaseId, message.Position.x, message.Position.y,
+                message.Position.z, message.IsMount, message.IsPlayerSummon,
+                message.LeveledNpcPickId.ModId, message.LeveledNpcPickId.BaseId);
+        else if (logIndex == 512)
+            spdlog::info("Temporary actor provenance log capped at 512 creations for this server process");
+    }
+
     m_world.emplace<AnimationComponent>(cEntity);
 
     // If this is a player character store a ref and trigger an event
@@ -666,7 +849,7 @@ void CharacterService::CreateCharacter(const PacketEvent<AssignCharacterRequest>
 
     AssignCharacterResponse response{};
     response.Cookie = message.Cookie;
-    response.Owner = true;
+    response.Owner = pOwner == acMessage.pPlayer;
     PopulateAssignmentResponse(cEntity, response);
 
     pServer->Send(acMessage.pPlayer->GetConnectionId(), response);
@@ -686,7 +869,10 @@ void CharacterService::PopulateAssignmentResponse(const entt::entity aEntity, As
         aResponse.AllActorValues = pActorValuesComponent->CurrentActorValues;
 
     if (const auto* pInventoryComponent = m_world.try_get<InventoryComponent>(aEntity))
+    {
         aResponse.CurrentInventory = pInventoryComponent->Content;
+        aResponse.InventoryAuthoritative = pInventoryComponent->HasAuthoritativeMutation;
+    }
 
     if (const auto* pCharacterComponent = m_world.try_get<CharacterComponent>(aEntity))
     {
@@ -694,6 +880,7 @@ void CharacterService::PopulateAssignmentResponse(const entt::entity aEntity, As
         aResponse.IsDead = pCharacterComponent->IsDead();
         aResponse.IsWeaponDrawn = pCharacterComponent->IsWeaponDrawn();
         aResponse.LeveledNpcPickId = pCharacterComponent->LeveledNpcPickId.Id;
+        aResponse.MountedOnServerId = pCharacterComponent->MountedOnServerId;
 
         if (pCharacterComponent->LeveledNpcPickId)
         {
@@ -728,6 +915,8 @@ const char* CharacterService::GetOwnershipTransferReasonName(const OwnershipTran
         return "party leader assignment";
     case OwnershipTransferReason::LeaderClaim:
         return "party leader claim";
+    case OwnershipTransferReason::CellLease:
+        return "separated-cell simulation lease";
     case OwnershipTransferReason::Mount:
         return "mounting";
     case OwnershipTransferReason::Relinquish:
@@ -771,19 +960,29 @@ bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aE
     if (!pCurrentOwner || pCurrentOwner == apPlayer)
         return reject("the player already owns the actor");
 
-    if (characterComponent.IsMount() || characterComponent.IsPlayer())
-        return reject("the actor cannot be claimed");
+    if (characterComponent.IsPlayer())
+        return reject("a player actor cannot be claimed");
 
     if (!apPlayer->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
         return reject("the actor is out of range");
 
     auto& partyService = m_world.GetPartyService();
-    if (!partyService.IsPlayerInParty(apPlayer) || !partyService.IsPlayerLeader(apPlayer))
-        return reject("the player is not the party leader");
-
     PartyService::Party* const pParty = partyService.GetPlayerParty(apPlayer);
-    if (!pParty || std::find(pParty->Members.begin(), pParty->Members.end(), pCurrentOwner) == pParty->Members.end())
+    if (!pParty)
+        return reject("the player is not in a party");
+    if (characterComponent.IsMount() && !partyService.IsPlayerLeader(apPlayer))
+        return reject("a follower cannot claim a mount from the leader's simulation");
+    if (std::find(pParty->Members.begin(), pParty->Members.end(), pCurrentOwner) == pParty->Members.end())
         return reject("the current owner is not in the party");
+
+    if (!partyService.IsPlayerLeader(apPlayer))
+    {
+        auto* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
+        if (pLeader && pLeader->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
+            return reject("the leader is in range and retains simulation authority");
+        if (pCurrentOwner->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
+            return reject("the current cell simulator is still in range");
+    }
 
     return true;
 }
@@ -819,6 +1018,13 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
 
     ownerComponent.SetOwner(apPlayer);
     ownerComponent.OwnershipEpoch = newEpoch;
+    if (auto* pAnimation = m_world.try_get<AnimationComponent>(aEntity))
+    {
+        pAnimation->EvaluatedPose = {};
+        pAnimation->EvaluatedPosePending = false;
+        pAnimation->VisualBones = {};
+        pAnimation->VisualBonesPending = false;
+    }
     if (aResetInvalidOwners)
         ownerComponent.InvalidOwners.clear();
 
@@ -851,9 +1057,17 @@ void CharacterService::TransferToNextOwner(const entt::entity aEntity, const Own
     const auto& characterComponent = view.get<CharacterComponent>(*it);
     const auto& cellIdComponent = view.get<CellIdComponent>(*it);
 
+    auto& partyService = m_world.GetPartyService();
+    // Prefer a leader in range, then grant a follower a temporary cell lease.
+    // Ownership epochs still invalidate packets from the former simulator.
+    for (int priority = 0; priority < 2; ++priority)
     for (Player* pPlayer : m_world.GetPlayerManager())
     {
         if (pPlayer == ownerComponent.GetOwner())
+            continue;
+
+        const bool follower = partyService.IsPlayerInParty(pPlayer) && !partyService.IsPlayerLeader(pPlayer);
+        if (follower != (priority == 1))
             continue;
 
         if (std::find(ownerComponent.InvalidOwners.begin(), ownerComponent.InvalidOwners.end(), pPlayer) != ownerComponent.InvalidOwners.end())
@@ -863,7 +1077,8 @@ void CharacterService::TransferToNextOwner(const entt::entity aEntity, const Own
             continue;
 
         // Retain every owner that declined this handoff chain so the actor cannot bounce between unloaded clients.
-        if (TransferOwnership(pPlayer, aEntity, aReason, false))
+        if (TransferOwnership(pPlayer, aEntity,
+                follower ? OwnershipTransferReason::CellLease : aReason, false))
             return;
     }
 
@@ -993,6 +1208,8 @@ void CharacterService::ProcessMovementChanges() const noexcept
             auto& update = message.Updates[World::ToInteger(entity)];
             auto& movement = update.UpdatedMovement;
 
+            movement.CellId = cellIdComponent.Cell;
+            movement.WorldSpaceId = cellIdComponent.WorldSpaceId;
             movement.Position = movementComponent.Position;
 
             movement.Rotation.x = movementComponent.Rotation.x;
@@ -1000,8 +1217,13 @@ void CharacterService::ProcessMovementChanges() const noexcept
 
             movement.Direction = movementComponent.Direction;
             movement.Variables = movementComponent.Variables;
+            update.CombatTargetServerId = movementComponent.CombatTargetServerId;
 
             update.ActionEvents = animationComponent.Actions;
+            if (animationComponent.EvaluatedPosePending)
+                update.EvaluatedPose = animationComponent.EvaluatedPose;
+            if (animationComponent.VisualBonesPending)
+                update.VisualBones = animationComponent.VisualBones;
         }
     }
 
@@ -1009,6 +1231,8 @@ void CharacterService::ProcessMovementChanges() const noexcept
     {
         // Remove actions we've sent
         animationComponent.Actions.clear();
+        animationComponent.EvaluatedPosePending = false;
+        animationComponent.VisualBonesPending = false;
     });
 
     m_world.view<MovementComponent>().each([](MovementComponent& movementComponent) { movementComponent.Sent = true; });

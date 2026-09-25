@@ -14,6 +14,8 @@
 #include <Messages/AssignObjectsResponse.h>
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/NotifyScriptAnimation.h>
+#include <Messages/PhysicsReferencesMoveRequest.h>
+#include <Messages/NotifyPhysicsReferencesMove.h>
 
 ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -23,6 +25,36 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     m_activateConnection = aDispatcher.sink<PacketEvent<ActivateRequest>>().connect<&ObjectService::OnActivate>(this);
     m_lockChangeConnection = aDispatcher.sink<PacketEvent<LockChangeRequest>>().connect<&ObjectService::OnLockChange>(this);
     m_scriptAnimationConnection = aDispatcher.sink<PacketEvent<ScriptAnimationRequest>>().connect<&ObjectService::OnScriptAnimationRequest>(this);
+    m_physicsMoveConnection = aDispatcher.sink<PacketEvent<PhysicsReferencesMoveRequest>>().connect<&ObjectService::OnPhysicsReferencesMove>(this);
+}
+
+void ObjectService::OnPhysicsReferencesMove(const PacketEvent<PhysicsReferencesMoveRequest>& acMessage) noexcept
+{
+    auto& partyService = m_world.GetPartyService();
+    if (!partyService.IsPlayerLeader(acMessage.pPlayer))
+    {
+        spdlog::warn("Rejected physics snapshot from non-leader player {}", acMessage.pPlayer->GetId());
+        return;
+    }
+
+    auto* pParty = partyService.GetPlayerParty(acMessage.pPlayer);
+    if (!pParty || pParty->SessionState < 2 || acMessage.Packet.Updates.empty())
+        return;
+
+    NotifyPhysicsReferencesMove notify{};
+    notify.Tick = acMessage.Packet.Tick;
+    notify.AuthorityEpoch = pParty->StartEpoch;
+    notify.Updates = acMessage.Packet.Updates;
+    const auto& sourceCell = acMessage.pPlayer->GetCellComponent();
+    for (auto* pMember : pParty->Members)
+    {
+        // A separated party member must never receive corrections for a cell
+        // that their Skyrim instance has not loaded. The host remains the
+        // source for the nearby region; distant-cell authority is a separate
+        // concern and cannot be inferred from a missing local reference.
+        if (pMember != acMessage.pPlayer && pMember->GetCellComponent().IsInRange(sourceCell, false))
+            pMember->Send(notify);
+    }
 }
 
 // TODO(cosideci): the cell handling of objects need to be revamped.

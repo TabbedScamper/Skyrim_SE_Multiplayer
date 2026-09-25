@@ -17,6 +17,8 @@
 #include <Services/ScriptService.h>
 #include <Services/MapService.h>
 #include <Services/DiagnosticsService.h>
+#include <Services/CameraService.h>
+#include <Services/SceneTimelineService.h>
 
 #include <CampaignLedger.h>
 #include <console/Setting.h>
@@ -48,6 +50,8 @@ World::World()
     ctx().emplace<ServerListService>(*this, m_dispatcher);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
+    ctx().emplace<CameraService>(*this, m_dispatcher);
+    ctx().emplace<SceneTimelineService>(*this, m_dispatcher);
     ctx().emplace<ActorValueService>(*this, m_dispatcher);
     ctx().emplace<InventoryService>(*this, m_dispatcher);
     ctx().emplace<MagicService>(*this, m_dispatcher);

@@ -9,7 +9,19 @@ struct BGSScene : TESForm
 {
     GameArray<void*> phases;
     GameArray<uint32_t> actorIds;
+    uint8_t pad50[0x80 - 0x50];
+    GameArray<void*> actions; // +0x80; read-only diagnostic until native action ownership is understood.
+    uint8_t pad98[0xB0 - 0x98];
+    bool isPlaying;
+    uint8_t padB1[0xBC - 0xB1];
+    uint32_t rawPhaseWord; // +0xBC; phase interpretation is not validated on this runtime.
+    uint8_t padC0[0xC8 - 0xC0];
 };
+
+static_assert(offsetof(BGSScene, isPlaying) == 0xB0);
+static_assert(offsetof(BGSScene, actions) == 0x80);
+static_assert(offsetof(BGSScene, rawPhaseWord) == 0xBC);
+static_assert(sizeof(BGSScene) == 0xC8);
 
 struct TESQuest : BGSStoryManagerTreeForm
 {

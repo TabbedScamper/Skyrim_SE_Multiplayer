@@ -2,6 +2,8 @@
 #include "MenuTopicManager.h"
 
 #include <Events/SubtitleEvent.h>
+#include <Services/PartyService.h>
+#include <Services/TransportService.h>
 
 #include <TESObjectREFR.h>
 #include <Games/ActorExtension.h>
@@ -36,9 +38,20 @@ void TP_MAKE_THISCALL(HookShowSubtitle, SubtitleManager, TESObjectREFR* apSpeake
 
     Actor* pActor = Cast<Actor>(apSpeaker);
     const bool isNpc = pActor && !pActor->GetExtension()->IsPlayer();
-    const bool shouldSyncSubtitle = apSubtitleText && isNpc && (pActor->GetExtension()->IsLocal() || MenuTopicManager::IsPlayerDialogueSpeaker(pActor));
+    const bool isPlayerDialogueSpeaker = isNpc && MenuTopicManager::IsPlayerDialogueSpeaker(pActor);
+    const bool shouldSyncSubtitle = apSubtitleText && isNpc &&
+        (pActor->GetExtension()->IsLocal() || isPlayerDialogueSpeaker);
     if (shouldSyncSubtitle)
         World::Get().GetRunner().Trigger(SubtitleEvent(apSpeaker->formID, apSubtitleText));
+
+    // The follower's local scene can reach a remote NPC's subtitle before
+    // the leader's scene does. Keep the local scene running, but let only the
+    // owner-originated network event present that NPC's subtitle. The direct
+    // SubtitleManager::ShowSubtitle call used for replay bypasses this hook.
+    auto& world = World::Get();
+    if (isNpc && !pActor->GetExtension()->IsLocal() && !isPlayerDialogueSpeaker &&
+        world.GetTransport().IsConnected() && world.GetPartyService().IsInParty())
+        return;
 
     TiltedPhoques::ThisCall(RealShowSubtitle, apThis, apSpeaker, apSubtitleText, aIsInDialogue);
 }

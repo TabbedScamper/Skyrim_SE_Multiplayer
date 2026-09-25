@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Events/PacketEvent.h>
+#include <Structs/ServerSettings.h>
 
 struct World;
 struct UpdateEvent;
@@ -16,6 +17,7 @@ struct PartyKickRequest;
 struct PartyReadyRequest;
 struct PartyStartRequest;
 struct PartySessionSettingsRequest;
+struct PartyGameplaySettingsRequest;
 
 /**
  * @brief Manages every party in the server.
@@ -27,6 +29,8 @@ struct PartyService
         uint32_t LeaderPlayerId;
         Vector<Player*> Members;
         Vector<uint32_t> ReadyPlayerIds;
+        Vector<uint32_t> LoadedPlayerIds;
+        Vector<uint32_t> GameplayReadyPlayerIds;
         GameId CachedWeather{};
         uint8_t CampaignMode{};
         uint8_t SessionState{};
@@ -34,6 +38,8 @@ struct PartyService
         String CheckpointId{};
         bool LobbyOpen{};
         bool PasswordProtected{};
+        ServerSettings GameplaySettings{};
+        bool GameplayOverridden{};
     };
 
     PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept;
@@ -45,6 +51,7 @@ struct PartyService
     bool IsPlayerInParty(Player* const apPlayer) const noexcept;
     bool IsPlayerLeader(const Player* const apPlayer) const noexcept;
     Party* GetPlayerParty(Player* const apPlayer) noexcept;
+    ServerSettings GetSettingsForPlayer(const Player* apPlayer) const noexcept;
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
@@ -59,6 +66,7 @@ protected:
     void OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) noexcept;
     void OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept;
     void OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept;
+    void OnPartyGameplaySettings(const PacketEvent<PartyGameplaySettingsRequest>& acPacket) noexcept;
     void RemovePlayerFromParty(Player* apPlayer) noexcept;
 
     void BroadcastPlayerList(Player* apPlayer = nullptr) const noexcept;
@@ -83,6 +91,7 @@ private:
     entt::scoped_connection m_partyReadyConnection;
     entt::scoped_connection m_partyStartConnection;
     entt::scoped_connection m_partySessionSettingsConnection;
+    entt::scoped_connection m_partyGameplaySettingsConnection;
 
     uint64_t m_nextStartEpoch{1};
 

@@ -1,4 +1,5 @@
 #include <Services/PlayerService.h>
+#include <Services/OverlayService.h>
 
 #include <World.h>
 
@@ -22,10 +23,13 @@
 #include <Messages/PlayerLevelRequest.h>
 
 #include <Structs/ServerSettings.h>
+#include <OverlayApp.hpp>
 
 #include <PlayerCharacter.h>
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESGlobal.h>
+#include <Forms/TESQuest.h>
+#include <Forms/TESPackage.h>
 #include <Games/Overrides.h>
 #include <Games/References.h>
 #include <AI/AIProcess.h>
@@ -71,7 +75,8 @@ void PlayerService::OnConnected(const ConnectedEvent& acEvent) noexcept
 
 void PlayerService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
 {
-    PlayerCharacter::Get()->SetDifficulty(m_previousDifficulty);
+    if (m_previousDifficulty >= 0 && m_previousDifficulty <= 5)
+        PlayerCharacter::Get()->SetDifficulty(m_previousDifficulty);
     m_serverDifficulty = m_previousDifficulty = 6;
 
     ToggleDeathSystem(false);
@@ -89,17 +94,45 @@ void PlayerService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
 
 void PlayerService::OnServerSettingsReceived(const ServerSettings& acSettings) noexcept
 {
-    m_previousDifficulty = *Settings::GetDifficulty();
+    if (m_previousDifficulty == 6)
+        m_previousDifficulty = *Settings::GetDifficulty();
     PlayerCharacter::Get()->SetDifficulty(acSettings.Difficulty);
     m_serverDifficulty = acSettings.Difficulty;
 
-    if (!acSettings.GreetingsEnabled)
-    {
-        float* greetDistance = Settings::GetGreetDistance();
-        *greetDistance = 0.f;
-    }
+    *Settings::GetGreetDistance() = acSettings.GreetingsEnabled ? 150.f : 0.f;
 
     ToggleDeathSystem(acSettings.DeathSystemEnabled);
+
+    if (auto* pOverlay = m_world.GetOverlayService().GetOverlayApp())
+    {
+        auto args = CefListValue::Create();
+        args->SetInt(0, static_cast<int>(acSettings.Difficulty));
+        args->SetBool(1, acSettings.PvpEnabled);
+        args->SetBool(2, acSettings.DeathSystemEnabled);
+        args->SetBool(3, acSettings.GreetingsEnabled);
+        pOverlay->ExecuteAsync("coopGameplaySettings", args);
+    }
+}
+
+PlayerService::DeathDiagnostic PlayerService::GetDeathDiagnostic() const noexcept
+{
+    return {
+        m_respawnCount.load(std::memory_order_relaxed),
+        m_lastRespawnMs.load(std::memory_order_relaxed),
+        m_postRespawnKnockAttempts.load(std::memory_order_relaxed),
+        m_postRespawnKnocksApplied.load(std::memory_order_relaxed),
+        m_lastPostRespawnKnockMs.load(std::memory_order_relaxed),
+        m_skipNextPostRespawnKnock.load(std::memory_order_relaxed),
+        m_lastKnockSkipped.load(std::memory_order_relaxed),
+        m_lastBleedingOutAtKnock.load(std::memory_order_relaxed),
+        m_lastHad3DAtKnock.load(std::memory_order_relaxed),
+        m_lastHadProcessAtKnock.load(std::memory_order_relaxed)
+    };
+}
+
+void PlayerService::SetSkipNextPostRespawnKnock(bool aSkip) noexcept
+{
+    m_skipNextPostRespawnKnock.store(aSkip, std::memory_order_release);
 }
 
 void PlayerService::OnNotifyPlayerRespawn(const NotifyPlayerRespawn& acMessage) const noexcept
@@ -198,8 +231,6 @@ void PlayerService::RunRespawnUpdates() noexcept
     if (!m_isDeathSystemEnabled)
         return;
 
-    static bool s_startTimer = false;
-
     PlayerCharacter* pPlayer = PlayerCharacter::Get();
     if (!pPlayer->actorState.IsBleedingOut())
     {
@@ -207,13 +238,13 @@ void PlayerService::RunRespawnUpdates() noexcept
         m_cachedSecondarySpellId = pPlayer->magicItems[1] ? pPlayer->magicItems[1]->formID : 0;
         m_cachedPowerId = pPlayer->equippedShout ? pPlayer->equippedShout->formID : 0;
 
-        s_startTimer = false;
+        m_respawnTimerStarted = false;
         return;
     }
 
-    if (!s_startTimer)
+    if (!m_respawnTimerStarted)
     {
-        s_startTimer = true;
+        m_respawnTimerStarted = true;
         m_respawnDeadline = std::chrono::steady_clock::now() + 5s;
         FadeOutGame(true, true, 3.0f, true, 2.0f);
 
@@ -228,11 +259,25 @@ void PlayerService::RunRespawnUpdates() noexcept
     const auto cNow = std::chrono::steady_clock::now();
     if (cNow >= m_respawnDeadline)
     {
+        const auto* pIntroQuest = Cast<TESQuest>(TESForm::GetById(0x3372B));
+        spdlog::info("Player respawn begin tick={} actorState1={} actorState2={} package={:08X} "
+            "MQ101Stage={} position=({}, {}, {})",
+            GetTickCount64(), pPlayer->actorState.flags1, pPlayer->actorState.flags2,
+            pPlayer->currentProcess && pPlayer->currentProcess->package ?
+                pPlayer->currentProcess->package->formID : 0,
+            pIntroQuest ? pIntroQuest->currentStage : 0,
+            pPlayer->position.x, pPlayer->position.y, pPlayer->position.z);
         pPlayer->RespawnPlayer();
+        spdlog::info("Player respawn end tick={} actorState1={} actorState2={} package={:08X}",
+            GetTickCount64(), pPlayer->actorState.flags1, pPlayer->actorState.flags2,
+            pPlayer->currentProcess && pPlayer->currentProcess->package ?
+                pPlayer->currentProcess->package->formID : 0);
+        m_respawnCount.fetch_add(1, std::memory_order_relaxed);
+        m_lastRespawnMs.store(GetTickCount64(), std::memory_order_relaxed);
 
         m_transport.Send(PlayerRespawnRequest());
 
-        s_startTimer = false;
+        m_respawnTimerStarted = false;
 
         auto* pEquipManager = EquipManager::Get();
         TESForm* pSpell = TESForm::GetById(m_cachedMainSpellId);
@@ -263,11 +308,36 @@ void PlayerService::RunPostDeathUpdates() noexcept
     if (m_knockdownStart && cNow >= m_knockdownDeadline)
     {
         PlayerCharacter* pPlayer = PlayerCharacter::Get();
+        if (!pPlayer)
+            return;
 
         PlayerCharacter::SetGodMode(true);
         m_godmodeStart = true;
 
-        pPlayer->currentProcess->KnockExplosion(pPlayer, &pPlayer->position, 0.f);
+        const bool skipKnock = m_skipNextPostRespawnKnock.exchange(false,
+            std::memory_order_acq_rel);
+        const bool hadProcess = pPlayer->currentProcess != nullptr;
+        m_postRespawnKnockAttempts.fetch_add(1, std::memory_order_relaxed);
+        m_lastPostRespawnKnockMs.store(GetTickCount64(),
+            std::memory_order_relaxed);
+        m_lastKnockSkipped.store(skipKnock, std::memory_order_relaxed);
+        m_lastBleedingOutAtKnock.store(pPlayer->actorState.IsBleedingOut(),
+            std::memory_order_relaxed);
+        m_lastHad3DAtKnock.store(pPlayer->GetNiNode() != nullptr,
+            std::memory_order_relaxed);
+        m_lastHadProcessAtKnock.store(hadProcess,
+            std::memory_order_relaxed);
+        if (!skipKnock && hadProcess)
+        {
+            pPlayer->currentProcess->KnockExplosion(pPlayer,
+                &pPlayer->position, 0.f);
+            m_postRespawnKnocksApplied.fetch_add(1,
+                std::memory_order_relaxed);
+        }
+        spdlog::info("Post-respawn knock trial: skip={}, hadProcess={}, bleedingOut={}, had3D={}",
+            skipKnock, hadProcess,
+            m_lastBleedingOutAtKnock.load(std::memory_order_relaxed),
+            m_lastHad3DAtKnock.load(std::memory_order_relaxed));
 
         FadeOutGame(false, true, 0.5f, true, 2.f);
 
@@ -345,6 +415,20 @@ void PlayerService::RunBeastFormDetection() const noexcept
 
 void PlayerService::ToggleDeathSystem(bool aSet) noexcept
 {
+    if (!aSet)
+    {
+        // A one-shot diagnostic must never carry into a later session.
+        m_skipNextPostRespawnKnock.store(false, std::memory_order_release);
+        if (m_respawnTimerStarted)
+            FadeOutGame(false, true, 0.5f, true, 2.f);
+        m_respawnTimerStarted = false;
+        m_knockdownStart = false;
+        if (m_godmodeStart)
+        {
+            PlayerCharacter::SetGodMode(false);
+            m_godmodeStart = false;
+        }
+    }
     m_isDeathSystemEnabled = aSet;
 
     PlayerCharacter::Get()->SetPlayerRespawnMode(aSet);

@@ -166,6 +166,15 @@ void TESObjectREFR::SetRotation(float aX, float aY, float aZ) noexcept
     TiltedPhoques::ThisCall(RealRotateZ, this, aZ);
 }
 
+bool TESObjectREFR::SetMotionType(MotionType aMotionType, bool aAllowActivate) noexcept
+{
+    auto* pNode = GetNiNode();
+    if (!pNode)
+        return false;
+
+    return pNode->SetMotionType(static_cast<uint32_t>(aMotionType), true, false, aAllowActivate);
+}
+
 void TESObjectREFR::SetLeveledCreature(TESActorBase* apOriginalBase, TESActorBase* apTemplateA) noexcept
 {
     TP_THIS_FUNCTION(TSetLeveledCreature, void, TESObjectREFR, TESActorBase*, TESActorBase*);

@@ -43,7 +43,7 @@ struct PlayerControls
     void SetCamSwitch(bool aSet) noexcept;
 
 public:
-    char pad0[0x20];
+    char pad0[0x24];
     PlayerControlsData Data;
     std::uint32_t pad054;                    // 054
     GameArray<void*> handlers;               // 058
@@ -77,7 +77,9 @@ public:
 };
 
 static_assert(offsetof(PlayerControls, PlayerControls::bBlockPlayerInput) == 0x1D9);
-static_assert(offsetof(PlayerControls, PlayerControls::Data) == 0x20);
+static_assert(offsetof(PlayerControls, PlayerControls::Data) == 0x24);
+static_assert(offsetof(PlayerControls, PlayerControls::handlers) == 0x58);
+static_assert(sizeof(PlayerControls) == 0x1E0);
 
 struct BSInputEnableManager
 {

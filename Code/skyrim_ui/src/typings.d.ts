@@ -93,6 +93,7 @@ declare namespace SkyrimTogetherTypes {
     playerIds: Array<number>, leaderId: number, readyPlayerIds: Array<number>, campaignMode: number,
     sessionState: number, startEpoch: string, checkpointId: string, lobbyOpen: boolean, passwordProtected: boolean,
   ) => void;
+  type CoopGameplaySettingsCallback = (difficulty: number, pvpEnabled: boolean, deathSystemEnabled: boolean, greetingsEnabled: boolean) => void;
   type SteamLobbyStateCallback = (
     lobbyId: string, ownerId: string, memberIds: string[], memberNames: string[], friendIds: string[], friendNames: string[],
     open: boolean, passwordProtected: boolean, waitingForPassword: boolean, isHost: boolean,
@@ -230,6 +231,7 @@ interface SkyrimTogether {
 
   on(event: 'partyInfo', callback: SkyrimTogetherTypes.PartyInfoCallback): void;
   on(event: 'coopLobbyState', callback: SkyrimTogetherTypes.CoopLobbyStateCallback): void;
+  on(event: 'coopGameplaySettings', callback: SkyrimTogetherTypes.CoopGameplaySettingsCallback): void;
   on(event: 'showTitleLobby', callback: SkyrimTogetherTypes.VoidCallback): void;
   on(event: 'steamLobbyState', callback: SkyrimTogetherTypes.SteamLobbyStateCallback): void;
   on(event: 'deploymentScanState', callback: SkyrimTogetherTypes.DeploymentScanStateCallback): void;
@@ -372,6 +374,7 @@ interface SkyrimTogether {
     callback?: SkyrimTogetherTypes.PartyInfoCallback,
   ): void;
   off(event: 'coopLobbyState', callback?: SkyrimTogetherTypes.CoopLobbyStateCallback): void;
+  off(event: 'coopGameplaySettings', callback?: SkyrimTogetherTypes.CoopGameplaySettingsCallback): void;
 
   off(
     event: 'partyCreated',
@@ -463,6 +466,7 @@ interface SkyrimTogether {
   refreshSteamLobby(): void;
 
   setSteamSessionAccess(open: boolean, password: string): void;
+  setCoopGameplaySettings(difficulty: number, pvpEnabled: boolean): void;
 
   connectJoinedSteamSession(password: string): void;
 

@@ -1,0 +1,43 @@
+# Open-source Skyrim engine feasibility (2026-09-23)
+
+## Objective and honest status
+
+The objective is a source-visible, host-authoritative Skyrim SE runtime that can run a complete shared campaign with all clients presenting the same authored events, actor poses, physics objects, camera, UI, quests, inventory, and persistent world state. It must load game content from each player's own installation; this repository must not ship Bethesda executable code or assets.
+
+No examined project is presently a complete, vanilla-accurate, multiplayer-capable Skyrim SE engine. The current Skyrim Together-derived native mod is a playable development harness, not proof of 1:1 parity. In our paired MQ101 run, the host physics target reached the follower exactly (`hostTargetError=0`) while the follower cart remained about 176-255 game units away; actor bones, scene phase, and camera also diverged. Those are failures of independent simulation/presentation, not packet delivery alone.
+
+The earliest retained same-tick sample in the 09:02 campaign (`Tools/InGameTests/artifacts/authority-20260923-090249.json`) is already divergent at MQ101 stage 12: the two cart reference errors are 76.3 and 13.5 game units with only 37 ms between sampled world ticks. Its motion sample counters are 65 host versus 9 follower. That counter difference is a clue about startup/update cadence, **not yet proof** of the first causative engine event; we need trace data from before cart motion begins.
+
+## Candidate evidence
+
+| Project | Source/license evidence | Runtime status relevant to us | Decision |
+| --- | --- | --- | --- |
+| [OpenMW](https://openmw.org/2025/openmw-0-49-0-released/) | Established open-source engine | Official Skyrim SE support is experimental and lacks key animation/physics functionality. | Study architecture and test discipline; not a playable Skyrim base today. |
+| [ByroRedux](https://github.com/matiaszanolli/ByroRedux) | README says MIT; local shallow clone at `c6eb06d381524b253564a67eaf34179f3e5c6614` | The roadmap reports a live MQ101 vertical slice, but its race menu auto-accepts, general HKX behavior/animation is absent, Papyrus fragment coverage is partial, and multiplayer is a future M60 milestone. | Do **not** import code now: its own `AGENTS.md` and `docs/legacy/` cite a leaked Gamebryo 2.3 source tree. Source provenance needs independent review before reuse. Publicly documented formats and test ideas can be researched independently. |
+| [Wah Krah Jol](https://github.com/realfakenerd/wah-krah-jol/tree/2105bfd468d23bbddd54c74d898bfc11fd798f21) | MIT OR Apache-2.0, inspected at `2105bfd468d23bbddd54c74d898bfc11fd798f21`; local read-only clone at `C:\Users\mwalt\SkyrimResearch\wah-krah-jol` | Source implements asset conversion, SQLite world records, Bevy rendering/streaming, a PEX-to-Luau converter and synthetic acceptance fixtures. Its own roadmap places gameplay/physics/persistence in Phase 4 and native co-op in Phase 5. | Good clean-room format and conformance-test reference; not a 1:1 gameplay or multiplayer base today. |
+| [recreation](https://github.com/Force67/recreation) + [rx](https://github.com/Force67/rx) | Public source; no top-level `LICENSE` found in the checked `main` trees | Claims a Bethesda-content runtime and authoritative multiplayer/RPC features, but explicitly says it is not a Creation-engine reimplementation. | Inspect behavior/tests as prior art only; no code reuse until licensing is clarified. |
+| [SkyrimReLive](https://github.com/danmeedev/skyrimReLive) | Apache-2.0 SKSE client + Rust server | Its own README says current co-op synchronizes ghost-player locomotion and weapons; combat authority and deeper world sync remain underway. | Useful network/server prior art, not a replacement game engine or 1:1 baseline. |
+| [skyrim-re-toolkit](https://github.com/ByteBard97/skyrim-re-toolkit) | Public reverse-engineering tooling | Type/signature recovery helps inspect installed executables but is not a game runtime. | Use only verified, appropriately licensed tooling and independently validate findings on our exact game build. |
+
+## Project direction
+
+### Wah Krah Jol integration boundary (inspected 2026-09-24)
+
+The pinned source is useful in three concrete ways: `crates/converter/src/esm` demonstrates plugin/record merging and a SQLite schema keyed by FormID; `crates/converter/src/script.rs` parses PEX and lowers instructions into Luau; `crates/dummy-content` and `docs/roadmap/02-acceptance.md` demonstrate synthetic fixtures and measurable render/streaming gates without distributing game assets. Its `crates/engine/src/app.rs` currently assembles a Bevy renderer, streaming plugin, fly camera, and fixtures. A search of engine/converter source found no implemented HKX/Havok animation or physics runtime, quest state machine, or network replication; the project's own [Phase 4](https://github.com/realfakenerd/wah-krah-jol/blob/2105bfd468d23bbddd54c74d898bfc11fd798f21/docs/roadmap/04-gameplay-and-physics.md) and [Phase 5](https://github.com/realfakenerd/wah-krah-jol/blob/2105bfd468d23bbddd54c74d898bfc11fd798f21/docs/roadmap/05-multiplatform-and-networking.md) list these as future work. This is source inspection, not a compiled or in-game validation of the project.
+
+For our immediate MQ101 parity problem, evaluate its ESM/VMAD/PEX parsing and synthetic fixture patterns against our existing quest corpus. Do not swap in its Luau runtime as if it reproduced Skyrim's native Papyrus scheduling or quest semantics, and do not expect its renderer to fix NPC poses, mounted actors, or cart Havok. Any reused code needs a narrow license/provenance review and tests against locally owned data; an independent engine belongs in its own repository until that boundary is settled.
+
+1. Keep the native Skyrim build as an **oracle**: capture the same MQ101 scene at the same host tick on both PCs, including active scene/action, Papyrus timing, actor skeleton pose, rigid-body pose, cart/camera transforms, audio/subtitle cue, and title/menu state. A screenshot alone is insufficient.
+2. Treat replacement-engine work as a separate clean-room track. Start with independently specified on-disk formats, test fixtures from users' own installations, a deterministic single-authority simulation, and a headless MQ101 conformance runner. Do not copy Bethesda code/assets or source of unclear provenance.
+3. Reproduce **single-player vanilla behavior first**, then transmit one canonical tick/event stream to clients. A server cannot make two independently advancing Skyrim VMs and Havok worlds 1:1 by periodically correcting positions. The follower must either render host-owned state or run a verified deterministic runtime with the same inputs and versioned content.
+4. Every parity claim needs an automated gate: matching authoritative entity set and quest/scene event sequence; bounded position/orientation and bone-pose error at the same presentation tick; no duplicated dialogue, object spawns, or deaths; and two-PC visual/audio confirmation. Gate MQ101 before claiming a complete playthrough.
+
+## Legal/provenance boundary
+
+The [Skyrim SE EULA](https://store.steampowered.com/eula/489830_eula_0) reserves Bethesda's code/assets and contains reverse-engineering restrictions. Applicability and statutory exceptions depend on jurisdiction; obtain legal review before distributing a replacement engine or accepting externally derived code. This is not a legal conclusion. The practical project rule is to publish only our own code and properly licensed dependencies, require legitimately installed game data locally, track provenance for each imported component, and reject leaked/proprietary source.
+
+This Skyrim Together-derived repository itself carries GPLv3 terms (`LICENSE`). Keep a truly independent clean-room engine in a separate repository until its license, contributors, and dependency compatibility are settled; do not silently mix MIT/Apache code into this tree or assume the engine can inherit this repository's provenance.
+
+## Next measurable frontier
+
+The read-only VM timing hook and host-tick-aligned pose capture have now been exercised on both PCs. The next runtime slice is to use the validated contiguous `hkbCharacter::poseLocal` array as a host-owned pose source, prove a safe post-animation/pre-render follower apply boundary, and compare actual numeric bone error and visual output. Keep cart/scene/physics and camera as separate authority domains; copying pose alone cannot make the intro 1:1. In parallel, create a clean-room runtime proof of concept only after choosing a licensed base and defining a reproducible MQ101 conformance fixture.

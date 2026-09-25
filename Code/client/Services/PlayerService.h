@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+
 struct World;
 struct TransportService;
 
@@ -21,10 +24,26 @@ struct NotifyPlayerRespawn;
  */
 struct PlayerService
 {
+    struct DeathDiagnostic
+    {
+        uint64_t Respawns{};
+        uint64_t LastRespawnMs{};
+        uint64_t PostRespawnKnockAttempts{};
+        uint64_t PostRespawnKnocksApplied{};
+        uint64_t LastPostRespawnKnockMs{};
+        bool SkipNextPostRespawnKnock{};
+        bool LastKnockSkipped{};
+        bool LastBleedingOutAtKnock{};
+        bool LastHad3DAtKnock{};
+        bool LastHadProcessAtKnock{};
+    };
+
     PlayerService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept;
     ~PlayerService() noexcept = default;
 
     TP_NOCOPYMOVE(PlayerService);
+    [[nodiscard]] DeathDiagnostic GetDeathDiagnostic() const noexcept;
+    void SetSkipNextPostRespawnKnock(bool aSkip) noexcept;
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
@@ -63,6 +82,7 @@ private:
     int32_t m_previousDifficulty = 6;
 
     bool m_isDeathSystemEnabled = true;
+    bool m_respawnTimerStarted = false;
 
     bool m_knockdownStart = false;
     std::chrono::steady_clock::time_point m_knockdownDeadline;
@@ -73,6 +93,17 @@ private:
     uint32_t m_cachedMainSpellId = 0;
     uint32_t m_cachedSecondarySpellId = 0;
     uint32_t m_cachedPowerId = 0;
+
+    std::atomic<uint64_t> m_respawnCount{};
+    std::atomic<uint64_t> m_lastRespawnMs{};
+    std::atomic<uint64_t> m_postRespawnKnockAttempts{};
+    std::atomic<uint64_t> m_postRespawnKnocksApplied{};
+    std::atomic<uint64_t> m_lastPostRespawnKnockMs{};
+    std::atomic<bool> m_skipNextPostRespawnKnock{};
+    std::atomic<bool> m_lastKnockSkipped{};
+    std::atomic<bool> m_lastBleedingOutAtKnock{};
+    std::atomic<bool> m_lastHad3DAtKnock{};
+    std::atomic<bool> m_lastHadProcessAtKnock{};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_connectedConnection;

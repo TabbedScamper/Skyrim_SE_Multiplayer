@@ -5,6 +5,7 @@
 #endif
 
 #include <Structs/AnimationVariables.h>
+#include <Structs/GameId.h>
 
 struct InterpolationComponent
 {
@@ -23,4 +24,14 @@ struct InterpolationComponent
 
     List<TimePoint> TimePoints;
     glm::vec3 Position;
+    GameId AuthorityCellId{};
+    GameId AuthorityWorldSpaceId{};
+    glm::vec3 AuthorityPosition{};
+    uint64_t AuthorityTick{};
+    uint64_t AuthorityStableSinceTick{};
+    uint64_t LastCorpseCorrectionTick{};
+    glm::vec3 LastCorpseCorrectionPosition{};
+    uint32_t LastCorpseCorrectionCellId{};
+    uint32_t CorpseCorrectionAttempts{};
+    uint32_t CorpseCorrectionAttemptsForTarget{};
 };

@@ -25,6 +25,79 @@ bool UI::GetMenuOpen(const BSFixedString& acName) const
     return TiltedPhoques::ThisCall(s_isMenuOpen.Get(), this, acName);
 }
 
+bool UI::SelectCharacterConfirmationForTest() noexcept
+{
+    // Port of CommonLibSSE-NG's MessageBoxMenu::SelectOption. This is only
+    // used by the local test bridge after both native menus are visibly open.
+    if (!GetMenuOpen(BSFixedString("RaceSex Menu")) ||
+        !GetMenuOpen(BSFixedString("MessageBoxMenu")))
+        return false;
+
+    struct MessageDataView
+    {
+        uint8_t pad00[0x10];
+        const char* bodyText;
+        uint8_t pad18[0x40 - 0x18];
+        void* callback;
+        uint8_t pad48[0x4C - 0x48];
+        uint8_t buttonPressOffset;
+    };
+    static_assert(offsetof(MessageDataView, callback) == 0x40);
+    static_assert(offsetof(MessageDataView, buttonPressOffset) == 0x4C);
+
+    POINTER_SKYRIMSE(GameArray<MessageDataView*>, s_messageQueue, 406362);
+    auto* pQueue = s_messageQueue.Get();
+    if (!pQueue || !pQueue->data || pQueue->length != 1 ||
+        pQueue->capacity < pQueue->length)
+        return false;
+    auto* pData = pQueue->data[0];
+    if (!pData || !pData->callback || !pData->bodyText)
+        return false;
+    char body[96]{};
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), pData->bodyText, body,
+            sizeof(body) - 1, &copied) ||
+        std::string_view(body).find("Finish and name your character?") == std::string_view::npos)
+        return false;
+
+    auto* pCallback = pData->callback;
+    auto* pCallbackVtable = *reinterpret_cast<void***>(pCallback);
+    if (!pCallbackVtable || !pCallbackVtable[0] || !pCallbackVtable[1])
+        return false;
+    const uint8_t option = pData->buttonPressOffset;
+    // IMessageBoxCallback is virtual (vptr +0); its native intrusive count
+    // is at +8. Retain through the queue removal and callback re-entry.
+    auto& count = *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pCallback) + 8);
+    std::atomic_ref<uint32_t> refCount(count);
+    refCount.fetch_add(1, std::memory_order_acq_rel);
+
+    using TRemove = void(void*, MessageDataView*);
+    POINTER_SKYRIMSE(TRemove, s_removeMessage, 52284);
+    if (!s_removeMessage.Get())
+    {
+        refCount.fetch_sub(1, std::memory_order_acq_rel);
+        return false;
+    }
+    s_removeMessage.Get()(nullptr, pData);
+    if (pQueue->length == 0)
+    {
+        POINTER_SKYRIMSE(void*, s_uiMessageQueue, 400445);
+        using TAddMessage = void(void*, const BSFixedString&, UIMessage::UI_MESSAGE_TYPE, void*);
+        POINTER_SKYRIMSE(TAddMessage, s_addMessage, 13631);
+        if (s_uiMessageQueue.Get() && *s_uiMessageQueue.Get() && s_addMessage.Get())
+            s_addMessage.Get()(*s_uiMessageQueue.Get(), BSFixedString("MessageBoxMenu"),
+                UIMessage::kHide, nullptr);
+    }
+    using TRun = void(void*, uint8_t);
+    reinterpret_cast<TRun*>(pCallbackVtable[1])(pCallback, option);
+    if (refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+    {
+        using TDeletingDestructor = void(void*, uint32_t);
+        reinterpret_cast<TDeletingDestructor*>(pCallbackVtable[0])(pCallback, 1);
+    }
+    return true;
+}
+
 void UI::CloseAllMenus()
 {
     TP_THIS_FUNCTION(TUI_CloseAll, void, const UI);
@@ -75,9 +148,8 @@ static void UnfreezeMenu(IMenu* apEntry)
 
 static constexpr const char* kAllowList[] = {
     "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu", "MessageBoxMenu",
-    "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console"
+    "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console",       "Journal Menu"
     //"MapMenu", // MapMenu is disabled till we find a proper fix for first person.
-    //"Journal Menu", // Journal menu, aka pause menu, is disabled until we find a fix for manual save crashing while unpaused.
 };
 
 static void* (*UI_AddToActiveQueue)(UI*, IMenu*, void*);

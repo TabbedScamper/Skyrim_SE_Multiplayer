@@ -1,6 +1,8 @@
 #pragma once
 #include "Structs/Inventory.h"
 #include "Structs/ActorData.h"
+#include <atomic>
+#include <unordered_map>
 
 struct ActorAddedEvent;
 struct ActorRemovedEvent;
@@ -56,22 +58,72 @@ struct CharacterService
 
     static void DeleteTempActor(const uint32_t aFormId) noexcept;
 
+    void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
+    [[nodiscard]] uint32_t GetPresentationDelayMs() const noexcept;
+    struct MountDiagnostic
+    {
+        uint32_t Pending{};
+        uint64_t Notifications{};
+        uint64_t WaitedFor3D{};
+        uint64_t Applied{};
+        uint64_t Seated{};
+        uint64_t Rejected{};
+        uint32_t LastRiderId{};
+        uint32_t LastMountId{};
+    };
+    [[nodiscard]] MountDiagnostic GetMountDiagnostic() const noexcept;
+    struct LocalPoseProductionDiagnostic
+    {
+        uint64_t Batches{};
+        uint64_t Actors{};
+        uint64_t TotalUs{};
+        uint32_t MaxActorUs{};
+        uint32_t LastBatchUs{};
+        uint32_t LastBatchActors{};
+    };
+    [[nodiscard]] LocalPoseProductionDiagnostic GetLocalPoseProductionDiagnostic() const noexcept;
+    struct MountRelationDiagnostic
+    {
+        uint32_t RiderId{};
+        uint32_t MountId{};
+        uint32_t RiderFormId{};
+        uint32_t MountFormId{};
+        uint32_t NativeMountFormId{};
+        uint32_t NativeVehicleHandle{};
+        bool HorseExtra{};
+        uint32_t HorseHandle{};
+        bool InteractionExtra{};
+        bool InteractionPointerPresent{};
+        uint32_t InteractionActorHandle{};
+        uint32_t InteractionTargetHandle{};
+        bool RiderHas3D{};
+        bool MountHas3D{};
+        bool WasSeated{};
+        uint32_t Attempts{};
+    };
+    [[nodiscard]] Vector<MountRelationDiagnostic> GetPendingMountRelations() const noexcept;
+    void SetVehicleTrialRiderId(uint32_t aRiderId) noexcept;
+    [[nodiscard]] uint32_t GetVehicleTrialRiderId() const noexcept;
+    [[nodiscard]] uint64_t GetVehicleTrialCalls() const noexcept;
+    [[nodiscard]] uint64_t GetVehicleTrialImmediateSeats() const noexcept;
+    [[nodiscard]] uint32_t GetVehicleTrialImmediateHandle() const noexcept;
+
     bool RequestOwnership(uint32_t aFormId, uint32_t aServerId, entt::entity aEntity) const noexcept;
 
     void OnActorAdded(const ActorAddedEvent& acEvent) noexcept;
     void OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept;
     void OnUpdate(const UpdateEvent& acUpdateEvent) noexcept;
     void OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept;
-    void OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) const noexcept;
+    void OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept;
     void OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept;
-    void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) const noexcept;
+    void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept;
     void OnReferencesMoveRequest(const ServerReferencesMoveRequest& acMessage) const noexcept;
     void OnActionEvent(const ActionEvent& acActionEvent) const noexcept;
     void OnFactionsChanges(const NotifyFactionsChanges& acEvent) const noexcept;
     void OnOwnershipTransfer(const NotifyOwnershipTransfer& acMessage) noexcept;
-    void OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) const noexcept;
+    void OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) noexcept;
     void OnMountEvent(const MountEvent& acEvent) const noexcept;
-    void OnNotifyMount(const NotifyMount& acMessage) const noexcept;
+    void OnNotifyMount(const NotifyMount& acMessage) noexcept;
     void OnInitPackageEvent(const InitPackageEvent& acEvent) const noexcept;
     void OnNotifyNewPackage(const NotifyNewPackage& acMessage) const noexcept;
     void OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept;
@@ -88,29 +140,41 @@ struct CharacterService
     void ProcessNewEntity(entt::entity aEntity) const noexcept;
 
 private:
-    void MoveActor(const Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
+    void MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
 
     void RequestServerAssignment(entt::entity aEntity) const noexcept;
     void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId) const noexcept;
     void DeleteRemoteEntityComponents(entt::entity aEntity) const noexcept;
     void DeclineOwnership(uint32_t aServerId, uint32_t aOwnershipEpoch) const noexcept;
-    void ReconcileActorData(entt::entity aEntity, Actor* apActor, uint32_t aOwnershipEpoch, const ActorData& acActorData, bool aApplyInventory, bool aIsLocalOwner) noexcept;
+    void ReconcileActorData(entt::entity aEntity, Actor* apActor, uint32_t aOwnershipEpoch, const ActorData& acActorData, bool aApplyInventory, bool aIsLocalOwner, bool aInitialNativeAssignment = false) noexcept;
 
     Actor* CreateCharacterForEntity(entt::entity aEntity) const noexcept;
     ActorData BuildActorData(Actor* apActor) const noexcept;
     void ApplyLeveledNpcPick(Actor* apActor, const GameId& acPickId) const noexcept;
     void ProcessLeveledConforms() noexcept;
+    void ClearMountRelationsForServerId(uint32_t aServerId) noexcept;
 
     void RunLocalUpdates() const noexcept;
     void RunRemoteUpdates() noexcept;
+    void RunPresentationEvents() noexcept;
     void RunFactionsUpdates() const noexcept;
     void RunSpawnUpdates() const noexcept;
+    void RunPendingMounts() noexcept;
+    void RunLocalMountUpdates() noexcept;
     void RunExperienceUpdates() noexcept;
     void ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept;
 
     World& m_world;
     entt::dispatcher& m_dispatcher;
     TransportService& m_transport;
+    std::atomic<uint32_t> m_presentationDelayMs{300};
+    // Selected actor Serialize includes pose capture and the ordinary movement fields.
+    mutable std::atomic<uint64_t> m_localPoseBatches{};
+    mutable std::atomic<uint64_t> m_localPoseActors{};
+    mutable std::atomic<uint64_t> m_localPoseTotalUs{};
+    mutable std::atomic<uint32_t> m_localPoseMaxActorUs{};
+    mutable std::atomic<uint32_t> m_localPoseLastBatchUs{};
+    mutable std::atomic<uint32_t> m_localPoseLastBatchActors{};
 
     float m_cachedExperience = 0.f;
 
@@ -133,6 +197,53 @@ private:
     // Actor form ID -> pick form ID. The active stage lives in ActorExtension.
     // Written from const message handlers, drained by ProcessLeveledConforms.
     mutable Map<uint32_t, uint32_t> m_pendingLeveledConforms{};
+    uint64_t m_nextDeferredAssignmentRetryMs{};
+
+    struct PendingVoice
+    {
+        uint32_t ServerId{};
+        uint64_t Tick{};
+        TiltedPhoques::String Filename{};
+    };
+    struct PendingSubtitle
+    {
+        uint32_t ServerId{};
+        uint64_t Tick{};
+        uint32_t TopicFormId{};
+        TiltedPhoques::String Text{};
+    };
+    Vector<PendingVoice> m_pendingVoices{};
+    Vector<PendingSubtitle> m_pendingSubtitles{};
+    struct PendingMount
+    {
+        uint32_t MountId{};
+        uint64_t NextAttemptMs{};
+        uint32_t Attempts{};
+        uint64_t StartedAtMs{};
+        bool WasSeated{};
+        bool VehicleTrialAttempted{};
+    };
+    std::unordered_map<uint32_t, PendingMount> m_pendingMounts{};
+    struct LocalMountSendState
+    {
+        uint32_t OwnershipEpoch{};
+        uint32_t MountId{};
+        uint64_t LastSentMs{};
+        uint64_t ZeroObservedAtMs{};
+    };
+    std::unordered_map<uint32_t, LocalMountSendState> m_localMountSent{};
+    uint64_t m_lastLocalMountPollMs{};
+    uint64_t m_mountNotifications{};
+    uint64_t m_mountWaitedFor3D{};
+    uint64_t m_mountApplied{};
+    uint64_t m_mountSeated{};
+    uint64_t m_mountRejected{};
+    uint32_t m_lastMountRiderId{};
+    uint32_t m_lastMountId{};
+    std::atomic<uint32_t> m_vehicleTrialRiderId{};
+    uint64_t m_vehicleTrialCalls{};
+    uint64_t m_vehicleTrialImmediateSeats{};
+    uint32_t m_vehicleTrialImmediateHandle{};
 
     entt::scoped_connection m_referenceAddedConnection;
     entt::scoped_connection m_referenceRemovedConnection;

@@ -1,5 +1,6 @@
 #include <Games/References.h>
 #include <Games/Skyrim/EquipManager.h>
+#include <atomic>
 #include <AI/AIProcess.h>
 #include <Misc/MiddleProcess.h>
 #include <Misc/GameVM.h>
@@ -23,6 +24,9 @@
 #include <Games/TES.h>
 #include <World.h>
 #include <Services/PapyrusService.h>
+#include <Services/PartyService.h>
+#include <Services/ObjectService.h>
+#include <Services/TransportService.h>
 
 #include <Forms/ActorValueInfo.h>
 #include <Forms/TESRace.h>
@@ -31,6 +35,7 @@
 
 #include <Games/Skyrim/Misc/InventoryEntry.h>
 #include <Games/Skyrim/ExtraData/ExtraCount.h>
+#include <NetImmerse/NiPointer.h>
 #include <Games/Misc/ActorKnowledge.h>
 
 #include <ExtraData/ExtraDataList.h>
@@ -128,7 +133,10 @@ TP_THIS_FUNCTION(TAddInventoryItem, void, Actor, TESBoundObject* apItem, ExtraDa
 TP_THIS_FUNCTION(TPickUpObject, void*, Actor, TESObjectREFR* apObject, int32_t aCount, bool aUnk1, float aUnk2);
 TP_THIS_FUNCTION(TDropObject, void*, Actor, void* apResult, TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation);
 TP_THIS_FUNCTION(TSetPosition, char, Actor, NiPoint3& acPosition);
+TP_THIS_FUNCTION(TKnockExplosion, void, AIProcess, Actor*, const NiPoint3&, float);
 TP_THIS_FUNCTION(TActorProcess, char, Actor, float aValue);
+TP_THIS_FUNCTION(TNativeExtraDataAdd, BSExtraData*, ExtraDataList, BSExtraData*);
+TP_THIS_FUNCTION(TNativeSetInteraction, void, ExtraDataList, void*);
 
 using TGetLocation = TESForm*(TESForm*);
 static TGetLocation* FUNC_GetActorLocation;
@@ -142,7 +150,18 @@ static TAddInventoryItem* RealAddInventoryItem = nullptr;
 static TPickUpObject* RealPickUpObject = nullptr;
 static TDropObject* RealDropObject = nullptr;
 static TSetPosition* RealSetPosition = nullptr;
+static TKnockExplosion* RealKnockExplosion = nullptr;
+static std::atomic<uint64_t> s_nullKnockExplosionSkips{};
 static TActorProcess* RealActorProcess = nullptr;
+static TNativeExtraDataAdd* RealNativeExtraDataAdd = nullptr;
+static TNativeSetInteraction* RealNativeSetInteraction = nullptr;
+static std::atomic<uint32_t> s_interactionAddTraceCount{};
+static std::atomic<uint32_t> s_interactionSetTraceCount{};
+static std::atomic<uint32_t> s_mountPackageTraceCount{};
+static std::atomic<bool> s_interactionTraceArmed{};
+static std::atomic<uint32_t> s_remoteProcessTrialRiderFormId{};
+static std::atomic<uint32_t> s_remoteProcessTrialMountFormId{};
+static std::atomic<uint64_t> s_remoteProcessTrialTicks{};
 
 float Actor::GetSpeed() noexcept
 {
@@ -788,6 +807,78 @@ bool Actor::InitiateMountPackage(Actor* apMount) noexcept
     return TiltedPhoques::ThisCall(RealInitiateMountPackage, this, apMount);
 }
 
+uint32_t Actor::GetNativeMountFormId() noexcept
+{
+    TP_THIS_FUNCTION(TGetMount, bool, Actor, NiPointer<Actor>&);
+    POINTER_SKYRIMSE(TGetMount, s_getMount, 38702);
+    NiPointer<Actor> mount{};
+    const bool mounted = TiltedPhoques::ThisCall(s_getMount, this, mount);
+    const uint32_t formId = mounted && mount.object ? mount.object->formID : 0;
+    // This project's lightweight NiPointer has no destructor; the native
+    // out-parameter retains its actor just like CommonLib's RAII pointer.
+    if (mount.object)
+        mount.object->handleRefObject.DecRefHandle();
+    return formId;
+}
+
+bool Actor::SetNativeVehicle(TESObjectREFR* apVehicle) noexcept
+{
+    // Resolve only after the VM has registered the native binding. Unlike a
+    // static PAPYRUS_FUNCTION wrapper, an early menu-time miss is not cached.
+    const auto* address = World::Get().ctx().at<PapyrusService>().Get(
+        "Actor", "SetVehicle");
+    if (!address || !GameVM::Get() || !GameVM::Get()->virtualMachine)
+        return false;
+    PapyrusFunction<void, Actor, TESObjectREFR*> setVehicle(address);
+    setVehicle(this, apVehicle);
+    return true;
+}
+
+Actor::NativeMountState Actor::GetNativeMountState() const noexcept
+{
+    NativeMountState state{};
+    const auto read = [](const void* address, void* destination, size_t size) noexcept
+    {
+        SIZE_T bytes{};
+        return address && ReadProcessMemory(GetCurrentProcess(), address,
+            destination, size, &bytes) && bytes == size;
+    };
+    if (const auto* horse = extraData.GetByType(ExtraDataType::Horse))
+    {
+        state.HorseExtra = true;
+        read(reinterpret_cast<const uint8_t*>(horse) + 0x10,
+            &state.HorseHandle, sizeof(state.HorseHandle));
+    }
+    if (const auto* extra = extraData.GetByType(ExtraDataType::Interaction))
+    {
+        state.InteractionExtra = true;
+        const void* interaction{};
+        if (read(reinterpret_cast<const uint8_t*>(extra) + 0x10,
+                &interaction, sizeof(interaction)) && interaction)
+        {
+            state.InteractionPointerPresent = true;
+            read(reinterpret_cast<const uint8_t*>(interaction) + 0x10,
+                &state.InteractionActorHandle, sizeof(state.InteractionActorHandle));
+            read(reinterpret_cast<const uint8_t*>(interaction) + 0x14,
+                &state.InteractionTargetHandle, sizeof(state.InteractionTargetHandle));
+        }
+    }
+    return state;
+}
+
+void Actor::SetRemoteProcessTrial(uint32_t aRiderFormId,
+    uint32_t aMountFormId) noexcept
+{
+    s_remoteProcessTrialRiderFormId.store(aRiderFormId, std::memory_order_release);
+    s_remoteProcessTrialMountFormId.store(aMountFormId, std::memory_order_release);
+    s_remoteProcessTrialTicks.store(0, std::memory_order_relaxed);
+}
+
+uint64_t Actor::GetRemoteProcessTrialTicks() noexcept
+{
+    return s_remoteProcessTrialTicks.load(std::memory_order_relaxed);
+}
+
 void Actor::GenerateMagicCasters() noexcept
 {
     using CS = MagicSystem::CastingSource;
@@ -801,9 +892,20 @@ void Actor::GenerateMagicCasters() noexcept
 
 bool Actor::IsDead() const noexcept
 {
-    PAPYRUS_FUNCTION(bool, Actor, IsDead);
+    // This can be queried while a new game is still registering Papyrus
+    // functions. Do not cache the lookup: a null result during that window
+    // would otherwise remain null for the lifetime of the process.
+    PapyrusFunction<bool, Actor> isDead(World::Get().ctx().at<PapyrusService>().Get("Actor", "IsDead"));
 
-    return s_pIsDead(this);
+    if (!isDead)
+        return false;
+
+    return isDead(this);
+}
+
+uint64_t Actor::GetNullKnockExplosionSkips() noexcept
+{
+    return s_nullKnockExplosionSkips.load(std::memory_order_relaxed);
 }
 
 bool Actor::IsDragon() const noexcept
@@ -893,9 +995,18 @@ void Actor::FixVampireLordModel() noexcept
 char TP_MAKE_THISCALL(HookSetPosition, Actor, NiPoint3& aPosition)
 {
     const auto pExtension = apThis ? apThis->GetExtension() : nullptr;
-    const auto bIsRemote = pExtension && pExtension->IsRemote();
+    const bool bIsRemote = pExtension && pExtension->IsRemote();
+    const bool scopedOverride = ScopedReferencesOverride::IsOverriden();
+    if (apThis)
+    {
+        const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        ObjectService::RecordNativeSetPosition(apThis,
+            caller >= base ? caller - base : 0, &aPosition,
+            bIsRemote, scopedOverride);
+    }
 
-    if (bIsRemote && !ScopedReferencesOverride::IsOverriden())
+    if (bIsRemote && !scopedOverride)
         return 1;
 
     // Don't interfere with non actor references, or the player, or if we are calling our self
@@ -1180,10 +1291,25 @@ uint64_t TP_MAKE_THISCALL(HookProcessResponse, void, DialogueItem* apVoice, Acto
 
 bool TP_MAKE_THISCALL(HookInitiateMountPackage, Actor, Actor* apMount)
 {
-    if (apMount && apThis->GetExtension()->IsLocal())
+    const bool connected = World::Get().GetTransport().IsConnected();
+    const bool trace = connected &&
+        s_mountPackageTraceCount.fetch_add(1, std::memory_order_relaxed) < 256;
+    const auto caller = trace ? reinterpret_cast<uintptr_t>(_ReturnAddress()) : 0;
+    const bool started = TiltedPhoques::ThisCall(RealInitiateMountPackage,
+        apThis, apMount);
+    if (trace)
+    {
+        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        spdlog::info("Native mount package rider={:X} mount={:X} remote={} riderProcess={} mountProcess={} started={} callerRva={:X}",
+            apThis->formID, apMount ? apMount->formID : 0,
+            apThis->GetExtension()->IsRemote(), apThis->currentProcess != nullptr,
+            apMount && apMount->currentProcess != nullptr, started,
+            caller >= base ? caller - base : 0);
+    }
+    if (started && apMount && apThis->GetExtension()->IsLocal())
         World::Get().GetRunner().Trigger(MountEvent(apThis->formID, apMount->formID));
 
-    return TiltedPhoques::ThisCall(RealInitiateMountPackage, apThis, apMount);
+    return started;
 }
 
 TP_THIS_FUNCTION(TUnequipObject, void, Actor, void* apUnk1, TESBoundObject* apObject, int32_t aUnk2, void* apUnk3);
@@ -1195,18 +1321,64 @@ void TP_MAKE_THISCALL(HookUnequipObject, Actor, void* apUnk1, TESBoundObject* ap
 }
 
 TP_THIS_FUNCTION(TSpeakSoundFunction, bool, Actor, const char* apName, uint32_t* a3, uint32_t a4, uint32_t a5, uint32_t a6, uint64_t a7, uint64_t a8, uint64_t a9, bool a10, uint64_t a11, bool a12, bool a13, bool a14);
+TP_THIS_FUNCTION(TSetSoundVolume, bool, void, float);
 static TSpeakSoundFunction* RealSpeakSoundFunction = nullptr;
+static std::atomic<uint32_t> s_nativeVoiceProbeCount{0};
+static std::atomic<uint32_t> s_mutedRemoteVoiceProbeCount{0};
 
 bool TP_MAKE_THISCALL(HookSpeakSoundFunction, Actor, const char* apName, uint32_t* a3, uint32_t a4, uint32_t a5, uint32_t a6, uint64_t a7, uint64_t a8, uint64_t a9, bool a10, uint64_t a11, bool a12, bool a13, bool a14)
 {
     spdlog::debug("a3: {:X}, a4: {}, a5: {}, a6: {}, a7: {}, a8: {:X}, a9: {:X}, a10: {}, a11: {:X}, a12: {}, a13: {}, a14: {}", (uint64_t)a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
 
-    // The player having the conversation may not own this NPC. Ambient
-    // speech still comes only from the actor's simulation owner.
-    if (apThis->GetExtension()->IsLocal() || MenuTopicManager::IsPlayerDialogueSpeaker(apThis))
+    if (World::Get().GetTransport().IsConnected() && s_nativeVoiceProbeCount.fetch_add(1, std::memory_order_relaxed) < 96)
+        spdlog::info("Native voice start actor {:X} authority={} playerDialogue={} file={}",
+            apThis->formID, apThis->GetExtension()->IsLocal() ? "local" : "remote",
+            MenuTopicManager::IsPlayerDialogueSpeaker(apThis), apName ? apName : "");
+
+    const bool result = TiltedPhoques::ThisCall(RealSpeakSoundFunction, apThis, apName, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+
+    // Skyrim can invoke this function twice for one line: the first call
+    // reports success but leaves the handle invalid. Publish only the call
+    // that actually acquired a playable sound, or followers replay it twice.
+    const bool soundStarted = result && a3 && a3[0] != 0xFFFFFFFFu;
+    if (soundStarted && (apThis->GetExtension()->IsLocal() ||
+        MenuTopicManager::IsPlayerDialogueSpeaker(apThis)))
         World::Get().GetRunner().Trigger(DialogueEvent(apThis->formID, apName));
 
-    return TiltedPhoques::ThisCall(RealSpeakSoundFunction, apThis, apName, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+    // Preserve Skyrim's native voice handle and duration for scene waits, but
+    // never audibly present a remote NPC's independently timed local line.
+    // The owner-originated replay calls RealSpeakSoundFunction directly, so
+    // it is not muted by this hook.
+    auto& world = World::Get();
+    const bool remotePartyNpc = world.GetTransport().IsConnected() &&
+        world.GetPartyService().IsInParty() && apThis->GetExtension()->IsRemote() &&
+        !apThis->GetExtension()->IsPlayer() && !MenuTopicManager::IsPlayerDialogueSpeaker(apThis);
+    if (remotePartyNpc && s_mutedRemoteVoiceProbeCount.load(std::memory_order_relaxed) < 96)
+        spdlog::info("Native remote voice handle actor {:X} result={} soundId={} file={}",
+            apThis->formID, result, a3 ? a3[0] : 0xFFFFFFFFu, apName ? apName : "");
+    if (remotePartyNpc && soundStarted)
+    {
+        POINTER_SKYRIMSE(TSetSoundVolume, s_setSoundVolume, 67626);
+        const bool muted = TiltedPhoques::ThisCall(s_setSoundVolume, a3, 0.f);
+        if (s_mutedRemoteVoiceProbeCount.fetch_add(1, std::memory_order_relaxed) < 96)
+            spdlog::info("Native remote voice muted actor {:X} soundId={} success={} file={}",
+                apThis->formID, a3[0], muted, apName ? apName : "");
+    }
+    return result;
+}
+
+void TP_MAKE_THISCALL(HookKnockExplosion, AIProcess, Actor* apActor,
+    const NiPoint3& acLocation, float aMagnitude)
+{
+    // A queued explosion can outlive an actor's AI process during a scene or
+    // load transition. Native KnockExplosion unconditionally reads [this+8].
+    if (!apThis)
+    {
+        s_nullKnockExplosionSkips.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    TiltedPhoques::ThisCall(RealKnockExplosion, apThis, apActor,
+        acLocation, aMagnitude);
 }
 
 void Actor::SpeakSound(const char* pFile)
@@ -1218,12 +1390,102 @@ void Actor::SpeakSound(const char* pFile)
 
 char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
 {
-    // Don't process AI if we own the actor
-
+    // Remote AI cannot be allowed to execute independently of the owner.
+    // This opt-in two-actor trial tests whether continued native processing
+    // is required for a mount interaction to remain alive. It is not a
+    // production authority policy and never applies while disconnected.
     if (apThis->GetExtension()->IsRemote())
-        return 0;
+    {
+        const auto formId = apThis->formID;
+        if (!World::Get().GetTransport().IsConnected() ||
+            (formId != s_remoteProcessTrialRiderFormId.load(std::memory_order_acquire) &&
+             formId != s_remoteProcessTrialMountFormId.load(std::memory_order_acquire)))
+            return 0;
+        s_remoteProcessTrialTicks.fetch_add(1, std::memory_order_relaxed);
+    }
 
     return TiltedPhoques::ThisCall(RealActorProcess, apThis, a2);
+}
+
+BSExtraData* TP_MAKE_THISCALL(HookNativeExtraDataAdd, ExtraDataList,
+    BSExtraData* apNewData)
+{
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const bool connected = World::Get().GetTransport().IsConnected();
+    if (connected)
+        s_interactionTraceArmed.store(true, std::memory_order_relaxed);
+    const bool trace = apNewData && connected &&
+        apNewData->GetType() == ExtraDataType::Interaction &&
+        s_interactionAddTraceCount.fetch_add(1, std::memory_order_relaxed) < 96;
+    uint32_t actorHandle{};
+    uint32_t targetHandle{};
+    if (trace)
+    {
+        void* interaction{};
+        SIZE_T bytes{};
+        if (ReadProcessMemory(GetCurrentProcess(),
+                reinterpret_cast<const uint8_t*>(apNewData) + 0x10,
+                &interaction, sizeof(interaction), &bytes) &&
+            bytes == sizeof(interaction) && interaction)
+        {
+            ReadProcessMemory(GetCurrentProcess(),
+                reinterpret_cast<const uint8_t*>(interaction) + 0x10,
+                &actorHandle, sizeof(actorHandle), &bytes);
+            ReadProcessMemory(GetCurrentProcess(),
+                reinterpret_cast<const uint8_t*>(interaction) + 0x14,
+                &targetHandle, sizeof(targetHandle), &bytes);
+        }
+    }
+    auto* result = TiltedPhoques::ThisCall(RealNativeExtraDataAdd, apThis,
+        apNewData);
+    if (trace)
+    {
+        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        spdlog::info("Native interaction add list={} actorHandle={} targetHandle={} callerRva={:X} result={}",
+            fmt::ptr(apThis), actorHandle, targetHandle,
+            caller >= base ? caller - base : 0, fmt::ptr(result));
+    }
+    return result;
+}
+
+void TP_MAKE_THISCALL(HookNativeSetInteraction, ExtraDataList,
+    void* apInteractionPointer)
+{
+    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const bool connected = World::Get().GetTransport().IsConnected();
+    if (connected)
+        s_interactionTraceArmed.store(true, std::memory_order_relaxed);
+    const bool trace = (connected || s_interactionTraceArmed.load(std::memory_order_relaxed)) &&
+        s_interactionSetTraceCount.fetch_add(1, std::memory_order_relaxed) < 256;
+    const bool before = trace && apThis->Contains(ExtraDataType::Interaction);
+    void* interaction{};
+    uint32_t actorHandle{};
+    uint32_t targetHandle{};
+    if (trace && apInteractionPointer)
+    {
+        SIZE_T bytes{};
+        if (ReadProcessMemory(GetCurrentProcess(), apInteractionPointer,
+                &interaction, sizeof(interaction), &bytes) &&
+            bytes == sizeof(interaction) && interaction)
+        {
+            ReadProcessMemory(GetCurrentProcess(),
+                reinterpret_cast<const uint8_t*>(interaction) + 0x10,
+                &actorHandle, sizeof(actorHandle), &bytes);
+            ReadProcessMemory(GetCurrentProcess(),
+                reinterpret_cast<const uint8_t*>(interaction) + 0x14,
+                &targetHandle, sizeof(targetHandle), &bytes);
+        }
+    }
+    TiltedPhoques::ThisCall(RealNativeSetInteraction, apThis,
+        apInteractionPointer);
+    if (trace)
+    {
+        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        spdlog::info("Native interaction set list={} hasInput={} actorHandle={} targetHandle={} before={} after={} callerRva={:X}",
+            fmt::ptr(apThis), interaction != nullptr, actorHandle,
+            targetHandle, before, apThis->Contains(ExtraDataType::Interaction),
+            caller >= base ? caller - base : 0);
+    }
 }
 
 TP_THIS_FUNCTION(TAddDeathItems, void, Actor);
@@ -1255,6 +1517,7 @@ static TiltedPhoques::Initializer s_actorHooks(
     {
         POINTER_SKYRIMSE(TActorProcess, s_actorProcess, 37356);
         POINTER_SKYRIMSE(TSetPosition, s_setPosition, 19790);
+        POINTER_SKYRIMSE(TKnockExplosion, s_knockExplosion, 39895);
         POINTER_SKYRIMSE(TRemoveSpell, s_removeSpell, 38717);
         POINTER_SKYRIMSE(TCharacterConstructor, s_characterCtor, 40245);
         POINTER_SKYRIMSE(TCharacterConstructor2, s_characterCtor2, 40246);
@@ -1275,9 +1538,21 @@ static TiltedPhoques::Initializer s_actorHooks(
         POINTER_SKYRIMSE(TSpeakSoundFunction, s_speakSoundFunction, 37542);
         POINTER_SKYRIMSE(TAddDeathItems, addDeathItems, 37198);
         POINTER_SKYRIMSE(TIsFleeing, isFleeing, 37577);
+        POINTER_SKYRIMSE(TNativeExtraDataAdd, s_nativeExtraDataAdd, 12315);
 
         RealActorProcess = s_actorProcess.Get();
+        RealNativeExtraDataAdd = s_nativeExtraDataAdd.Get();
+        // The installed 1.7.104 executable's ExtraInteraction setter. Its
+        // prologue guard avoids hooking an unrelated address on another build.
+        const auto gameBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        constexpr uint8_t setInteractionPrologue[]{0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56};
+        const auto* candidate = reinterpret_cast<const uint8_t*>(gameBase + 0x1739A0);
+        if (memcmp(candidate, setInteractionPrologue,
+                sizeof(setInteractionPrologue)) == 0)
+            RealNativeSetInteraction = reinterpret_cast<TNativeSetInteraction*>(
+                const_cast<uint8_t*>(candidate));
         RealSetPosition = s_setPosition.Get();
+        RealKnockExplosion = s_knockExplosion.Get();
         RealRemoveSpell = s_removeSpell.Get();
         FUNC_GetActorLocation = s_GetActorLocation.Get();
         RealCharacterConstructor = s_characterCtor.Get();
@@ -1299,7 +1574,11 @@ static TiltedPhoques::Initializer s_actorHooks(
         RealIsFleeing = isFleeing.Get();
 
         TP_HOOK(&RealActorProcess, HookActorProcess);
+        TP_HOOK(&RealNativeExtraDataAdd, HookNativeExtraDataAdd);
+        if (RealNativeSetInteraction)
+            TP_HOOK(&RealNativeSetInteraction, HookNativeSetInteraction);
         TP_HOOK(&RealSetPosition, HookSetPosition);
+        TP_HOOK(&RealKnockExplosion, HookKnockExplosion);
         TP_HOOK(&RealRemoveSpell, HookRemoveSpell);
         TP_HOOK(&RealCharacterConstructor, HookCharacterConstructor);
         TP_HOOK(&RealCharacterConstructor2, HookCharacterConstructor2);

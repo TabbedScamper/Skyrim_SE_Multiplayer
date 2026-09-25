@@ -5,19 +5,25 @@
 
 enum class FormType : uint8_t
 {
+    Activator = 24,
     Armor = 26,
     Book = 27,
     Container = 28,
     Door = 29,
     Ingredient = 30,
+    Light = 31,
+    Misc = 32,
     Weapon = 41,
     Ammo = 42,
     Npc = 43,
     LeveledCharacter = 44,
+    KeyMaster = 45,
     Alchemy = 46,
+    SoulGem = 52,
     LeveledItem = 53,
     Character = 62,
     QuestItem = 77,
+    AnimatedObject = 83,
     Count = 0x87
 };
 

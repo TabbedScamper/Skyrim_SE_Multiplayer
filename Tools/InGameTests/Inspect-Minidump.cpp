@@ -72,9 +72,9 @@ void PrintSymbol(const HANDLE process, const uint64_t address)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc != 4)
+    if (argc != 4 && argc != 6)
     {
-        std::wcerr << L"Usage: Inspect-Minidump.exe <dump> <matching-image> <symbol-directory>\n";
+        std::wcerr << L"Usage: Inspect-Minidump.exe <dump> <matching-image> <symbol-directory> [address length<=256]\n";
         return 2;
     }
 
@@ -116,11 +116,74 @@ int wmain(int argc, wchar_t** argv)
     if (faultModule)
         std::wcout << L"Fault module: " << faultModuleName << L" + 0x" << std::hex
                    << (exception->ExceptionRecord.ExceptionAddress - faultModule->BaseOfImage) << L'\n';
+    if (exception->ExceptionRecord.NumberParameters >= 2)
+        std::wcout << L"Access: " << (exception->ExceptionRecord.ExceptionInformation[0] ? L"write/execute" : L"read")
+                   << L" at 0x" << std::hex << exception->ExceptionRecord.ExceptionInformation[1] << L'\n';
 
     CONTEXT context{};
     if (exception->ThreadContext.DataSize >= sizeof(context))
         std::memcpy(&context, base + exception->ThreadContext.Rva, sizeof(context));
     std::wcout << L"RIP=0x" << std::hex << context.Rip << L" RSP=0x" << context.Rsp << L" RBP=0x" << context.Rbp << L'\n';
+    std::wcout << L"RAX=0x" << context.Rax << L" RBX=0x" << context.Rbx
+               << L" RCX=0x" << context.Rcx << L" RDX=0x" << context.Rdx
+               << L" RSI=0x" << context.Rsi << L" RDI=0x" << context.Rdi
+               << L" R8=0x" << context.R8 << L" R9=0x" << context.R9
+               << L" R10=0x" << context.R10 << L" R11=0x" << context.R11
+               << L" R12=0x" << context.R12 << L" R13=0x" << context.R13
+               << L" R14=0x" << context.R14 << L" R15=0x" << context.R15 << L'\n';
+
+    const std::byte* instructions = nullptr;
+    size_t instructionBytes = 0;
+    if (MiniDumpReadDumpStream(const_cast<std::byte*>(base), Memory64ListStream, &directory, &stream, &streamSize))
+    {
+        instructions = FindMemory(base, static_cast<const MINIDUMP_MEMORY64_LIST*>(stream),
+            context.Rip, instructionBytes);
+    }
+    if (!instructions && MiniDumpReadDumpStream(const_cast<std::byte*>(base), MemoryListStream,
+            &directory, &stream, &streamSize))
+        instructions = FindMemory(base, static_cast<const MINIDUMP_MEMORY_LIST*>(stream),
+            context.Rip, instructionBytes);
+    if (instructions)
+    {
+        std::cout << "Instruction bytes:";
+        for (size_t i = 0; i < (std::min)(instructionBytes, size_t{24}); ++i)
+            std::cout << ' ' << std::hex << static_cast<unsigned>(instructions[i]);
+        std::cout << '\n';
+    }
+
+    if (argc == 6)
+    {
+        wchar_t* addressEnd = nullptr;
+        wchar_t* lengthEnd = nullptr;
+        const auto address = std::wcstoull(argv[4], &addressEnd, 0);
+        const auto length = std::wcstoull(argv[5], &lengthEnd, 0);
+        if (*addressEnd || *lengthEnd || !address || !length || length > 256)
+            return 8;
+        const std::byte* memory = nullptr;
+        size_t available = 0;
+        if (MiniDumpReadDumpStream(const_cast<std::byte*>(base), Memory64ListStream,
+                &directory, &stream, &streamSize))
+            memory = FindMemory(base, static_cast<const MINIDUMP_MEMORY64_LIST*>(stream),
+                address, available);
+        if (!memory && MiniDumpReadDumpStream(const_cast<std::byte*>(base), MemoryListStream,
+                &directory, &stream, &streamSize))
+            memory = FindMemory(base, static_cast<const MINIDUMP_MEMORY_LIST*>(stream),
+                address, available);
+        std::cout << "Memory at 0x" << std::hex << address << ':';
+        if (!memory)
+            std::cout << " unavailable in dump\n";
+        else
+        {
+            const auto count = (std::min)(static_cast<size_t>(length), available);
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (i % 16 == 0)
+                    std::cout << "\n  +0x" << std::hex << i << ':';
+                std::cout << ' ' << std::hex << static_cast<unsigned>(memory[i]);
+            }
+            std::cout << '\n';
+        }
+    }
 
     const HANDLE process = GetCurrentProcess();
     SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
@@ -162,8 +225,22 @@ int wmain(int argc, wchar_t** argv)
         std::cout << "Candidate frames from stack memory:\n";
         const auto* words = reinterpret_cast<const uint64_t*>(stack);
         const auto stackWords = (std::min)(maximumStackWords, available / sizeof(uint64_t));
-        for (size_t i = 0; i < stackWords; ++i)
-            PrintSymbol(process, words[i]);
+        size_t candidates = 0;
+        for (size_t i = 0; i < stackWords && candidates < 80; ++i)
+        {
+            for (ULONG32 j = 0; j < modules->NumberOfModules; ++j)
+            {
+                const auto& module = modules->Modules[j];
+                if (words[i] < module.BaseOfImage || words[i] >= module.BaseOfImage + module.SizeOfImage)
+                    continue;
+                const auto name = std::filesystem::path(ReadDumpString(base, module.ModuleNameRva)).filename().wstring();
+                std::wcout << L"  stack+0x" << std::hex << i * sizeof(uint64_t) << L"  " << name
+                           << L"+0x" << words[i] - module.BaseOfImage << L'\n';
+                PrintSymbol(process, words[i]);
+                ++candidates;
+                break;
+            }
+        }
     }
 
     SymCleanup(process);

@@ -31,7 +31,9 @@
     <section class="roster">
       <div *ngFor="let name of steam.memberNames; let i = index" class="member">
         <span>{{ name }}</span>
-        <small *ngIf="steam.memberIds[i] === steam.ownerId">HOST</small>
+        <small *ngIf="memberPlayerId(i) === lobby.leaderId">HOST</small>
+        <button *ngIf="isLeader() && memberPlayerId(i) && memberPlayerId(i) !== lobby.leaderId"
+          class="promote" (click)="promote(memberPlayerId(i))">Promote to Host</button>
       </div>
       <div *ngIf="steam.memberNames.length < 2" class="member empty">Waiting for a companion...</div>
       <div class="member"><span>Party readiness</span><strong>{{ lobby.readyPlayerIds.length }} / {{ lobby.playerIds.length }}</strong></div>
@@ -50,14 +52,37 @@
       <input *ngIf="sessionOpen" type="password" [(ngModel)]="sessionPassword" (ngModelChange)="queuePartyOptionsSave()" maxlength="64" placeholder="Optional session password" />
     </section>
 
-    <section class="campaign">
+    <section class="party-options">
+      <h2>Co-op Gameplay</h2>
+      <div class="setting-row">
+        <label for="coopDifficulty">Difficulty</label>
+        <select id="coopDifficulty" [(ngModel)]="gameplay.difficulty" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="!isLeader() || lobby.sessionState === 1 || lobby.sessionState === 2">
+          <option [ngValue]="0">Novice</option><option [ngValue]="1">Apprentice</option>
+          <option [ngValue]="2">Adept</option><option [ngValue]="3">Expert</option>
+          <option [ngValue]="4">Master</option><option [ngValue]="5">Legendary</option>
+        </select>
+      </div>
+      <label class="checkbox-row"><input type="checkbox" [(ngModel)]="gameplay.pvpEnabled" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="!isLeader() || lobby.sessionState === 1 || lobby.sessionState === 2" /> <span>Friendly fire between players</span></label>
+      <label class="checkbox-row"><input type="checkbox" [ngModel]="settingService.settings.isPartyShown | async" (ngModelChange)="settingService.settings.isPartyShown.next($event)" /> <span>Show party HUD on this PC</span></label>
+      <p class="muted">{{ isLeader() ? 'Difficulty and friendly fire apply to everyone.' : 'The host controls shared gameplay settings.' }}</p>
+      <p class="muted">Death: {{ gameplay.deathSystemEnabled ? 'current multiplayer respawn' : 'vanilla' }}. Downed/revive and spectate policies are not enabled yet.</p>
+    </section>
+
+    <section *ngIf="isLeader() && lobby.sessionState === 0" class="campaign">
       <h2>Campaign</h2>
       <button [class.selected]="campaignMode === 1" [disabled]="!isLeader()" (click)="chooseCampaign(1)">New Shared Campaign</button>
       <button [class.selected]="campaignMode === 2" [disabled]="!isLeader()" (click)="chooseCampaign(2)">Continue Shared Campaign</button>
       <input *ngIf="campaignMode === 2" [(ngModel)]="checkpointId" [disabled]="!isLeader()" placeholder="Latest shared checkpoint" />
+      <p class="muted">Selected: {{ campaignLabel() }}. Everyone must be ready before you can start.</p>
     </section>
 
-    <section class="actions">
+    <section *ngIf="!isLeader() && lobby.sessionState === 0" class="campaign campaign-status">
+      <h2>Campaign</h2>
+      <strong>{{ campaignLabel() }}</strong>
+      <p class="muted">{{ leaderName() }} controls the shared campaign. Ready up when you are prepared to begin.</p>
+    </section>
+
+    <section *ngIf="lobby.sessionState === 0" class="actions">
       <button (click)="invite()">Invite Friend</button>
       <button [class.selected]="ready" [disabled]="!connected" (click)="toggleReady()">{{ ready ? 'Ready' : 'Ready Up' }}</button>
       <button *ngIf="isLeader()" data-style-ornament="inverted" [disabled]="!canStart()" (click)="start()">Start Together</button>

@@ -43,6 +43,7 @@ protected:
     {
         LeaderAssignment,
         LeaderClaim,
+        CellLease,
         Mount,
         Relinquish,
         OwnerUnavailable

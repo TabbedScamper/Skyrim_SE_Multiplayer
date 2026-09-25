@@ -4,6 +4,12 @@
 
 #include <Games/Animation/TESActionData.h>
 #include <Games/Animation/ActorMediator.h>
+#include <Games/ActorExtension.h>
+#include <Games/Skyrim/BSAnimationGraphManager.h>
+#include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
+#include <Games/Skyrim/NetImmerse/NiAVObject.h>
+#include <Combat/CombatController.h>
+#include <Utils.h>
 
 #include <Games/References.h>
 
@@ -20,6 +26,120 @@
 #include <Forms/TESWorldSpace.h>
 
 extern thread_local const char* g_animErrorCode;
+
+namespace
+{
+bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
+    VisualBoneSnapshot& arVisualBones) noexcept
+{
+    using namespace ActorPoseDiagnosticViews;
+    BSAnimationGraphManager* pManager{};
+    if (!apActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return false;
+
+    bool captured = false;
+    bool visualCaptured = false;
+    {
+        BSScopedLock<BSRecursiveLock> graphLock(pManager->lock);
+        const auto count = pManager->animationGraphs.size;
+        const auto index = pManager->animationGraphIndex;
+        if (count > 0 && count <= 32 && index < count)
+        {
+            const auto* pGraph = pManager->animationGraphs.Get(index);
+            AnimationGraph graph{};
+            SIZE_T bytesRead{};
+            if (pGraph && ReadProcessMemory(GetCurrentProcess(), pGraph, &graph,
+                    sizeof(graph), &bytesRead) && bytesRead == sizeof(graph))
+            {
+                const auto poseCount = graph.characterInstance.numPoseLocal;
+                if (poseCount > 0 && poseCount <= EvaluatedPoseSnapshot::MaxBones &&
+                    graph.characterInstance.poseLocal)
+                {
+                    std::array<QsTransform, EvaluatedPoseSnapshot::MaxBones> nativePose{};
+                    const auto byteCount = static_cast<size_t>(poseCount) * sizeof(QsTransform);
+                    bytesRead = 0;
+                    if (ReadProcessMemory(GetCurrentProcess(), graph.characterInstance.poseLocal,
+                            nativePose.data(), byteCount, &bytesRead) && bytesRead == byteCount)
+                    {
+                        arSnapshot.GraphDescriptor = apActor->GetExtension() ?
+                            apActor->GetExtension()->GraphDescriptorHash : 0;
+                        arSnapshot.Bones.resize(poseCount);
+                        for (int32_t i = 0; i < poseCount; ++i)
+                        {
+                            const auto& source = nativePose[i];
+                            auto& target = arSnapshot.Bones[i];
+                            std::copy_n(source.translation, 3, target.Translation.begin());
+                            std::copy_n(source.rotation, 4, target.Rotation.begin());
+                            std::copy_n(source.scale, 3, target.Scale.begin());
+                        }
+                        captured = arSnapshot.IsValid();
+                    }
+                }
+
+                const auto renderCount = graph.boneNodes.length;
+                if (renderCount > 0 && renderCount <= VisualBoneSnapshot::MaxBones &&
+                    graph.boneNodes.capacity >= renderCount && graph.boneNodes.data &&
+                    graph.rootNode)
+                {
+                    std::array<BoneNodeEntry, VisualBoneSnapshot::MaxBones> nodes{};
+                    const auto byteCount = static_cast<size_t>(renderCount) * sizeof(BoneNodeEntry);
+                    bytesRead = 0;
+                    if (ReadProcessMemory(GetCurrentProcess(), graph.boneNodes.data,
+                            nodes.data(), byteCount, &bytesRead) && bytesRead == byteCount)
+                    {
+                        NiTransform rootWorld{};
+                        bytesRead = 0;
+                        if (ReadProcessMemory(GetCurrentProcess(),
+                                reinterpret_cast<const uint8_t*>(graph.rootNode) +
+                                    offsetof(NiAVObject, world), &rootWorld,
+                                sizeof(rootWorld), &bytesRead) && bytesRead == sizeof(rootWorld))
+                        {
+                            auto& root = arVisualBones.RootWorld;
+                            root.Present = true;
+                            std::copy_n(&rootWorld.rotate.entry[0][0], 9,
+                                root.Rotation.begin());
+                            root.Translation = {rootWorld.translate.x,
+                                rootWorld.translate.y, rootWorld.translate.z};
+                            root.Scale = rootWorld.scale;
+                        }
+                        arVisualBones.GraphDescriptor = apActor->GetExtension() ?
+                            apActor->GetExtension()->GraphDescriptorHash : 0;
+                        arVisualBones.Bones.resize(renderCount);
+                        uint32_t presentCount = 0;
+                        for (uint32_t i = 0; i < renderCount; ++i)
+                        {
+                            const auto* pNode = nodes[i].node;
+                            NiTransform local{};
+                            bytesRead = 0;
+                            if (!pNode || !ReadProcessMemory(GetCurrentProcess(),
+                                    reinterpret_cast<const uint8_t*>(pNode) +
+                                        offsetof(NiAVObject, local), &local,
+                                    sizeof(local), &bytesRead) || bytesRead != sizeof(local))
+                                continue;
+                            auto& bone = arVisualBones.Bones[i];
+                            bone.Present = true;
+                            std::copy_n(&local.rotate.entry[0][0], 9, bone.Rotation.begin());
+                            bone.Translation = {local.translate.x, local.translate.y,
+                                local.translate.z};
+                            bone.Scale = local.scale;
+                            ++presentCount;
+                        }
+                        visualCaptured = arVisualBones.RootWorld.Present &&
+                            presentCount >= renderCount / 2 &&
+                            arVisualBones.IsValid();
+                    }
+                }
+            }
+        }
+    }
+    pManager->Release();
+    if (!captured)
+        arSnapshot = {};
+    if (!visualCaptured)
+        arVisualBones = {};
+    return captured || visualCaptured;
+}
+}
 
 void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationComponent& aAnimationComponent, const uint64_t aTick) noexcept
 {
@@ -62,6 +182,7 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         actionData.someFlag = ((first.Type & 0x4) != 0) ? 1 : 0;
 
         const auto result = ActorMediator::Get()->ForceAction(&actionData);
+        aAnimationComponent.LastRanActionResult = result != 0;
 
         if (aAnimationComponent.ReplayCount > 0)
             aAnimationComponent.ReplayCount--;
@@ -105,7 +226,7 @@ void AnimationSystem::AddAction(RemoteAnimationComponent& aAnimationComponent, c
     aAnimationComponent.TimePoints.push_back(lastProcessedAction);
 }
 
-void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMovementSnapshot, LocalComponent& localComponent, LocalAnimationComponent& animationComponent, FormIdComponent& formIdComponent)
+void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMovementSnapshot, LocalComponent& localComponent, LocalAnimationComponent& animationComponent, FormIdComponent& formIdComponent, bool aCapturePose)
 {
     const auto pForm = TESForm::GetById(formIdComponent.Id);
     const auto pActor = Cast<Actor>(pForm);
@@ -114,6 +235,36 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
 
     auto& update = aMovementSnapshot.Updates[localComponent.Id];
     auto& movement = update.UpdatedMovement;
+    update.CombatTargetServerId = 0;
+    if (pActor->pCombatController && pActor->pCombatController->targetHandle)
+    {
+        update.CombatTargetServerId = 0xFFFFFFFFu;
+        auto* pTarget = Cast<Actor>(TESObjectREFR::GetByHandle(
+            pActor->pCombatController->targetHandle));
+        if (pTarget)
+        {
+            auto token = Utils::GetLocalOwnershipToken(pTarget->formID);
+            if (!token)
+                token = Utils::GetRemoteOwnershipToken(pTarget->formID);
+            if (token)
+                update.CombatTargetServerId = token->ServerId;
+        }
+    }
+
+    if (aCapturePose)
+    {
+        CaptureEvaluatedPose(pActor, update.EvaluatedPose, update.VisualBones);
+        if (!update.EvaluatedPose.Bones.empty())
+        {
+            update.EvaluatedPose.SourceTick = aMovementSnapshot.Tick;
+            animationComponent.LastSentPose = update.EvaluatedPose;
+        }
+        if (!update.VisualBones.Bones.empty())
+        {
+            update.VisualBones.SourceTick = aMovementSnapshot.Tick;
+            animationComponent.LastSentVisualBones = update.VisualBones;
+        }
+    }
 
     if (const auto pCell = pActor->parentCell)
         World::Get().GetModSystem().GetServerModId(pCell->formID, movement.CellId.ModId, movement.CellId.BaseId);
@@ -136,6 +287,7 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
     for (auto& entry : animationComponent.Actions)
     {
         update.ActionEvents.push_back(entry);
+        animationComponent.LastSentAction = entry;
     }
 
     auto latestAction = animationComponent.GetLatestAction();

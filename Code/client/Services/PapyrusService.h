@@ -35,6 +35,8 @@ template <class Return, class Type, class... Args> struct PapyrusFunction
     {
     }
 
+    explicit operator bool() const noexcept { return m_pFunction != nullptr; }
+
     Return operator()(const Type* apThis, Args... args) const noexcept { return m_pFunction(GameVM::Get()->virtualMachine, 0, apThis, std::forward<Args>(args)...); }
 
 private:

@@ -43,7 +43,7 @@ struct TransportService : Client
     const uint32_t& GetLocalPlayerId() const noexcept { return m_localPlayerId; }
     const String& GetCampaignId() const noexcept { return m_campaignId; }
     uint64_t GetCampaignRevision() const noexcept { return m_campaignRevision; }
-    uint64_t GetAuthorityEpoch() const noexcept { return m_authorityEpoch; }
+    uint64_t GetAuthorityEpoch() const noexcept { return m_authorityEpoch.load(std::memory_order_acquire); }
 
 protected:
     // Event handlers
@@ -65,7 +65,7 @@ private:
     uint32_t m_localPlayerId{};
     String m_campaignId{};
     uint64_t m_campaignRevision{};
-    uint64_t m_authorityEpoch{};
+    std::atomic<uint64_t> m_authorityEpoch{0};
     std::future<DeploymentScanResult> m_deploymentScan;
     std::optional<DeploymentManifest> m_deploymentManifest;
     bool m_authenticationPending{};

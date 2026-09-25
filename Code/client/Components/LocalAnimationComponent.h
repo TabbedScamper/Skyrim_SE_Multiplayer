@@ -5,11 +5,16 @@
 #endif
 
 #include <Structs/ActionEvent.h>
+#include <Structs/EvaluatedPoseSnapshot.h>
+#include <Structs/VisualBoneSnapshot.h>
 
 struct LocalAnimationComponent
 {
     Vector<ActionEvent> Actions;
     ActionEvent LastProcessedAction;
+    ActionEvent LastSentAction;
+    EvaluatedPoseSnapshot LastSentPose;
+    VisualBoneSnapshot LastSentVisualBones;
 
     [[nodiscard]] Outcome<ActionEvent, bool> GetLatestAction() const noexcept
     {

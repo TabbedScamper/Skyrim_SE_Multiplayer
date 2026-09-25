@@ -56,4 +56,6 @@ private:
     mutable std::mutex m_debugEventMutex;
     std::deque<DebugEvent> m_debugEvents;
     uint64_t m_debugEventSequence{};
+    uint64_t m_appliedQuestEpoch{};
+    Map<uint32_t, uint64_t> m_appliedQuestRevisions;
 };

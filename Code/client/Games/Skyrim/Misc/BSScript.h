@@ -129,6 +129,9 @@ struct BSScript
             POINTER_SKYRIMSE(TGetStackFrameVariable, getStackFrameVariable, 104484);
             return TiltedPhoques::ThisCall(getStackFrameVariable, this, apFrame, aIndex, aPageHint);
         }
+
+        std::uint8_t pad00[0x60];
+        StackFrame* top; // 0x60, CommonLibSSE-NG Stack.h
     };
 
     struct StackFrame
@@ -138,7 +141,18 @@ struct BSScript
         Variable* GetStackFrameVariable(uint32_t aIndex, uint32_t aPageHint) { return pParent->GetStackFrameVariable(this, aIndex, aPageHint); }
 
         Stack* pParent;
+        StackFrame* previousFrame; // 0x08
+        IFunction* owningFunction; // 0x10, BSTSmartPointer<IFunction>
+        void* owningObjectType; // 0x18, BSTSmartPointer<ObjectTypeInfo>
+        uint32_t instructionPointer; // 0x20
+        uint32_t pad24; // 0x24
+        uint64_t selfType; // 0x28, Variable::type
+        uint64_t selfData; // 0x30, Variable::data
     };
+
+    static_assert(offsetof(Stack, top) == 0x60);
+    static_assert(offsetof(StackFrame, owningFunction) == 0x10);
+    static_assert(offsetof(StackFrame, selfData) == 0x30);
 
     struct IObjectHandlePolicy
     {

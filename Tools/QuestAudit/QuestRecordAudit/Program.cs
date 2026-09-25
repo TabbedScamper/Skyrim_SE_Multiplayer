@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Reflection;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 
@@ -21,6 +22,35 @@ if (!File.Exists(pluginPath))
 var modKey = ModKey.FromFileName(Path.GetFileName(pluginPath));
 var modPath = new ModPath(modKey, pluginPath);
 using var mod = SkyrimMod.CreateFromBinaryOverlay(modPath, SkyrimRelease.SkyrimSE);
+
+static object DescribeSceneMember(object value)
+{
+    var type = value.GetType();
+    var fields = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => p.GetIndexParameters().Length == 0 &&
+            (p.Name.Contains("Actor", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Alias", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Phase", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Index", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Flag", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Type", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Package", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Topic", StringComparison.OrdinalIgnoreCase) ||
+             p.Name.Contains("Timer", StringComparison.OrdinalIgnoreCase) ||
+             p.Name == "ID"))
+        .ToDictionary(p => p.Name, p =>
+        {
+            try
+            {
+                var member = p.GetValue(value);
+                if (p.Name == "Packages" && member is System.Collections.IEnumerable items)
+                    return string.Join(",", items.Cast<object>().Select(x => x.ToString()));
+                return member?.ToString();
+            }
+            catch { return "<unavailable>"; }
+        });
+    return new { type = type.Name, fields };
+}
 
 var quests = mod.Quests
     .Where(q => editorIdFilter is null ||
@@ -51,6 +81,10 @@ var quests = mod.Quests
                 phase_count = s.Phases.Count,
                 actor_count = s.Actors.Count,
                 action_count = s.Actions.Count,
+                actor_bindings = editorIdFilter is null ? null :
+                    s.Actors.Select(a => DescribeSceneMember(a)).ToArray(),
+                action_bindings = editorIdFilter is null ? null :
+                    s.Actions.Select(a => DescribeSceneMember(a)).ToArray(),
                 condition_count = s.Conditions.Count,
                 attached_scripts = s.VirtualMachineAdapter?.Scripts.Select(x => x.Name).ToArray() ?? []
             })

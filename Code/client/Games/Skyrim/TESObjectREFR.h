@@ -31,6 +31,16 @@ enum class ITEM_REMOVE_REASON
 
 struct TESObjectREFR : TESForm
 {
+    enum class MotionType : uint32_t
+    {
+        Dynamic = 1,
+        SphereInertia = 2,
+        BoxInertia = 3,
+        Keyframed = 4,
+        Fixed = 5,
+        ThinBoxInertia = 6,
+        Character = 7
+    };
     enum ChangeFlags : uint32_t
     {
         CHANGE_REFR_MOVE = 1 << 1,
@@ -165,6 +175,7 @@ struct TESObjectREFR : TESForm
     virtual void sub_9B();
 
     void SetRotation(float aX, float aY, float aZ) noexcept;
+    bool SetMotionType(MotionType aMotionType, bool aAllowActivate = true) noexcept;
     void SetLeveledCreature(TESActorBase* apOriginalBase, TESActorBase* apTemplateA) noexcept;
 
     BSPointerHandle<TESObjectREFR> GetHandle() const noexcept;

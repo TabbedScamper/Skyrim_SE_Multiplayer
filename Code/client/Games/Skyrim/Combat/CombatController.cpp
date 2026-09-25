@@ -1,5 +1,34 @@
 #include "CombatController.h"
 #include "CombatTargetSelector.h"
+#include <Games/ActorExtension.h>
+
+namespace
+{
+std::atomic<uint32_t> s_targetTrialActorFormId{0};
+std::atomic<uint64_t> s_targetTrialCalls{0};
+std::atomic<uint64_t> s_targetTrialOverrides{0};
+std::atomic<uint32_t> s_targetTrialLastRequested{0};
+std::atomic<uint32_t> s_targetTrialLastPresented{0xFFFFFFFFu};
+std::atomic<uint32_t> s_targetTrialLastNative{0};
+std::atomic<uintptr_t> s_targetTrialLastCallerRva{0};
+}
+
+void CombatController::SetTargetAuthorityTrialActor(uint32_t aActorFormId) noexcept
+{
+    s_targetTrialActorFormId.store(aActorFormId, std::memory_order_release);
+}
+
+CombatController::TargetAuthorityTrialDiagnostics
+CombatController::GetTargetAuthorityTrialDiagnostics() noexcept
+{
+    return {s_targetTrialActorFormId.load(std::memory_order_acquire),
+        s_targetTrialCalls.load(std::memory_order_relaxed),
+        s_targetTrialOverrides.load(std::memory_order_relaxed),
+        s_targetTrialLastRequested.load(std::memory_order_relaxed),
+        s_targetTrialLastPresented.load(std::memory_order_relaxed),
+        s_targetTrialLastNative.load(std::memory_order_relaxed),
+        s_targetTrialLastCallerRva.load(std::memory_order_relaxed)};
+}
 
 void ArrayQuickSortRecursiveCombatTargets(GameArray<CombatTargetSelector*>* apArray, uint32_t aiLowIndex,
                                           uint32_t aiHighIndex)
@@ -74,6 +103,61 @@ void CombatController::SetTarget(Actor* apTarget)
     TiltedPhoques::ThisCall(setTarget, this, apTarget);
 }
 
+TP_THIS_FUNCTION(TNativeSetTarget, void, CombatController, Actor* apTarget);
+static TNativeSetTarget* RealNativeSetTarget = nullptr;
+
+void TP_MAKE_THISCALL(HookNativeSetTarget, CombatController, Actor* apTarget)
+{
+    const uint32_t selected = s_targetTrialActorFormId.load(
+        std::memory_order_acquire);
+    if (selected && apThis)
+    {
+        auto* pAttacker = Cast<Actor>(TESObjectREFR::GetByHandle(
+            apThis->attackerHandle));
+        if (pAttacker && pAttacker->formID == selected &&
+            pAttacker->GetExtension()->IsRemote())
+        {
+            s_targetTrialCalls.fetch_add(1, std::memory_order_relaxed);
+            s_targetTrialLastRequested.store(apTarget ? apTarget->formID : 0,
+                std::memory_order_relaxed);
+            const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+            const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+            s_targetTrialLastCallerRva.store(caller >= base ? caller - base : 0,
+                std::memory_order_relaxed);
+            const uint32_t presented = pAttacker->GetExtension()->
+                PresentedCombatTargetFormId.load(std::memory_order_acquire);
+            s_targetTrialLastPresented.store(presented,
+                std::memory_order_relaxed);
+            if (presented != 0xFFFFFFFFu)
+            {
+                auto* pPresented = presented ? Cast<Actor>(TESForm::GetById(
+                    presented)) : nullptr;
+                if (!presented || pPresented)
+                {
+                    if (apTarget != pPresented)
+                        s_targetTrialOverrides.fetch_add(1,
+                            std::memory_order_relaxed);
+                    apTarget = pPresented;
+                }
+            }
+        }
+    }
+    TiltedPhoques::ThisCall(RealNativeSetTarget, apThis, apTarget);
+    if (selected && apThis)
+    {
+        auto* pAttacker = Cast<Actor>(TESObjectREFR::GetByHandle(
+            apThis->attackerHandle));
+        if (pAttacker && pAttacker->formID == selected &&
+            pAttacker->GetExtension()->IsRemote())
+        {
+            auto* pNative = Cast<Actor>(TESObjectREFR::GetByHandle(
+                apThis->targetHandle));
+            s_targetTrialLastNative.store(pNative ? pNative->formID : 0,
+                std::memory_order_relaxed);
+        }
+    }
+}
+
 static TiltedPhoques::Initializer s_combatControllerHooks(
     []()
     {
@@ -84,5 +168,8 @@ static TiltedPhoques::Initializer s_combatControllerHooks(
 
         TP_HOOK(&RealUpdateTarget, HookUpdateTarget);
 #endif
+        POINTER_SKYRIMSE(TNativeSetTarget, s_setTarget, 33235);
+        RealNativeSetTarget = s_setTarget.Get();
+        TP_HOOK(&RealNativeSetTarget, HookNativeSetTarget);
     });
 

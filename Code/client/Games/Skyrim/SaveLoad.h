@@ -6,6 +6,7 @@ struct BGSSaveLoadManager
 {
     virtual ~BGSSaveLoadManager();
 
+
     struct SaveData
     {
         void* unk0;           // maybe vtable

@@ -1078,9 +1078,11 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
 void GameServer::UpdateSettings()
 {
     NotifySettingsChange notify{};
-    notify.Settings = GetSettings();
-
-    SendToPlayers(notify);
+    for (auto* pPlayer : m_pWorld->GetPlayerManager())
+    {
+        notify.Settings = m_pWorld->GetPartyService().GetSettingsForPlayer(pPlayer);
+        pPlayer->Send(notify);
+    }
 }
 
 GameServer::Uptime GameServer::GetUptime() const noexcept

@@ -22,6 +22,7 @@ void CharacterSpawnRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter)
     Serialization::WriteBool(aWriter, IsWeaponDrawn);
     Serialization::WriteBool(aWriter, IsPlayerSummon);
     LeveledNpcPickId.Serialize(aWriter);
+    Serialization::WriteVarInt(aWriter, MountedOnServerId);
 }
 
 void CharacterSpawnRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -59,4 +60,5 @@ void CharacterSpawnRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
     IsWeaponDrawn = Serialization::ReadBool(aReader);
     IsPlayerSummon = Serialization::ReadBool(aReader);
     LeveledNpcPickId.Deserialize(aReader);
+    MountedOnServerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
 }

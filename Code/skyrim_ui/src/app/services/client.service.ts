@@ -29,6 +29,7 @@ export class ClientService implements OnDestroy {
   public titleOptionsRequested = new Subject<void>();
   public titleLobbyRequested = new Subject<void>();
   public coopLobbyStateChange = new ReplaySubject<CoopLobbyState>(1);
+  public coopGameplaySettingsChange = new ReplaySubject<{ difficulty: number; pvpEnabled: boolean; deathSystemEnabled: boolean; greetingsEnabled: boolean }>(1);
   public steamLobbyStateChange = new ReplaySubject<SteamLobbyState>(1);
   public deploymentScanStateChange = new ReplaySubject<{ complete: boolean; fileCount: number; hashed: number; cached: number; errors: number }>(1);
 
@@ -143,6 +144,8 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('showTitleLobby', () => this.zone.run(() => this.titleLobbyRequested.next()));
     skyrimtogether.on('coopLobbyState', (playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected) =>
       this.zone.run(() => this.coopLobbyStateChange.next({ playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected })));
+    skyrimtogether.on('coopGameplaySettings', (difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled) =>
+      this.zone.run(() => this.coopGameplaySettingsChange.next({ difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled })));
     skyrimtogether.on('steamLobbyState', (lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost) =>
       this.zone.run(() => this.steamLobbyStateChange.next({ lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost })));
     skyrimtogether.on('deploymentScanState', (complete, fileCount, hashed, cached, errors) =>
@@ -204,6 +207,7 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('showTitleOptions');
     skyrimtogether.off('showTitleLobby');
     skyrimtogether.off('coopLobbyState');
+    skyrimtogether.off('coopGameplaySettings');
     skyrimtogether.off('steamLobbyState');
     skyrimtogether.off('deploymentScanState');
     skyrimtogether.off('openingMenu');
@@ -275,6 +279,10 @@ export class ClientService implements OnDestroy {
 
   public setSteamSessionAccess(open: boolean, password = ''): void {
     skyrimtogether.setSteamSessionAccess(open, password);
+  }
+
+  public setCoopGameplaySettings(difficulty: number, pvpEnabled: boolean): void {
+    skyrimtogether.setCoopGameplaySettings(difficulty, pvpEnabled);
   }
 
   public connectJoinedSteamSession(password = ''): void {

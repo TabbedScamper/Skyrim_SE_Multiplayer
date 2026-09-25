@@ -5,7 +5,7 @@ using TiltedPhoques::Serialization;
 
 bool ServerSettings::operator==(const ServerSettings& acRhs) const noexcept
 {
-    return Difficulty == acRhs.Difficulty && GreetingsEnabled == acRhs.GreetingsEnabled && PvpEnabled == acRhs.PvpEnabled && SyncPlayerHomes == acRhs.SyncPlayerHomes && DeathSystemEnabled == acRhs.DeathSystemEnabled && AutoPartyJoin == acRhs.AutoPartyJoin;
+    return Difficulty == acRhs.Difficulty && GreetingsEnabled == acRhs.GreetingsEnabled && PvpEnabled == acRhs.PvpEnabled && SyncPlayerHomes == acRhs.SyncPlayerHomes && DeathSystemEnabled == acRhs.DeathSystemEnabled && SyncPlayerCalendar == acRhs.SyncPlayerCalendar && AutoPartyJoin == acRhs.AutoPartyJoin;
 }
 
 bool ServerSettings::operator!=(const ServerSettings& acRhs) const noexcept

@@ -10,6 +10,7 @@
 #include <Components/FormIdComponent.h>
 #include <Components/InterpolationComponent.h>
 #include <Components/WaitingForAssignmentComponent.h>
+#include <Components/DeferredAssignmentComponent.h>
 #include <Components/LocalComponent.h>
 #include <Components/RemoteComponent.h>
 #include <Components/FaceGenComponent.h>

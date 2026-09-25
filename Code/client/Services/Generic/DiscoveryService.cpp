@@ -258,6 +258,12 @@ void DiscoveryService::VisitForms() noexcept
             {
                 continue;
             }
+            if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().IsLeader())
+                spdlog::info("Discovery removed actor {:X}: cell={:X} attached={} has3D={} dead={} remote={} reconciliation={}",
+                    formId, pCell ? pCell->formID : 0,
+                    pCell && pCell->IsAttached(), pActor->GetNiNode() != nullptr,
+                    pActor->IsDead(), pActor->GetExtension()->IsRemote(),
+                    static_cast<uint32_t>(cStage));
         }
 
         m_dispatcher.trigger(ActorRemovedEvent(formId));
@@ -294,6 +300,8 @@ void DiscoveryService::OnConnected(const ConnectedEvent& acEvent) noexcept
 BSTEventResult DiscoveryService::OnEvent(const TESLoadGameEvent*, const EventDispatcher<TESLoadGameEvent>*)
 {
     spdlog::info("Finished loading, triggering visit cell");
+
+    m_world.GetPartyService().ReachWorldReadyBarrier();
 
     if (!IsDefaultModlist(ModManager::Get()->mods))
     {

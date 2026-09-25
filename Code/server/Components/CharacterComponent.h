@@ -86,4 +86,5 @@ struct CharacterComponent
     Factions FactionsContent{};
     uint16_t Flags{};
     int32_t PlayerId{};
+    uint32_t MountedOnServerId{};
 };

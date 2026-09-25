@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include "World.h"
+#include "GameLoopDiagnostic.h"
 
 #include <Services/DiscoveryService.h>
 #include <Services/InputService.h>
@@ -24,11 +25,117 @@
 #include <Services/SteamLobbyService.h>
 #include <Services/GameSettingsService.h>
 #include <Services/GameTestService.h>
+#include <Services/CameraService.h>
+#include <Services/SceneTimelineService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
 
 #include <ModCompat/BehaviorVar.h>  
+
+namespace
+{
+std::atomic<uint64_t> s_vmHookCalls{};
+std::atomic<uint64_t> s_vmActiveCalls{};
+std::atomic<uint64_t> s_vmInactiveCalls{};
+std::atomic<uint64_t> s_vmAppTotalUs{};
+std::atomic<uint64_t> s_vmOriginalTotalUs{};
+std::atomic<uint32_t> s_vmLastAppUs{};
+std::atomic<uint32_t> s_vmLastOriginalUs{};
+std::atomic<uint64_t> s_vmLastEntryNs{};
+std::atomic<uint32_t> s_vmLastEntryGapUs{};
+std::atomic<uint32_t> s_vmMaxEntryGapUs{};
+std::atomic<uint32_t> s_vmMaxAppUs{};
+std::atomic<uint32_t> s_vmMaxOriginalUs{};
+std::atomic<uint64_t> s_worldCalls{};
+std::atomic<uint64_t> s_worldPreUpdateTotalUs{};
+std::atomic<uint64_t> s_worldRunnerTotalUs{};
+std::atomic<uint64_t> s_worldDispatcherTotalUs{};
+std::atomic<uint64_t> s_worldGameTestTotalUs{};
+std::atomic<uint32_t> s_worldLastGameTestUs{};
+std::atomic<uint32_t> s_worldMaxGameTestUs{};
+std::atomic<uint64_t> s_worldLastEntryNs{};
+std::atomic<uint32_t> s_worldLastEntryGapUs{};
+std::atomic<uint32_t> s_worldMaxDispatcherUs{};
+std::atomic<uint32_t> s_worldMaxEntryGapUs{};
+std::atomic<uint64_t> s_worldGapsOver50Ms{};
+std::atomic<uint64_t> s_worldGapsOver100Ms{};
+std::atomic<uint64_t> s_worldGapsOver250Ms{};
+
+uint32_t DurationUs(std::chrono::steady_clock::time_point aStart,
+    std::chrono::steady_clock::time_point aEnd) noexcept
+{
+    return static_cast<uint32_t>((std::min)(int64_t{UINT32_MAX},
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            aEnd - aStart).count()));
+}
+
+void RecordMaximum(std::atomic<uint32_t>& aMaximum, uint32_t aValue) noexcept
+{
+    auto previous = aMaximum.load(std::memory_order_relaxed);
+    while (aValue > previous && !aMaximum.compare_exchange_weak(previous,
+        aValue, std::memory_order_relaxed)) {}
+}
+}
+
+void RecordGameVmHookEntry() noexcept
+{
+    const auto entry = std::chrono::steady_clock::now();
+    const auto entryNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            entry.time_since_epoch()).count());
+    const auto prior = s_vmLastEntryNs.exchange(entryNs, std::memory_order_relaxed);
+    if (prior && entryNs >= prior)
+    {
+        const auto gapUs = static_cast<uint32_t>((std::min)(uint64_t{UINT32_MAX},
+            (entryNs - prior) / 1000));
+        s_vmLastEntryGapUs.store(gapUs, std::memory_order_relaxed);
+        RecordMaximum(s_vmMaxEntryGapUs, gapUs);
+    }
+}
+
+void RecordGameVmHookCall(bool aActive, uint32_t aAppDurationUs,
+    uint32_t aOriginalDurationUs) noexcept
+{
+    s_vmHookCalls.fetch_add(1, std::memory_order_relaxed);
+    (aActive ? s_vmActiveCalls : s_vmInactiveCalls).fetch_add(1,
+        std::memory_order_relaxed);
+    s_vmAppTotalUs.fetch_add(aAppDurationUs, std::memory_order_relaxed);
+    s_vmOriginalTotalUs.fetch_add(aOriginalDurationUs,
+        std::memory_order_relaxed);
+    s_vmLastAppUs.store(aAppDurationUs, std::memory_order_relaxed);
+    s_vmLastOriginalUs.store(aOriginalDurationUs, std::memory_order_relaxed);
+    RecordMaximum(s_vmMaxAppUs, aAppDurationUs);
+    RecordMaximum(s_vmMaxOriginalUs, aOriginalDurationUs);
+}
+
+GameLoopDiagnostic GetGameLoopDiagnostic() noexcept
+{
+    return {s_vmHookCalls.load(std::memory_order_relaxed),
+        s_vmActiveCalls.load(std::memory_order_relaxed),
+        s_vmInactiveCalls.load(std::memory_order_relaxed),
+        s_vmAppTotalUs.load(std::memory_order_relaxed),
+        s_vmOriginalTotalUs.load(std::memory_order_relaxed),
+        s_vmLastAppUs.load(std::memory_order_relaxed),
+        s_vmLastOriginalUs.load(std::memory_order_relaxed),
+        s_vmLastEntryGapUs.load(std::memory_order_relaxed),
+        s_vmMaxEntryGapUs.load(std::memory_order_relaxed),
+        s_vmMaxAppUs.load(std::memory_order_relaxed),
+        s_vmMaxOriginalUs.load(std::memory_order_relaxed),
+        s_worldCalls.load(std::memory_order_relaxed),
+        s_worldPreUpdateTotalUs.load(std::memory_order_relaxed),
+        s_worldRunnerTotalUs.load(std::memory_order_relaxed),
+        s_worldDispatcherTotalUs.load(std::memory_order_relaxed),
+        s_worldGameTestTotalUs.load(std::memory_order_relaxed),
+        s_worldLastGameTestUs.load(std::memory_order_relaxed),
+        s_worldMaxGameTestUs.load(std::memory_order_relaxed),
+        s_worldLastEntryGapUs.load(std::memory_order_relaxed),
+        s_worldMaxDispatcherUs.load(std::memory_order_relaxed),
+        s_worldMaxEntryGapUs.load(std::memory_order_relaxed),
+        s_worldGapsOver50Ms.load(std::memory_order_relaxed),
+        s_worldGapsOver100Ms.load(std::memory_order_relaxed),
+        s_worldGapsOver250Ms.load(std::memory_order_relaxed)};
+}
 
 World::World()
     : m_runner(m_dispatcher)
@@ -48,6 +155,8 @@ World::World()
     ctx().emplace<CalendarService>(*this, m_dispatcher, m_transport);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
     ctx().emplace<ActorValueService>(*this, m_dispatcher, m_transport);
     ctx().emplace<InventoryService>(*this, m_dispatcher, m_transport);
     ctx().emplace<MagicService>(*this, m_dispatcher, m_transport);
@@ -68,6 +177,29 @@ World::~World() = default;
 
 void World::Update() noexcept
 {
+    const auto entry = std::chrono::steady_clock::now();
+    const auto entryNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            entry.time_since_epoch()).count());
+    const auto priorEntryNs = s_worldLastEntryNs.exchange(entryNs,
+        std::memory_order_relaxed);
+    if (priorEntryNs && entryNs >= priorEntryNs)
+    {
+        const auto gapUs = static_cast<uint32_t>((std::min)(
+            uint64_t{UINT32_MAX}, (entryNs - priorEntryNs) / 1000));
+        s_worldLastEntryGapUs.store(gapUs, std::memory_order_relaxed);
+        auto previousMax = s_worldMaxEntryGapUs.load(std::memory_order_relaxed);
+        while (gapUs > previousMax &&
+            !s_worldMaxEntryGapUs.compare_exchange_weak(previousMax, gapUs,
+                std::memory_order_relaxed)) {}
+        if (gapUs > 50000)
+            s_worldGapsOver50Ms.fetch_add(1, std::memory_order_relaxed);
+        if (gapUs > 100000)
+            s_worldGapsOver100Ms.fetch_add(1, std::memory_order_relaxed);
+        if (gapUs > 250000)
+            s_worldGapsOver250Ms.fetch_add(1, std::memory_order_relaxed);
+    }
+    s_worldCalls.fetch_add(1, std::memory_order_relaxed);
     const auto cNow = std::chrono::high_resolution_clock::now();
     const auto cDelta = cNow - m_lastFrameTime;
     m_lastFrameTime = cNow;
@@ -75,11 +207,30 @@ void World::Update() noexcept
     const auto cDeltaSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(cDelta).count();
 
     m_dispatcher.trigger(PreUpdateEvent(cDeltaSeconds));
+    const auto afterPreUpdate = std::chrono::steady_clock::now();
 
     // Force run this before so we get the tasks scheduled to run
     m_runner.OnUpdate(UpdateEvent(cDeltaSeconds));
+    const auto afterRunner = std::chrono::steady_clock::now();
     m_dispatcher.trigger(UpdateEvent(cDeltaSeconds));
+    const auto afterDispatcher = std::chrono::steady_clock::now();
     ctx().at<GameTestService>().OnGameThread();
+    const auto afterGameTest = std::chrono::steady_clock::now();
+    s_worldPreUpdateTotalUs.fetch_add(DurationUs(entry, afterPreUpdate),
+        std::memory_order_relaxed);
+    s_worldRunnerTotalUs.fetch_add(DurationUs(afterPreUpdate, afterRunner),
+        std::memory_order_relaxed);
+    const auto dispatcherUs = DurationUs(afterRunner, afterDispatcher);
+    s_worldDispatcherTotalUs.fetch_add(dispatcherUs,
+        std::memory_order_relaxed);
+    auto previousMax = s_worldMaxDispatcherUs.load(std::memory_order_relaxed);
+    while (dispatcherUs > previousMax &&
+        !s_worldMaxDispatcherUs.compare_exchange_weak(previousMax,
+            dispatcherUs, std::memory_order_relaxed)) {}
+    const auto gameTestUs = DurationUs(afterDispatcher, afterGameTest);
+    s_worldGameTestTotalUs.fetch_add(gameTestUs, std::memory_order_relaxed);
+    s_worldLastGameTestUs.store(gameTestUs, std::memory_order_relaxed);
+    RecordMaximum(s_worldMaxGameTestUs, gameTestUs);
 }
 
 RunnerService& World::GetRunner() noexcept

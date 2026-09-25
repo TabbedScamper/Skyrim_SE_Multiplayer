@@ -10,6 +10,13 @@ Every engine claim below carries a confidence tag:
 
 ## Map
 
+- [WHOLE_GAME_SYSTEM_ATLAS](WHOLE_GAME_SYSTEM_ATLAS.md) - physics, drops, ragdolls, inventory, UI, animation, loading, sound, combat, magic and shouts with source-inspected prior art.
+
+- [NATIVE_MANIPULATION_SURFACES](NATIVE_MANIPULATION_SURFACES.md) - exact-runtime candidates, validation gates, and independent Reviewer A/Reviewer B review.
+
+- [OVERHAUL_TOOL_WORKBENCH](OVERHAUL_TOOL_WORKBENCH.md) — pinned, source-inspected
+  behavior, animation, NIF, quest, save, Papyrus and executable-analysis tools;
+  exact 1.7.104 validation boundaries and next integration gates.
 - [SOURCE_CATALOG](SOURCE_CATALOG.md) — prior art, commits, licenses, reuse verdicts.
 - [RUNTIME_1_7_104](RUNTIME_1_7_104.md) — exe hash, Address Library, symbols, confidence.
 - [MAIN_LOOP_AND_THREADING](MAIN_LOOP_AND_THREADING.md) — main loop, VM update, task queues.
@@ -22,6 +29,13 @@ Every engine claim below carries a confidence tag:
 - [BACKLOG](BACKLOG.md) — ordered slices with acceptance evidence.
 - [ACCESS_NEEDED](ACCESS_NEEDED.md) — files blocked by workspace policy.
 - [DEEPENING_PLAN](DEEPENING_PLAN.md) — compact evidence + blockers + next 3 slices.
+- [NATIVE_AUTHORITY_SEAMS](NATIVE_AUTHORITY_SEAMS.md) — universal
+  party-leader engine-integration contract: Havok, PlayerCamera, animation /
+  ragdoll, save/load, dialogue / scenes / quests / Papyrus VM, plus
+  prioritized native hook/probe slices.
+- [NATIVE_LIVE_VALIDATION](NATIVE_LIVE_VALIDATION.md): live-verified camera
+  layout and motion-type fixes; 1.7.104 camera, loading-presentation, scene
+  transform, and ragdoll probes.
 
 ## Current status (phase one)
 
@@ -59,12 +73,21 @@ Done this run:
 4. AE IDs are 1.6.1170 lineage; each 1.7.104 use needs live-probe
    confirmation (PROBE-1.7.104).
 
-## Next 3 slices (see DEEPENING_PLAN §3)
+## Next 3 universal implementation slices (see NATIVE_AUTHORITY_SEAMS)
 
-A. Pin + license pass — SHAs/sizes/headers into SOURCE_CATALOG.
-B. Quest/authority convergence — divergence fields into
-   SAVE_QUEST_WORLD_STATE + NETWORK_AUTHORITY_MAP + ACTORS_DEATH_RESPAWN.
-C. Engine-seam revalidation — per-ID 1.7.104 status into RUNTIME_1_7_104.
+S1. Camera observe + save/load flag gate (P0-1, P0-4) — bridge snapshots
+    `PlayerCamera::currentState->id`, `cameraRoot` transform, FOV, and
+    `BGSSaveLoadGame::flags` across cinematics and a save/load cycle.
+    No setters called. Acceptance: state/flag transitions visible in
+    snapshots; proves the authority barrier is observable.
+S2. Quest stage-write probe (P0-3) — locate the `SetStage`-equivalent
+    entry point + 1.7.104 ID and wire it behind the existing leader-only
+    `QuestService` ledger gate. Acceptance: leader stage advance commits
+    once; follower converges without executing fragments.
+S3. Physics snapshot probe (P1-1) — `bhkRigidBody` slot `0x3A`
+    `GetTransform` + world-scale reads on a known movable; velocity and
+    motion-type IDs follow. Acceptance: host transform stream mirrors in
+    follower snapshots; carts mapped as one consumer, not a new design.
 
 ## Highest-risk unknowns
 

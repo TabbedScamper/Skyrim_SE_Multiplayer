@@ -4,6 +4,7 @@
 #include <TiltedCore/Serialization.hpp>
 
 #include <optional>
+#include <limits>
 
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -16,11 +17,98 @@
 #include <Messages/ClientMessageFactory.h>
 #include <Messages/ServerMessageFactory.h>
 #include <Structs/Vector2_NetQuantize.h>
+#include <Structs/AnimationGraphDescriptorManager.h>
+#include <Structs/AnimationVariables.h>
+#include <Structs/PhysicsReferenceUpdate.h>
+#include <Structs/ServerSettings.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Master_Behavior.h>
 
 #include <TiltedCore/Math.hpp>
 #include <TiltedCore/Platform.hpp>
 
 using namespace TiltedPhoques;
+
+TEST_CASE("Every server setting participates in equality", "[encoding.settings]")
+{
+    ServerSettings source{};
+    source.Difficulty = 4;
+    source.DeathSystemEnabled = true;
+    ServerSettings changed = source;
+    changed.SyncPlayerCalendar = true;
+    REQUIRE(source != changed);
+
+    Buffer buffer(64);
+    Buffer::Writer writer(&buffer);
+    changed.Serialize(writer);
+    Buffer::Reader reader(&buffer);
+    ServerSettings restored{};
+    restored.Deserialize(reader);
+    REQUIRE(restored == changed);
+}
+
+TEST_CASE("Dynamic physics stream detects body-only motion", "[encoding.physics]")
+{
+    std::array<float, 16> sent{};
+    sent[0] = sent[5] = sent[10] = sent[15] = 1.f;
+    auto current = sent;
+    REQUIRE_FALSE(PhysicsBodyMotionChanged(sent, {}, current, {}));
+    current[12] = 0.01f;
+    REQUIRE_FALSE(PhysicsBodyMotionChanged(sent, {}, current, {}));
+    current[12] = 0.02f;
+    REQUIRE(PhysicsBodyMotionChanged(sent, {}, current, {}));
+    current = sent;
+    current[0] = 0.97f;
+    REQUIRE(PhysicsBodyMotionChanged(sent, {}, current, {}));
+    current = sent;
+    REQUIRE(PhysicsBodyMotionChanged(sent, {}, current,
+        glm::vec3{0.2f, 0.f, 0.f}));
+}
+
+TEST_CASE("Humanoid head-tracking graph inputs are synchronized", "[encoding.animation]")
+{
+    const auto* descriptor = AnimationGraphDescriptorManager::Get().GetDescriptor(
+        AnimationGraphDescriptor_Master_Behavior::m_key);
+    REQUIRE(descriptor);
+    REQUIRE(descriptor->BooleanLookUpTable.size() == 66);
+    for (const uint32_t index : {151u, 178u, 185u, 221u, 257u, 271u, 272u, 283u})
+        REQUIRE(std::find(descriptor->BooleanLookUpTable.begin(),
+            descriptor->BooleanLookUpTable.end(), index) !=
+            descriptor->BooleanLookUpTable.end());
+    for (const uint32_t index : {47u, 127u, 184u, 191u, 192u, 193u, 194u})
+        REQUIRE(std::find(descriptor->FloatLookupTable.begin(),
+            descriptor->FloatLookupTable.end(), index) !=
+            descriptor->FloatLookupTable.end());
+    REQUIRE(std::find(descriptor->IntegerLookupTable.begin(),
+        descriptor->IntegerLookupTable.end(), 229u) !=
+        descriptor->IntegerLookupTable.end());
+}
+
+TEST_CASE("Animation booleans beyond bit 63 roundtrip", "[encoding.animation]")
+{
+    AnimationVariables source;
+    AnimationVariables previous;
+    source.Booleans.assign(66, false);
+    source.Booleans[64] = true;
+    source.Booleans[65] = true;
+    Buffer buffer(256);
+    Buffer::Writer writer(&buffer);
+    source.GenerateDiff(previous, writer);
+    Buffer::Reader reader(&buffer);
+    AnimationVariables received;
+    received.ApplyDiff(reader);
+    REQUIRE(received.Booleans.size() == 66);
+    REQUIRE(received.Booleans[64]);
+    REQUIRE(received.Booleans[65]);
+}
+
+TEST_CASE("Humanoid turn graph inputs are synchronized", "[encoding.animation]")
+{
+    const auto* descriptor = AnimationGraphDescriptorManager::Get().GetDescriptor(
+        AnimationGraphDescriptor_Master_Behavior::m_key);
+    REQUIRE(descriptor);
+    for (const uint32_t index : {2u, 13u, 155u})
+        REQUIRE(descriptor->IsSynced(index));
+}
 
 TEST_CASE("Encoding factory", "[encoding.factory]")
 {
@@ -79,6 +167,246 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         auto pRequest = CastUnique<PartySessionSettingsRequest>(std::move(pMessage));
         REQUIRE(pRequest->Open);
         REQUIRE(pRequest->Password == request.Password);
+    }
+
+    {
+        PhysicsReferencesMoveRequest request;
+        request.Tick = 4242;
+        request.Updates.push_back({GameId{1, 0xB9DF3}, {1.f, 2.f, 3.f}, {0.1f, 0.2f, 0.3f}, 3, {1.1f, -2.2f, 0.5f},
+            {1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 4.f, 5.f, 6.f, 1.f}});
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pRequest = CastUnique<PhysicsReferencesMoveRequest>(std::move(pMessage));
+        REQUIRE(pRequest->Tick == request.Tick);
+        REQUIRE(pRequest->Updates.size() == 1);
+        REQUIRE(pRequest->Updates[0].Id == request.Updates[0].Id);
+        REQUIRE(pRequest->Updates[0].Position == request.Updates[0].Position);
+        REQUIRE(pRequest->Updates[0].Rotation == request.Updates[0].Rotation);
+        REQUIRE(pRequest->Updates[0].MotionType == 3);
+        REQUIRE(pRequest->Updates[0].LinearVelocity == request.Updates[0].LinearVelocity);
+        REQUIRE(pRequest->Updates[0].BodyTransform == request.Updates[0].BodyTransform);
+    }
+
+    {
+        NotifyPhysicsReferencesMove notify;
+        notify.Tick = 5150;
+        notify.AuthorityEpoch = 7;
+        notify.Updates.push_back({GameId{2, 0xBB970}, {-4.f, 5.f, 6.f}, {0.4f, 0.5f, 0.6f}, 3, {-1.f, 2.f, 0.f},
+            {0.f, 1.f, 0.f, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, -4.f, 5.f, 6.f, 1.f}});
+
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pNotify = CastUnique<NotifyPhysicsReferencesMove>(std::move(pMessage));
+        REQUIRE(pNotify->Tick == notify.Tick);
+        REQUIRE(pNotify->AuthorityEpoch == notify.AuthorityEpoch);
+        REQUIRE(pNotify->Updates.size() == 1);
+        REQUIRE(pNotify->Updates[0].Id == notify.Updates[0].Id);
+        REQUIRE(pNotify->Updates[0].Position == notify.Updates[0].Position);
+        REQUIRE(pNotify->Updates[0].Rotation == notify.Updates[0].Rotation);
+        REQUIRE(pNotify->Updates[0].MotionType == 3);
+        REQUIRE(pNotify->Updates[0].LinearVelocity == notify.Updates[0].LinearVelocity);
+        REQUIRE(pNotify->Updates[0].BodyTransform == notify.Updates[0].BodyTransform);
+    }
+
+    {
+        PhysicsReferencesMoveRequest request;
+        request.Tick = 5151;
+        request.Updates.push_back({GameId{1, 0x1234}, {1.f, 2.f, 3.f}, {}, 0, {}});
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+        REQUIRE(pMessage);
+        auto pRequest = CastUnique<PhysicsReferencesMoveRequest>(std::move(pMessage));
+        REQUIRE(pRequest->Updates.size() == 1);
+        REQUIRE(pRequest->Updates[0].MotionType == 0);
+        REQUIRE(pRequest->Updates[0].BodyTransform == std::array<float, 16>{});
+    }
+
+    {
+        CameraStateRequest request;
+        request.Snapshot.Tick = 9001;
+        request.Snapshot.AuthorityEpoch = 12;
+        request.Snapshot.Position = {123.5f, -456.25f, 789.f};
+        request.Snapshot.Rotation = {1.f, 0.f, 0.f, 0.f, 0.f, -1.f, 0.f, 1.f, 0.f};
+        request.Snapshot.Scale = 1.f;
+        request.Snapshot.Fov = 80.f;
+        request.Snapshot.StateId = 8;
+        REQUIRE(request.Snapshot.IsValid());
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pRequest = CastUnique<CameraStateRequest>(std::move(pMessage));
+        REQUIRE(*pRequest == request);
+        REQUIRE(pRequest->Snapshot.IsValid());
+    }
+
+    {
+        NotifyCameraState notify;
+        notify.Snapshot.Tick = 9100;
+        notify.Snapshot.AuthorityEpoch = 13;
+        notify.Snapshot.Position = {-10.f, 20.f, 30.f};
+        notify.Snapshot.Rotation = {0.f, -1.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+        notify.Snapshot.Scale = 1.f;
+        notify.Snapshot.Fov = 65.f;
+        notify.Snapshot.StateId = 7;
+
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pNotify = CastUnique<NotifyCameraState>(std::move(pMessage));
+        REQUIRE(*pNotify == notify);
+        REQUIRE(pNotify->Snapshot.IsValid());
+    }
+
+    {
+        CharacterSpawnRequest spawn;
+        spawn.ServerId = 101;
+        spawn.OwnershipEpoch = 7;
+        spawn.MountedOnServerId = 202;
+        Buffer::Writer writer(&buff);
+        spawn.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto decoded = CastUnique<CharacterSpawnRequest>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(decoded->MountedOnServerId == 202);
+        REQUIRE(*decoded == spawn);
+    }
+
+    {
+        AssignCharacterResponse assignment;
+        assignment.Cookie = 42;
+        assignment.ServerId = 101;
+        assignment.OwnershipEpoch = 7;
+        assignment.InventoryAuthoritative = true;
+        assignment.MountedOnServerId = 202;
+        Buffer::Writer writer(&buff);
+        assignment.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto decoded = CastUnique<AssignCharacterResponse>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(decoded->MountedOnServerId == 202);
+        REQUIRE(*decoded == assignment);
+    }
+
+    {
+        MountRequest dismount;
+        dismount.RiderId = 101;
+        dismount.RiderOwnershipEpoch = 7;
+        dismount.MountId = 0;
+        dismount.MountOwnershipEpoch = 0;
+        Buffer::Writer writer(&buff);
+        dismount.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto decoded = CastUnique<MountRequest>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(*decoded == dismount);
+    }
+
+    {
+        NotifyMount dismount;
+        dismount.RiderId = 101;
+        dismount.MountId = 0;
+        Buffer::Writer writer(&buff);
+        dismount.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto decoded = CastUnique<NotifyMount>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(decoded->RiderId == 101);
+        REQUIRE(decoded->MountId == 0);
+    }
+
+    {
+        CameraStateSnapshot invalid{};
+        invalid.Rotation = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+        invalid.Fov = std::numeric_limits<float>::quiet_NaN();
+        REQUIRE_FALSE(invalid.IsValid());
+        invalid.Fov = 75.f;
+        invalid.Rotation.fill(0.f);
+        REQUIRE_FALSE(invalid.IsValid());
+    }
+
+    {
+        DialogueRequest request;
+        request.ServerId = 42;
+        request.Tick = 123456789;
+        request.SoundFilename = "Voice\\MQ101\\line.fuz";
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto decoded = CastUnique<DialogueRequest>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(*decoded == request);
+    }
+
+    {
+        NotifyDialogue notify;
+        notify.ServerId = 42;
+        notify.Tick = 123456789;
+        notify.SoundFilename = "Voice\\MQ101\\line.fuz";
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto decoded = CastUnique<NotifyDialogue>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(*decoded == notify);
+    }
+
+    {
+        SubtitleRequest request;
+        request.ServerId = 42;
+        request.Tick = 123456790;
+        request.TopicFormId = 0x1234;
+        request.Text = "Wake up.";
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ClientMessageFactory factory;
+        auto decoded = CastUnique<SubtitleRequest>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(*decoded == request);
+    }
+
+    {
+        NotifySubtitle notify;
+        notify.ServerId = 42;
+        notify.Tick = 123456790;
+        notify.TopicFormId = 0x1234;
+        notify.Text = "Wake up.";
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+        Buffer::Reader reader(&buff);
+        const ServerMessageFactory factory;
+        auto decoded = CastUnique<NotifySubtitle>(factory.Extract(reader));
+        REQUIRE(decoded);
+        REQUIRE(*decoded == notify);
     }
 }
 
@@ -542,6 +870,7 @@ TEST_CASE("Packets", "[encoding.packets]")
     {
         ClientReferencesMoveRequest sendMessage, recvMessage;
         auto& update = sendMessage.Updates[1];
+        update.CombatTargetServerId = 42;
         auto& move = update.UpdatedMovement;
 
         AnimationVariables vars;
@@ -565,7 +894,31 @@ TEST_CASE("Packets", "[encoding.packets]")
 
         move.Variables = vars;
 
-        Buffer buff(1000);
+        auto& pose = update.EvaluatedPose;
+        pose.GraphDescriptor = 0xAABBCCDDEEFF0011ULL;
+        pose.SourceTick = 7878;
+        EvaluatedPoseSnapshot::Bone bone{};
+        bone.Translation = {12.5f, -3.25f, 0.f};
+        bone.Rotation = {0.f, 0.f, 0.70710677f, 0.70710677f};
+        bone.Scale = {1.f, 1.f, 1.f};
+        pose.Bones.push_back(bone);
+
+        auto& visual = update.VisualBones;
+        visual.GraphDescriptor = pose.GraphDescriptor;
+        visual.SourceTick = pose.SourceTick;
+        visual.RootWorld.Present = true;
+        visual.RootWorld.Rotation = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+        visual.RootWorld.Translation = {200.f, 300.f, 400.f};
+        visual.RootWorld.Scale = 1.f;
+        VisualBoneSnapshot::Bone visualBone{};
+        visualBone.Present = true;
+        visualBone.Rotation = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+        visualBone.Translation = {12.5f, -3.25f, 7.f};
+        visualBone.Scale = 1.f;
+        visual.Bones.push_back(visualBone);
+        visual.Bones.push_back({}); // no live NiNode at this graph index
+
+        Buffer buff(2000);
         Buffer::Writer writer(&buff);
         sendMessage.Serialize(writer);
 
@@ -577,7 +930,46 @@ TEST_CASE("Packets", "[encoding.packets]")
         recvMessage.DeserializeRaw(reader);
 
         REQUIRE(recvMessage.Updates[1].UpdatedMovement == sendMessage.Updates[1].UpdatedMovement);
+        REQUIRE(recvMessage.Updates[1].CombatTargetServerId == 42);
+        REQUIRE(recvMessage.Updates[1].EvaluatedPose == pose);
+        REQUIRE(recvMessage.Updates[1].EvaluatedPose.Checksum() == pose.Checksum());
+        REQUIRE(recvMessage.Updates[1].VisualBones == visual);
+        REQUIRE(recvMessage.Updates[1].VisualBones.Checksum() == visual.Checksum());
     }
+}
+
+TEST_CASE("Evaluated pose transport bounds", "[encoding.pose]")
+{
+    EvaluatedPoseSnapshot pose;
+    pose.Bones.resize(EvaluatedPoseSnapshot::MaxBones + 1);
+    REQUIRE_FALSE(pose.IsValid());
+    pose.Bones.resize(1);
+    pose.Bones[0].Scale = {1.f, 1.f, 1.f};
+    pose.Bones[0].Rotation = {0.f, 0.f, 0.f, 1.f};
+    REQUIRE(pose.IsValid());
+    pose.Bones[0].Rotation[0] = std::numeric_limits<float>::infinity();
+    REQUIRE_FALSE(pose.IsValid());
+}
+
+TEST_CASE("Visual bone transport bounds", "[encoding.visual_pose]")
+{
+    VisualBoneSnapshot visual;
+    visual.Bones.resize(VisualBoneSnapshot::MaxBones + 1);
+    REQUIRE_FALSE(visual.IsValid());
+    visual.Bones.resize(1);
+    visual.Bones[0].Present = true;
+    visual.Bones[0].Rotation = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+    visual.Bones[0].Scale = 1.f;
+    REQUIRE(visual.IsValid());
+    visual.RootWorld.Present = true;
+    visual.RootWorld.Rotation = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+    visual.RootWorld.Translation = {100.f, 200.f, 300.f};
+    REQUIRE(visual.IsValid());
+    visual.RootWorld.Translation[0] = std::numeric_limits<float>::infinity();
+    REQUIRE_FALSE(visual.IsValid());
+    visual.RootWorld.Translation[0] = 100.f;
+    visual.Bones[0].Rotation[0] = std::numeric_limits<float>::infinity();
+    REQUIRE_FALSE(visual.IsValid());
 }
 
 TEST_CASE("StringCache", "[encoding.string_cache]")

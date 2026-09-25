@@ -80,6 +80,7 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
 
     auto& inventoryComponent = view.get<InventoryComponent>(*it);
     inventoryComponent.Content.AddOrRemoveEntry(message.Item);
+    inventoryComponent.HasAuthoritativeMutation = true;
 
     if (!message.UpdateClients && !isRemoteNpcInteraction)
         return;
@@ -129,6 +130,7 @@ void InventoryService::OnEquipmentChanges(const PacketEvent<RequestEquipmentChan
 
     auto& inventoryComponent = view.get<InventoryComponent>(*it);
     inventoryComponent.Content.UpdateEquipment(message.CurrentInventory);
+    inventoryComponent.HasAuthoritativeMutation = true;
 
     NotifyEquipmentChanges notify;
     notify.ServerId = message.ServerId;

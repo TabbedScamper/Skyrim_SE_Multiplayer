@@ -114,6 +114,34 @@ try {
     $lobbyExitCode = $LASTEXITCODE
     $lobby = $lobbyOutput | ConvertFrom-Json
 
+    $cameraOutput = & $botPath "127.0.0.1:$Port" camera-authority $botManifestArgument
+    $cameraExitCode = $LASTEXITCODE
+    $camera = $cameraOutput | ConvertFrom-Json
+
+    $sceneOutput = & $botPath "127.0.0.1:$Port" scene-authority $botManifestArgument
+    $sceneExitCode = $LASTEXITCODE
+    $scene = $sceneOutput | ConvertFrom-Json
+
+    $physicsOutput = & $botPath "127.0.0.1:$Port" physics-authority $botManifestArgument
+    $physicsExitCode = $LASTEXITCODE
+    $physics = $physicsOutput | ConvertFrom-Json
+
+    $cellLeaseOutput = & $botPath "127.0.0.1:$Port" separated-cell-lease $botManifestArgument
+    $cellLeaseExitCode = $LASTEXITCODE
+    $cellLease = $cellLeaseOutput | ConvertFrom-Json
+
+    $mountAffinityOutput = & $botPath "127.0.0.1:$Port" mount-leader-affinity $botManifestArgument
+    $mountAffinityExitCode = $LASTEXITCODE
+    $mountAffinity = $mountAffinityOutput | ConvertFrom-Json
+
+    $temporaryIdentityOutput = & $botPath "127.0.0.1:$Port" temporary-actor-identity $botManifestArgument
+    $temporaryIdentityExitCode = $LASTEXITCODE
+    $temporaryIdentity = $temporaryIdentityOutput | ConvertFrom-Json
+
+    $fivePlayerOutput = & $botPath "127.0.0.1:$Port" five-player-smoke $botManifestArgument
+    $fivePlayerExitCode = $LASTEXITCODE
+    $fivePlayer = $fivePlayerOutput | ConvertFrom-Json
+
     $accessOutput = & $botPath "127.0.0.1:$Port" session-access-authority $botManifestArgument
     $accessExitCode = $LASTEXITCODE
     $access = $accessOutput | ConvertFrom-Json
@@ -128,12 +156,19 @@ try {
 
     $summary = [pscustomobject]@{
         passed = $joinExitCode -eq 0 -and $handoffExitCode -eq 0 -and $reconnectExitCode -eq 0 -and `
-            $modMismatchExitCode -eq 0 -and $deploymentMismatchExitCode -eq 0 -and $lobbyExitCode -eq 0 -and $accessExitCode -eq 0 -and `
+            $modMismatchExitCode -eq 0 -and $deploymentMismatchExitCode -eq 0 -and $lobbyExitCode -eq 0 -and $cameraExitCode -eq 0 -and $sceneExitCode -eq 0 -and $physicsExitCode -eq 0 -and $cellLeaseExitCode -eq 0 -and $mountAffinityExitCode -eq 0 -and $temporaryIdentityExitCode -eq 0 -and $fivePlayerExitCode -eq 0 -and $accessExitCode -eq 0 -and `
             ($authorityExitCode -eq 0 -or (-not $FailOnKnownGaps -and $authorityExitCode -eq 2))
         join = $join
         modMismatch = $modMismatch
         deploymentMismatch = $deploymentMismatch
         lobbyReadyBarrier = $lobby
+        cameraAuthority = $camera
+        sceneAuthority = $scene
+        physicsAuthority = $physics
+        separatedCellLease = $cellLease
+        mountLeaderAffinity = $mountAffinity
+        temporaryActorIdentity = $temporaryIdentity
+        fivePlayerSmoke = $fivePlayer
         sessionAccessAuthority = $access
         leaderHandoff = $handoff
         followerReconnect = $reconnect

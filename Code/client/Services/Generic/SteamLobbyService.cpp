@@ -516,7 +516,8 @@ bool SteamLobbyService::StartLocalServer() noexcept
     if (!GetModuleFileNameW(nullptr, gamePath, MAX_PATH))
         return false;
 
-    const auto serverDirectory = std::filesystem::path(gamePath).parent_path() / L"Data" / L"SkyrimTogetherReborn";
+    const auto gameDirectory = std::filesystem::path(gamePath).parent_path();
+    const auto serverDirectory = gameDirectory / L"Data" / L"SkyrimTogetherReborn";
     const auto serverPath = serverDirectory / L"SkyrimTogetherServer.exe";
     if (!std::filesystem::exists(serverPath))
     {
@@ -532,8 +533,12 @@ bool SteamLobbyService::StartLocalServer() noexcept
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
     auto command = L"\"" + serverPath.wstring() + L"\"";
+    // STServer.ini and mandatory deployment manifests use paths relative to
+    // Skyrim's root (for example, Data/Skyrim.esm). Starting in the server's
+    // binary directory silently turns those into SkyrimTogetherReborn/Data/*
+    // and makes the host reject its own otherwise-identical client.
     if (!CreateProcessW(serverPath.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
-            serverDirectory.c_str(), &startup, &process))
+            gameDirectory.c_str(), &startup, &process))
     {
         ShowMessage("The local Skyrim Together server could not start.");
         return false;

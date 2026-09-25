@@ -9,4 +9,7 @@
 struct InventoryComponent
 {
     Inventory Content{};
+    // The creation snapshot may precede native default-outfit equip. Once a
+    // real inventory/equipment event arrives, an empty inventory is explicit.
+    bool HasAuthoritativeMutation{};
 };

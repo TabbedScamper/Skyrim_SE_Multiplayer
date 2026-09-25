@@ -32,10 +32,8 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
         auto eventName = pArguments->GetString(0).ToString();
         auto eventArgs = pArguments->GetList(1);
 
-        spdlog::info(eventName);
-        spdlog::info(eventArgs->GetString(0).ToString());
-        spdlog::info(std::to_string(eventArgs->GetInt(1)));
-        spdlog::info(eventArgs->GetString(2).ToString());
+        // UI arguments can contain lobby and server passwords. Never log them.
+        spdlog::debug("Received UI event {}", eventName);
 
 #ifndef PUBLIC_BUILD
         LOG(INFO) << "event=ui_event name=" << eventName;
@@ -124,6 +122,16 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             const bool open = eventArgs->GetBool(0);
             const String password = eventArgs->GetString(1).ToString().c_str();
             World::Get().GetPartyService().SetSessionSettings(open, password);
+        }
+        else if (eventName == "setCoopGameplaySettings")
+        {
+            const int difficulty = eventArgs->GetInt(0);
+            const bool pvp = eventArgs->GetBool(1);
+            if (difficulty >= 0 && difficulty <= 5)
+                World::Get().GetRunner().Queue([difficulty, pvp]() {
+                    World::Get().GetPartyService().SetGameplaySettings(
+                        static_cast<uint32_t>(difficulty), pvp);
+                });
         }
         else if (eventName == "connectJoinedSteamSession")
         {
