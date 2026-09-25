@@ -815,8 +815,13 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     // leader claims it right after. Applying the follower's spawn state moved the leader's scripted
     // intro dragon off its flight (the scene waited for a landing that never came) and made the
     // leader's beheaded prisoner loop create-and-remove every 6 s.
+    // Near the leader, whether or not its 3D is loaded yet (the intro dragon was still far off in the
+    // sky, without 3D, when the follower registered it).
+    const auto* pLeaderPlayer = PlayerCharacter::Get();
+    const bool nearLeader = pActor->GetNiNode() != nullptr || (pActor->parentCell && pActor->parentCell->IsAttached()) ||
+        (pLeaderPlayer && std::hypot(pActor->position.x - pLeaderPlayer->position.x, pActor->position.y - pLeaderPlayer->position.y) < 20000.f);
     const bool keepLocalState = m_world.GetPartyService().IsLeader() && acMessage.FormId != GameId{} && !acMessage.IsPlayer &&
-        pActor->GetNiNode() != nullptr;
+        pActor->formID < 0xFF000000 && nearLeader;
     if (keepLocalState)
     {
         s_keepLocalSpawnState.insert(pActor->formID);

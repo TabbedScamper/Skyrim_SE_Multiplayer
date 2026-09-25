@@ -61,9 +61,25 @@ void ShowNotice(const char* apText) noexcept
     s_showHUDMessage.Get()(apText, nullptr, true);
 }
 
-// Hidden by shrinking its root node: the creator does not honour the root's hidden flag (measured:
-// the view switched, nothing on screen changed). The scale is restored when shown again.
-std::unordered_map<uint32_t, float> s_scaleBeforeHide;
+// Hidden by hiding its meshes (NiAVObject flags bit 0 on every leaf of its 3D): the creator
+// ignores the root's flag (the engine sets it on the player every frame), and shrinking the root
+// dragged the head bone, which the creator camera tracks, down to the feet. Restored when shown.
+std::unordered_map<uint32_t, std::vector<NiAVObject*>> s_hiddenMeshes;
+
+void CollectMeshes(NiAVObject* apNode, std::vector<NiAVObject*>& arMeshes, int aDepth) noexcept
+{
+    if (!apNode || aDepth > 64)
+        return;
+    auto* pNode = apNode->AsNode();
+    if (!pNode)
+    {
+        if (!(apNode->flags & 1))
+            arMeshes.push_back(apNode);
+        return;
+    }
+    for (uint16_t i = 0; i < pNode->children.length; ++i)
+        CollectMeshes(pNode->children.data[i], arMeshes, aDepth + 1);
+}
 
 void SetHidden(Actor* apActor, bool aHidden) noexcept
 {
@@ -73,17 +89,19 @@ void SetHidden(Actor* apActor, bool aHidden) noexcept
     const bool hidden = s_hiddenByUs.contains(apActor->formID);
     if (aHidden && !hidden)
     {
-        s_scaleBeforeHide[apActor->formID] = pRoot->local.scale;
-        pRoot->local.scale = 0.0001f;
+        auto& meshes = s_hiddenMeshes[apActor->formID];
+        meshes.clear();
+        CollectMeshes(pRoot, meshes, 0);
+        for (auto* pMesh : meshes)
+            pMesh->flags |= 1;
         s_hiddenByUs[apActor->formID] = true;
-        apActor->Update3DPosition(false);
     }
     else if (!aHidden && hidden)
     {
-        pRoot->local.scale = s_scaleBeforeHide.contains(apActor->formID) ? s_scaleBeforeHide[apActor->formID] : 1.f;
-        s_scaleBeforeHide.erase(apActor->formID);
+        for (auto* pMesh : s_hiddenMeshes[apActor->formID])
+            pMesh->flags &= ~1u;
+        s_hiddenMeshes.erase(apActor->formID);
         s_hiddenByUs.erase(apActor->formID);
-        apActor->Update3DPosition(false);
     }
 }
 
@@ -113,14 +131,13 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             // Leaving the creator: everyone visible again.
             for (const auto& [formId, hidden] : s_hiddenByUs)
             {
-                if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)); pActor && pActor->GetNiNode())
-                {
-                    pActor->GetNiNode()->local.scale = s_scaleBeforeHide.contains(formId) ? s_scaleBeforeHide[formId] : 1.f;
-                    pActor->Update3DPosition(false);
-                }
+                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                if (pActor && pActor->GetNiNode())
+                    for (auto* pMesh : s_hiddenMeshes[formId])
+                        pMesh->flags &= ~1u;
             }
             s_hiddenByUs.clear();
-            s_scaleBeforeHide.clear();
+            s_hiddenMeshes.clear();
             s_view = SIZE_MAX;
             s_hintShown = false;
             World::Get().GetOverlayService().SetCreatorView(false, 1, 1, false);
@@ -208,8 +225,8 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             auto* pActor = s_players[i] == 0x14 ? static_cast<Actor*>(pPlayer) : Cast<Actor>(TESForm::GetById(s_players[i]));
             auto* pRoot = pActor ? pActor->GetNiNode() : nullptr;
             if (pRoot)
-                spdlog::info("Character creator together: {:X} root scale {:.4f} world ({:.0f}, {:.0f}, {:.0f}) player at ({:.0f}, {:.0f}, {:.0f})",
-                    pActor->formID, pRoot->world.scale, pRoot->world.translate.x, pRoot->world.translate.y, pRoot->world.translate.z,
+                spdlog::info("Character creator together: {:X} root world scale {:.4f}, hidden meshes {}, world ({:.0f}, {:.0f}, {:.0f}) player at ({:.0f}, {:.0f}, {:.0f})",
+                    pActor->formID, pRoot->world.scale, s_hiddenMeshes.contains(pActor->formID) ? s_hiddenMeshes[pActor->formID].size() : 0, pRoot->world.translate.x, pRoot->world.translate.y, pRoot->world.translate.z,
                     pPlayer->position.x, pPlayer->position.y, pPlayer->position.z);
             else if (pActor)
                 spdlog::info("Character creator together: {:X} has no 3D", pActor->formID);

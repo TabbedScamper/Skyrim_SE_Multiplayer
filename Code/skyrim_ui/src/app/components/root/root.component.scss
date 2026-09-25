@@ -223,9 +223,9 @@
 // Character creation together: whose character the creator shows. Skyrim style: white small caps
 // on a dark bar, thin rules, no colour except the ready state.
 .creator-view-banner-host {
-  // Top right: the creator's own menus take the left side and the bottom.
+  // Bottom right, above the creator's race list.
   position: fixed;
-  top: 5vh;
+  bottom: 22vh;
   right: 3vw;
   display: flex;
   justify-content: flex-end;
