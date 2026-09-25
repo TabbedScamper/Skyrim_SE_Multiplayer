@@ -287,6 +287,8 @@ private:
         uint32_t SampleNext{};
         uint32_t HostMotionType{3};
         bool HostDriven{};
+        // Newest sample tick whose resting pose has been written; later frames skip the write.
+        uint64_t AppliedRestTick{};
     };
     std::unordered_map<uint32_t, ReferencePose> m_referencePoses;
     std::unordered_map<uint32_t, RemoteReferencePose> m_remoteReferencePoses;

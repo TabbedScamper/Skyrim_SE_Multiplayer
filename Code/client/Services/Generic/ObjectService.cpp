@@ -1843,7 +1843,14 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
 
         const bool passive = IsPassivePhysicsReference(pReference);
         DynamicBody body{};
-        if (!passive && !GetDynamicBody(pReference, body))
+        if (!passive && !GetDynamicBody(pReference, body, true))
+            return;
+        // Keyframed bodies are driven by their node (scene, script, animation) on each PC, so
+        // they are only sent at rest: measured, the Helgen carts are keyframed after the intro
+        // scene and each PC's save parked them up to 34 units and 0.75 rad apart. Doors animate
+        // their body while the reference stays put; leave them to the door sync.
+        const bool keyframed = !passive && body.State.motionType == 4;
+        if (keyframed && (!pReference->baseForm || pReference->baseForm->formType == FormType::Door))
             return;
         if (!passive && !std::all_of(std::begin(body.State.transform),
                 std::end(body.State.transform), [](float value)
@@ -1872,7 +1879,9 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
                     body.State.linearVelocity[1], body.State.linearVelocity[2]};
                 previous.HasBodyState = true;
             }
-            return;
+            // Fall through: send the resting pose once on discovery. Each PC loads its own
+            // save, so a body that never moves on the host (measured: the parked Helgen carts
+            // after Continue, 34 units and 0.75 rad apart) otherwise never converges.
         }
 
         const auto positionDelta = pReference->position - previous.Position;
@@ -1896,11 +1905,22 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         const bool moved = bodyMoved || referenceMoved;
         previous.Position = pReference->position;
         previous.Rotation = pReference->rotation;
+        if (keyframed && moved)
+        {
+            // Animating on its own: track it, send nothing until it has rested for 5 s.
+            std::copy(std::begin(body.State.transform), std::end(body.State.transform),
+                previous.LastSentBodyTransform.begin());
+            previous.LastSentBodyVelocity = {body.State.linearVelocity[0], body.State.linearVelocity[1],
+                body.State.linearVelocity[2]};
+            previous.LastSent = now;
+            return;
+        }
         if (moved)
             previous.HasMoved = true;
         // Periodic keyframes recover from a dropped delta or a follower that
-        // enters an already-active cell. Never flood unchanged static refs.
-        if (!moved && (!previous.HasMoved || now - previous.LastSent < 500ms))
+        // enters an already-active cell. Resting bodies refresh slowly so a
+        // follower that loaded later still converges; moving ones every 500 ms.
+        if (!moved && now - previous.LastSent < (previous.HasMoved ? 500ms : 5000ms))
             return;
 
         PhysicsReferenceUpdate update{};
@@ -2219,6 +2239,16 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     break;
                 }
             }
+            // A body at rest (no newer sample past the hold window) keeps the pose already
+            // written; resting bodies are all host-driven, so rewriting them every frame adds up.
+            const uint64_t newestTick = sample(count - 1).Tick;
+            const bool atRest = renderTick - static_cast<int64_t>(newestTick) > kHostDrivenHoldAfterMs;
+            if (atRest && pose.AppliedRestTick == newestTick)
+            {
+                ++it;
+                continue;
+            }
+            pose.AppliedRestTick = atRest ? newestTick : 0;
             pReference->position = position;
             pReference->SetRotation(rotation.x, rotation.y, rotation.z);
             pReference->Update3DPosition(true);
