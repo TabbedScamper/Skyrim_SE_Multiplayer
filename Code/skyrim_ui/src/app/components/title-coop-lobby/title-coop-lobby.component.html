@@ -1,93 +1,125 @@
 <div class="coop-lobby">
   <header>
-    <h1>Skyrim SE Multiplayer</h1>
-    <p>Shared Campaign</p>
+    <h1>Skyrim Together</h1>
+    <p>Shared campaign</p>
   </header>
 
-  <section class="entry-grid">
-    <p *ngIf="!steam.lobbyId" class="muted">Creating your private session...</p>
-    <div class="friend-list">
-      <h2>Join a Friend's Session</h2>
-      <p *ngIf="steam.friendIds.length === 0" class="muted">No open friend sessions found. Private sessions require an invitation.</p>
-      <button *ngFor="let id of steam.friendIds; let i = index" (click)="joinFriend(id)">
-        Join {{ steam.friendNames[i] || 'Steam Friend' }}
-      </button>
-    </div>
-    <details>
-      <summary>Direct LAN</summary>
-      <input [(ngModel)]="lanAddress" placeholder="192.168.1.10:10578" (keydown.enter)="connectLan()" />
-      <button (click)="connectLan()">Connect</button>
-    </details>
-  </section>
-
-  <ng-container *ngIf="steam.lobbyId">
-    <section class="status-row">
-      <span>Steam Lobby</span><strong>{{ steam.lobbyId }}</strong>
-      <span>Profile</span><strong [class.ok]="connected">{{ connected ? 'Compatible' : 'Validating...' }}</strong>
-      <span>Deployment</span><strong [class.ok]="scan.complete">{{ scan.complete ? (scan.fileCount + ' files verified') : 'Scanning effective Data...' }}</strong>
-      <span>Access</span><strong>{{ steam.open ? (steam.passwordProtected ? 'OPEN / PASSWORD' : 'OPEN') : 'PRIVATE / INVITE ONLY' }}</strong>
-    </section>
-
-    <section class="roster">
-      <div *ngFor="let name of steam.memberNames; let i = index" class="member">
-        <span>{{ name }}</span>
-        <small *ngIf="memberPlayerId(i) === lobby.leaderId">HOST</small>
-        <button *ngIf="isLeader() && memberPlayerId(i) && memberPlayerId(i) !== lobby.leaderId"
-          class="promote" (click)="promote(memberPlayerId(i))">Promote to Host</button>
+  <div class="columns">
+    <!-- Left: who is here -->
+    <section class="card party">
+      <div class="card-head">
+        <h2>Party</h2>
+        <span *ngIf="steam.lobbyId" class="pill" [class.ok]="connected">{{ steam.open ? (steam.passwordProtected ? 'Open, password' : 'Open to friends') : 'Invite only' }}</span>
       </div>
-      <div *ngIf="steam.memberNames.length < 2" class="member empty">Waiting for a companion...</div>
-      <div class="member"><span>Party readiness</span><strong>{{ lobby.readyPlayerIds.length }} / {{ lobby.playerIds.length }}</strong></div>
+
+      <p *ngIf="!steam.lobbyId" class="muted">Creating your private session...</p>
+
+      <ul *ngIf="steam.lobbyId" class="roster">
+        <li *ngFor="let name of steam.memberNames; let i = index" class="member" [class.ready]="isMemberReady(i)">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="name">{{ name }}</span>
+          <small *ngIf="memberPlayerId(i) === lobby.leaderId" class="badge">Host</small>
+          <small class="state">{{ isMemberReady(i) ? 'Ready' : 'Not ready' }}</small>
+          <button *ngIf="isLeader() && memberPlayerId(i) && memberPlayerId(i) !== lobby.leaderId"
+            class="link" (click)="promote(memberPlayerId(i))">Make host</button>
+        </li>
+        <li *ngIf="steam.memberNames.length < 2" class="member empty">
+          <span class="name">Waiting for a companion...</span>
+        </li>
+      </ul>
+
+      <button *ngIf="steam.lobbyId" class="wide" (click)="invite()">Invite a friend</button>
+
+      <div *ngIf="steam.isHost && isLeader()" class="access">
+        <label class="switch-row">
+          <span>Open to Steam friends<small>Friends can join without an invite.</small></span>
+          <input class="switch" type="checkbox" [(ngModel)]="sessionOpen" (ngModelChange)="queuePartyOptionsSave()" />
+        </label>
+        <input *ngIf="sessionOpen" type="password" [(ngModel)]="sessionPassword" (ngModelChange)="queuePartyOptionsSave()"
+          maxlength="64" placeholder="Optional password" />
+      </div>
+
+      <div *ngIf="steam.waitingForPassword" class="password-prompt">
+        <h3>This session needs a password</h3>
+        <input type="password" [(ngModel)]="joinPassword" maxlength="64" placeholder="Host's password" (keydown.enter)="connectWithPassword()" />
+        <button data-style-ornament="inverted" (click)="connectWithPassword()">Join</button>
+      </div>
+
+      <div class="join">
+        <h3>Join a friend</h3>
+        <p *ngIf="steam.friendIds.length === 0" class="muted">No friends are hosting an open session. Ask them to invite you.</p>
+        <button *ngFor="let id of steam.friendIds; let i = index" class="friend" (click)="joinFriend(id)">
+          {{ steam.friendNames[i] || 'Steam friend' }}<small>Join</small>
+        </button>
+        <details>
+          <summary>Connect by IP address</summary>
+          <div class="lan">
+            <input [(ngModel)]="lanAddress" placeholder="192.168.1.10:10578" (keydown.enter)="connectLan()" />
+            <button (click)="connectLan()">Connect</button>
+          </div>
+        </details>
+      </div>
     </section>
 
-    <section *ngIf="steam.waitingForPassword" class="party-options">
-      <h2>Session Password</h2>
-      <input type="password" [(ngModel)]="joinPassword" maxlength="64" placeholder="Enter host password" (keydown.enter)="connectWithPassword()" />
-      <button data-style-ornament="inverted" (click)="connectWithPassword()">Connect</button>
-    </section>
+    <!-- Right: what we are playing -->
+    <section class="card campaign" *ngIf="steam.lobbyId">
+      <div class="card-head"><h2>Campaign</h2></div>
 
-    <section *ngIf="steam.isHost && isLeader()" class="party-options">
-      <h2>Party Options</h2>
-      <label class="checkbox-row"><input type="checkbox" [(ngModel)]="sessionOpen" (ngModelChange)="queuePartyOptionsSave()" /> <span>Open to Steam friends</span></label>
-      <p class="muted">Private is invite-only. Open sessions appear in your friends' Join list.</p>
-      <input *ngIf="sessionOpen" type="password" [(ngModel)]="sessionPassword" (ngModelChange)="queuePartyOptionsSave()" maxlength="64" placeholder="Optional session password" />
-    </section>
+      <ng-container *ngIf="lobby.sessionState === 0">
+        <div *ngIf="isLeader(); else guestCampaign" class="choice">
+          <button class="option" [class.selected]="campaignMode === 1" (click)="chooseCampaign(1)">
+            <strong>New campaign</strong><small>Start a fresh shared playthrough.</small>
+          </button>
+          <button class="option" [class.selected]="campaignMode === 2" (click)="chooseCampaign(2)">
+            <strong>Continue</strong><small>Pick up from your last shared checkpoint.</small>
+          </button>
+          <input *ngIf="campaignMode === 2" [(ngModel)]="checkpointId" placeholder="Latest shared checkpoint" />
+        </div>
+        <ng-template #guestCampaign>
+          <p class="chosen"><strong>{{ campaignLabel() }}</strong></p>
+          <p class="muted">{{ leaderName() }} chooses the campaign. Ready up when you're set.</p>
+        </ng-template>
+      </ng-container>
 
-    <section class="party-options">
-      <h2>Co-op Gameplay</h2>
+      <h3>Rules</h3>
       <div class="setting-row">
         <label for="coopDifficulty">Difficulty</label>
-        <select id="coopDifficulty" [(ngModel)]="gameplay.difficulty" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="!isLeader() || lobby.sessionState === 1 || lobby.sessionState === 2">
+        <select id="coopDifficulty" [(ngModel)]="gameplay.difficulty" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="settingsLocked()">
           <option [ngValue]="0">Novice</option><option [ngValue]="1">Apprentice</option>
           <option [ngValue]="2">Adept</option><option [ngValue]="3">Expert</option>
           <option [ngValue]="4">Master</option><option [ngValue]="5">Legendary</option>
         </select>
       </div>
-      <label class="checkbox-row"><input type="checkbox" [(ngModel)]="gameplay.pvpEnabled" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="!isLeader() || lobby.sessionState === 1 || lobby.sessionState === 2" /> <span>Friendly fire between players</span></label>
-      <label class="checkbox-row"><input type="checkbox" [ngModel]="settingService.settings.isPartyShown | async" (ngModelChange)="settingService.settings.isPartyShown.next($event)" /> <span>Show party HUD on this PC</span></label>
-      <p class="muted">{{ isLeader() ? 'Difficulty and friendly fire apply to everyone.' : 'The host controls shared gameplay settings.' }}</p>
-      <p class="muted">Death: {{ gameplay.deathSystemEnabled ? 'current multiplayer respawn' : 'vanilla' }}. Downed/revive and spectate policies are not enabled yet.</p>
-    </section>
+      <label class="switch-row" [class.locked]="settingsLocked()">
+        <span>Friendly fire<small>Players can damage each other.</small></span>
+        <input class="switch" type="checkbox" [(ngModel)]="gameplay.pvpEnabled" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="settingsLocked()" />
+      </label>
+      <p class="muted">{{ isLeader() ? 'Rules apply to everyone.' : 'The host sets the rules.' }}
+        Death: {{ gameplay.deathSystemEnabled ? 'respawn' : 'vanilla' }}.</p>
 
-    <section *ngIf="isLeader() && lobby.sessionState === 0" class="campaign">
-      <h2>Campaign</h2>
-      <button [class.selected]="campaignMode === 1" [disabled]="!isLeader()" (click)="chooseCampaign(1)">New Shared Campaign</button>
-      <button [class.selected]="campaignMode === 2" [disabled]="!isLeader()" (click)="chooseCampaign(2)">Continue Shared Campaign</button>
-      <input *ngIf="campaignMode === 2" [(ngModel)]="checkpointId" [disabled]="!isLeader()" placeholder="Latest shared checkpoint" />
-      <p class="muted">Selected: {{ campaignLabel() }}. Everyone must be ready before you can start.</p>
-    </section>
+      <h3>This PC</h3>
+      <label class="switch-row">
+        <span>Show party HUD</span>
+        <input class="switch" type="checkbox" [ngModel]="settingService.settings.isPartyShown | async" (ngModelChange)="settingService.settings.isPartyShown.next($event)" />
+      </label>
 
-    <section *ngIf="!isLeader() && lobby.sessionState === 0" class="campaign campaign-status">
-      <h2>Campaign</h2>
-      <strong>{{ campaignLabel() }}</strong>
-      <p class="muted">{{ leaderName() }} controls the shared campaign. Ready up when you are prepared to begin.</p>
+      <details class="tech">
+        <summary>Connection details</summary>
+        <dl>
+          <dt>Steam lobby</dt><dd>{{ steam.lobbyId }}</dd>
+          <dt>Mod setup</dt><dd [class.ok]="connected">{{ connected ? 'Matches the host' : 'Checking...' }}</dd>
+          <dt>Game files</dt><dd [class.ok]="scan.complete">{{ scan.complete ? (scan.fileCount + ' verified') : 'Verifying...' }}</dd>
+        </dl>
+      </details>
     </section>
+  </div>
 
-    <section *ngIf="lobby.sessionState === 0" class="actions">
-      <button (click)="invite()">Invite Friend</button>
-      <button [class.selected]="ready" [disabled]="!connected" (click)="toggleReady()">{{ ready ? 'Ready' : 'Ready Up' }}</button>
-      <button *ngIf="isLeader()" data-style-ornament="inverted" [disabled]="!canStart()" (click)="start()">Start Together</button>
-    </section>
-  </ng-container>
-
-  <button class="back" (click)="close()">Back</button>
+  <footer class="bar">
+    <button class="back" (click)="close()">Back</button>
+    <span class="status" *ngIf="steam.lobbyId && lobby.sessionState === 0">{{ isLeader() ? (startBlocker() || 'Everyone is ready.') : (ready ? 'Waiting for the host to start.' : 'Ready up when you are set.') }}</span>
+    <ng-container *ngIf="steam.lobbyId && lobby.sessionState === 0">
+      <button class="ready" [class.selected]="ready" [disabled]="!connected" (click)="toggleReady()">{{ ready ? 'Ready' : 'Ready up' }}</button>
+      <button *ngIf="isLeader()" class="primary" data-style-ornament="inverted" [disabled]="!canStart()" (click)="start()">Start together</button>
+    </ng-container>
+  </footer>
 </div>

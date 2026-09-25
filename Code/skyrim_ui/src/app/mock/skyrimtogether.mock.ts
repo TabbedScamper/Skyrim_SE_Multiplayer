@@ -171,10 +171,16 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
   requestGameSettings(): void {
     this.emit('gameSettings', 1, 0, 1920, 1080, true, 1, 1, 0.8, 0.8, 1,
       1, 0.0125, 0.6667, false, true, true, true, true,
-      'Display 1 (1920x1080)', '1280x720|1600x900|1920x1080|2560x1440|3840x2160', false);
+      'Display 1 (1920x1080)', '1280x720|1600x900|1920x1080|2560x1440|3840x2160', false,
+      '', JSON.stringify([
+        { id: '{0.0.0.00000000}.{mock-speakers}', name: 'Speakers (Realtek(R) Audio)' },
+        { id: '{0.0.0.00000000}.{mock-headset}', name: 'Headset Earphone (Arctis Nova 7)' },
+      ]));
   }
 
   previewGameSetting(_name: string, _value: string): void {}
+
+  submitDebugFeedback(_looksRight: boolean, _note: string): void {}
 
   confirmDisplaySettings(): void {
     this.emit('gameSettingsApplied');

@@ -2,119 +2,240 @@
 
 @import 'functions/rem';
 
+$-accent: #d9c38a;
+$-muted: rgba(255, 255, 255, 0.55);
+$-line: rgba(255, 255, 255, 0.14);
+
 :host {
   position: relative;
-  display: block;
+  display: flex;
+  flex-direction: column;
+  width: min(62rem, calc(100vw - 4rem));
+  height: min(40rem, calc(100vh - 6rem));
 }
 
-.container {
-  overflow: auto;
-  max-height: 60vh;
+.settings-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 12rem 1fr;
+  gap: 2rem;
+}
+
+// ---- section navigation ----
+.sections {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-right: 1.5rem;
+  border-right: 1px solid $-line;
+}
+
+.section-tab {
+  position: relative;
+  text-align: left;
+  padding: 0.7rem 0.9rem;
+  opacity: 0.55;
+  letter-spacing: 0.06em;
+  transition: opacity $-time-transition, background $-time-transition;
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 20%;
+    bottom: 20%;
+    width: 2px;
+    background: $-accent;
+    transform: scaleY(0);
+    transition: transform $-time-transition;
+  }
+
+  &:hover,
+  &:focus-visible {
+    opacity: 0.9;
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  &.active {
+    opacity: 1;
+    color: $-accent;
+
+    &::before {
+      transform: scaleY(1);
+    }
+  }
+}
+
+// ---- content ----
+.panel {
+  overflow-y: auto;
+  min-height: 0;
   padding-right: 1rem;
 
-  .settings {
-    display: flex;
-    margin-top: 1rem;
-    justify-content: space-between;
-    flex-direction: column;
+  h2 {
+    margin: 0 0 1.25rem;
+    font-size: 1.5em;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
 
-    section {
-      margin-bottom: 1rem;
-      border-bottom: 2px solid;
-
-      .version {
-        color: green;
-
-        .outdated {
-          color: red;
-        }
-      }
-
-      .flex-item {
-        position: relative;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin: 1em 0;
-      }
-
-      & > div:not(:last-child) {
-        margin-bottom: 0.5rem;
-      }
-    }
-
-    hr {
-      width: 100%;
-    }
-
-    h2:first-child {
-      margin-top: 0;
-    }
+  h3 {
+    margin: 2rem 0 0.5rem;
+    font-size: 1em;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: $-muted;
   }
 }
 
-.setting {
-  display: flex;
-  flex-direction: row;
-  justify-content: space-between;
-  align-items: center;
-  margin: 1em 0;
-
-  & > label {
-    width: 15em;
-  }
-
-  & > input,
-  > app-dropdown,
-  > select,
-  > .slider-with-value {
-    width: 10em;
-    max-width: 10em;
-    font-size: inherit;
-  }
-}
-
-input:focus,
-button:focus,
-app-dropdown:focus {
-  outline: 2px solid #fff;
-  outline-offset: 3px;
-}
-
-.slider-with-value {
+.row {
   display: grid;
-  grid-template-columns: 1fr 4em;
+  grid-template-columns: minmax(0, 1fr) 16rem;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1.5rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid $-line;
 
-  input {
+  &.disabled {
+    opacity: 0.45;
+  }
+
+  > input.switch {
+    justify-self: end;
+  }
+
+  > app-dropdown,
+  > .slider,
+  > .version {
     width: 100%;
   }
 
-  span {
+  > .version {
     text-align: right;
   }
 }
 
-.safety {
-  color: #ffcf66;
-  text-align: center;
-}
-
-.hint {
-  opacity: 0.75;
-  font-size: 0.9em;
-}
-
-.actions {
-  margin-top: 1rem;
+.row-label {
   display: flex;
-  justify-content: center;
-  gap: 1rem;
-  align-items: center;
+  flex-direction: column;
+  gap: 0.35rem;
 
+  label {
+    font-size: 1.05em;
+  }
+
+  small {
+    color: $-muted;
+    font-size: 0.85em;
+    line-height: 1.3em;
+  }
 }
 
+.warning {
+  color: #ffcf66 !important;
+}
+
+.loading {
+  color: $-muted;
+}
+
+.version {
+  color: #8fd18f;
+
+  &.outdated {
+    color: #ff7a7a;
+  }
+}
+
+// ---- slider with value chip ----
+.slider {
+  display: grid;
+  grid-template-columns: 1fr 3.5em;
+  align-items: center;
+  gap: 0.75rem;
+
+  input[type='range'] {
+    width: 100%;
+    accent-color: $-accent;
+  }
+
+  output {
+    text-align: center;
+    padding: 0.25rem 0;
+    border: 1px solid $-line;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+// ---- switch (a styled checkbox so ngModel keeps working) ----
+input.switch {
+  appearance: none;
+  position: relative;
+  width: 2.75rem;
+  height: 1.5rem;
+  // The global checkbox rule clamps to 1rem and paints a checkmark image.
+  max-width: none;
+  max-height: none;
+  background-image: none !important;
+  margin: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+  cursor: pointer;
+  transition: background $-time-transition, border-color $-time-transition;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 0.2rem;
+    width: 1.05rem;
+    height: 1.05rem;
+    border-radius: 50%;
+    background: #e8e8e8;
+    transform: translateY(-50%);
+    transition: left $-time-transition, background $-time-transition;
+  }
+
+  &:checked {
+    background: rgba(217, 195, 138, 0.35);
+    border-color: $-accent;
+
+    &::after {
+      left: calc(100% - 1.25rem);
+      background: $-accent;
+    }
+  }
+}
+
+input:focus-visible,
+button:focus-visible,
+app-dropdown:focus-visible,
+app-dropdown:focus {
+  outline: 2px solid $-accent;
+  outline-offset: 3px;
+}
+
+// ---- footer ----
+.actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid $-line;
+
+  .autosave {
+    margin-right: auto;
+    color: $-muted;
+    font-size: 0.85em;
+  }
+}
+
+// ---- display confirmation ----
 .display-confirm-backdrop {
   position: absolute;
   inset: 0;
@@ -127,11 +248,13 @@ app-dropdown:focus {
 .display-confirm {
   width: min(32rem, 80%);
   padding: 2rem;
-  border: 2px solid #d8d8d8;
+  border: 1px solid $-accent;
   background: #111;
   text-align: center;
 
-  h2 { margin-top: 0; }
+  h2 {
+    margin-top: 0;
+  }
 }
 
 .confirm-actions {

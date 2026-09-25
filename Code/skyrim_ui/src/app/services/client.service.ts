@@ -5,7 +5,7 @@ import { environment } from '../../environments/environment';
 import { Debug } from '../models/debug';
 import { PartyInfo } from '../models/party-info';
 import { Player } from '../models/player';
-import { DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
+import { AudioDevice, DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
 import { ChatService } from './chat.service';
 import { CoopLobbyState } from '../models/coop-lobby-state';
 import { SteamLobbyState } from '../models/steam-lobby-state';
@@ -779,6 +779,7 @@ export class ClientService implements OnDestroy {
     gamma: number, mouseSensitivity: number, gamepadSensitivity: number, invertY: boolean,
     dialogueSubtitles: boolean, generalSubtitles: boolean, alwaysRun: boolean,
     controllerRumble: boolean, monitors: string, resolutions: string, defaults: boolean,
+    audioDevice?: string, audioDevicesJson?: string,
   ): void {
     this.zone.run(() => this.gameSettingsChange.next({
       settings: {
@@ -786,10 +787,25 @@ export class ClientService implements OnDestroy {
         monitor, width, height, vsync, master, footsteps, voice, music, effects,
         gamma, mouseSensitivity, gamepadSensitivity, invertY, dialogueSubtitles,
         generalSubtitles, alwaysRun, controllerRumble,
+        audioDevice: audioDevice ?? '',
       },
       monitors: monitors ? monitors.split('|') : [],
       resolutions: resolutions ? resolutions.split('|') : [],
+      audioDevices: ClientService.parseAudioDevices(audioDevicesJson),
       defaults,
     }));
+  }
+
+  /** Undefined when the game client predates audio device reporting. */
+  private static parseAudioDevices(json?: string): AudioDevice[] | undefined {
+    if (json === undefined) return undefined;
+    try {
+      const parsed = JSON.parse(json);
+      return Array.isArray(parsed)
+        ? parsed.filter(d => typeof d?.id === 'string' && typeof d?.name === 'string')
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

@@ -91,7 +91,9 @@
     }
 
     > app-popup[data-popup='settings'] > app-window {
-      width: clamp(48rem, 28vw, 68rem);
+      // The settings component sizes its own two-pane layout.
+      width: auto;
+      max-width: none;
       font-size: clamp(1rem, 1.4vh, 1.4rem);
     }
     > app-popup[data-popup='coopLobby'] > app-window {

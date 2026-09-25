@@ -12,7 +12,9 @@ import { Sound, SoundService } from '../../services/sound.service';
 import { environment } from 'src/environments/environment';
 import { HttpClient } from '@angular/common/http';
 import { ClientService } from 'src/app/services/client.service';
-import { DisplayMode, GameSettings } from 'src/app/models/game-settings';
+import { AudioDevice, DisplayMode, GameSettings } from 'src/app/models/game-settings';
+
+type SettingsSection = 'display' | 'audio' | 'controls' | 'accessibility' | 'interface' | 'party' | 'about';
 
 @Component({
   selector: 'app-settings',
@@ -53,6 +55,25 @@ export class SettingsComponent implements OnDestroy {
     },
   ];
   readonly availableAutoHideTimes = autoHideTimerLengths;
+  readonly sections: { id: SettingsSection; label: string }[] = [
+    { id: 'display', label: 'Display' },
+    { id: 'audio', label: 'Audio' },
+    { id: 'controls', label: 'Controls' },
+    { id: 'accessibility', label: 'Accessibility' },
+    { id: 'interface', label: 'Interface' },
+    { id: 'party', label: 'Party HUD' },
+    { id: 'about', label: 'About' },
+  ];
+  readonly volumeChannels = [
+    { key: 'master', label: 'Master volume' },
+    { key: 'effects', label: 'Effects' },
+    { key: 'voice', label: 'Voice' },
+    { key: 'music', label: 'Music' },
+    { key: 'footsteps', label: 'Footsteps' },
+  ];
+  public activeSection: SettingsSection = SettingsComponent.restoreSection();
+  /** Undefined until the client reports devices (older clients never do). */
+  public audioDevices?: AudioDevice[];
 
   public settings = this.settingService.settings;
   public autoHideTime: number;
@@ -93,6 +114,7 @@ export class SettingsComponent implements OnDestroy {
         this.gameSettings = { ...payload.settings };
         this.monitors = payload.monitors;
         this.resolutions = payload.resolutions;
+        this.audioDevices = payload.audioDevices;
       }),
       this.client.displayPreviewStarted.subscribe(() => this.startDisplayCountdown()),
       this.client.displayPreviewReverted.subscribe(() => {
@@ -146,7 +168,38 @@ export class SettingsComponent implements OnDestroy {
     this.sound.play(Sound.Ok);
   }
 
-  preview(name: keyof GameSettings, value: number | boolean): void {
+  selectSection(section: SettingsSection): void {
+    this.activeSection = section;
+    try {
+      localStorage.setItem(SettingsComponent.sectionKey, section);
+    } catch {
+      // Storage can be unavailable; the section just is not remembered.
+    }
+    this.sound.play(Sound.Focus);
+  }
+
+  isGameSection(section: SettingsSection): boolean {
+    return section === 'display' || section === 'audio' || section === 'controls' || section === 'accessibility';
+  }
+
+  audioDeviceConnected(id: string): boolean {
+    return !!this.audioDevices?.some(device => device.id === id);
+  }
+
+  private static readonly sectionKey = 'settings.section';
+
+  private static restoreSection(): SettingsSection {
+    try {
+      const saved = localStorage.getItem(SettingsComponent.sectionKey) as SettingsSection | null;
+      if (saved && ['display', 'audio', 'controls', 'accessibility', 'interface', 'party', 'about'].includes(saved))
+        return saved;
+    } catch {
+      // Fall through to the default section.
+    }
+    return 'display';
+  }
+
+  preview(name: keyof GameSettings, value: number | boolean | string): void {
     if (!this.gameSettings) return;
     (this.gameSettings as any)[name] = value;
     this.client.previewGameSetting(name, value);

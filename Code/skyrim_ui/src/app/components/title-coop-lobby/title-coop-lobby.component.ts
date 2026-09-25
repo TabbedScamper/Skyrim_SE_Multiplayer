@@ -201,6 +201,25 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
       this.lobby.readyPlayerIds.length === this.lobby.playerIds.length && this.campaignMode > 0 && this.lobby.sessionState === 0;
   }
 
+  public isMemberReady(index: number): boolean {
+    const id = this.memberPlayerId(index);
+    return !!id && this.lobby.readyPlayerIds.includes(id);
+  }
+
+  public settingsLocked(): boolean {
+    return !this.isLeader() || this.lobby.sessionState === 1 || this.lobby.sessionState === 2;
+  }
+
+  /** Why the host cannot start yet, in the order the host should fix it. */
+  public startBlocker(): string {
+    if (!this.connected) return 'Checking that everyone has the same mod setup...';
+    if (!this.scan.complete) return 'Verifying game files...';
+    if (this.lobby.playerIds.length < 2) return 'Invite a friend to start.';
+    const waiting = this.lobby.playerIds.length - this.lobby.readyPlayerIds.length;
+    if (waiting > 0) return waiting === 1 ? 'Waiting for 1 player to ready up.' : `Waiting for ${waiting} players to ready up.`;
+    return '';
+  }
+
   public close(): void {
     this.done.emit();
   }

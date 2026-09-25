@@ -1,271 +1,230 @@
-<div class="container">
-  <div class="settings">
-    <ng-container *ngIf="gameSettings as game">
-      <section>
+<div class="settings-shell">
+  <nav class="sections" role="tablist" aria-label="Settings sections">
+    <button
+      *ngFor="let section of sections"
+      role="tab"
+      class="section-tab"
+      [class.active]="activeSection === section.id"
+      [attr.aria-selected]="activeSection === section.id"
+      (click)="selectSection(section.id)"
+    >
+      {{ section.label }}
+    </button>
+  </nav>
+
+  <div class="panel" role="tabpanel">
+    <ng-container *ngIf="gameSettings as game; else loadingGame">
+      <!-- Display -->
+      <section *ngIf="activeSection === 'display'">
         <h2>Display</h2>
-        <div class="setting">
-          <label for="displayMode">Display mode</label>
+        <div class="row">
+          <div class="row-label">
+            <label for="displayMode">Display mode</label>
+            <small>Borderless keeps alt-tab instant. Press F11 to jump between windowed and your last fullscreen mode.</small>
+          </div>
           <app-dropdown id="displayMode" [noTranslate]="true" [ngModel]="game.displayMode" (ngModelChange)="preview('displayMode', $event)">
             <app-dropdown-option *ngFor="let mode of displayModes" [text]="mode.label" [value]="mode.value"></app-dropdown-option>
           </app-dropdown>
         </div>
-        <div class="setting">
-          <label for="monitor">Monitor</label>
+        <div class="row">
+          <div class="row-label"><label for="monitor">Monitor</label></div>
           <app-dropdown id="monitor" [noTranslate]="true" [ngModel]="game.monitor" (ngModelChange)="preview('monitor', $event)">
             <app-dropdown-option *ngFor="let monitor of monitors; let index = index" [text]="monitor" [value]="index"></app-dropdown-option>
           </app-dropdown>
         </div>
-        <div class="setting">
-          <label for="resolution">Resolution</label>
+        <div class="row">
+          <div class="row-label">
+            <label for="resolution">Resolution</label>
+            <small *ngIf="game.displayMode === DisplayMode.Borderless">Borderless always uses the monitor's resolution.</small>
+          </div>
           <app-dropdown id="resolution" [noTranslate]="true" [(ngModel)]="selectedResolution">
             <app-dropdown-option *ngFor="let resolution of resolutions" [text]="resolution" [value]="resolution"></app-dropdown-option>
           </app-dropdown>
         </div>
-        <div class="setting">
-          <label for="vsync">Vertical synchronization</label>
-          <input type="checkbox" id="vsync" [ngModel]="game.vsync" (ngModelChange)="preview('vsync', $event)" />
+        <div class="row">
+          <div class="row-label"><label for="vsync">Vertical sync</label><small>Prevents tearing; may add a little input latency.</small></div>
+          <input class="switch" type="checkbox" id="vsync" [ngModel]="game.vsync" (ngModelChange)="preview('vsync', $event)" />
         </div>
-        <div class="setting">
-          <label for="gamma">Brightness</label>
-          <div class="slider-with-value">
-            <input type="range" id="gamma" min="0.5" max="1.5" step="0.05"
-              [ngModel]="game.gamma" (ngModelChange)="preview('gamma', $event)" />
-            <span>{{ game.gamma | number:'1.2-2' }}</span>
-          </div>
-        </div>
-        <p class="hint">Press F11 at any time to toggle windowed mode and restore your previous fullscreen mode.</p>
-      </section>
-
-      <section>
-        <h2>Game Audio</h2>
-        <div class="setting" *ngFor="let audio of [
-          { key: 'master', label: 'Master volume' },
-          { key: 'effects', label: 'Effects' },
-          { key: 'voice', label: 'Voice' },
-          { key: 'music', label: 'Music' },
-          { key: 'footsteps', label: 'Footsteps' }
-        ]">
-          <label [for]="audio.key">{{ audio.label }}</label>
-          <div class="slider-with-value">
-            <input type="range" [id]="audio.key" min="0" max="1" step="0.05"
-              [ngModel]="$any(game)[audio.key]" (ngModelChange)="preview($any(audio.key), $event)" />
-            <span>{{ $any(game)[audio.key] * 100 | number:'1.0-0' }}%</span>
+        <div class="row">
+          <div class="row-label"><label for="gamma">Brightness</label></div>
+          <div class="slider">
+            <input type="range" id="gamma" min="0.5" max="1.5" step="0.05" [ngModel]="game.gamma" (ngModelChange)="preview('gamma', $event)" />
+            <output>{{ game.gamma | number: '1.2-2' }}</output>
           </div>
         </div>
       </section>
 
-      <section>
+      <!-- Audio -->
+      <section *ngIf="activeSection === 'audio'">
+        <h2>Audio</h2>
+        <div class="row">
+          <div class="row-label">
+            <label for="audioDevice">Output device</label>
+            <small *ngIf="!audioDevices">This build of the game client does not report audio devices yet.</small>
+            <small *ngIf="audioDevices && !game.audioDevice">Uses the Windows default output. A change applies the next time the game starts.</small>
+            <small *ngIf="audioDevices && game.audioDevice && audioDeviceConnected(game.audioDevice)">Applies the next time the game starts.</small>
+            <small *ngIf="audioDevices && game.audioDevice && !audioDeviceConnected(game.audioDevice)" class="warning">
+              Not connected. Using the Windows default until it comes back.
+            </small>
+          </div>
+          <app-dropdown id="audioDevice" [noTranslate]="true" [disabled]="!audioDevices" [ngModel]="game.audioDevice || ''" (ngModelChange)="preview('audioDevice', $event)">
+            <app-dropdown-option text="Windows default" value=""></app-dropdown-option>
+            <app-dropdown-option *ngFor="let device of audioDevices || []" [text]="device.name" [value]="device.id"></app-dropdown-option>
+          </app-dropdown>
+        </div>
+        <div class="row" *ngFor="let audio of volumeChannels">
+          <div class="row-label"><label [for]="audio.key">{{ audio.label }}</label></div>
+          <div class="slider">
+            <input type="range" [id]="audio.key" min="0" max="1" step="0.05" [ngModel]="$any(game)[audio.key]" (ngModelChange)="preview($any(audio.key), $event)" />
+            <output>{{ $any(game)[audio.key] * 100 | number: '1.0-0' }}%</output>
+          </div>
+        </div>
+
+        <h3>Interface sounds</h3>
+        <div class="row">
+          <div class="row-label"><label for="muted">{{ 'COMPONENT.SETTINGS.MUTE_UI' | transloco }}</label></div>
+          <input class="switch" type="checkbox" id="muted" [ngModel]="settings.muted | async" (ngModelChange)="settings.muted.next($event)" />
+        </div>
+        <div class="row">
+          <div class="row-label"><label for="volumeSlider">{{ 'COMPONENT.SETTINGS.UI_VOLUME' | transloco }}</label></div>
+          <div class="slider">
+            <input type="range" id="volumeSlider" min="0" max="1" step="0.1" [disabled]="settings.muted | async" [ngModel]="settings.volume | async" (ngModelChange)="settings.volume.next($event)" />
+            <output>{{ (settings.volume | async) * 100 | number: '1.0-0' }}%</output>
+          </div>
+        </div>
+      </section>
+
+      <!-- Controls -->
+      <section *ngIf="activeSection === 'controls'">
         <h2>Controls</h2>
-        <div class="setting">
-          <label for="mouseSensitivity">Mouse sensitivity</label>
-          <div class="slider-with-value">
-            <input type="range" id="mouseSensitivity" min="0.001" max="0.1" step="0.001"
-              [ngModel]="game.mouseSensitivity" (ngModelChange)="preview('mouseSensitivity', $event)" />
-            <span>{{ game.mouseSensitivity | number:'1.3-3' }}</span>
+        <div class="row">
+          <div class="row-label"><label for="mouseSensitivity">Mouse sensitivity</label></div>
+          <div class="slider">
+            <input type="range" id="mouseSensitivity" min="0.001" max="0.1" step="0.001" [ngModel]="game.mouseSensitivity" (ngModelChange)="preview('mouseSensitivity', $event)" />
+            <output>{{ game.mouseSensitivity * 1000 | number: '1.0-0' }}</output>
           </div>
         </div>
-        <div class="setting">
-          <label for="gamepadSensitivity">Controller sensitivity</label>
-          <div class="slider-with-value">
-            <input type="range" id="gamepadSensitivity" min="0.1" max="2" step="0.05"
-              [ngModel]="game.gamepadSensitivity" (ngModelChange)="preview('gamepadSensitivity', $event)" />
-            <span>{{ game.gamepadSensitivity | number:'1.2-2' }}</span>
+        <div class="row">
+          <div class="row-label"><label for="gamepadSensitivity">Controller sensitivity</label></div>
+          <div class="slider">
+            <input type="range" id="gamepadSensitivity" min="0.1" max="2" step="0.05" [ngModel]="game.gamepadSensitivity" (ngModelChange)="preview('gamepadSensitivity', $event)" />
+            <output>{{ game.gamepadSensitivity | number: '1.2-2' }}</output>
           </div>
         </div>
-        <div class="setting"><label for="invertY">Invert Y axis</label><input type="checkbox" id="invertY" [ngModel]="game.invertY" (ngModelChange)="preview('invertY', $event)" /></div>
-        <div class="setting"><label for="alwaysRun">Always run</label><input type="checkbox" id="alwaysRun" [ngModel]="game.alwaysRun" (ngModelChange)="preview('alwaysRun', $event)" /></div>
-        <div class="setting"><label for="controllerRumble">Controller vibration</label><input type="checkbox" id="controllerRumble" [ngModel]="game.controllerRumble" (ngModelChange)="preview('controllerRumble', $event)" /></div>
+        <div class="row">
+          <div class="row-label"><label for="invertY">Invert Y axis</label></div>
+          <input class="switch" type="checkbox" id="invertY" [ngModel]="game.invertY" (ngModelChange)="preview('invertY', $event)" />
+        </div>
+        <div class="row">
+          <div class="row-label"><label for="alwaysRun">Always run</label></div>
+          <input class="switch" type="checkbox" id="alwaysRun" [ngModel]="game.alwaysRun" (ngModelChange)="preview('alwaysRun', $event)" />
+        </div>
+        <div class="row">
+          <div class="row-label"><label for="controllerRumble">Controller vibration</label></div>
+          <input class="switch" type="checkbox" id="controllerRumble" [ngModel]="game.controllerRumble" (ngModelChange)="preview('controllerRumble', $event)" />
+        </div>
       </section>
 
-      <section>
+      <!-- Accessibility -->
+      <section *ngIf="activeSection === 'accessibility'">
         <h2>Accessibility</h2>
-        <div class="setting"><label for="dialogueSubtitles">Dialogue subtitles</label><input type="checkbox" id="dialogueSubtitles" [ngModel]="game.dialogueSubtitles" (ngModelChange)="preview('dialogueSubtitles', $event)" /></div>
-        <div class="setting"><label for="generalSubtitles">General subtitles</label><input type="checkbox" id="generalSubtitles" [ngModel]="game.generalSubtitles" (ngModelChange)="preview('generalSubtitles', $event)" /></div>
+        <div class="row">
+          <div class="row-label"><label for="dialogueSubtitles">Dialogue subtitles</label></div>
+          <input class="switch" type="checkbox" id="dialogueSubtitles" [ngModel]="game.dialogueSubtitles" (ngModelChange)="preview('dialogueSubtitles', $event)" />
+        </div>
+        <div class="row">
+          <div class="row-label"><label for="generalSubtitles">General subtitles</label><small>Nearby NPC chatter.</small></div>
+          <input class="switch" type="checkbox" id="generalSubtitles" [ngModel]="game.generalSubtitles" (ngModelChange)="preview('generalSubtitles', $event)" />
+        </div>
+        <div class="row">
+          <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.FONT_SIZE' | transloco }}</label><small>Multiplayer interface text size.</small></div>
+          <app-dropdown [ngModel]="settings.fontSize | async" (ngModelChange)="settings.fontSize.next($event)">
+            <app-dropdown-option *ngFor="let size of availableFontSizes" [text]="size.label" [value]="size.id"></app-dropdown-option>
+          </app-dropdown>
+        </div>
       </section>
     </ng-container>
 
-    <section>
-      <h2>{{ 'COMPONENT.SETTINGS.VERSION.HEADER' | transloco }}</h2>
-      <div class="flex-item">
-        {{ 'COMPONENT.SETTINGS.VERSION.INFO' | transloco }}
-        <div class="version" [class.outdated]="isVersionOutdated | async">{{ clientVersion$ | async }}</div>
+    <ng-template #loadingGame>
+      <section *ngIf="isGameSection(activeSection)" class="loading">Reading game settings...</section>
+    </ng-template>
+
+    <!-- Interface -->
+    <section *ngIf="activeSection === 'interface'">
+      <h2>Interface</h2>
+      <div class="row">
+        <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.LANGUAGE' | transloco }}</label></div>
+        <app-dropdown [noTranslate]="true" [ngModel]="settings.language | async" (ngModelChange)="settings.language.next($event)">
+          <app-dropdown-option *ngFor="let lang of availableLanguages" [text]="lang.label" [value]="lang.id"></app-dropdown-option>
+        </app-dropdown>
       </div>
-      <div *ngIf="isVersionOutdated | async" class="flex-item">
-        {{ 'COMPONENT.SETTINGS.VERSION.OUTDATED' | transloco }}
+      <div class="row">
+        <div class="row-label"><label for="showDebug">{{ 'COMPONENT.SETTINGS.SHOW_DEBUG_INFO' | transloco }}</label><small>Connection and performance overlay.</small></div>
+        <input class="switch" type="checkbox" id="showDebug" [ngModel]="settings.isDebugShown | async" (ngModelChange)="settings.isDebugShown.next($event)" />
       </div>
     </section>
 
-    <section>
-      <h2>{{ 'COMPONENT.SETTINGS.AUDIO' | transloco }}</h2>
-      <div class="setting">
-        <label for="muted">{{
-          'COMPONENT.SETTINGS.MUTE_UI' | transloco
-        }}</label>
-        <input
-          type="checkbox"
-          id="muted"
-          [ngModel]="settings.muted | async"
-          (ngModelChange)="settings.muted.next($event)"
-        />
+    <!-- Party HUD -->
+    <section *ngIf="activeSection === 'party'">
+      <h2>Party HUD</h2>
+      <div class="row">
+        <div class="row-label"><label for="showParty">{{ 'COMPONENT.SETTINGS.SHOW_PARTY' | transloco }}</label></div>
+        <input class="switch" type="checkbox" id="showParty" [ngModel]="settings.isPartyShown | async" (ngModelChange)="settings.isPartyShown.next($event)" />
       </div>
-      <div class="setting">
-        <label for="volumeSlider">{{
-          'COMPONENT.SETTINGS.UI_VOLUME' | transloco
-        }}</label>
-        <input
-          type="range"
-          id="volumeSlider"
-          min="0.0"
-          max="1.0"
-          step="0.1"
-          [ngModel]="settings.volume | async"
-          (ngModelChange)="settings.volume.next($event)"
-        />
+      <div class="row">
+        <div class="row-label"><label for="autoHideParty">{{ 'COMPONENT.SETTINGS.AUTO_HIDE_PARTY' | transloco }}</label></div>
+        <input class="switch" type="checkbox" id="autoHideParty" [ngModel]="settings.autoHideParty | async" (ngModelChange)="settings.autoHideParty.next($event)" />
+      </div>
+      <div class="row" [class.disabled]="!(settings.autoHideParty | async)">
+        <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.AUTO_HIDE_PARTY_LENGTH' | transloco }}</label></div>
+        <app-dropdown [disabled]="!(settings.autoHideParty | async)" [ngModel]="settings.autoHideTime | async" (ngModelChange)="settings.autoHideTime.next($event)">
+          <app-dropdown-option *ngFor="let time of availableAutoHideTimes" [text]="'COMPONENT.SETTINGS.LENGTH'" [value]="time"></app-dropdown-option>
+        </app-dropdown>
+      </div>
+      <div class="row">
+        <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.PARTY_ANCHOR' | transloco }}</label></div>
+        <app-dropdown [ngModel]="settings.partyAnchor | async" (ngModelChange)="settings.partyAnchor.next($event)">
+          <app-dropdown-option *ngFor="let anchor of availablePartyAnchors" [text]="anchor.label" [value]="anchor.id"></app-dropdown-option>
+        </app-dropdown>
+      </div>
+      <div class="row">
+        <div class="row-label"><label for="partyAnchorOffsetX">{{ 'COMPONENT.SETTINGS.PARTY_ANCHOR_OFFSET_X' | transloco }}</label></div>
+        <div class="slider">
+          <input type="range" id="partyAnchorOffsetX" min="0" max="84" step="1" [ngModel]="settings.partyAnchorOffsetX | async" (ngModelChange)="settings.partyAnchorOffsetX.next($event)" />
+          <output>{{ settings.partyAnchorOffsetX | async }}</output>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-label"><label for="partyAnchorOffsetY">{{ 'COMPONENT.SETTINGS.PARTY_ANCHOR_OFFSET_Y' | transloco }}</label></div>
+        <div class="slider">
+          <input type="range" id="partyAnchorOffsetY" min="2" max="50" step="1" [ngModel]="settings.partyAnchorOffsetY | async" (ngModelChange)="settings.partyAnchorOffsetY.next($event)" />
+          <output>{{ settings.partyAnchorOffsetY | async }}</output>
+        </div>
       </div>
     </section>
 
-    <section>
-      <h2>{{ 'COMPONENT.SETTINGS.UI' | transloco }}</h2>
-      <div class="setting">
-        <label>{{ 'COMPONENT.SETTINGS.LANGUAGE' | transloco }}</label>
-        <app-dropdown
-          [noTranslate]="true"
-          class="settings-dropdown"
-          [ngModel]="settings.language | async"
-          (ngModelChange)="settings.language.next($event)"
-        >
-          <app-dropdown-option
-            *ngFor="let lang of availableLanguages"
-            [text]="lang.label"
-            [value]="lang.id"
-          ></app-dropdown-option>
-        </app-dropdown>
+    <!-- About -->
+    <section *ngIf="activeSection === 'about'">
+      <h2>About</h2>
+      <div class="row">
+        <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.VERSION.INFO' | transloco }}</label></div>
+        <span class="version" [class.outdated]="isVersionOutdated | async">{{ clientVersion$ | async }}</span>
       </div>
-      <div class="setting">
-        <label>{{ 'COMPONENT.SETTINGS.FONT_SIZE' | transloco }}</label>
-        <app-dropdown
-          class="settings-dropdown"
-          [ngModel]="settings.fontSize | async"
-          (ngModelChange)="settings.fontSize.next($event)"
-        >
-          <app-dropdown-option
-            *ngFor="let size of availableFontSizes"
-            [text]="size.label"
-            [value]="size.id"
-          ></app-dropdown-option>
-        </app-dropdown>
-      </div>
-    </section>
-
-    <section>
-      <h2>{{ 'COMPONENT.SETTINGS.PARTY' | transloco }}</h2>
-      <div class="setting">
-        <label for="showParty">{{
-          'COMPONENT.SETTINGS.SHOW_PARTY' | transloco
-        }}</label>
-        <input
-          type="checkbox"
-          id="showParty"
-          [ngModel]="settings.isPartyShown | async"
-          (ngModelChange)="settings.isPartyShown.next($event)"
-        />
-      </div>
-      <div class="setting">
-        <label for="autoHideParty">{{
-          'COMPONENT.SETTINGS.AUTO_HIDE_PARTY' | transloco
-        }}</label>
-        <input
-          type="checkbox"
-          id="autoHideParty"
-          [ngModel]="settings.autoHideParty | async"
-          (ngModelChange)="settings.autoHideParty.next($event)"
-        />
-      </div>
-      <div class="setting">
-        <label>{{
-          'COMPONENT.SETTINGS.AUTO_HIDE_PARTY_LENGTH' | transloco
-        }}</label>
-        <app-dropdown
-          [disabled]="!(settings.autoHideParty | async)"
-          [ngModel]="settings.autoHideTime | async"
-          (ngModelChange)="settings.autoHideTime.next($event)"
-        >
-          <app-dropdown-option
-            *ngFor="let time of availableAutoHideTimes"
-            [text]="'COMPONENT.SETTINGS.LENGTH'"
-            [value]="time"
-          ></app-dropdown-option>
-        </app-dropdown>
-      </div>
-      <div class="setting">
-        <label>{{ 'COMPONENT.SETTINGS.PARTY_ANCHOR' | transloco }}</label>
-        <app-dropdown
-          [ngModel]="settings.partyAnchor | async"
-          (ngModelChange)="settings.partyAnchor.next($event)"
-        >
-          <app-dropdown-option
-            *ngFor="let anchor of availablePartyAnchors"
-            [text]="anchor.label"
-            [value]="anchor.id"
-          ></app-dropdown-option>
-        </app-dropdown>
-      </div>
-      <div class="setting">
-        <label for="partyAnchorOffsetX">{{
-          'COMPONENT.SETTINGS.PARTY_ANCHOR_OFFSET_X' | transloco
-        }}</label>
-        <input
-          type="range"
-          id="partyAnchorOffsetX"
-          min="0"
-          max="84"
-          step="1"
-          [ngModel]="settings.partyAnchorOffsetX | async"
-          (ngModelChange)="settings.partyAnchorOffsetX.next($event)"
-        />
-      </div>
-      <div class="setting">
-        <label for="partyAnchorOffsetY">{{
-          'COMPONENT.SETTINGS.PARTY_ANCHOR_OFFSET_Y' | transloco
-        }}</label>
-        <input
-          type="range"
-          id="partyAnchorOffsetY"
-          min="2"
-          max="50"
-          step="1"
-          [ngModel]="settings.partyAnchorOffsetY | async"
-          (ngModelChange)="settings.partyAnchorOffsetY.next($event)"
-        />
-      </div>
-    </section>
-
-    <section>
-      <h2>{{ 'COMPONENT.SETTINGS.DEBUG' | transloco }}</h2>
-      <div class="setting">
-        <label for="showDebug">{{
-          'COMPONENT.SETTINGS.SHOW_DEBUG_INFO' | transloco
-        }}</label>
-        <input
-          type="checkbox"
-          id="showDebug"
-          [ngModel]="settings.isDebugShown | async"
-          (ngModelChange)="settings.isDebugShown.next($event)"
-        />
-      </div>
+      <p *ngIf="isVersionOutdated | async" class="warning">{{ 'COMPONENT.SETTINGS.VERSION.OUTDATED' | transloco }}</p>
     </section>
   </div>
 </div>
 
-<div class="actions">
-  <button data-style-ornament="simple" (click)="resetDefaults()">Defaults</button>
-  <button data-style-ornament="simple" class="btnClose" (click)="close()">Close</button>
-</div>
+<footer class="actions">
+  <span class="autosave">Changes apply and save immediately.</span>
+  <button data-style-ornament="simple" (click)="resetDefaults()">Restore defaults</button>
+  <button data-style-ornament="simple" class="btnClose" (click)="close()">Done</button>
+</footer>
 
 <div class="display-confirm-backdrop" *ngIf="displayPreviewSeconds">
   <div class="display-confirm" role="dialog" aria-modal="true" aria-labelledby="display-confirm-title">
     <h2 id="display-confirm-title">Keep these display settings?</h2>
-    <p>The previous resolution and window mode will be restored in {{ displayPreviewSeconds }} seconds.</p>
+    <p>Reverting to the previous resolution and window mode in {{ displayPreviewSeconds }} seconds.</p>
     <div class="confirm-actions">
       <button data-style-ornament="simple" (click)="revertDisplaySettings()">Revert</button>
       <button data-style-ornament="simple" (click)="keepDisplaySettings()">Keep changes</button>

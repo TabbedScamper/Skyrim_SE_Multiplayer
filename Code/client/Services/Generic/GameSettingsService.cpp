@@ -9,6 +9,7 @@
 #include <Forms/TESForm.h>
 #include <DefaultObjectManager.h>
 #include <Games/Skyrim/Interface/MainMenuIntegration.h>
+#include <Games/Skyrim/Audio/AudioDeviceSelection.h>
 #include <OverlayApp.hpp>
 
 #include <d3d11.h>
@@ -350,6 +351,7 @@ void GameSettingsService::PreviewSetting(const String& acName, const String& acV
         else if (name == "generalSubtitles") m_preview.GeneralSubtitles = value == "true" || value == "1";
         else if (name == "alwaysRun") m_preview.AlwaysRun = value == "true" || value == "1";
         else if (name == "controllerRumble") m_preview.ControllerRumble = value == "true" || value == "1";
+        else if (name == "audioDevice") m_preview.AudioDevice = value;
 
         ApplyRuntime(m_preview, display);
         if (display)
@@ -693,6 +695,7 @@ GameSettingsSnapshot GameSettingsService::ReadSettings() const noexcept
     result.GeneralSubtitles = GetPrivateProfileIntW(L"Interface", L"bGeneralSubtitles", 1, path.c_str()) != 0;
     result.AlwaysRun = GetPrivateProfileIntW(L"Controls", L"bAlwaysRunByDefault", 1, path.c_str()) != 0;
     result.ControllerRumble = GetPrivateProfileIntW(L"Controls", L"bGamePadRumble", 1, path.c_str()) != 0;
+    result.AudioDevice = AudioDeviceSelection::GetPreferredDevice();
 
     if (auto* pRenderer = BSGraphics::GetRendererData())
     {
@@ -850,6 +853,8 @@ void GameSettingsService::Persist(const GameSettingsSnapshot& acSettings) const 
     WriteInt(path, L"Interface", L"bGeneralSubtitles", acSettings.GeneralSubtitles);
     WriteInt(path, L"Controls", L"bAlwaysRunByDefault", acSettings.AlwaysRun);
     WriteInt(path, L"Controls", L"bGamePadRumble", acSettings.ControllerRumble);
+    if (acSettings.AudioDevice != AudioDeviceSelection::GetPreferredDevice())
+        AudioDeviceSelection::SetPreferredDevice(acSettings.AudioDevice);
 }
 
 void GameSettingsService::SendSettings(const GameSettingsSnapshot& acSettings, bool aDefaults) const noexcept
@@ -890,6 +895,8 @@ void GameSettingsService::SendSettings(const GameSettingsSnapshot& acSettings, b
         resolutions = currentResolution + '|' + resolutions;
     arguments->SetString(19, resolutions);
     arguments->SetBool(20, aDefaults);
+    arguments->SetString(21, acSettings.AudioDevice);
+    arguments->SetString(22, AudioDeviceSelection::OutputsJson());
     m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("gameSettings", arguments);
 }
 

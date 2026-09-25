@@ -27,6 +27,7 @@ struct GameSettingsSnapshot
     bool GeneralSubtitles{true};
     bool AlwaysRun{true};
     bool ControllerRumble{true};
+    std::string AudioDevice; // MMDevice endpoint ID; empty = Windows default
 };
 
 struct GameSettingsService
