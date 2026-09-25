@@ -153,6 +153,46 @@ void CharacterService::OnUpdate(const UpdateEvent&) const noexcept
 {
     ProcessFactionsChanges();
     ProcessMovementChanges();
+    EnforceLeaderAuthority();
+}
+
+// During a shared session the leader simulates every NPC it has in range; a follower only keeps
+// NPCs the leader cannot reach. Assignment races at a new game start otherwise leave followers
+// owning scene NPCs and vehicles (measured: the follower owned a cart horse, pulling against its
+// own host-driven cart, so the leader's cart froze mid-road; and Lokir, stalling the cart scene).
+void CharacterService::EnforceLeaderAuthority() const noexcept
+{
+    static auto s_next = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now < s_next)
+        return;
+    s_next = now + std::chrono::seconds(1);
+
+    auto& partyService = m_world.GetPartyService();
+    const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
+    std::vector<std::pair<Player*, entt::entity>> transfers;
+    for (auto entity : view)
+    {
+        const auto& ownerComponent = view.get<OwnerComponent>(entity);
+        const auto& characterComponent = view.get<CharacterComponent>(entity);
+        Player* pOwner = ownerComponent.GetOwner();
+        if (!pOwner || characterComponent.IsPlayer() || !partyService.IsPlayerInParty(pOwner) || partyService.IsPlayerLeader(pOwner))
+            continue;
+        auto* pParty = partyService.GetPlayerParty(pOwner);
+        if (!pParty || pParty->SessionState < 1)
+            continue;
+        Player* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
+        if (!pLeader)
+            continue;
+        const auto& cellIdComponent = view.get<CellIdComponent>(entity);
+        if (cellIdComponent.Cell == GameId{} || pLeader->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
+            transfers.emplace_back(pLeader, entity);
+    }
+    for (const auto& [pLeader, entity] : transfers)
+    {
+        spdlog::info("Leader authority: actor {:X} moves from a follower to the leader", World::ToInteger(entity));
+        TransferOwnership(pLeader, entity, OwnershipTransferReason::LeaderAssignment);
+    }
 }
 
 void CharacterService::OnCharacterExteriorCellChange(const CharacterExteriorCellChangeEvent& acEvent) const noexcept
@@ -488,6 +528,7 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
 
     NotifyCorpseRagdoll notify{};
     notify.ServerId = acMessage.Packet.ServerId;
+    notify.Tick = acMessage.Packet.Tick;
     notify.Bodies = bodies;
     GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
 }
@@ -992,7 +1033,14 @@ bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aE
     if (characterComponent.IsPlayer())
         return reject("a player actor cannot be claimed");
 
-    if (!apPlayer->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
+    // An actor whose stored cell is unknown was registered by a PC whose cell had not loaded yet
+    // (a follower at the first frame of a new game: Lokir came in at cell 0, position 0,0,0). Nothing
+    // is ever in range of that cell, so the leader's claim was rejected and the follower kept a
+    // scene actor the leader's quest was waiting on (the intro cart scene stalled). The leader may
+    // always claim such an actor.
+    const bool unknownCell = cellIdComponent.Cell == GameId{};
+    if (!apPlayer->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()) &&
+        !(unknownCell && m_world.GetPartyService().IsPlayerLeader(apPlayer)))
         return reject("the actor is out of range");
 
     auto& partyService = m_world.GetPartyService();

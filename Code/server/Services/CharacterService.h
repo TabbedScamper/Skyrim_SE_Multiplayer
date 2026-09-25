@@ -51,6 +51,7 @@ protected:
     };
 
     void OnUpdate(const UpdateEvent& acEvent) const noexcept;
+    void EnforceLeaderAuthority() const noexcept;
     void OnCharacterExteriorCellChange(const CharacterExteriorCellChangeEvent& acEvent) const noexcept;
     void OnCharacterInteriorCellChange(const CharacterInteriorCellChangeEvent& acEvent) const noexcept;
     void OnAssignCharacterRequest(const PacketEvent<AssignCharacterRequest>& acMessage) const noexcept;
