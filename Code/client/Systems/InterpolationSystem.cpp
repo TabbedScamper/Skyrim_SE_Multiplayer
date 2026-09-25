@@ -70,11 +70,31 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                 apActor->actorState.flags1, sitSleepState == 2 || sitSleepState == 3);
         }
     }
-    if (sitSleepState == 2 || sitSleepState == 3)
+    // Only while this PC's seat is the owner's: this PC's AI picks its own seat, and moved the front
+    // cart's passengers into the follower's cart. A seat far from the owner's position is wrong;
+    // the owner's position (and pose) place the actor then.
+    const float seatError = std::sqrt((apActor->position.x - position.x) * (apActor->position.x - position.x) +
+        (apActor->position.y - position.y) * (apActor->position.y - position.y) +
+        (apActor->position.z - position.z) * (apActor->position.z - position.z));
+    // Off: this PC's AI chose other seats than the owner's (the front cart's passengers in the
+    // follower's cart), and correcting a wrong seat flipped the actor 280 units every frame between
+    // the seat and the owner's position. The owner's position places seated actors too.
+    constexpr bool kSeatPlacesActor = false;
+    if (kSeatPlacesActor && (sitSleepState == 2 || sitSleepState == 3) && seatError < 100.f)
     {
         const auto& seated = aTick >= second.Tick ? second : first;
         apActor->LoadAnimationVariables(seated.Variables);
         return;
+    }
+    {
+        // Diagnostic: a jump of more than 150 units in one placement.
+        const float jumpX = position.x - apActor->position.x, jumpY = position.y - apActor->position.y,
+                    jumpZ = position.z - apActor->position.z;
+        const float jump = std::sqrt(jumpX * jumpX + jumpY * jumpY + jumpZ * jumpZ);
+        if (jump > 150.f)
+            spdlog::info("Remote actor {:X} placed {:.0f} u away from where it was ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}), "
+                "sit state {}", apActor->formID, jump, apActor->position.x, apActor->position.y, apActor->position.z, position.x,
+                position.y, position.z, sitSleepState);
     }
     apActor->ForcePosition(position);
     const auto& discrete = aTick >= second.Tick ? second : first;

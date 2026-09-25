@@ -39,6 +39,16 @@ ActorValueService::ActorValueService(World& aWorld, entt::dispatcher& aDispatche
     m_dispatcher.sink<NotifyDeathStateChange>().connect<&ActorValueService::OnDeathStateChange>(this);
 }
 
+namespace
+{
+struct PendingDeath
+{
+    uint32_t FormId{};
+    uint64_t DueMs{};
+};
+std::vector<PendingDeath> s_pendingDeaths;
+} // namespace
+
 void ActorValueService::CreateActorValuesComponent(const entt::entity aEntity, Actor* apActor) noexcept
 {
     auto& actorValuesComponent = m_world.emplace_or_replace<ActorValuesComponent>(aEntity);
@@ -95,6 +105,21 @@ void ActorValueService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcep
 
 void ActorValueService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
+    if (!s_pendingDeaths.empty())
+    {
+        const auto now = GetTickCount64();
+        for (auto it = s_pendingDeaths.begin(); it != s_pendingDeaths.end();)
+        {
+            if (now < it->DueMs)
+            {
+                ++it;
+                continue;
+            }
+            if (auto* pActor = Cast<Actor>(TESForm::GetById(it->FormId)); pActor && !pActor->IsDead())
+                pActor->Kill();
+            it = s_pendingDeaths.erase(it);
+        }
+    }
     RunSmallHealthUpdates();
     RunDeathStateUpdates();
     RunActorValuesUpdates();
@@ -402,5 +427,16 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
         return;
 
     if (pActor->IsDead() != acMessage.IsDead)
-        acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
+    {
+        // A death is shown on the presentation timeline, like the owner's fall: applied on arrival,
+        // this copy died about the presentation delay early and lay where it was (96 units from
+        // where the owner's ragdoll starts for the running intro prisoner) until its ragdoll caught up.
+        if (acMessage.IsDead)
+        {
+            const uint64_t delay = World::Get().GetCharacterService().GetPresentationDelayMs();
+            s_pendingDeaths.push_back({pActor->formID, GetTickCount64() + delay});
+            return;
+        }
+        pActor->Respawn();
+    }
 }

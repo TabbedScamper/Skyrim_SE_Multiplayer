@@ -230,17 +230,7 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
     // A new ragdoll event (first sample, or after a gap): knock this copy into ragdoll now, on
     // receipt, so its bodies follow from the first frame. Waiting for the death or knock sync left
     // the intro prisoner animated on the follower for the whole fall (24 s behind the owner).
-    if (!ragdoll.Knocked)
-    {
-        ragdoll.Knocked = true;
-        if (auto* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
-            pActor && pActor->GetNiNode() && !PhysicsOwnsSkeleton(pActor) && pActor->currentProcess)
-        {
-            pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
-            spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll to follow the owner (sample tick {}, presentation {})",
-                pActor->formID, acMessage.Tick, PoseCopyAuthority::GetPresentationTick());
-        }
-    }
+    // The knock itself waits for the presentation time to reach the first sample (ApplyRemote).
     auto& sample = ragdoll.Ring[ragdoll.RingNext];
     sample.Tick = acMessage.Tick;
     std::copy(std::begin(acMessage.Origin), std::end(acMessage.Origin), std::begin(sample.Origin));
@@ -343,8 +333,24 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
         auto* pActor = Utils::GetByServerId<Actor>(it->first);
         if (!pActor || !pActor->GetNiNode())
             continue;
-        // Not ragdolling here yet (the knock is on its way): nothing to place.
+        // Not ragdolling here yet: knock this copy when the presentation time reaches the owner's first
+        // ragdoll sample, so it falls from the owner's pose at that moment. Knocked on receipt, it
+        // went ragdoll 255 ms early and its bodies jumped to a pose the owner reached later (156
+        // units for the running intro prisoner).
         if (!PhysicsOwnsSkeleton(pActor))
+        {
+            if (!ragdoll.Knocked && presentation >= sample(0).Tick && pActor->currentProcess)
+            {
+                ragdoll.Knocked = true;
+                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+                spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll at the owner's first sample (tick {}, presentation {})",
+                    pActor->formID, sample(0).Tick, presentation);
+            }
+            continue;
+        }
+        // Ragdolling here before the owner's ragdoll starts on this PC's timeline (the death sync
+        // arrives as early as the first sample): leave the bodies until the presentation time gets there.
+        if (presentation < sample(0).Tick)
             continue;
         Vector<RigidBody*> bodies;
         if (!GetRagdollBodies(pActor, bodies))

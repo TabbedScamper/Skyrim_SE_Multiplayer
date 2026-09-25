@@ -699,6 +699,14 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
 
     Inventory currentInventory = GetActorInventory();
 
+    // Already what the owner has: re-applying removes every item and re-equips it (and rebuilds the
+    // 3D), which showed as the actor going naked for a moment on every ownership handover.
+    if (currentInventory == acInventory)
+    {
+        spdlog::info("Inventory for actor {:X} already matches; left as is", formID);
+        return;
+    }
+
     if (!this->GetExtension()->IsPlayer() && currentInventory.ContainsQuestItems())
         SetInventoryRetainingQuestItems(currentInventory, acInventory);
     else
@@ -728,7 +736,12 @@ void Actor::FlushPendingReset3D() noexcept
         }
         // Actor::DoReset3D(true) (ID 40255) drops every biped part and rebuilds them from what is worn.
         auto* pActor = Cast<Actor>(TESForm::GetById(it->first));
-        if (pActor && !pActor->GetExtension()->IsPlayer() && !pActor->IsDead() && pActor->GetNiNode())
+        // Not while dying, dead, knocked down or ragdolling (ActorState1 lifeState bits 21-24,
+        // knockState 25-27): the rebuild drew the falling intro prisoner naked for a moment and put
+        // his ragdoll back at the actor's position.
+        const uint32_t flags1 = pActor ? pActor->actorState.flags1 : 0;
+        const bool physicsOwned = ((flags1 >> 21) & 0xF) != 0 || ((flags1 >> 25) & 0x7) != 0;
+        if (pActor && !physicsOwned && !pActor->GetExtension()->IsPlayer() && !pActor->IsDead() && pActor->GetNiNode())
         {
             TP_THIS_FUNCTION(TDoReset3D, void, Actor, bool aRebuildParts);
             POINTER_SKYRIMSE(TDoReset3D, s_doReset3D, 40255);
