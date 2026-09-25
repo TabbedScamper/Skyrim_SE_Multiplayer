@@ -32,9 +32,14 @@ class Setting<T> extends BehaviorSubject<T> {
   constructor(
     private readonly storeService: StoreService,
     private storeKey: string,
-    defaultValue: T,
+    readonly defaultValue: T,
   ) {
     super(defaultValue);
+  }
+
+  /** Back to the value it has on a fresh install. */
+  reset(): void {
+    this.next(this.defaultValue);
   }
 
   public next(value: T) {

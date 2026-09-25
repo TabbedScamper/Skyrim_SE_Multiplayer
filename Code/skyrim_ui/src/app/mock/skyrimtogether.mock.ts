@@ -227,7 +227,7 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
     this.requestGameSettings();
   }
 
-  resetGameSettings(): void {
+  resetGameSettings(_section?: string): void {
     this.requestGameSettings();
   }
 

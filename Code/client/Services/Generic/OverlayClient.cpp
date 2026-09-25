@@ -187,7 +187,8 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
         else if (eventName == "revertGameSettings")
             World::Get().GetGameSettingsService().QueueRevertSettings();
         else if (eventName == "resetGameSettings")
-            World::Get().GetGameSettingsService().QueueResetSettings();
+            World::Get().GetGameSettingsService().QueueResetSettings(
+                eventArgs->GetSize() > 0 ? eventArgs->GetString(0).ToString() : std::string{});
         else if (eventName == "submitDebugFeedback")
         {
             const bool looksRight = eventArgs->GetBool(0);

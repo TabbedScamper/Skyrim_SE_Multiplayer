@@ -214,3 +214,29 @@ $-separator: url('../../../assets/images/separator/single.svg');
   text-align: center;
   font-size: max(13px, 0.9em);
 }
+
+// ---- important actions left unassigned ----
+// The one colour on the page: a muted blood red, so a missing essential reads at a glance.
+$-missing: #d8584a;
+
+.missing-summary {
+  margin: 0.4rem 0;
+  padding: 0.45rem 0.7rem;
+  border-left: 3px solid $-missing;
+  background: rgba(216, 88, 74, 0.12);
+  color: #f0b4ac;
+  font-size: max(13px, 0.9em);
+}
+
+.binding.missing {
+  .action-name {
+    color: $-missing;
+    text-shadow: 0 0 0.35rem rgba(216, 88, 74, 0.45);
+  }
+
+  .key {
+    opacity: 1;
+    color: $-missing;
+    font-style: italic;
+  }
+}

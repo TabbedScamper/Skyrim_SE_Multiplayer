@@ -222,8 +222,9 @@
 </div>
 
 <footer class="actions">
-  <span class="autosave">Changes apply and save immediately.</span>
-  <button data-style-ornament="simple" data-nav-y="Restore defaults" (click)="resetDefaults()">Restore defaults</button>
+  <span class="autosave" [class.done]="restoredMessage">{{ restoredMessage || 'Changes apply and save immediately.' }}</span>
+  <button *ngIf="restoreDescription" data-style-ornament="simple" [attr.data-nav-y]="'Restore ' + sectionLabel + ' defaults'"
+    (click)="resetDefaults()">Restore {{ sectionLabel }} defaults</button>
   <button data-style-ornament="simple" class="btnClose" (click)="close()">Done</button>
 </footer>
 
@@ -232,8 +233,19 @@
     <h2 id="display-confirm-title">Keep these display settings?</h2>
     <p>Reverting to the previous resolution and window mode in {{ displayPreviewSeconds }} seconds.</p>
     <div class="confirm-actions">
-      <button data-style-ornament="simple" data-nav-x="Revert" (click)="revertDisplaySettings()">Revert</button>
+      <button data-style-ornament="simple" data-nav-cancel="Revert" (click)="revertDisplaySettings()">Revert</button>
       <button data-style-ornament="simple" data-nav-default (click)="keepDisplaySettings()">Keep changes</button>
+    </div>
+  </div>
+</div>
+
+<div class="display-confirm-backdrop" *ngIf="confirmRestore" data-nav-scope="modal">
+  <div class="display-confirm" role="dialog" aria-modal="true" aria-labelledby="restore-confirm-title">
+    <h2 id="restore-confirm-title">Restore {{ sectionLabel }} defaults?</h2>
+    <p>{{ restoreDescription }}</p>
+    <div class="confirm-actions">
+      <button data-style-ornament="simple" data-nav-default data-nav-cancel="Cancel" (click)="cancelRestore()">Cancel</button>
+      <button data-style-ornament="simple" data-nav-a="Restore" (click)="confirmRestoreDefaults()">Restore defaults</button>
     </div>
   </div>
 </div>

@@ -58,29 +58,31 @@
   </svg>
   <p *ngIf="model.note" class="hint center">{{ model.note }}</p>
 
+  <p *ngIf="missing.length" class="missing-summary" role="alert">Not assigned: {{ missingNames() }}. Choose a button for each, or restore the Controls defaults.</p>
   <p class="hint center">Choose an action, then press the button you want for it.</p>
   <div class="bindings">
-    <div *ngFor="let row of actions" class="binding" [class.lit]="isFocused(row)">
+    <div *ngFor="let row of actions" class="binding" [class.lit]="isFocused(row)" [class.missing]="isMissing(row, 'controller')">
       <span class="action-name">{{ row.label }}</span>
       <button class="key" [class.capturing]="isCapturing(row.event, InputDevice.Gamepad)"
         (click)="startCapture(row, InputDevice.Gamepad)">
-        {{ isCapturing(row.event, InputDevice.Gamepad) ? 'Press a button...' : keyName(InputDevice.Gamepad, row.gamepad) }}
+        {{ isCapturing(row.event, InputDevice.Gamepad) ? 'Press a button...' : isMissing(row, 'controller') ? 'Not assigned' : keyName(InputDevice.Gamepad, row.gamepad) }}
       </button>
     </div>
   </div>
 </ng-container>
 
 <ng-container *ngIf="state && mode === 'keyboard'">
+  <p *ngIf="missing.length" class="missing-summary" role="alert">Not assigned: {{ missingNames() }}. Choose a key or mouse button for each, or restore the Controls defaults.</p>
   <p class="hint center">Choose a key or mouse slot, then press the key or button you want.</p>
   <div class="bindings keyboard">
     <div class="binding head">
       <span>Action</span><span>Keyboard</span><span>Mouse</span>
     </div>
-    <div *ngFor="let row of actions" class="binding">
+    <div *ngFor="let row of actions" class="binding" [class.missing]="isMissing(row, 'keyboard')">
       <span class="action-name">{{ row.label }}</span>
       <button class="key" [class.capturing]="isCapturing(row.event, InputDevice.Keyboard)"
         (click)="startCapture(row, InputDevice.Keyboard)">
-        {{ isCapturing(row.event, InputDevice.Keyboard) ? 'Press a key...' : keyName(InputDevice.Keyboard, row.keyboard) }}
+        {{ isCapturing(row.event, InputDevice.Keyboard) ? 'Press a key...' : isMissing(row, 'keyboard') ? 'Not assigned' : keyName(InputDevice.Keyboard, row.keyboard) }}
       </button>
       <button class="key" [class.capturing]="isCapturing(row.event, InputDevice.Mouse)"
         (click)="startCapture(row, InputDevice.Mouse)">

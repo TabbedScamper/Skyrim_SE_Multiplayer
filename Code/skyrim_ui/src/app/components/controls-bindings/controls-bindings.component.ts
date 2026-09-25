@@ -14,6 +14,17 @@ interface ActionRow {
   gamepad?: number;
 }
 
+/**
+ * Actions the game cannot really be played without, per device. Taken from the
+ * vanilla defaults (Interface/Controls/PC and 360 ControlMap.txt): on a controller
+ * the stick moves, so Forward/Back/Strafe are keyboard-only.
+ */
+const ESSENTIAL_CONTROLLER = new Set([
+  'Activate', 'Ready Weapon', 'Left Attack/Block', 'Right Attack/Block', 'Jump', 'Sprint', 'Sneak', 'Shout',
+  'Tween Menu', 'Journal', 'Favorites',
+]);
+const ESSENTIAL_KEYBOARD = new Set([...ESSENTIAL_CONTROLLER, 'Forward', 'Back', 'Strafe Left', 'Strafe Right']);
+
 /** Actions in the order players look for them; anything else follows alphabetically. */
 const ACTION_ORDER = [
   'Forward', 'Back', 'Strafe Left', 'Strafe Right', 'Jump', 'Sprint', 'Sneak', 'Run', 'Toggle Always Run', 'Auto-Move',
@@ -132,6 +143,26 @@ export class ControlsBindingsComponent implements OnInit, OnDestroy {
       .filter(b => b.device === InputDevice.Gamepad && b.key === key)
       .map(b => eventLabel(b.event));
     return names.length ? [...new Set(names)].join(', ') : '-';
+  }
+
+  private static unbound(key?: number): boolean {
+    return key === undefined || key === 0xff || key === 0xffff;
+  }
+
+  /** An important action with nothing assigned on the page's device (keyboard page: neither key nor mouse button). */
+  isMissing(row: ActionRow, mode: 'controller' | 'keyboard' = this.mode): boolean {
+    if (mode === 'controller') return ESSENTIAL_CONTROLLER.has(row.event) && ControlsBindingsComponent.unbound(row.gamepad);
+    return ESSENTIAL_KEYBOARD.has(row.event) && ControlsBindingsComponent.unbound(row.keyboard) &&
+      ControlsBindingsComponent.unbound(row.mouse);
+  }
+
+  /** Important actions left unassigned on the page being shown. */
+  get missing(): ActionRow[] {
+    return this.actions.filter(row => this.isMissing(row));
+  }
+
+  missingNames(): string {
+    return this.missing.map(row => row.label).join(', ');
   }
 
   keyName(device: InputDevice, key?: number): string {

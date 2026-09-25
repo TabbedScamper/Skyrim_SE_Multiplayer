@@ -233,8 +233,69 @@ export class SettingsComponent implements OnDestroy {
     this.sound.play(Sound.Cancel);
   }
 
+  /** What the section's restore button resets, shown in its confirmation. Absent: the section has nothing to restore. */
+  private static readonly restoreScope: Partial<Record<SettingsSection, string>> = {
+    display: 'Vertical sync and brightness. Your display mode, monitor and resolution stay as they are.',
+    audio: 'Every volume, the output device (back to the Windows default) and the interface sounds.',
+    controls: 'Mouse and controller sensitivity, invert Y, always run, vibration, and every keyboard, mouse and controller binding (Skyrim\'s default controls).',
+    accessibility: 'Dialogue and general subtitles.',
+    party: 'Every party HUD option.',
+  };
+
+  get restoreDescription(): string | undefined {
+    return SettingsComponent.restoreScope[this.activeSection];
+  }
+
+  get sectionLabel(): string {
+    return this.sections.find(section => section.id === this.activeSection)?.label ?? '';
+  }
+
+  /** Section awaiting confirmation in the restore dialog. */
+  public confirmRestore?: SettingsSection;
+  /** Shown in the footer after a restore, in place of the autosave note. */
+  public restoredMessage = '';
+  private restoredTimer?: ReturnType<typeof setTimeout>;
+
   resetDefaults(): void {
-    this.client.resetGameSettings();
+    if (!this.restoreDescription) return;
+    this.confirmRestore = this.activeSection;
+    this.sound.play(Sound.Focus);
+  }
+
+  cancelRestore(): void {
+    this.confirmRestore = undefined;
+    this.sound.play(Sound.Cancel);
+  }
+
+  confirmRestoreDefaults(): void {
+    const section = this.confirmRestore;
+    this.confirmRestore = undefined;
+    if (!section) return;
+    const ui = this.settingService.settings;
+    switch (section) {
+      case 'display':
+      case 'accessibility':
+      case 'controls':
+        this.client.resetGameSettings(section);
+        break;
+      case 'audio':
+        this.client.resetGameSettings(section);
+        ui.muted.reset();
+        ui.volume.reset();
+        break;
+      case 'party':
+        ui.isPartyShown.reset();
+        ui.autoHideParty.reset();
+        ui.autoHideTime.reset();
+        ui.partyAnchor.reset();
+        ui.partyAnchorOffsetX.reset();
+        ui.partyAnchorOffsetY.reset();
+        break;
+    }
+    this.sound.play(Sound.Ok);
+    this.restoredMessage = `${this.sections.find(s => s.id === section)?.label ?? 'Section'} restored to defaults.`;
+    if (this.restoredTimer) clearTimeout(this.restoredTimer);
+    this.restoredTimer = setTimeout(() => (this.restoredMessage = ''), 4000);
   }
 
   private startDisplayCountdown(): void {
@@ -267,7 +328,10 @@ export class SettingsComponent implements OnDestroy {
   @HostListener('window:keydown.escape', ['$event'])
   // @ts-ignore
   private activate(event: KeyboardEvent): void {
-    if (this.displayPreviewSeconds) this.revertDisplaySettings();
+    // Only the Settings window on screen answers (another instance can exist hidden).
+    if (!this.elementRef.nativeElement.getClientRects().length) return;
+    if (this.confirmRestore) this.cancelRestore();
+    else if (this.displayPreviewSeconds) this.revertDisplaySettings();
     else this.close();
     event.stopPropagation();
     event.preventDefault();

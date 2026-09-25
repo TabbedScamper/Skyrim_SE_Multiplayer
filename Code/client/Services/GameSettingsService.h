@@ -42,7 +42,8 @@ struct GameSettingsService
     void ConfirmDisplaySettings() noexcept;
     void ApplySettings(const GameSettingsSnapshot& acSettings) noexcept;
     void RevertSettings() noexcept;
-    void ResetSettings() noexcept;
+    // aSection: display, audio, controls, accessibility; empty = every game setting (not display mode/size).
+    void ResetSettings(const std::string& acSection = {}) noexcept;
     void ToggleWindowMode() noexcept;
     void RecordDebugFeedback(bool aLooksRight, const String& acNote) noexcept;
     [[nodiscard]] std::filesystem::path CaptureTestScreenshot() const noexcept;
@@ -55,7 +56,7 @@ struct GameSettingsService
     void QueueConfirmDisplaySettings() noexcept;
     void QueueApplySettings(const GameSettingsSnapshot& acSettings) noexcept;
     void QueueRevertSettings() noexcept;
-    void QueueResetSettings() noexcept;
+    void QueueResetSettings(const std::string& acSection = {}) noexcept;
     // Key bindings (ControlBindings) and live audio previews.
     void QueueRequestControlBindings() noexcept;
     void QueueStartControlCapture(const String& acEvent, int aDevice) noexcept;

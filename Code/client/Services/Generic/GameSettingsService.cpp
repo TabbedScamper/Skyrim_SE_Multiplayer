@@ -313,9 +313,9 @@ void GameSettingsService::QueueRevertSettings() noexcept
     WakeWindowThread();
 }
 
-void GameSettingsService::QueueResetSettings() noexcept
+void GameSettingsService::QueueResetSettings(const std::string& acSection) noexcept
 {
-    m_mainLoopTasks.Add([this]() { ResetSettings(); });
+    m_mainLoopTasks.Add([this, acSection]() { ResetSettings(acSection); });
     WakeWindowThread();
 }
 
@@ -511,15 +511,43 @@ void GameSettingsService::RevertSettings() noexcept
     SendSettings(m_preview);
 }
 
-void GameSettingsService::ResetSettings() noexcept
+void GameSettingsService::ResetSettings(const std::string& acSection) noexcept
 {
-    GameSettingsSnapshot defaults{};
-    const auto display = m_hasBaseline ? m_baseline : ReadSettings();
-    defaults.DisplayMode = display.DisplayMode;
-    defaults.Monitor = display.Monitor;
-    defaults.Width = display.Width;
-    defaults.Height = display.Height;
-    m_preview = defaults;
+    // Only the named section's values return to their defaults; everything else
+    // (and always the display mode, monitor and size) keeps its current value.
+    const GameSettingsSnapshot defaults{};
+    GameSettingsSnapshot result = m_hasBaseline ? m_baseline : ReadSettings();
+    const bool all = acSection.empty();
+    if (all || acSection == "display")
+    {
+        result.VSync = defaults.VSync;
+        result.Gamma = defaults.Gamma;
+    }
+    if (all || acSection == "audio")
+    {
+        result.MasterVolume = defaults.MasterVolume;
+        result.FootstepsVolume = defaults.FootstepsVolume;
+        result.VoiceVolume = defaults.VoiceVolume;
+        result.MusicVolume = defaults.MusicVolume;
+        result.EffectsVolume = defaults.EffectsVolume;
+        result.AudioDevice = defaults.AudioDevice;
+    }
+    if (all || acSection == "controls")
+    {
+        result.MouseSensitivity = defaults.MouseSensitivity;
+        result.GamepadSensitivity = defaults.GamepadSensitivity;
+        result.InvertY = defaults.InvertY;
+        result.AlwaysRun = defaults.AlwaysRun;
+        result.ControllerRumble = defaults.ControllerRumble;
+        ControlBindings::ResetToDefaults();
+    }
+    if (all || acSection == "accessibility")
+    {
+        result.DialogueSubtitles = defaults.DialogueSubtitles;
+        result.GeneralSubtitles = defaults.GeneralSubtitles;
+    }
+    spdlog::info("Restored defaults for {}", all ? "all game settings" : acSection);
+    m_preview = result;
     ApplyRuntime(m_preview, false);
     Persist(m_preview);
     m_baseline = m_preview;

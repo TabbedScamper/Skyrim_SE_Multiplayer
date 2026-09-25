@@ -22,6 +22,8 @@ type Direction = 'up' | 'down' | 'left' | 'right';
  * - `data-nav-default` is focused when the scope appears.
  * - `data-nav-x|y|start|view="Label"` binds that button to a click on the element.
  * - `data-nav-a="Label"` renames the A prompt for an element.
+ * - `data-nav-cancel="Label"` is the button B presses in that scope (a dialog's Cancel/Revert);
+ *   without one, B sends Escape to the menu (`data-nav-b` on the scope names what that does).
  *
  * Movement is spatial (nearest control in the pressed direction), sliders and
  * dropdowns change with left/right, B steps back one level, and the right
@@ -39,6 +41,8 @@ export class GamepadNavigationService {
     'button:not([disabled]), input:not([disabled]):not([type="hidden"]), app-dropdown:not(.disabled), summary, [data-nav-item]';
 
   private rowElement?: Element;
+  /** Where focus was when a dialog opened; it returns there when the dialog closes. */
+  private beforeModal?: { modal: HTMLElement; focus: HTMLElement };
   private scheduled = false;
   private modelRequested = false;
 
@@ -194,6 +198,12 @@ export class GamepadNavigationService {
     const tab = this.activeTab(scope);
     if (tab && current && !this.tabs(scope).includes(current)) {
       this.focus(tab, true, Sound.Cancel);
+      return;
+    }
+    // A dialog's own cancel button (data-nav-cancel) is exactly what its B prompt names.
+    const cancel = Array.from(scope.querySelectorAll<HTMLElement>('[data-nav-cancel]')).find(e => this.visible(e));
+    if (cancel) {
+      cancel.click();
       return;
     }
     // Leave the menu through its own Escape handling (reverts a pending display change, closes).
@@ -449,6 +459,14 @@ export class GamepadNavigationService {
 
   private update(): void {
     const scope = this.active$.value ? this.scope() : null;
+    if (scope?.dataset['navScope'] === 'modal' && this.beforeModal?.modal !== scope) {
+      const previous = document.activeElement as HTMLElement | null;
+      this.beforeModal = previous && !scope.contains(previous) ? { modal: scope, focus: previous } : undefined;
+    } else if (this.beforeModal && !document.contains(this.beforeModal.modal)) {
+      const { focus } = this.beforeModal;
+      this.beforeModal = undefined;
+      if (scope?.contains(focus) && this.visible(focus)) focus.focus({ preventScroll: true });
+    }
     let current = scope ? this.current(scope) : null;
     // A menu just opened (or the focused control disappeared): pick its default.
     if (scope && !current) {
@@ -479,7 +497,7 @@ export class GamepadNavigationService {
     if (!accept) {
       if (isDropdown) accept = open ? 'Choose' : 'Open';
       else if (current instanceof HTMLInputElement && current.type === 'checkbox') accept = current.checked ? 'Turn off' : 'Turn on';
-      else if (this.isTextField(current)) accept = 'Type';
+      else if (this.isTextField(current)) accept = 'Type (keyboard)';
       else if (current.tagName === 'SUMMARY') accept = (current.parentElement as HTMLDetailsElement).open ? 'Hide' : 'Show';
       else if (!isRange) accept = 'Select';
     }
@@ -487,7 +505,10 @@ export class GamepadNavigationService {
     if (isRange || (isDropdown && !open)) prompts.push({ button: 'lr', label: 'Adjust' });
 
     const tab = this.activeTab(scope);
-    const back = open ? 'Cancel' : tab && !this.tabs(scope).includes(current) ? 'Back' : 'Close';
+    // A dialog names what B does there (data-nav-b), e.g. Cancel or Revert.
+    const cancel = Array.from(scope.querySelectorAll<HTMLElement>('[data-nav-cancel]')).find(e => this.visible(e));
+    const back = open ? 'Cancel' : tab && !this.tabs(scope).includes(current) ? 'Back'
+      : cancel?.getAttribute('data-nav-cancel') || scope.getAttribute('data-nav-b') || 'Close';
     prompts.push({ button: 'b', label: back });
 
     for (const action of ['x', 'y', 'start', 'view']) {

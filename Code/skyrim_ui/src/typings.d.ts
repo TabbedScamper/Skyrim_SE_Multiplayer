@@ -491,7 +491,7 @@ interface SkyrimTogether {
 
   revertGameSettings(): void;
 
-  resetGameSettings(): void;
+  resetGameSettings(section?: string): void;
 
   openTitleOptions(): void;
 

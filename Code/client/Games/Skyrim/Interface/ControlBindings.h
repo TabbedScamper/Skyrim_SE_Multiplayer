@@ -24,6 +24,11 @@ std::string BindingsJson() noexcept;
 // is bound to acEvent. Esc cancels. Must run on the window thread.
 void StartCapture(const std::string& acEvent, Device aDevice) noexcept;
 void CancelCapture() noexcept;
+
+// Restores every keyboard, mouse and controller binding to Interface/Controls/PC/ControlMap.txt,
+// exactly as the vanilla Controls menu's "Defaults" does, then saves ControlMap_Custom.txt
+// and reports the new bindings. Must run on the window thread.
+bool ResetToDefaults() noexcept;
 bool IsCapturing() noexcept;
 
 // Fed from InputService (raw input) and the overlay's XInput poll. Return

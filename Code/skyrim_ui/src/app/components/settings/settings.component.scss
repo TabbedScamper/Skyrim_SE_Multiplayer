@@ -208,3 +208,8 @@ app-dropdown:focus {
   gap: 1rem;
   margin-top: 1.5rem;
 }
+
+// Footer note after a restore: confirms what just happened.
+.actions .autosave.done {
+  color: #fff;
+}

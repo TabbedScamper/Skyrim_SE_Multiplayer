@@ -354,8 +354,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.revertGameSettings();
   }
 
-  public resetGameSettings(): void {
-    skyrimtogether.resetGameSettings();
+  /** Restores one settings section (display, audio, controls, accessibility) or, without one, every game setting. */
+  public resetGameSettings(section = ''): void {
+    skyrimtogether.resetGameSettings(section);
   }
 
   public openTitleOptions(): void {

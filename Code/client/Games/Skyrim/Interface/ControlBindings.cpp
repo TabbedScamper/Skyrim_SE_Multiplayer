@@ -163,6 +163,42 @@ bool Remap(const std::string& acEvent, ControlBindings::Device aDevice, uint32_t
     return remapped;
 }
 
+// The vanilla Journal Menu's "ResetControlsToDefaults" GameDelegate callback
+// (FUN_1409a8730, disassembled live): reload the default ControlMap for all
+// devices (ID 68536 -> FUN_140cf17d0 with device 7), rebuild the derived
+// mappings (ID 68554), and, only when the byte at ID 383626 is set, remap the
+// user event at UserEvents (ID 402638) +0x28 to controller key 0x0C.
+// Vanilla saves when its menu closes; this saves right away (ID 68539).
+bool ResetBindingsNative() noexcept
+{
+    auto* pMap = ControlMapInstance();
+    if (!pMap)
+        return false;
+    using TLoadDefaults = void (*)(void*);
+    using TRebuild = void (*)(void*);
+    using TRemap = bool (*)(void*, const void*, uint32_t, uint32_t);
+    using TSave = void (*)(void*);
+    static VersionDbPtr<void> s_loadDefaults(68536);
+    static VersionDbPtr<void> s_rebuild(68554);
+    static VersionDbPtr<uint8_t> s_extraMapping(383626);
+    static VersionDbPtr<uint8_t*> s_userEvents(402638);
+    static VersionDbPtr<void> s_remap(68538);
+    static VersionDbPtr<void> s_save(68539);
+    auto* pLoad = reinterpret_cast<TLoadDefaults>(s_loadDefaults.GetPtr());
+    auto* pRebuild = reinterpret_cast<TRebuild>(s_rebuild.GetPtr());
+    auto* pSave = reinterpret_cast<TSave>(s_save.GetPtr());
+    if (!pLoad || !pRebuild || !pSave)
+        return false;
+    pLoad(pMap);
+    pRebuild(pMap);
+    if (s_extraMapping.Get() && *s_extraMapping.Get())
+        if (auto* pUserEvents = s_userEvents.Get() ? *s_userEvents.Get() : nullptr)
+            if (auto* pRemap = reinterpret_cast<TRemap>(s_remap.GetPtr()))
+                pRemap(pMap, pUserEvents + 0x28, 2, 0x0C);
+    pSave(pMap);
+    return true;
+}
+
 bool FinishCapture(uint32_t aKey) noexcept
 {
     const auto event = s_captureEvent;
@@ -207,6 +243,16 @@ void StartCapture(const std::string& acEvent, Device aDevice) noexcept
     s_captureEvent = acEvent;
     s_captureDevice = aDevice;
     s_capturing = true;
+}
+
+bool ResetToDefaults() noexcept
+{
+    CancelCapture();
+    const bool reset = ResetBindingsNative();
+    spdlog::info("Reset all key bindings to the game's defaults: {}", reset ? "saved" : "failed");
+    if (s_onChanged)
+        s_onChanged(BindingsJson());
+    return reset;
 }
 
 void CancelCapture() noexcept
