@@ -408,12 +408,8 @@ void OverlayService::SetActive(bool aActive) noexcept
             pRenderer->SetCursorVisible(false);
     }
 
-    const auto* pWindow = BSGraphics::GetMainWindow();
-    if (pWindow && GetForegroundWindow() == pWindow->hWnd)
-    {
-        while (ShowCursor(FALSE) >= 0)
-            ;
-    }
+    // Pointer visibility/confinement is owned by InputService on the window thread.
+    InputService::RequestCursorUpdate();
 
     m_pOverlay->ExecuteAsync(m_active ? "activate" : "deactivate");
 }

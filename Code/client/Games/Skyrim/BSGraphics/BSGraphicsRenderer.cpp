@@ -94,17 +94,9 @@ LRESULT CALLBACK Hook_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam
     if (uMsg == WM_SIZE && entt::locator<World>::has_value())
         World::Get().GetGameSettingsService().OnWindowSizeChanged(wParam);
 
-    if (uMsg == WM_KILLFOCUS || (uMsg == WM_ACTIVATEAPP && wParam == FALSE) ||
-        (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE))
-    {
-        // Skyrim may hide/clip the cursor inside its deactivation handler, so
-        // release it after the real WndProc has finished.
-        ClipCursor(nullptr);
-        ReleaseCapture();
-        while (ShowCursor(TRUE) < 0)
-            ;
-        SetCursor(LoadCursor(nullptr, IDC_ARROW));
-    }
+    // Skyrim may toggle ShowCursor inside its own focus handling, so the
+    // pointer owner re-applies its rule after the real WndProc has finished.
+    InputService::AfterGameWndProc(hwnd, uMsg);
 
     return result;
 }

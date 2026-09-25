@@ -15,6 +15,11 @@
 
 #include "Games/Skyrim/Interface/MenuControls.h"
 #include "Games/Skyrim/Interface/MainMenuIntegration.h"
+#include <Games/Skyrim/Interface/UI.h>
+#include <Games/Skyrim/Interface/IMenu.h>
+#include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
+
+#include <optional>
 
 static OverlayService* s_pOverlay = nullptr;
 static UINT s_currentACP = CP_ACP;
@@ -24,7 +29,6 @@ static bool s_overlayMouseInitialized = false;
 static uint16_t s_overlayMouseWidth = 0;
 static uint16_t s_overlayMouseHeight = 0;
 static uint32_t s_overlayMouseButtonModifiers = 0;
-static bool s_systemCursorReleased = false;
 static std::atomic_uint64_t s_lastControllerInputMs{0};
 
 void InputService::NotifyControllerInput() noexcept
@@ -32,21 +36,137 @@ void InputService::NotifyControllerInput() noexcept
     s_lastControllerInputMs.store(GetTickCount64(), std::memory_order_relaxed);
 }
 
-void ReleaseCursorToWindows()
+// ---------------------------------------------------------------------------
+// Windows pointer ownership. One rule, evaluated on the window thread only:
+//   game window focused (and not handed to the shell) -> Windows pointer hidden
+//     and confined to the client area; Skyrim's Cursor Menu or CEF draws the
+//     only visible cursor;
+//   otherwise -> pointer free and visible.
+// Vanilla Skyrim never calls ClipCursor (exe corpus: no callers), so without
+// the confinement the real pointer leaves a windowed/borderless game and
+// clicks land on other applications.
+// ---------------------------------------------------------------------------
+namespace
 {
-    ClipCursor(nullptr);
-    ReleaseCapture();
-    while (ShowCursor(TRUE) < 0)
-        ;
-    SetCursor(LoadCursor(nullptr, IDC_ARROW));
-    s_systemCursorReleased = true;
+struct MenuCursorCounter
+{
+    uint8_t Pad[0x2C];
+    int32_t ShowCursorCount; // CommonLibSSE-NG MenuCursor::showCursorCount
+};
+static_assert(offsetof(MenuCursorCounter, ShowCursorCount) == 0x2C);
+
+bool s_shellOwnsPointer = false;           // Win key/Snap UI: shell keeps the pointer until focus or a click returns
+std::optional<bool> s_appliedGameOwnership; // last visibility state applied
+uint64_t s_nextClipCheckMs = 0;
+
+// Leaves the display counter at exactly 0 (visible) or -1 (hidden), however
+// far it had drifted, and mirrors it into Skyrim's MenuCursor cache
+// (ID 403551, +0x2C). Skyrim only calls ShowCursor when that cache disagrees
+// with the state it wants, so a stale cache leaves the pointer stuck.
+void SetSystemCursorVisible(bool aVisible) noexcept
+{
+    int count = ShowCursor(aVisible ? TRUE : FALSE);
+    if (aVisible)
+    {
+        while (count < 0)
+            count = ShowCursor(TRUE);
+        while (count > 0)
+            count = ShowCursor(FALSE);
+    }
+    else
+    {
+        while (count >= 0)
+            count = ShowCursor(FALSE);
+        while (count < -1)
+            count = ShowCursor(TRUE);
+    }
+
+    static VersionDbPtr<uint8_t> s_menuCursorSingleton(403551);
+    auto** ppMenuCursor = reinterpret_cast<MenuCursorCounter**>(s_menuCursorSingleton.Get());
+    if (ppMenuCursor && *ppMenuCursor)
+        (*ppMenuCursor)->ShowCursorCount = count;
 }
 
-void ReclaimCursorForGame()
+void ClipToClientArea(HWND aWindow) noexcept
 {
-    s_systemCursorReleased = false;
-    while (ShowCursor(FALSE) >= 0)
-        ;
+    RECT client{};
+    if (!GetClientRect(aWindow, &client) || client.right <= client.left || client.bottom <= client.top)
+        return;
+    POINT topLeft{client.left, client.top};
+    POINT bottomRight{client.right, client.bottom};
+    ClientToScreen(aWindow, &topLeft);
+    ClientToScreen(aWindow, &bottomRight);
+    const RECT screen{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+    RECT current{};
+    if (GetClipCursor(&current) && EqualRect(&current, &screen))
+        return;
+    ClipCursor(&screen);
+}
+
+bool GameOwnsPointer(HWND aWindow) noexcept
+{
+    return !s_shellOwnsPointer && GetForegroundWindow() == aWindow && !IsIconic(aWindow);
+}
+
+void UpdateCursorOwnership(HWND aWindow) noexcept
+{
+    const bool owned = GameOwnsPointer(aWindow);
+    if (owned)
+        ClipToClientArea(aWindow);
+    else if (s_appliedGameOwnership.value_or(true))
+        ClipCursor(nullptr);
+
+    if (s_appliedGameOwnership == owned)
+        return;
+    s_appliedGameOwnership = owned;
+    if (!owned)
+        ReleaseCapture();
+    SetSystemCursorVisible(!owned);
+    spdlog::debug("Windows pointer {}", owned ? "confined to game" : "released to desktop");
+}
+
+void HandPointerToShell(HWND aWindow) noexcept
+{
+    s_shellOwnsPointer = true;
+    UpdateCursorOwnership(aWindow);
+}
+
+// Exactly one visible cursor: Skyrim's Cursor Menu when it is open (it is
+// drawn over CEF by OverlayService), otherwise CEF's own software cursor. In
+// gameplay no Skyrim menu is open, so hiding CEF's cursor left none at all.
+bool IsNativeCursorMenuOpen() noexcept
+{
+    auto* pUI = UI::Get();
+    auto* pCursorMenu = pUI ? pUI->FindMenuByName(BSFixedString("Cursor Menu")) : nullptr;
+    return pCursorMenu && pCursorMenu->uiMovie;
+}
+} // namespace
+
+void InputService::RequestCursorUpdate() noexcept
+{
+    if (const auto* pWindow = BSGraphics::GetMainWindow(); pWindow && pWindow->hWnd)
+        PostMessageW(pWindow->hWnd, cCursorUpdateMessage, 0, 0);
+}
+
+void InputService::AfterGameWndProc(HWND hwnd, UINT uMsg) noexcept
+{
+    switch (uMsg)
+    {
+    case WM_ACTIVATE:
+    case WM_ACTIVATEAPP:
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    case WM_SIZE:
+    case WM_MOVE:
+    case WM_WINDOWPOSCHANGED:
+    case WM_DISPLAYCHANGE:
+        // Skyrim's own handler may have toggled ShowCursor; reassert and
+        // resync its cache.
+        s_appliedGameOwnership.reset();
+        UpdateCursorOwnership(hwnd);
+        break;
+    default: break;
+    }
 }
 
 POINT MapClientToOverlay(HWND aWindow, POINT aPosition, TiltedPhoques::OverlayRenderHandler* apRenderer)
@@ -220,14 +340,8 @@ void SetUIActive(OverlayService& aOverlay, auto apRenderer, bool aActive)
     aOverlay.SetVersion(BUILD_COMMIT);
     aOverlay.GetOverlayApp()->ExecuteAsync(aOverlay.GetInGame() ? "enterGame" : "enterTitleScreen");
 
-    // Skyrim's native Cursor Menu is the single cursor owner. It is rendered
-    // over CEF by OverlayService, so never draw CEF's software cursor too.
-    apRenderer->SetCursorVisible(false);
-
-    // This is to disable the Windows cursor
-    while (ShowCursor(FALSE) >= 0)
-        ;
-    s_systemCursorReleased = false;
+    apRenderer->SetCursorVisible(aActive && !IsNativeCursorMenuOpen());
+    InputService::RequestCursorUpdate();
 }
 
 void ProcessKeyboard(uint16_t aKey, uint16_t aScanCode, cef_key_event_type_t aType, bool aE0, bool aE1)
@@ -417,22 +531,47 @@ UINT GetRealACP()
 
 LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    // Windows-key shell UI and Alt-Tab do not always deliver the initiating
-    // key message to Skyrim. Focus loss is authoritative: immediately undo
-    // Skyrim's ShowCursor/ClipCursor ownership so the desktop pointer remains
-    // visible even while it crosses the unfocused game window.
-    if (uMsg == WM_KILLFOCUS || (uMsg == WM_ACTIVATEAPP && wParam == FALSE) ||
-        (uMsg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE))
-        ReleaseCursorToWindows();
-
-    // Do not rely on having observed a particular deactivation message. The
-    // foreground HWND is the source of truth whenever Windows asks which
-    // cursor to display over this window.
-    if (uMsg == WM_SETCURSOR && GetForegroundWindow() != hwnd)
+    if (uMsg == cCursorUpdateMessage)
     {
-        ReleaseCursorToWindows();
-        SetCursor(LoadCursor(nullptr, IDC_ARROW));
-        return TRUE;
+        UpdateCursorOwnership(hwnd);
+        return 1;
+    }
+
+    // Coming back to the game (Alt-Tab, taskbar, click) ends a shell handoff.
+    if ((uMsg == WM_ACTIVATE && LOWORD(wParam) != WA_INACTIVE) || uMsg == WM_SETFOCUS ||
+        (uMsg == WM_ACTIVATEAPP && wParam != FALSE) || uMsg == WM_LBUTTONDOWN)
+        s_shellOwnsPointer = false;
+
+    // Windows-key shell UI (Start, Win+Z Snap layouts) needs a free pointer
+    // even though Skyrim keeps focus.
+    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && (wParam == VK_LWIN || wParam == VK_RWIN))
+        HandPointerToShell(hwnd);
+
+    if (uMsg == WM_SETCURSOR)
+    {
+        // The foreground HWND, not a remembered focus message, decides.
+        UpdateCursorOwnership(hwnd);
+        if (LOWORD(lParam) == HTCLIENT)
+        {
+            SetCursor(GameOwnsPointer(hwnd) ? nullptr : LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+    }
+
+    // Focus and click transitions are also finalized in AfterGameWndProc.
+    if (uMsg == WM_LBUTTONDOWN || uMsg == WM_ACTIVATE || uMsg == WM_ACTIVATEAPP)
+        UpdateCursorOwnership(hwnd);
+
+    // Windows drops ClipCursor on some shell events without messaging us;
+    // re-check cheaply while input is flowing.
+    if (uMsg == WM_INPUT)
+    {
+        const auto now = GetTickCount64();
+        if (now >= s_nextClipCheckMs)
+        {
+            s_nextClipCheckMs = now + 250;
+            UpdateCursorOwnership(hwnd);
+        }
     }
 
     const auto pApp = s_pOverlay->GetOverlayApp();
@@ -446,24 +585,6 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     const auto pRenderer = pClient->GetOverlayRenderHandler();
     if (!pRenderer)
         return 0;
-
-    // Win+Z belongs to the Windows shell. Skyrim normally keeps the shared
-    // system cursor hidden and clipped even while the Snap Layout chooser is
-    // visible, leaving the user unable to click a zone. Release it as soon as
-    // either Windows key arrives and keep the arrow alive until focus or a
-    // click explicitly returns to the game.
-    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) &&
-        (wParam == VK_LWIN || wParam == VK_RWIN))
-        ReleaseCursorToWindows();
-
-    if (s_systemCursorReleased && uMsg == WM_SETCURSOR)
-    {
-        SetCursor(LoadCursor(nullptr, IDC_ARROW));
-        return 1;
-    }
-
-    if (s_systemCursorReleased && uMsg == WM_LBUTTONDOWN)
-        ReclaimCursorForGame();
 
     auto& discord = World::Get().ctx().at<DiscordService>();
     discord.WndProcHandler(hwnd, uMsg, wParam, lParam);
@@ -514,7 +635,7 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             if ((keyboard.Flags & RI_KEY_BREAK) == 0 &&
                 (keyboard.VKey == VK_LWIN || keyboard.VKey == VK_RWIN))
-                ReleaseCursorToWindows();
+                HandPointerToShell(hwnd);
 
             ProcessKeyboard(keyboard.VKey, keyboard.MakeCode, keyboard.Flags & RI_KEY_BREAK ? KEYEVENT_KEYUP : KEYEVENT_KEYDOWN, keyboard.Flags & RI_KEY_E0, keyboard.Flags & RI_KEY_E1);
         }
@@ -524,10 +645,9 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             if (active)
             {
-                // Skyrim's native cursor is the only visible pointer. CEF still
-                // receives the same coordinates for hit testing, but drawing
-                // its software cursor here creates a second pointer.
-                pRenderer->SetCursorVisible(false);
+                // One visible cursor: CEF draws its own only when Skyrim's
+                // Cursor Menu is not open to draw the native one.
+                pRenderer->SetCursorVisible(!IsNativeCursorMenuOpen());
                 position = AdvanceOverlayMouse(hwnd, mouse, pRenderer.get());
                 if (s_pOverlay->GetTitleScreen())
                     SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
@@ -594,8 +714,8 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     {
         TiltedPhoques::DInputHook::Get().SetEnabled(true);
         s_pOverlay->SetActive(true);
-        pRenderer->SetCursorVisible(false);
-        ReclaimCursorForGame();
+        pRenderer->SetCursorVisible(!IsNativeCursorMenuOpen());
+        UpdateCursorOwnership(hwnd);
     }
     else if (uMsg == WM_INPUTLANGCHANGE)
     {
