@@ -223,12 +223,12 @@
 // Character creation together: whose character the creator shows. Skyrim style: white small caps
 // on a dark bar, thin rules, no colour except the ready state.
 .creator-view-banner-host {
+  // Top right: the creator's own menus take the left side and the bottom.
   position: fixed;
-  top: 6vh;
-  left: 0;
-  right: 0;
+  top: 5vh;
+  right: 3vw;
   display: flex;
-  justify-content: center;
+  justify-content: flex-end;
   pointer-events: none;
   z-index: 50;
 }
@@ -236,10 +236,10 @@
 .creator-view-banner {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   gap: 0.35em;
-  padding: 0.6em 2.4em;
-  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.72) 18%, rgba(0, 0, 0, 0.72) 82%, transparent);
+  padding: 0.6em 1.6em 0.6em 3em;
+  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.72) 30%);
   border-top: 1px solid rgba(255, 255, 255, 0.35);
   border-bottom: 1px solid rgba(255, 255, 255, 0.35);
   color: #f2f0e8;
