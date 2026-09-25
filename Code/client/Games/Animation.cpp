@@ -13,6 +13,7 @@
 #include <Misc/BSFixedString.h>
 
 #include <World.h>
+#include <Services/PartyService.h>
 
 TP_THIS_FUNCTION(TPerformAction, uint8_t, ActorMediator, TESActionData* apAction);
 static TPerformAction* RealPerformAction;
@@ -31,6 +32,17 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
         if (!g_forceAnimation && pActor->formID == 0x14 && pEventName &&
             strstr(pEventName, "WalkingCamera") != nullptr)
         {
+            // A follower never starts the scripted walking camera on its own player. Its copy of
+            // MQ101 can run the fragment that starts it (MQ101QuestScript.CameraBobStart ->
+            // IdleWalkingCameraStart) but not reliably the one that ends it, and the first-person
+            // graph then stays in "MT WalkingCamera": the camera bobs while standing still
+            // (measured 1.07 units of camera travel in 2.5 s, bIsInMT 0, PitchOffset animating).
+            const auto& party = World::Get().GetPartyService();
+            if (party.IsInParty() && !party.IsLeader() && strstr(pEventName, "WalkingCameraStart") != nullptr)
+            {
+                spdlog::info("Follower: skipped local walking-camera start ({})", pEventName);
+                return 0;
+            }
             spdlog::info("Local player walking-camera action event={} tick={} idleForm={:08X} "
                 "targetForm={:08X} caller={}", pEventName, GetTickCount64(),
                 apAction->idleForm ? apAction->idleForm->formID : 0,

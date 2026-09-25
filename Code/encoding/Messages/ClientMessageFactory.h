@@ -62,6 +62,8 @@
 #include <Messages/PhysicsReferencesMoveRequest.h>
 #include <Messages/CameraStateRequest.h>
 #include <Messages/SceneTimelineRequest.h>
+#include <Messages/CheckpointSaveRequest.h>
+#include <Messages/CorpseRagdollRequest.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -76,7 +78,7 @@ struct ClientMessageFactory
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
             RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,
             RequestEquipmentChanges, SendChatMessageRequest, TeleportCommandRequest, PlayerRespawnRequest, DialogueRequest, SubtitleRequest, PlayerDialogueRequest, PlayerLevelRequest, TeleportRequest, RequestPlayerHealthUpdate, RequestWeatherChange, RequestCurrentWeather, RequestSetWaypoint,
-            RequestRemoveWaypoint, RemoveSpellRequest, SetTimeCommandRequest, PartyReadyRequest, PartyStartRequest, PartySessionSettingsRequest, PartyGameplaySettingsRequest, PhysicsReferencesMoveRequest, CameraStateRequest, SceneTimelineRequest>;
+            RequestRemoveWaypoint, RemoveSpellRequest, SetTimeCommandRequest, PartyReadyRequest, PartyStartRequest, PartySessionSettingsRequest, PartyGameplaySettingsRequest, PhysicsReferencesMoveRequest, CameraStateRequest, SceneTimelineRequest, CheckpointSaveRequest, CorpseRagdollRequest>;
 
         return s_visitor(std::forward<T>(func));
     }

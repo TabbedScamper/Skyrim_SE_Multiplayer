@@ -60,6 +60,8 @@ enum ClientOpcode : unsigned char
     kPhysicsReferencesMoveRequest,
     kCameraStateRequest,
     kSceneTimelineRequest,
+    kCheckpointSaveRequest,
+    kCorpseRagdollRequest,
     kClientOpcodeMax
 };
 
@@ -122,5 +124,7 @@ enum ServerOpcode : unsigned char
     kNotifyPhysicsReferencesMove,
     kNotifyCameraState,
     kNotifySceneTimeline,
+    kNotifyCheckpointSave,
+    kNotifyCorpseRagdoll,
     kServerOpcodeMax
 };

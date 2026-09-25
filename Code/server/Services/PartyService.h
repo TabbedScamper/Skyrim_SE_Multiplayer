@@ -18,6 +18,7 @@ struct PartyReadyRequest;
 struct PartyStartRequest;
 struct PartySessionSettingsRequest;
 struct PartyGameplaySettingsRequest;
+struct CheckpointSaveRequest;
 
 /**
  * @brief Manages every party in the server.
@@ -67,6 +68,7 @@ protected:
     void OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept;
     void OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept;
     void OnPartyGameplaySettings(const PacketEvent<PartyGameplaySettingsRequest>& acPacket) noexcept;
+    void OnCheckpointSave(const PacketEvent<CheckpointSaveRequest>& acPacket) noexcept;
     void RemovePlayerFromParty(Player* apPlayer) noexcept;
 
     void BroadcastPlayerList(Player* apPlayer = nullptr) const noexcept;
@@ -92,6 +94,7 @@ private:
     entt::scoped_connection m_partyStartConnection;
     entt::scoped_connection m_partySessionSettingsConnection;
     entt::scoped_connection m_partyGameplaySettingsConnection;
+    entt::scoped_connection m_checkpointSaveConnection;
 
     uint64_t m_nextStartEpoch{1};
 

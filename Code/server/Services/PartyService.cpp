@@ -21,6 +21,8 @@
 #include <Messages/PartyStartRequest.h>
 #include <Messages/PartySessionSettingsRequest.h>
 #include <Messages/PartyGameplaySettingsRequest.h>
+#include <Messages/CheckpointSaveRequest.h>
+#include <Messages/NotifyCheckpointSave.h>
 #include <Messages/NotifySettingsChange.h>
 #include <Messages/NotifyPlayerJoined.h>
 
@@ -39,6 +41,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyStartConnection(aDispatcher.sink<PacketEvent<PartyStartRequest>>().connect<&PartyService::OnPartyStart>(this))
     , m_partySessionSettingsConnection(aDispatcher.sink<PacketEvent<PartySessionSettingsRequest>>().connect<&PartyService::OnPartySessionSettings>(this))
     , m_partyGameplaySettingsConnection(aDispatcher.sink<PacketEvent<PartyGameplaySettingsRequest>>().connect<&PartyService::OnPartyGameplaySettings>(this))
+    , m_checkpointSaveConnection(aDispatcher.sink<PacketEvent<CheckpointSaveRequest>>().connect<&PartyService::OnCheckpointSave>(this))
 {
 }
 
@@ -253,6 +256,27 @@ void PartyService::OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) 
         spdlog::info("[PartyService]: Every party member reached the gameplay barrier for epoch {}", pParty->StartEpoch);
     }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
+void PartyService::OnCheckpointSave(const PacketEvent<CheckpointSaveRequest>& acPacket) noexcept
+{
+    // Only the leader's saves define a checkpoint, and only inside a running shared session.
+    auto* const pPlayer = acPacket.pPlayer;
+    auto* const pParty = GetPlayerParty(pPlayer);
+    const auto& id = acPacket.Packet.CheckpointId;
+    if (!pParty || pParty->LeaderPlayerId != pPlayer->GetId() || pParty->SessionState < 2 || id.empty() ||
+        id.size() > 64 || !std::all_of(id.begin(), id.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-'; }))
+    {
+        spdlog::warn("[PartyService]: Rejected checkpoint save request from player {}", pPlayer->GetId());
+        return;
+    }
+
+    NotifyCheckpointSave notify{};
+    notify.CheckpointId = id;
+    notify.AuthorityEpoch = pParty->StartEpoch;
+    for (auto* pMember : pParty->Members)
+        pMember->Send(notify);
+    spdlog::info("[PartyService]: Checkpoint {} for party of {} (epoch {})", id, pParty->Members.size(), pParty->StartEpoch);
 }
 
 void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept

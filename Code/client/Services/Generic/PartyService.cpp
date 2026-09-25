@@ -24,6 +24,10 @@
 #include <Messages/PartyStartRequest.h>
 #include <Messages/PartySessionSettingsRequest.h>
 #include <Messages/PartyGameplaySettingsRequest.h>
+#include <Messages/CheckpointSaveRequest.h>
+#include <Messages/NotifyCheckpointSave.h>
+#include <Services/CheckpointSaves.h>
+#include <Forms/TESIdleForm.h>
 
 #include <OverlayApp.hpp>
 
@@ -43,6 +47,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, Transpo
 
     m_playerListConnection = aDispatcher.sink<NotifyPlayerList>().connect<&PartyService::OnPlayerList>(this);
     m_partyInfoConnection = aDispatcher.sink<NotifyPartyInfo>().connect<&PartyService::OnPartyInfo>(this);
+    m_checkpointSaveConnection = aDispatcher.sink<NotifyCheckpointSave>().connect<&PartyService::OnCheckpointSave>(this);
     m_partyInviteConnection = aDispatcher.sink<NotifyPartyInvite>().connect<&PartyService::OnPartyInvite>(this);
     m_partyJoinedConnection = aDispatcher.sink<NotifyPartyJoined>().connect<&PartyService::OnPartyJoined>(this);
     m_partyLeftConnection = aDispatcher.sink<NotifyPartyLeft>().connect<&PartyService::OnPartyLeft>(this);
@@ -109,7 +114,8 @@ void PartyService::SelectCampaign(const uint8_t aMode, const String& acCheckpoin
 {
     PartyStartRequest request;
     request.Mode = aMode;
-    request.CheckpointId = acCheckpointId;
+    // Continue loads the leader's newest matched checkpoint on every PC unless one was named.
+    request.CheckpointId = aMode == PartyStartRequest::kContinue && acCheckpointId.empty() ? CheckpointSaves::Latest() : acCheckpointId;
     m_transport.Send(request);
 }
 
@@ -118,7 +124,7 @@ void PartyService::StartTogether(const uint8_t aMode, const String& acCheckpoint
     PartyStartRequest request;
     request.Mode = aMode;
     request.Launch = true;
-    request.CheckpointId = acCheckpointId;
+    request.CheckpointId = aMode == PartyStartRequest::kContinue && acCheckpointId.empty() ? CheckpointSaves::Latest() : acCheckpointId;
     m_transport.Send(request);
 }
 
@@ -161,6 +167,15 @@ void PartyService::ReachWorldReadyBarrier() noexcept
     spdlog::info("Reached shared-campaign world-ready barrier for epoch {}", m_startEpoch);
 }
 
+void PartyService::OnCheckpointSave(const NotifyCheckpointSave& acMessage) noexcept
+{
+    spdlog::info("Checkpoint {} announced (epoch {}, ours {}, session {})", acMessage.CheckpointId, acMessage.AuthorityEpoch,
+        m_startEpoch, m_sessionState);
+    if (!m_inParty || acMessage.AuthorityEpoch != m_startEpoch)
+        return;
+    m_pendingCheckpoint = acMessage.CheckpointId;
+}
+
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
     // Followers are passive spectators while the leader drives MQ101's cart
@@ -174,6 +189,48 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     // suppresses host-camera playback while RaceSex Menu is open. Restore the
     // follower lock as soon as the native menu closes.
     const auto* pUI = UI::Get();
+
+    const bool localSaveMade = CheckpointSaves::TakeLocalSaveMade();
+    if (localSaveMade && m_isLeader && m_sessionState >= 2)
+    {
+        CheckpointSaveRequest request{};
+        request.CheckpointId = CheckpointSaves::NewCheckpointId(m_startEpoch);
+        m_transport.Send(request);
+        spdlog::info("Leader saved: announcing checkpoint {}", request.CheckpointId);
+    }
+    // A checkpoint the leader announced: start it once this PC is in the world (the engine
+    // defers a queued save until saving is allowed), then copy the save when it is on disk.
+    if (!m_pendingCheckpoint.empty() && m_sessionState >= 2)
+    {
+        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell && pPlayer->GetNiNode())
+        {
+            CheckpointSaves::Begin(m_pendingCheckpoint);
+            m_pendingCheckpoint.clear();
+        }
+    }
+    CheckpointSaves::Poll();
+
+    // A save can carry a follower's first-person graph still in the scripted walking camera
+    // (the stage-160 checkpoint did), and the load restores the bob. Leave it once per load by
+    // playing its end idle (IdleWalkingCameraEnd, 0x10C00D), which the graph ignores otherwise.
+    if (m_inParty && !m_isLeader && m_sessionState >= 2)
+    {
+        auto* pPlayer = PlayerCharacter::Get();
+        if (!pPlayer || !pPlayer->parentCell || !pPlayer->GetNiNode())
+        {
+            m_player3DSince = {};
+            m_walkingCameraCleared = false;
+        }
+        else if (m_player3DSince == std::chrono::steady_clock::time_point{})
+            m_player3DSince = std::chrono::steady_clock::now();
+        else if (!m_walkingCameraCleared && std::chrono::steady_clock::now() - m_player3DSince > std::chrono::seconds(2))
+        {
+            m_walkingCameraCleared = true;
+            if (auto* pIdle = Cast<TESIdleForm>(TESForm::GetById(0x10C00D)))
+                spdlog::info("Follower: cleared any saved walking camera (IdleWalkingCameraEnd played={})", pPlayer->PlayIdle(pIdle));
+        }
+    }
+
     const bool creatorOpen = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"));
     if (m_sessionState == 2 && creatorOpen)
         m_creatorSeen = true;
@@ -317,7 +374,15 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             // active hides that state transition and keeps its input hook.
             m_world.GetOverlayService().SetActive(false);
             m_waitingForWorldReady = true;
-            LaunchSharedCampaignFromMainMenu(m_campaignMode);
+            // Continue with a named checkpoint loads that save on every PC; without one (or if
+            // this PC does not have it) fall back to the game's own Continue.
+            if (m_campaignMode != PartyStartRequest::kContinue || acPartyInfo.CheckpointId.empty() ||
+                !CheckpointSaves::Load(acPartyInfo.CheckpointId))
+            {
+                if (m_campaignMode == PartyStartRequest::kContinue)
+                    spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acPartyInfo.CheckpointId);
+                LaunchSharedCampaignFromMainMenu(m_campaignMode);
+            }
         }
         else if (previousSessionState == 1 && m_sessionState == 2)
         {

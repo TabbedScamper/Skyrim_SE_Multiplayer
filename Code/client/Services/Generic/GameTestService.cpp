@@ -32,6 +32,7 @@
 #include <Games/Skyrim/Camera/TESCameraState.h>
 #include <Games/Skyrim/AI/AIProcess.h>
 #include <Games/Skyrim/Actor.h>
+#include <Forms/TESIdleForm.h>
 #include <Combat/CombatController.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
@@ -3969,6 +3970,16 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Error(id, "direct save is disabled after a paired cinematic hang; use gameplay_key quicksave after control handoff");
         if (command == "test_checkpoint_status")
             return Error(id, "direct save is disabled after a paired cinematic hang");
+        // Plays an idle (form ID, hex) on the local player, e.g. 10C00D IdleWalkingCameraEnd.
+        if (command == "player_idle")
+        {
+            auto* pPlayer = PlayerCharacter::Get();
+            const auto form = GetJsonString(acLine, "form_id");
+            auto* pIdle = form.empty() ? nullptr : Cast<TESIdleForm>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            if (!pPlayer || !pIdle)
+                return Error(id, "player or idle form not found");
+            return Result(id, fmt::format("\"played\":{}", pPlayer->PlayIdle(pIdle)));
+        }
         if (command == "set_session_open")
         {
             if (!m_world.GetPartyService().IsLeader())
@@ -4128,11 +4139,15 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (gameplayKey)
             {
                 auto* pPlayer = PlayerCharacter::Get();
+                // The Loading Menu instance stays alive between loads, so GetMenuOpen is not a
+                // loading test; a loaded player (cell and 3D) is.
                 if (m_world.GetPartyService().GetSessionState() != 3 ||
-                    !pPlayer || !pPlayer->parentCell ||
-                    pUI->GetMenuOpen(BSFixedString("Loading Menu")) ||
+                    !pPlayer || !pPlayer->parentCell || !pPlayer->GetNiNode() ||
                     pUI->GetMenuOpen(BSFixedString("RaceSex Menu")))
-                    return Error(id, "gameplay input requires shared gameplay, a loaded cell, and no loading or creator menu");
+                    return Error(id, fmt::format("gameplay input requires shared gameplay, a loaded cell, and no creator menu "
+                        "(session {}, cell {}, 3D {}, creator {})", m_world.GetPartyService().GetSessionState(),
+                        pPlayer && pPlayer->parentCell, pPlayer && pPlayer->GetNiNode(),
+                        pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))));
             }
             else if (!pUI->GetMenuOpen(BSFixedString("RaceSex Menu")))
                 return Error(id, "RaceSex Menu is not visible");

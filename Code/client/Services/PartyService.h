@@ -10,6 +10,7 @@ struct NotifyPartyInfo;
 struct NotifyPartyInvite;
 struct NotifyPartyJoined;
 struct NotifyPartyLeft;
+struct NotifyCheckpointSave;
 
 /**
  * @brief Manages the party of the local player.
@@ -51,6 +52,7 @@ protected:
     void OnDisconnected(const DisconnectedEvent& acEvent) noexcept;
     void OnPlayerList(const NotifyPlayerList& acPlayerList) noexcept;
     void OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept;
+    void OnCheckpointSave(const NotifyCheckpointSave& acMessage) noexcept;
     void OnPartyInvite(const NotifyPartyInvite& acPartyInvite) noexcept;
     void OnPartyJoined(const NotifyPartyJoined& acPartyJoined) noexcept;
     void OnPartyLeft(const NotifyPartyLeft& acPartyLeft) noexcept;
@@ -70,6 +72,11 @@ private:
     Vector<uint32_t> m_partyMembers;
     Vector<uint32_t> m_readyPlayers;
     uint8_t m_campaignMode{};
+    // Checkpoint the leader announced; written once this PC is in the world.
+    String m_pendingCheckpoint{};
+    // When this follower's player last got 3D after a load, and whether its walking camera was cleared since.
+    std::chrono::steady_clock::time_point m_player3DSince{};
+    bool m_walkingCameraCleared{};
     uint8_t m_sessionState{};
     uint64_t m_startEpoch{};
     bool m_waitingForWorldReady{};
@@ -87,6 +94,7 @@ private:
     entt::scoped_connection m_disconnectConnection;
     entt::scoped_connection m_playerListConnection;
     entt::scoped_connection m_partyInfoConnection;
+    entt::scoped_connection m_checkpointSaveConnection;
     entt::scoped_connection m_partyInviteConnection;
     entt::scoped_connection m_partyJoinedConnection;
     entt::scoped_connection m_partyLeftConnection;
