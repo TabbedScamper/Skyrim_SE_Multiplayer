@@ -33,6 +33,7 @@
 #include <Games/Skyrim/AI/AIProcess.h>
 #include <Games/Skyrim/Actor.h>
 #include <Forms/TESIdleForm.h>
+#include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Combat/CombatController.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
@@ -3970,6 +3971,14 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Error(id, "direct save is disabled after a paired cinematic hang; use gameplay_key quicksave after control handoff");
         if (command == "test_checkpoint_status")
             return Error(id, "direct save is disabled after a paired cinematic hang");
+        // Host-driven bone playback: stats, and "enabled":"false" to compare against local animation.
+        if (command == "pose_authority")
+        {
+            const auto enabled = GetJsonString(acLine, "enabled");
+            if (!enabled.empty())
+                PoseCopyAuthority::SetEnabled(enabled != "false");
+            return Result(id, PoseCopyAuthority::StatsJson());
+        }
         // Plays an idle (form ID, hex) on the local player, e.g. 10C00D IdleWalkingCameraEnd.
         if (command == "player_idle")
         {

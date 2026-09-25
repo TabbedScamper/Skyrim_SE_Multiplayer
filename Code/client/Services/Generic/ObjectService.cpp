@@ -59,7 +59,6 @@ constexpr bool kEnableDynamicBodyServo = false;
 // stale Havok body still was. The Havok body is moved along with the reference
 // so no invisible collider is left behind.
 constexpr bool kHostDrivenMovingBodies = true;
-constexpr int64_t kHostDrivenRenderDelayMs = 100;
 constexpr int64_t kHostDrivenMaxExtrapolationMs = 150;
 constexpr int64_t kHostDrivenHoldAfterMs = 300;
 constexpr float kHavokToGameUnits = 70.f;
@@ -2189,7 +2188,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
             const auto sample = [&](uint32_t aIndex) -> const RemoteReferencePose::Sample&
             { return pose.Samples[(pose.SampleNext + size - count + aIndex) % size]; };
             const int64_t renderTick = static_cast<int64_t>(m_transport.GetClock().GetCurrentTick()) -
-                kHostDrivenRenderDelayMs;
+                static_cast<int64_t>(m_world.GetCharacterService().GetPresentationDelayMs());
 
             const auto lerpAngle = [](float aFrom, float aTo, float aT)
             {

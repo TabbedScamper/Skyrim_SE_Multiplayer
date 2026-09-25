@@ -42,6 +42,7 @@
 #include <Messages/AssignCharacterResponse.h>
 #include <Messages/ServerReferencesMoveRequest.h>
 #include <Games/Skyrim/Havok/VisualPoseMailbox.h>
+#include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Messages/ClientReferencesMoveRequest.h>
 #include <Messages/CharacterSpawnRequest.h>
 #include <Messages/RequestFactionsChanges.h>
@@ -386,6 +387,13 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
     Actor::FlushPendingReset3D();
+    PoseCopyAuthority::SetCurrentTick(m_transport.GetClock().GetCurrentTick());
+    static uint64_t s_nextPoseRegistryMs = 0;
+    if (const auto registryNow = GetTickCount64(); registryNow >= s_nextPoseRegistryMs)
+    {
+        s_nextPoseRegistryMs = registryNow + 250;
+        PoseCopyAuthority::RefreshRegistry(m_world);
+    }
 
     // Discovery emits ActorAddedEvent only once per high-process lifetime.
     // New Game can expose the player (and scene actors) before their cell is
@@ -889,6 +897,9 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         {
             animationComponent.EvaluatedPose = update.EvaluatedPose;
             animationComponent.EvaluatedPoseTick = acMessage.Tick;
+            if (const auto* pFormId = m_world.try_get<FormIdComponent>(*itor))
+                PoseCopyAuthority::PushOwnerSample(pFormId->Id, update.EvaluatedPose,
+                    update.EvaluatedPose.SourceTick ? update.EvaluatedPose.SourceTick : acMessage.Tick);
         }
         if (!update.VisualBones.Bones.empty() &&
             acMessage.Tick >= animationComponent.VisualBonesTick)
@@ -2243,7 +2254,7 @@ void CharacterService::RunLocalUpdates() const noexcept
         // A production stream still needs priority, compression, and a
         // post-animation capture seam before enabling visual writes by default.
         const bool capturePose = actorCount &&
-            ((actorIndex + actorCount - firstPoseActor) % actorCount) < 4;
+            ((actorIndex + actorCount - firstPoseActor) % actorCount) < 8;
         const auto serializeStarted = capturePose ?
             std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         AnimationSystem::Serialize(m_world, message, localComponent,
@@ -2265,7 +2276,7 @@ void CharacterService::RunLocalUpdates() const noexcept
         ++actorIndex;
     }
 
-    nextPoseActor += 4;
+    nextPoseActor += 8;
     m_localPoseBatches.fetch_add(1, std::memory_order_relaxed);
     m_localPoseActors.fetch_add(selectedActors, std::memory_order_relaxed);
     m_localPoseTotalUs.fetch_add(selectedSerializeUs, std::memory_order_relaxed);
@@ -2284,6 +2295,7 @@ void CharacterService::RunRemoteUpdates() noexcept
     const auto delay = static_cast<uint64_t>(GetPresentationDelayMs());
     const auto tick = now > delay ? now - delay : 0;
     VisualPoseMailbox::SetPresentationTick(tick);
+    PoseCopyAuthority::SetPresentationTick(tick);
 
     // Interpolation has to keep running even if the actor is not in view, otherwise we will never know if we need to spawn it
     auto interpolatedEntities = m_world.view<RemoteComponent, InterpolationComponent>();

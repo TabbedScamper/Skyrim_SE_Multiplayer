@@ -24,6 +24,7 @@
 
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
+#include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 
 extern thread_local const char* g_animErrorCode;
 
@@ -39,6 +40,13 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
 
     bool captured = false;
     bool visualCaptured = false;
+    // The exact array the engine last copied onto this actor's bones (PoseCopyAuthority hook on
+    // ID 63856) rather than hkbCharacter::poseLocal, which a later copy can differ from.
+    if (PoseCopyAuthority::GetCapturedPose(apActor->formID, arSnapshot))
+    {
+        arSnapshot.GraphDescriptor = apActor->GetExtension() ? apActor->GetExtension()->GraphDescriptorHash : 0;
+        captured = true;
+    }
     {
         BSScopedLock<BSRecursiveLock> graphLock(pManager->lock);
         const auto count = pManager->animationGraphs.size;
@@ -52,7 +60,7 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
                     sizeof(graph), &bytesRead) && bytesRead == sizeof(graph))
             {
                 const auto poseCount = graph.characterInstance.numPoseLocal;
-                if (poseCount > 0 && poseCount <= EvaluatedPoseSnapshot::MaxBones &&
+                if (!captured && poseCount > 0 && poseCount <= EvaluatedPoseSnapshot::MaxBones &&
                     graph.characterInstance.poseLocal)
                 {
                     std::array<QsTransform, EvaluatedPoseSnapshot::MaxBones> nativePose{};
@@ -256,7 +264,9 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
         CaptureEvaluatedPose(pActor, update.EvaluatedPose, update.VisualBones);
         if (!update.EvaluatedPose.Bones.empty())
         {
-            update.EvaluatedPose.SourceTick = aMovementSnapshot.Tick;
+            // A pose captured in the bone-copy hook keeps the tick of the frame it was copied in.
+            if (!update.EvaluatedPose.SourceTick)
+                update.EvaluatedPose.SourceTick = aMovementSnapshot.Tick;
             animationComponent.LastSentPose = update.EvaluatedPose;
         }
         if (!update.VisualBones.Bones.empty())
