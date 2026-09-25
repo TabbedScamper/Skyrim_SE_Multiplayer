@@ -30,8 +30,24 @@ bool TP_MAKE_THISCALL(HookNativeSetStage, TESQuest, uint16_t aStage)
     // The leader's sequenced NotifyQuestUpdate is the only permitted stage
     // writer while a shared campaign is loading or running. Local-only quests
     // remain native and the scoped host apply passes through this same hook.
+    //
+    // Exception: a stage the leader has already entered this epoch. The
+    // leader's update for it can arrive before this follower's own new game
+    // has even started the quest (measured: MQ101 stage 10 arrived ~2 s before
+    // the follower's StartNewGame reached it); applying it then does nothing,
+    // and suppressing the follower's own write afterwards meant stage 10 -
+    // which moves the player into the Helgen cart - never ran, leaving the
+    // follower in the void behind the main menu.
     const auto& party = World::Get().GetPartyService();
     if (party.IsInParty() && !party.IsLeader() && party.GetStartEpoch() != 0 &&
+        party.GetSessionState() >= 1 && !ScopedQuestOverride::IsOverriden() &&
+        !QuestService::IsNonSyncableQuest(apThis) && apThis->currentStage != aStage &&
+        QuestService::HostReachedStage(apThis->formID, aStage, party.GetStartEpoch()))
+    {
+        spdlog::info("Allowed follower quest stage form={:X} from={} to={}: the leader already reached it",
+            apThis->formID, apThis->currentStage, aStage);
+    }
+    else if (party.IsInParty() && !party.IsLeader() && party.GetStartEpoch() != 0 &&
         party.GetSessionState() >= 1 && !ScopedQuestOverride::IsOverriden() &&
         !QuestService::IsNonSyncableQuest(apThis))
     {

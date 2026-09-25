@@ -80,6 +80,11 @@ struct MenuCursorLayout
 static_assert(offsetof(MenuCursorLayout, ScreenWidth) == 0x14);
 
 void* s_pMainMenuMovie = nullptr;
+// After a shared-campaign launch is queued, the start menu's own ActionScript
+// state is logged once a second until the menu goes away (or 90 s pass), so a
+// launch that never reaches New Game shows exactly where it stopped.
+std::chrono::steady_clock::time_point s_launchWatchUntil{};
+std::chrono::steady_clock::time_point s_launchWatchNext{};
 bool s_mainMenuOverlayActive = false;
 void* s_pVisibilityAppliedMovie = nullptr;
 bool s_visibilityApplied = false;
@@ -446,6 +451,38 @@ void PollMainMenuOptions(IMenu* apMainMenu) noexcept
         OpenOptions();
     else if (consumeRequest("_root.SkyrimSeamlessCoopRequested"))
         OpenCoopLobby();
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now < s_launchWatchUntil && now >= s_launchWatchNext)
+    {
+        s_launchWatchNext = now + std::chrono::seconds(1);
+        const auto read = [&](const char* acPath) -> std::string
+        {
+            ScaleformValue value{};
+            if (!getVariable(pMovie, &value, acPath))
+                return "?";
+            switch (value.Type & 0x0F)
+            {
+            case 0: return "undefined";
+            case 1: return "null";
+            case 2: return (reinterpret_cast<const uint8_t&>(value.Value) & 1) ? "true" : "false";
+            case 3: return fmt::format("{}", value.Value.Number);
+            case 4:
+            {
+                // A managed string (flag 0x40) points at its string node, whose first field is the text.
+                const char* pText = static_cast<const char*>(value.Value.Pointer);
+                if (pText && (value.Type & 0x40))
+                    pText = *reinterpret_cast<const char* const*>(value.Value.Pointer);
+                return pText ? fmt::format("\"{}\"", pText) : "\"\"";
+            }
+            default: return fmt::format("type{}", value.Type & 0x0F);
+            }
+        };
+        spdlog::info("Launch watch: state={} inputs={} pending={} queued={} selected={} menuVisible={} overlay={}",
+            read("_root.MenuHolder.Menu_mc.strCurrentState"), read("_root.MenuHolder.Menu_mc.ShouldProcessInputs"),
+            read("_root.MenuHolder.Menu_mc.SkyrimSeamlessPendingLaunchMode"), read("_root.SkyrimSeamlessLaunchMode"),
+            read("_root.MenuHolder.Menu_mc.MainList.selectedIndex"), read("_root.MenuHolder._visible"), s_mainMenuOverlayActive);
+    }
 }
 
 void SetMainMenuOverlayActive(bool aActive) noexcept
@@ -461,6 +498,31 @@ void LaunchSharedCampaignFromMainMenu(const uint8_t aCampaignMode) noexcept
     auto* pVtable = *reinterpret_cast<uintptr_t**>(s_pMainMenuMovie);
     if (!pVtable)
         return;
+    s_launchWatchUntil = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    s_launchWatchNext = {};
+
+    // Run the start menu's own post-confirmation step directly: StartMenu.as's
+    // FadeOutAndCall("StartNewGame" / "ContinueLastSavedGame") tells the engine
+    // the fade started, fades the menu out and then calls that GameDelegate
+    // handler (StartNewGame is FUN_140959160, ID 52118), exactly as a confirmed
+    // NEW/CONTINUE does. Driving it through the menu instead (select the row,
+    // call NEW, wait for MAIN_CONFIRM_STATE, press accept) raced with a stray
+    // LOAD request after the menu had idled: the follower sat in
+    // CharacterSelection on the title screen while its new game ran unseen.
+    using TIsAvailable = bool(void*, const char*);
+    using TInvoke = bool(void*, const char*, const char*, ...);
+    static VersionDbPtr<void> s_invoke(82664);
+    auto* pInvoke = reinterpret_cast<TInvoke*>(s_invoke.GetPtr());
+    constexpr const char* cFadeOutAndCall = "_root.MenuHolder.Menu_mc.FadeOutAndCall";
+    const char* pCallback = aCampaignMode == 1 ? "StartNewGame" : "ContinueLastSavedGame";
+    if (pInvoke && reinterpret_cast<TIsAvailable*>(pVtable[0x0A])(s_pMainMenuMovie, cFadeOutAndCall))
+    {
+        pInvoke(s_pMainMenuMovie, cFadeOutAndCall, "%s", pCallback);
+        spdlog::info("Shared campaign launch: start menu fading out into {} (mode {})", pCallback, aCampaignMode);
+        return;
+    }
+
+    // Older start menu without FadeOutAndCall: the ActionScript watcher path.
     ScaleformValue mode{};
     mode.Value.Number = aCampaignMode;
     const auto setVariable = reinterpret_cast<TSetVariable*>(pVtable[0x10]);

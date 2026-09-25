@@ -12,10 +12,15 @@ $knownHosts = Join-Path $projectRoot 'runtime\remote-access\known_hosts'
 $source = Join-Path $projectRoot 'build\windows\x64\releasedbg\SkyrimTogether.exe'
 $helperSource = Join-Path $projectRoot 'build\windows\x64\releasedbg\GameTestKeyHelper.exe'
 $serverSource = Join-Path $projectRoot 'build\windows\x64\releasedbg\STServer.dll'
+# The launcher rejects a server DLL from another build (CheckBuildTag in server_runner/main.cpp),
+# so it always ships with the DLL; a stale launcher silently left every host without a server.
+$runnerSource = Join-Path $projectRoot 'build\windows\x64\releasedbg\SkyrimTogetherServer.exe'
 $install = 'C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\Data\SkyrimTogetherReborn'
 $destination = Join-Path $install 'SkyrimTogether.exe'
 $helperDestination = Join-Path $install 'GameTestKeyHelper.exe'
 $serverDestination = Join-Path $install 'STServer.dll'
+$runnerDestination = Join-Path $install 'SkyrimTogetherServer.exe'
+$remoteRunnerTemp = 'C:/Users/eflem/AppData/Local/Temp/SkyrimTogetherServer.next.exe'
 $remoteTemp = 'C:/Users/eflem/AppData/Local/Temp/SkyrimTogether.next.exe'
 $remoteHelperTemp = 'C:/Users/eflem/AppData/Local/Temp/GameTestKeyHelper.next.exe'
 $remoteServerTemp = 'C:/Users/eflem/AppData/Local/Temp/STServer.next.dll'
@@ -25,9 +30,11 @@ if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or
     -not (Test-Path -LiteralPath $helperSource -PathType Leaf) -or
     -not (Test-Path -LiteralPath $destination -PathType Leaf) -or
     -not (Test-Path -LiteralPath $serverSource -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $runnerSource -PathType Leaf) -or
     -not (Test-Path -LiteralPath $serverDestination -PathType Leaf)) {
-    throw 'Expected build or local game binary is missing.'
+    throw 'Expected build or local game binary is missing (build SkyrimServerRunner for SkyrimTogetherServer.exe).'
 }
+$expectedRunnerHash = (Get-FileHash -LiteralPath $runnerSource -Algorithm SHA256).Hash
 $expectedHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
 $expectedHelperHash = (Get-FileHash -LiteralPath $helperSource -Algorithm SHA256).Hash
 $expectedServerHash = (Get-FileHash -LiteralPath $serverSource -Algorithm SHA256).Hash
@@ -38,6 +45,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not stage the follower binary.' }
 if ($LASTEXITCODE -ne 0) { throw 'Could not stage the follower test helper.' }
 & scp.exe @sshOptions $serverSource "${RemoteUser}@${RemoteHost}:$remoteServerTemp"
 if ($LASTEXITCODE -ne 0) { throw 'Could not stage the follower server DLL.' }
+& scp.exe @sshOptions $runnerSource "${RemoteUser}@${RemoteHost}:$remoteRunnerTemp"
+if ($LASTEXITCODE -ne 0) { throw 'Could not stage the follower server launcher.' }
 
 $remoteScript = @'
 $ErrorActionPreference = 'Stop'
@@ -68,17 +77,20 @@ for ($attempt = 0; $attempt -lt 6; $attempt++) {
 }
 Copy-Item -LiteralPath $serverStaged -Destination $serverDestination -Force
 Copy-Item -LiteralPath $helperStaged -Destination $helperDestination -Force
+Copy-Item -LiteralPath 'C:\Users\eflem\AppData\Local\Temp\SkyrimTogetherServer.next.exe' -Destination (Join-Path $install 'SkyrimTogetherServer.exe') -Force
 (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
 (Get-FileHash -LiteralPath $serverDestination -Algorithm SHA256).Hash
 (Get-FileHash -LiteralPath $helperDestination -Algorithm SHA256).Hash
+(Get-FileHash -LiteralPath (Join-Path $install 'SkyrimTogetherServer.exe') -Algorithm SHA256).Hash
 '@
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteScript))
 $remoteOutput = & ssh.exe @sshOptions "$RemoteUser@$RemoteHost" powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Follower deployment failed.' }
 $remoteHashes = @($remoteOutput | Where-Object { $_ -match '^[0-9A-F]{64}$' })
-if ($remoteHashes.Count -ne 3 -or $remoteHashes[0] -ne $expectedHash -or
+if ($remoteHashes.Count -ne 4 -or $remoteHashes[0] -ne $expectedHash -or
     $remoteHashes[1] -ne $expectedServerHash -or
-    $remoteHashes[2] -ne $expectedHelperHash) { throw 'Follower deployment hash mismatch.' }
+    $remoteHashes[2] -ne $expectedHelperHash -or
+    $remoteHashes[3] -ne $expectedRunnerHash) { throw 'Follower deployment hash mismatch.' }
 
 Get-Process SkyrimTogether, SkyrimTogetherServer -ErrorAction SilentlyContinue |
     Stop-Process -Force
@@ -95,6 +107,8 @@ for ($attempt = 0; $attempt -lt 6; $attempt++) {
 }
 Copy-Item -LiteralPath $serverSource -Destination $serverDestination -Force
 Copy-Item -LiteralPath $helperSource -Destination $helperDestination -Force
+Copy-Item -LiteralPath $runnerSource -Destination $runnerDestination -Force
+if ((Get-FileHash -LiteralPath $runnerDestination -Algorithm SHA256).Hash -ne $expectedRunnerHash) { throw 'Host server launcher hash mismatch.' }
 $localHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
 $localServerHash = (Get-FileHash -LiteralPath $serverDestination -Algorithm SHA256).Hash
 $localHelperHash = (Get-FileHash -LiteralPath $helperDestination -Algorithm SHA256).Hash

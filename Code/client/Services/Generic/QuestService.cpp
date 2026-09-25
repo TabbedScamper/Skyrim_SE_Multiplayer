@@ -175,6 +175,33 @@ BSTEventResult QuestService::OnEvent(const TESQuestStageEvent* apEvent, const Ev
     return BSTEventResult::kOk;
 }
 
+namespace
+{
+std::mutex s_hostStagesLock;
+uint64_t s_hostStagesEpoch{};
+std::unordered_map<uint32_t, std::unordered_set<uint16_t>> s_hostStages;
+
+void RecordHostStage(uint32_t aFormId, uint16_t aStage, uint64_t aEpoch) noexcept
+{
+    std::lock_guard lock(s_hostStagesLock);
+    if (s_hostStagesEpoch != aEpoch)
+    {
+        s_hostStages.clear();
+        s_hostStagesEpoch = aEpoch;
+    }
+    s_hostStages[aFormId].insert(aStage);
+}
+} // namespace
+
+bool QuestService::HostReachedStage(uint32_t aFormId, uint16_t aStage, uint64_t aEpoch) noexcept
+{
+    std::lock_guard lock(s_hostStagesLock);
+    if (s_hostStagesEpoch != aEpoch)
+        return false;
+    const auto it = s_hostStages.find(aFormId);
+    return it != s_hostStages.end() && it->second.contains(aStage);
+}
+
 void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
 {
     ModSystem& modSystem = World::Get().GetModSystem();
@@ -204,6 +231,8 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
         }
     }
     RecordDebugEvent("remote_update", formId, aUpdate.Stage, true);
+    if (aUpdate.Status == NotifyQuestUpdate::Started || aUpdate.Status == NotifyQuestUpdate::StageUpdate)
+        RecordHostStage(formId, aUpdate.Stage, aUpdate.AuthorityEpoch);
     TESQuest* pQuest = Cast<TESQuest>(TESForm::GetById(formId));
     if (!pQuest)
     {

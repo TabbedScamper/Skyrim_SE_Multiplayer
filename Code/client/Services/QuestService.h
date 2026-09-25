@@ -34,6 +34,9 @@ public:
     static bool IsNonSyncableQuest(TESQuest* apQuest);
     static void DebugDumpQuests();
     static bool StopQuest(uint32_t aformId);
+    // Stages the leader has entered in the current authority epoch (from its quest updates).
+    // A follower's own native stage write for one of them is the same stage arriving late.
+    static bool HostReachedStage(uint32_t aFormId, uint16_t aStage, uint64_t aEpoch) noexcept;
     [[nodiscard]] Vector<DebugEvent> GetRecentDebugEvents() const;
 
 private:
