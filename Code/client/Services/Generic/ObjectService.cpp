@@ -44,6 +44,24 @@ constexpr bool kEnablePerFrameReferenceCorrection = false;
 // divergence. Keep the source-backed setter path for further body-timing
 // research, but ship observation only until body/scene ownership is resolved.
 constexpr bool kEnableDynamicBodyServo = false;
+// Follower playback of the host's moving dynamic bodies (the Helgen carts first).
+// Two independent Havok simulations of a tethered cart cannot agree: the
+// follower's own step moved cart 0xBB970 100-117 game units in single 16-ms
+// frames while the host's moved under 10 (REFERENCE_RESEARCH.md). A keyframed
+// body follows its scene node, so writing Havok body poses into one is
+// overwritten by the node every step (the earlier kinematic trial's ~1,578-unit
+// drift). Instead the follower makes the body keyframed and drives the
+// *reference* transform from the host's samples, rendered ~100 ms behind the
+// newest sample so it always interpolates between two known poses. The host
+// stops sending once a body is at rest; the follower then holds the last pose.
+// It never hands the body back to local physics while loaded: the first trial
+// did after 1.5 s and the Helgen cart snapped ~14,700 units back to where its
+// stale Havok body still was. The Havok body is moved along with the reference
+// so no invisible collider is left behind.
+constexpr bool kHostDrivenMovingBodies = true;
+constexpr int64_t kHostDrivenRenderDelayMs = 100;
+constexpr int64_t kHostDrivenMaxExtrapolationMs = 150;
+constexpr int64_t kHostDrivenHoldAfterMs = 300;
 constexpr float kHavokToGameUnits = 70.f;
 // Default-off, single-reference engine-boundary probe. The form ID is chosen
 // at runtime by the test bridge; no quest/cart reference is hardcoded.
@@ -2065,6 +2083,10 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             pose.AuthorityEpoch = acMessage.AuthorityEpoch;
             pose.LastReceived = std::chrono::steady_clock::now();
             pose.BodyDriven = true;
+            pose.HostMotionType = update.MotionType;
+            pose.Samples[pose.SampleNext] = {acMessage.Tick, pose.Position, pose.Rotation};
+            pose.SampleNext = (pose.SampleNext + 1) % pose.Samples.size();
+            pose.SampleCount = (std::min)(pose.SampleCount + 1, static_cast<uint32_t>(pose.Samples.size()));
             if (formId == s_preStepPlaybackFormId.load(
                     std::memory_order_relaxed) ||
                 formId == s_referencePhaseFormId.load(
@@ -2126,6 +2148,94 @@ void ObjectService::ApplyRemotePhysics() noexcept
         }
 
         auto& pose = it->second;
+        if (pose.BodyDriven && kHostDrivenMovingBodies &&
+            s_bodyPlaybackFormId.load(std::memory_order_acquire) != it->first)
+        {
+            if (!pose.SampleCount)
+            {
+                ++it;
+                continue;
+            }
+            if (!pose.HostDriven)
+            {
+                pose.HostDriven = pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
+                spdlog::info("Host-driven body {:X}: following the host's transform (keyframed={})", it->first,
+                    pose.HostDriven);
+            }
+
+            // Oldest-to-newest view of the sample ring.
+            const uint32_t count = pose.SampleCount;
+            const uint32_t size = static_cast<uint32_t>(pose.Samples.size());
+            const auto sample = [&](uint32_t aIndex) -> const RemoteReferencePose::Sample&
+            { return pose.Samples[(pose.SampleNext + size - count + aIndex) % size]; };
+            const int64_t renderTick = static_cast<int64_t>(m_transport.GetClock().GetCurrentTick()) -
+                kHostDrivenRenderDelayMs;
+
+            const auto lerpAngle = [](float aFrom, float aTo, float aT)
+            {
+                const float delta = std::remainder(aTo - aFrom, static_cast<float>(TiltedPhoques::Pi * 2));
+                return aFrom + delta * aT;
+            };
+            NiPoint3 position = sample(count - 1).Position;
+            NiPoint3 rotation = sample(count - 1).Rotation;
+            if (renderTick <= static_cast<int64_t>(sample(0).Tick))
+            {
+                position = sample(0).Position;
+                rotation = sample(0).Rotation;
+            }
+            else if (renderTick >= static_cast<int64_t>(sample(count - 1).Tick))
+            {
+                // Past the newest sample: a late packet continues the last motion briefly;
+                // a body the host stopped sending (at rest) holds its last pose exactly.
+                if (count >= 2 && renderTick - static_cast<int64_t>(sample(count - 1).Tick) <= kHostDrivenHoldAfterMs)
+                {
+                    const auto& a = sample(count - 2);
+                    const auto& b = sample(count - 1);
+                    const int64_t span = static_cast<int64_t>(b.Tick) - static_cast<int64_t>(a.Tick);
+                    const int64_t ahead = (std::min)(renderTick - static_cast<int64_t>(b.Tick), kHostDrivenMaxExtrapolationMs);
+                    if (span > 0)
+                    {
+                        const float t = 1.f + static_cast<float>(ahead) / static_cast<float>(span);
+                        position = a.Position + (b.Position - a.Position) * t;
+                        rotation = glm::vec3{lerpAngle(a.Rotation.x, b.Rotation.x, t), lerpAngle(a.Rotation.y, b.Rotation.y, t),
+                            lerpAngle(a.Rotation.z, b.Rotation.z, t)};
+                    }
+                }
+            }
+            else
+            {
+                for (uint32_t i = 1; i < count; ++i)
+                {
+                    const auto& a = sample(i - 1);
+                    const auto& b = sample(i);
+                    if (renderTick > static_cast<int64_t>(b.Tick))
+                        continue;
+                    const int64_t span = static_cast<int64_t>(b.Tick) - static_cast<int64_t>(a.Tick);
+                    const float t = span > 0 ? static_cast<float>(renderTick - static_cast<int64_t>(a.Tick)) /
+                        static_cast<float>(span) : 1.f;
+                    position = a.Position + (b.Position - a.Position) * t;
+                    rotation = glm::vec3{lerpAngle(a.Rotation.x, b.Rotation.x, t), lerpAngle(a.Rotation.y, b.Rotation.y, t),
+                        lerpAngle(a.Rotation.z, b.Rotation.z, t)};
+                    break;
+                }
+            }
+            pReference->position = position;
+            pReference->SetRotation(rotation.x, rotation.y, rotation.z);
+            pReference->Update3DPosition(true);
+            // Keep the (keyframed) Havok body with the reference, at the host's offset between
+            // its body origin and reference position (the centre of mass is not the origin).
+            DynamicBody body{};
+            if (GetDynamicBody(pReference, body, true))
+            {
+                const glm::vec3 hostBody{pose.BodyTransform[12] * kHavokToGameUnits,
+                    pose.BodyTransform[13] * kHavokToGameUnits, pose.BodyTransform[14] * kHavokToGameUnits};
+                const glm::vec3 offset = hostBody - glm::vec3{pose.Position.x, pose.Position.y, pose.Position.z};
+                if (glm::dot(offset, offset) < 1000.f * 1000.f)
+                    SetDynamicBodyPosition(body, glm::vec3{position.x, position.y, position.z} + offset);
+            }
+            ++it;
+            continue;
+        }
         if (pose.BodyDriven)
         {
             if (s_bodyPlaybackFormId.load(std::memory_order_acquire) == it->first)

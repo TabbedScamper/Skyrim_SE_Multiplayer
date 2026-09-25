@@ -274,6 +274,19 @@ private:
         glm::vec3 LinearVelocity{};
         std::array<float, 16> BodyTransform{};
         std::chrono::steady_clock::time_point LastReceived{};
+
+        // Host-driven playback of a moving dynamic body (see kHostDrivenMovingBodies).
+        struct Sample
+        {
+            uint64_t Tick{};
+            NiPoint3 Position{};
+            NiPoint3 Rotation{};
+        };
+        std::array<Sample, 12> Samples{};
+        uint32_t SampleCount{};
+        uint32_t SampleNext{};
+        uint32_t HostMotionType{3};
+        bool HostDriven{};
     };
     std::unordered_map<uint32_t, ReferencePose> m_referencePoses;
     std::unordered_map<uint32_t, RemoteReferencePose> m_remoteReferencePoses;
