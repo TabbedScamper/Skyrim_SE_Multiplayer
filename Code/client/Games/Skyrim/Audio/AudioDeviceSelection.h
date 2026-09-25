@@ -3,13 +3,10 @@
 #include <string>
 #include <vector>
 
-// Output device choice for Skyrim's XAudio2 2.7 engine.
-//
-// BSXAudio2Audio's init (ID 67952) enumerates XAudio2 devices and creates the
-// mastering voice on the first one whose Role has DefaultGameDevice (0x8).
-// We make that flag point at the player's chosen endpoint; an empty choice
-// leaves Windows' own default untouched. The choice takes effect when the
-// engine initializes (game start).
+// Output device choice for the options page. Switching itself is done by the
+// vendored Auto Audio Output Switch (ThirdParty/AudioSwitch), which reads the
+// preference here: a connected preferred device wins, otherwise the game
+// follows the Windows default and moves when it changes.
 namespace AudioDeviceSelection
 {
 struct Endpoint
@@ -24,6 +21,8 @@ std::vector<Endpoint> EnumerateOutputs() noexcept;
 // Empty = follow the Windows default.
 std::string GetPreferredDevice() noexcept;
 void SetPreferredDevice(const std::string& acId) noexcept;
+// Moves the running engine to the preference (no-op if already there).
+void ApplyPreferredDevice() noexcept;
 
 // The endpoint the running engine was created on (empty until init ran).
 std::string GetActiveDevice() noexcept;

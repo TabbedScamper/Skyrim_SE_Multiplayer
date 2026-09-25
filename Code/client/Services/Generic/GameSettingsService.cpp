@@ -854,7 +854,10 @@ void GameSettingsService::Persist(const GameSettingsSnapshot& acSettings) const 
     WriteInt(path, L"Controls", L"bAlwaysRunByDefault", acSettings.AlwaysRun);
     WriteInt(path, L"Controls", L"bGamePadRumble", acSettings.ControllerRumble);
     if (acSettings.AudioDevice != AudioDeviceSelection::GetPreferredDevice())
+    {
         AudioDeviceSelection::SetPreferredDevice(acSettings.AudioDevice);
+        AudioDeviceSelection::ApplyPreferredDevice();
+    }
 }
 
 void GameSettingsService::SendSettings(const GameSettingsSnapshot& acSettings, bool aDefaults) const noexcept

@@ -61,8 +61,8 @@
           <div class="row-label">
             <label for="audioDevice">Output device</label>
             <small *ngIf="!audioDevices">This build of the game client does not report audio devices yet.</small>
-            <small *ngIf="audioDevices && !game.audioDevice">Uses the Windows default output. A change applies the next time the game starts.</small>
-            <small *ngIf="audioDevices && game.audioDevice && audioDeviceConnected(game.audioDevice)">Applies the next time the game starts.</small>
+            <small *ngIf="audioDevices && !game.audioDevice">Follows the Windows default and moves when you change it in Windows.</small>
+            <small *ngIf="audioDevices && game.audioDevice && audioDeviceConnected(game.audioDevice)">Always uses this device while it is connected.</small>
             <small *ngIf="audioDevices && game.audioDevice && !audioDeviceConnected(game.audioDevice)" class="warning">
               Not connected. Using the Windows default until it comes back.
             </small>
