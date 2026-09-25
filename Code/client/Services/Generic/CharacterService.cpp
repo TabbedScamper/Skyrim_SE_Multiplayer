@@ -1,4 +1,5 @@
 #include <Services/SmoothClock.h>
+#include <Services/CorpseRagdollService.h>
 #include "Forms/TESObjectCELL.h"
 #include "Forms/TESWorldSpace.h"
 #include "Services/PapyrusService.h"
@@ -1747,6 +1748,19 @@ void CharacterService::OnPartyJoinedEvent(const PartyJoinedEvent& acEvent) noexc
 
 void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
 {
+    // Never a remote actor that is dying, dead, knocked down or ragdolling (ActorState1 lifeState
+    // bits 21-24, knockState 25-27): MoveTo disables and re-enables it, reloading its 3D, which
+    // showed as the falling intro prisoner going naked and landing at the owner's final spot. The
+    // owner's ragdoll stream places its body (CorpseRagdollService).
+    if (apActor && apActor->GetExtension() && apActor->GetExtension()->IsRemote())
+    {
+        const uint32_t flags1 = apActor->actorState.flags1;
+        if (((flags1 >> 21) & 0xF) != 0 || ((flags1 >> 25) & 0x7) != 0 || apActor->IsDead())
+        {
+            spdlog::info("Left {:X} where it is: dying or ragdolling, its owner's ragdoll places it", apActor->formID);
+            return;
+        }
+    }
     TESObjectCELL* pCell = nullptr;
     if (!acWorldSpaceId)
     {
@@ -2449,6 +2463,7 @@ void CharacterService::RunRemoteUpdates() noexcept
         // ended in a different loaded cell or drifted far from the owner.
         if (pendingCorpseCorrection || !pActor ||
             !pActor->actorState.IsDeadState() ||
+            CorpseRagdollService::IsFollowingOwner(pActor->formID) ||
             !pActor->GetNiNode() || !interpolationComponent.AuthorityCellId ||
             !interpolationComponent.AuthorityTick ||
             now < interpolationComponent.AuthorityStableSinceTick + 1000 ||

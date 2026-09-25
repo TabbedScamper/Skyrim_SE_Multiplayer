@@ -24,6 +24,8 @@ using namespace ActorPoseDiagnosticViews;
 // Havok world units to game units (matches ObjectService).
 constexpr float kHavokToGameUnits = 70.f;
 std::atomic<CorpseRagdollService*> s_ragdollService{};
+std::mutex s_followingLock;
+std::unordered_map<uint32_t, uint64_t> s_followingSinceMs; // form id -> last sample received
 // A body counts as settled below this speed (Havok units/s, about 2 game units/s).
 constexpr float kSettledLinear = 0.03f;
 constexpr float kSettledAngular = 0.05f;
@@ -207,9 +209,26 @@ void CorpseRagdollService::OnDisconnected(const DisconnectedEvent&) noexcept
     m_remote.clear();
 }
 
+bool CorpseRagdollService::IsFollowingOwner(const uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_followingLock);
+    const auto it = s_followingSinceMs.find(aFormId);
+    return it != s_followingSinceMs.end() && NowMs() - it->second < 10000;
+}
+
 void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage) noexcept
 {
     std::lock_guard lock(m_remoteLock);
+    if (auto* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId))
+    {
+        std::lock_guard followingLock(s_followingLock);
+        if (!s_followingSinceMs.contains(pActor->formID) || NowMs() - s_followingSinceMs[pActor->formID] > 10000)
+            spdlog::info("Ragdoll {:X} (server {:X}): owner's ragdoll stream received (tick {}, {} bodies)", pActor->formID,
+                acMessage.ServerId, acMessage.Tick, acMessage.Bodies.size());
+        s_followingSinceMs[pActor->formID] = NowMs();
+    }
+    else
+        spdlog::info("Ragdoll stream for server id {:X}: no actor here", acMessage.ServerId);
     auto& ragdoll = m_remote[acMessage.ServerId];
     const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
     if (ragdoll.RingCount)
@@ -420,7 +439,38 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
             for (float& value : rotation)
                 value *= norm;
-            SetBodyPose(bodies[i], wanted, rotation, velocity);
+            // Steer, do not place: the owner's motion plus a correction that closes the gap within
+            // 0.1 s, as for host-driven carts. Placing each frame snapped the first frame of a fall
+            // (49 units for the intro prisoner). Placed only when far off, and while settling.
+            const float* current = &bodies[i]->transform[12];
+            const float gap[3]{wanted[0] - current[0], wanted[1] - current[1], wanted[2] - current[2]};
+            const float gapLength = std::sqrt(gap[0] * gap[0] + gap[1] * gap[1] + gap[2] * gap[2]);
+            if (settled || gapLength > 3.f)
+                SetBodyPose(bodies[i], wanted, rotation, velocity);
+            else
+            {
+                constexpr float kSteerSeconds = 0.1f;
+                for (int axis = 0; axis < 3; ++axis)
+                    bodies[i]->linearVelocity[axis] = velocity[axis] + gap[axis] / kSteerSeconds;
+                float have[4];
+                MatrixToQuaternion(bodies[i]->transform, have);
+                // delta = wanted * conjugate(have), as (x, y, z, w)
+                const float hx = -have[0], hy = -have[1], hz = -have[2], hw = have[3];
+                const float wx = rotation[0], wy = rotation[1], wz = rotation[2], ww = rotation[3];
+                float dx = ww * hx + wx * hw + wy * hz - wz * hy;
+                float dy = ww * hy - wx * hz + wy * hw + wz * hx;
+                float dz = ww * hz + wx * hy - wy * hx + wz * hw;
+                const float dw = ww * hw - wx * hx - wy * hy - wz * hz;
+                if (dw < 0.f)
+                {
+                    dx = -dx;
+                    dy = -dy;
+                    dz = -dz;
+                }
+                bodies[i]->angularVelocity[0] = dx * 2.f / kSteerSeconds;
+                bodies[i]->angularVelocity[1] = dy * 2.f / kSteerSeconds;
+                bodies[i]->angularVelocity[2] = dz * 2.f / kSteerSeconds;
+            }
         }
 
         if (!settled && !ragdoll.LiveLogged)

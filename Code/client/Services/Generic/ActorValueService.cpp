@@ -324,9 +324,19 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
     if (!pActor->IsDead() && health <= 0.f)
     {
         ActorExtension* pExtension = pActor->GetExtension();
-        // Players should never be killed
+        // Players should never be killed. A remote actor dies on the presentation timeline (like
+        // the death state below): killed on the health update, the intro prisoner died about the
+        // presentation delay before its owner's ragdoll started here.
         if (!pExtension->IsPlayer())
-            pActor->Kill();
+        {
+            if (pExtension->IsRemote())
+            {
+                const uint64_t delay = World::Get().GetCharacterService().GetPresentationDelayMs();
+                s_pendingDeaths.push_back({pActor->formID, GetTickCount64() + delay});
+            }
+            else
+                pActor->Kill();
+        }
     }
 
     // TODO(cosideci): find fix for player health sync so this can be used again

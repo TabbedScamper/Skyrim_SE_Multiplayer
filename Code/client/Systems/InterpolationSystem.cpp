@@ -60,6 +60,22 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // and passengers trailing their cart. The owner's pose still drives the body.
     const uint32_t sitSleepState = (apActor->actorState.flags1 >> 14) & 0xF;
     {
+        // Diagnostic: a remote actor's model appearing or disappearing (no 3D, or the root hidden:
+        // NiAVObject flags bit 0), with its sit state (the cart driver vanished at the stop).
+        static std::unordered_map<uint32_t, int> s_lastVisibility;
+        const auto* pRoot = apActor->GetNiNode();
+        const int visibility = !pRoot ? 0 : ((pRoot->flags & 1) ? 1 : 2);
+        auto [visibilityIt, inserted] = s_lastVisibility.try_emplace(apActor->formID, visibility);
+        if (!inserted && visibilityIt->second != visibility)
+        {
+            static const char* const s_names[] = {"no 3D", "hidden", "visible"};
+            spdlog::info("Remote actor {:X} model {} -> {} (sit state {}, at {:.0f}, {:.0f}, {:.0f})", apActor->formID,
+                s_names[visibilityIt->second], s_names[visibility], sitSleepState, apActor->position.x, apActor->position.y,
+                apActor->position.z);
+            visibilityIt->second = visibility;
+        }
+    }
+    {
         // Diagnostic: each remote actor's sit state, every 10 s.
         static std::unordered_map<uint32_t, uint64_t> s_nextSitLog;
         auto& next = s_nextSitLog[apActor->formID];

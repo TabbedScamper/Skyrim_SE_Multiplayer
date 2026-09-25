@@ -29,6 +29,10 @@ public:
     // Called by the Main::Update hook on the main thread: the remote ragdolls are placed there,
     // before the frame's physics step, not from the update job running beside it.
     static void OnMainFrame() noexcept;
+    // True while the owner's ragdoll stream for this actor drives it here (a sample within 10 s):
+    // nothing else may move it (the corpse cell correction reloaded it with MoveTo: naked, then
+    // teleported to the owner's final position). Any thread.
+    static bool IsFollowingOwner(uint32_t aFormId) noexcept;
 
 private:
     struct OwnedRagdoll
