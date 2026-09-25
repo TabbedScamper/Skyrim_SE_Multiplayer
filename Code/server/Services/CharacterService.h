@@ -12,6 +12,7 @@ struct AssignCharacterResponse;
 struct CharacterSpawnRequest;
 struct ClientReferencesMoveRequest;
 struct CorpseRagdollRequest;
+struct PlayerAppearanceRequest;
 struct RequestFactionsChanges;
 struct GridCellCoords;
 struct RequestOwnershipTransfer;
@@ -62,6 +63,7 @@ protected:
     void OnCharacterSpawned(const CharacterSpawnedEvent& acEvent) const noexcept;
     void OnReferencesMoveRequest(const PacketEvent<ClientReferencesMoveRequest>& acMessage) const noexcept;
     void OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& acMessage) const noexcept;
+    void OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequest>& acMessage) const noexcept;
     void OnFactionsChanges(const PacketEvent<RequestFactionsChanges>& acMessage) const noexcept;
     void OnMountRequest(const PacketEvent<MountRequest>& acMessage) const noexcept;
     void OnNewPackageRequest(const PacketEvent<NewPackageRequest>& acMessage) const noexcept;
@@ -86,6 +88,7 @@ private:
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_corpseRagdollConnection;
+    entt::scoped_connection m_playerAppearanceConnection;
     entt::scoped_connection m_exteriorCellChangeEventConnection;
     entt::scoped_connection m_interiorCellChangeEventConnection;
     entt::scoped_connection m_characterAssignRequestConnection;

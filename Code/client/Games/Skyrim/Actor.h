@@ -228,6 +228,8 @@ struct Actor : TESObjectREFR
     void SetActorInventory(const Inventory& aInventory) noexcept;
     // Runs the biped-part rebuilds SetActorInventory queued (once per actor, after it settles).
     static void FlushPendingReset3D() noexcept;
+    // Rebuild this actor's 3D (DoReset3D) shortly, once (same queue as SetActorInventory).
+    void QueueReset3D(uint32_t aDelayMs) noexcept;
     void SetMagicEquipment(const MagicEquipment& acEquipment) noexcept;
     void SetEssentialEx(bool aSet) noexcept;
     void SetNoBleedoutRecovery(bool aSet) noexcept;

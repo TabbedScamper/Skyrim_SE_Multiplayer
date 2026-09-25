@@ -33,6 +33,8 @@ public:
     // nothing else may move it (the corpse cell correction reloaded it with MoveTo: naked, then
     // teleported to the owner's final position). Any thread.
     static bool IsFollowingOwner(uint32_t aFormId) noexcept;
+    // Testing ground: the actor's ragdoll bodies as JSON (world positions, game units), "[]" if none.
+    static std::string DescribeRagdollBodies(Actor* apActor) noexcept;
 
 private:
     struct OwnedRagdoll

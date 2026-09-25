@@ -3034,12 +3034,24 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         break;
                     }
                 }
-                // Past the newest sample for long, the host stopped sending (at rest): let physics settle it.
-                if (renderTime - static_cast<double>(sample(count - 1).Tick) > static_cast<double>(kHostDrivenHoldAfterMs))
+                // Past the newest sample, the host stopped sending (at rest): keep steering to that final
+                // pose, with no motion of its own, until it sits there, then place it exactly and stop.
+                // Left to settle on its own, the cart came to rest off the host's, and the driver and
+                // passengers climbed out of a different cart.
+                const bool atFinalPose = renderTime - static_cast<double>(sample(count - 1).Tick) >
+                    static_cast<double>(kHostDrivenHoldAfterMs);
+                if (atFinalPose)
                 {
-                    ++it;
-                    continue;
+                    pA = pB = &sample(count - 1);
+                    t = 0.f;
+                    if (pose.SettledAtFinalPose)
+                    {
+                        ++it;
+                        continue;
+                    }
                 }
+                else
+                    pose.SettledAtFinalPose = false;
                 DynamicBody body{};
                 if (GetDynamicBody(pReference, body, false) && body.HavokBody && body.State.world)
                 {
@@ -3053,7 +3065,18 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         (glm::vec3{pB->Velocity.x, pB->Velocity.y, pB->Velocity.z} - glm::vec3{pA->Velocity.x, pA->Velocity.y,
                             pA->Velocity.z}) * t) / kHavokToGameUnits;
                     glm::vec3 angular{};
-                    if (pB->Tick > pA->Tick)
+                    if (atFinalPose)
+                    {
+                        const glm::vec3 have{body.State.transform[12], body.State.transform[13], body.State.transform[14]};
+                        target.Velocity[0] = target.Velocity[1] = target.Velocity[2] = 0.f;
+                        if (glm::length(have - position) < 1.f / kHavokToGameUnits)
+                        {
+                            // There (within a unit): this frame's step finishes it; then leave it at rest.
+                            pose.SettledAtFinalPose = true;
+                            spdlog::info("Host-driven body {:X}: at the host's final pose", it->first);
+                        }
+                    }
+                    else if (pB->Tick > pA->Tick)
                     {
                         glm::quat step = qb * glm::conjugate(qa);
                         if (step.w < 0.f)
@@ -3063,8 +3086,8 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     for (int k = 0; k < 3; ++k)
                     {
                         target.Position[k] = position[k];
-                        target.Velocity[k] = velocity[k];
-                        target.Angular[k] = angular[k];
+                        target.Velocity[k] = atFinalPose ? 0.f : velocity[k];
+                        target.Angular[k] = atFinalPose ? 0.f : angular[k];
                     }
                     target.Rotation[0] = rotation.x;
                     target.Rotation[1] = rotation.y;

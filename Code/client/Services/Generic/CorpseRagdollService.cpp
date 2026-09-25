@@ -209,6 +209,18 @@ void CorpseRagdollService::OnDisconnected(const DisconnectedEvent&) noexcept
     m_remote.clear();
 }
 
+std::string CorpseRagdollService::DescribeRagdollBodies(Actor* apActor) noexcept
+{
+    Vector<RigidBody*> bodies;
+    if (!apActor || !GetRagdollBodies(apActor, bodies))
+        return "[]";
+    std::string json = "[";
+    for (size_t i = 0; i < bodies.size(); ++i)
+        json += fmt::format("{}[{:.1f},{:.1f},{:.1f}]", i ? "," : "", bodies[i]->transform[12] * kHavokToGameUnits,
+            bodies[i]->transform[13] * kHavokToGameUnits, bodies[i]->transform[14] * kHavokToGameUnits);
+    return json + "]";
+}
+
 bool CorpseRagdollService::IsFollowingOwner(const uint32_t aFormId) noexcept
 {
     std::lock_guard lock(s_followingLock);

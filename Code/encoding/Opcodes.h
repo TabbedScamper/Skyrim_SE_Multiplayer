@@ -62,6 +62,7 @@ enum ClientOpcode : unsigned char
     kSceneTimelineRequest,
     kCheckpointSaveRequest,
     kCorpseRagdollRequest,
+    kPlayerAppearanceRequest,
     kClientOpcodeMax
 };
 
@@ -126,5 +127,6 @@ enum ServerOpcode : unsigned char
     kNotifySceneTimeline,
     kNotifyCheckpointSave,
     kNotifyCorpseRagdoll,
+    kNotifyPlayerAppearance,
     kServerOpcodeMax
 };

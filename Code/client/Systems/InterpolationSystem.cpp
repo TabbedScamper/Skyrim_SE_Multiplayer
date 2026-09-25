@@ -9,6 +9,7 @@
 #include <Games/References.h>
 #include <World.h>
 #include <Services/ObjectService.h>
+#include <Services/CharacterService.h>
 
 void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aTick) noexcept
 {
@@ -39,7 +40,13 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
         delta = static_cast<float>(aTick - first.Tick) /
             static_cast<float>(second.Tick - first.Tick);
 
-    const NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
+    NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
+    // A player still in the character creator stands beside this player here, not inside them.
+    if (NiPoint3 creatorOffset{}; apActor && CharacterService::GetCreatorDisplayOffset(apActor->formID, creatorOffset))
+    {
+        position.x += creatorOffset.x;
+        position.y += creatorOffset.y;
+    }
 
     aInterpolationComponent.Position = position;
 

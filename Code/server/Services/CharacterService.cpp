@@ -1,3 +1,5 @@
+#include <Messages/PlayerAppearanceRequest.h>
+#include <Messages/NotifyPlayerAppearance.h>
 #include <Services/CharacterService.h>
 #include <Components.h>
 #include <GameServer.h>
@@ -71,6 +73,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher)
     , m_characterSpawnedConnection(aDispatcher.sink<CharacterSpawnedEvent>().connect<&CharacterService::OnCharacterSpawned>(this))
     , m_referenceMovementSnapshotConnection(aDispatcher.sink<PacketEvent<ClientReferencesMoveRequest>>().connect<&CharacterService::OnReferencesMoveRequest>(this))
     , m_corpseRagdollConnection(aDispatcher.sink<PacketEvent<CorpseRagdollRequest>>().connect<&CharacterService::OnCorpseRagdoll>(this))
+    , m_playerAppearanceConnection(aDispatcher.sink<PacketEvent<PlayerAppearanceRequest>>().connect<&CharacterService::OnPlayerAppearance>(this))
     , m_factionsChangesConnection(aDispatcher.sink<PacketEvent<RequestFactionsChanges>>().connect<&CharacterService::OnFactionsChanges>(this))
     , m_mountConnection(aDispatcher.sink<PacketEvent<MountRequest>>().connect<&CharacterService::OnMountRequest>(this))
     , m_newPackageConnection(aDispatcher.sink<PacketEvent<NewPackageRequest>>().connect<&CharacterService::OnNewPackageRequest>(this))
@@ -541,6 +544,36 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     std::copy(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin), std::begin(notify.Origin));
     notify.Bodies = bodies;
     GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
+}
+
+void CharacterService::OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequest>& acMessage) const noexcept
+{
+    // Only a player's own character, from its owner. Stored, so a later spawn shows the newest
+    // look, and relayed to the other players (live while the owner is in the character creator).
+    const auto& packet = acMessage.Packet;
+    const auto entity = static_cast<entt::entity>(packet.ServerId);
+    auto view = m_world.view<OwnerComponent, CharacterComponent>();
+    const auto it = view.find(entity);
+    if (it == view.end() || view.get<OwnerComponent>(entity).GetOwner() != acMessage.pPlayer)
+        return;
+    auto& characterComponent = view.get<CharacterComponent>(entity);
+    if (!characterComponent.IsPlayer() || packet.AppearanceBuffer.empty() || packet.AppearanceBuffer.size() > 64 * 1024)
+        return;
+    characterComponent.SaveBuffer = packet.AppearanceBuffer;
+    characterComponent.ChangeFlags = packet.ChangeFlags;
+    characterComponent.FaceTints = packet.FaceTints;
+
+    NotifyPlayerAppearance notify{};
+    notify.ServerId = packet.ServerId;
+    notify.ChangeFlags = packet.ChangeFlags;
+    notify.AppearanceBuffer = packet.AppearanceBuffer;
+    notify.FaceTints = packet.FaceTints;
+    notify.InCreator = packet.InCreator;
+    for (auto* pPlayer : m_world.GetPlayerManager())
+    {
+        if (pPlayer != acMessage.pPlayer)
+            pPlayer->Send(notify);
+    }
 }
 
 void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReferencesMoveRequest>& acMessage) const noexcept

@@ -32,6 +32,7 @@ struct NotifyMount;
 struct InitPackageEvent;
 struct NotifyNewPackage;
 struct NotifyRespawn;
+struct NotifyPlayerAppearance;
 struct BeastFormChangeEvent;
 struct AddExperienceEvent;
 struct NotifySyncExperience;
@@ -128,6 +129,16 @@ struct CharacterService
     void OnNotifyNewPackage(const NotifyNewPackage& acMessage) const noexcept;
     void UpdateLeaderScriptedPackage() noexcept;
     void OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept;
+    void OnNotifyPlayerAppearance(const NotifyPlayerAppearance& acMessage) noexcept;
+    // Character creator together: this player's look sent live while editing (see CharacterService.cpp).
+    void SendCreatorAppearance() noexcept;
+
+public:
+    // Where to show another player's character on this PC while they are in the creator: beside
+    // this player instead of inside them (everyone stands on the same spot). Any thread.
+    static bool GetCreatorDisplayOffset(uint32_t aFormId, NiPoint3& arOffset) noexcept;
+
+private:
     void OnBeastFormChange(const BeastFormChangeEvent& acEvent) const noexcept;
     void OnAddExperienceEvent(const AddExperienceEvent& acEvent) noexcept;
     void OnNotifySyncExperience(const NotifySyncExperience& acMessage) noexcept;
@@ -264,6 +275,10 @@ private:
     entt::scoped_connection m_initPackageConnection;
     entt::scoped_connection m_newPackageConnection;
     entt::scoped_connection m_notifyRespawnConnection;
+    entt::scoped_connection m_notifyPlayerAppearanceConnection;
+    uint64_t m_nextCreatorAppearanceMs{};
+    uint64_t m_lastCreatorAppearanceHash{};
+    bool m_creatorWasOpen{};
     entt::scoped_connection m_beastFormChangeConnection;
     entt::scoped_connection m_addExperienceEventConnection;
     entt::scoped_connection m_syncExperienceConnection;

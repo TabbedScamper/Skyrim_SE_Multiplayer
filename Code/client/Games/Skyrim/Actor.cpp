@@ -724,6 +724,11 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
         s_pendingReset3D[formID] = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
 }
 
+void Actor::QueueReset3D(const uint32_t aDelayMs) noexcept
+{
+    s_pendingReset3D[formID] = std::chrono::steady_clock::now() + std::chrono::milliseconds(aDelayMs);
+}
+
 void Actor::FlushPendingReset3D() noexcept
 {
     const auto now = std::chrono::steady_clock::now();

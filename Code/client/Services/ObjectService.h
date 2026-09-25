@@ -334,6 +334,7 @@ private:
         // The played-back target this frame before smoothing (riders are matched against it).
         // Dynamic follow (see s_cartPhysicsEnabled): this copy's body is simulated, steered to the host.
         bool DynamicFollow{};
+        bool SettledAtFinalPose{};
         // The previous frame's played-back transform: what the node shows (see kVisualLagFrame).
         glm::vec3 PreviousDrawnPosition{};
         glm::vec3 PreviousDrawnRotation{};

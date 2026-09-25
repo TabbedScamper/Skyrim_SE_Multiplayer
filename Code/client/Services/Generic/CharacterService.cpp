@@ -63,6 +63,8 @@
 #include <Messages/NotifyNewPackage.h>
 #include <Messages/RequestRespawn.h>
 #include <Messages/NotifyRespawn.h>
+#include <Messages/PlayerAppearanceRequest.h>
+#include <Messages/NotifyPlayerAppearance.h>
 #include <Messages/SyncExperienceRequest.h>
 #include <Messages/NotifySyncExperience.h>
 #include <Messages/DialogueRequest.h>
@@ -103,6 +105,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
     m_newPackageConnection = m_dispatcher.sink<NotifyNewPackage>().connect<&CharacterService::OnNotifyNewPackage>(this);
 
     m_notifyRespawnConnection = m_dispatcher.sink<NotifyRespawn>().connect<&CharacterService::OnNotifyRespawn>(this);
+    m_notifyPlayerAppearanceConnection = m_dispatcher.sink<NotifyPlayerAppearance>().connect<&CharacterService::OnNotifyPlayerAppearance>(this);
     m_beastFormChangeConnection = m_dispatcher.sink<BeastFormChangeEvent>().connect<&CharacterService::OnBeastFormChange>(this);
 
     m_addExperienceEventConnection = m_dispatcher.sink<AddExperienceEvent>().connect<&CharacterService::OnAddExperienceEvent>(this);
@@ -400,6 +403,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
         s_nextScriptedPackageMs = packageNow + 100;
         UpdateLeaderScriptedPackage();
     }
+    SendCreatorAppearance();
     PoseCopyAuthority::SetCurrentTick(SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick());
     static uint64_t s_nextPoseRegistryMs = 0;
     if (const auto registryNow = GetTickCount64(); registryNow >= s_nextPoseRegistryMs)
@@ -1145,6 +1149,134 @@ void CharacterService::OnRemoveCharacter(const NotifyRemoveCharacter& acMessage)
 
         DeleteRemoteEntityComponents(*itor);
     }
+}
+
+namespace
+{
+// Other players in the character creator, by form id: the slot they are shown in beside this
+// player (1, 2, ...), and when their last look was applied here.
+struct CreatorPlayer
+{
+    uint32_t Slot{};
+    uint64_t AppliedAtMs{};
+};
+std::mutex s_creatorPlayersLock;
+std::unordered_map<uint32_t, CreatorPlayer> s_creatorPlayers;
+constexpr float kCreatorSpacing = 110.f;
+
+uint64_t CreatorNowMs() noexcept
+{
+    return GetTickCount64();
+}
+} // namespace
+
+bool CharacterService::GetCreatorDisplayOffset(const uint32_t aFormId, NiPoint3& arOffset) noexcept
+{
+    std::lock_guard lock(s_creatorPlayersLock);
+    const auto it = s_creatorPlayers.find(aFormId);
+    auto* pPlayer = PlayerCharacter::Get();
+    if (it == s_creatorPlayers.end() || !pPlayer)
+        return false;
+    // To this player's side (alternating left and right), so a player waiting beside the creator
+    // watches the others edit.
+    const float side = (it->second.Slot % 2 ? 1.f : -1.f) * static_cast<float>((it->second.Slot + 1) / 2) * kCreatorSpacing;
+    arOffset.x = std::cos(pPlayer->rotation.z) * side;
+    arOffset.y = -std::sin(pPlayer->rotation.z) * side;
+    arOffset.z = 0.f;
+    return true;
+}
+
+// While the creator (RaceSex Menu) is open: this player's look, once a second when it changed,
+// and the final look when the creator closes. Receivers apply it to this player's character.
+void CharacterService::SendCreatorAppearance() noexcept
+{
+    auto* pUI = UI::Get();
+    const bool creatorOpen = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"));
+    const bool closedNow = m_creatorWasOpen && !creatorOpen;
+    m_creatorWasOpen = creatorOpen;
+    if (!creatorOpen && !closedNow)
+        return;
+    const auto now = CreatorNowMs();
+    if (!closedNow && now < m_nextCreatorAppearanceMs)
+        return;
+    m_nextCreatorAppearanceMs = now + 1000;
+
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+    if (!pNpc)
+        return;
+    auto view = m_world.view<FormIdComponent>();
+    const auto it = std::find_if(view.begin(), view.end(), [view](auto entity) { return view.get<FormIdComponent>(entity).Id == 0x14; });
+    if (it == view.end())
+        return;
+    const auto serverId = Utils::GetServerId(*it);
+    if (!serverId)
+        return;
+
+    PlayerAppearanceRequest request;
+    request.ServerId = *serverId;
+    pNpc->MarkChanged(0x2000800);
+    request.ChangeFlags = pNpc->GetChangeFlags();
+    pNpc->Serialize(&request.AppearanceBuffer);
+    const auto& tints = pPlayer->GetTints();
+    request.FaceTints.Entries.resize(tints.length);
+    for (auto i = 0u; i < tints.length; ++i)
+    {
+        request.FaceTints.Entries[i].Alpha = tints[i]->alpha;
+        request.FaceTints.Entries[i].Color = tints[i]->color;
+        request.FaceTints.Entries[i].Type = tints[i]->type;
+        if (tints[i]->texture)
+            request.FaceTints.Entries[i].Name = tints[i]->texture->name.AsAscii();
+    }
+    request.InCreator = creatorOpen;
+
+    uint64_t hash = 14695981039346656037ULL;
+    for (const char c : request.AppearanceBuffer)
+        hash = (hash ^ static_cast<uint8_t>(c)) * 1099511628211ULL;
+    for (const auto& entry : request.FaceTints.Entries)
+        hash = (hash ^ entry.Color ^ (static_cast<uint64_t>(entry.Alpha * 1000.f) << 32)) * 1099511628211ULL;
+    if (!closedNow && hash == m_lastCreatorAppearanceHash)
+        return;
+    m_lastCreatorAppearanceHash = hash;
+    m_transport.Send(request);
+    if (closedNow)
+        spdlog::info("Character creator closed: sent the final look");
+}
+
+// Another player's look (live while they edit): applied to their character here, at most once a
+// second, and shown beside this player while they are still in the creator.
+void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& acMessage) noexcept
+{
+    auto view = m_world.view<FormIdComponent, RemoteComponent>();
+    const auto entityIt = std::find_if(view.begin(), view.end(),
+        [view, id = acMessage.ServerId](auto aEntity) { return view.get<RemoteComponent>(aEntity).Id == id; });
+    if (entityIt == view.end())
+        return;
+    auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(*entityIt).Id));
+    auto* pNpc = pActor ? Cast<TESNPC>(pActor->baseForm) : nullptr;
+    if (!pNpc || !pActor->GetExtension() || !pActor->GetExtension()->IsPlayer())
+        return;
+
+    {
+        std::lock_guard lock(s_creatorPlayersLock);
+        if (acMessage.InCreator)
+        {
+            auto& creatorPlayer = s_creatorPlayers[pActor->formID];
+            if (!creatorPlayer.Slot)
+                creatorPlayer.Slot = static_cast<uint32_t>(s_creatorPlayers.size());
+            const auto now = CreatorNowMs();
+            if (now < creatorPlayer.AppliedAtMs + 800)
+                return;
+            creatorPlayer.AppliedAtMs = now;
+        }
+        else
+            s_creatorPlayers.erase(pActor->formID);
+    }
+
+    pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
+    FaceGenSystem::Setup(m_world, *entityIt, acMessage.FaceTints);
+    pActor->QueueReset3D(50);
+    spdlog::info("Player {:X}: {} look applied", pActor->formID, acMessage.InCreator ? "live creator" : "final");
 }
 
 void CharacterService::OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept

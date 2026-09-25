@@ -8,6 +8,7 @@
 #include <Services/CharacterService.h>
 #include <Services/PlayerService.h>
 #include <Services/PapyrusService.h>
+#include <Services/CorpseRagdollService.h>
 #include <World.h>
 #include <GameLoopDiagnostic.h>
 #include <DInputHook.hpp>
@@ -3972,6 +3973,152 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         if (command == "test_checkpoint_status")
             return Error(id, "direct save is disabled after a paired cinematic hang");
         // Every physics body in a reference's 3D tree (carts: body, wheels, harness...).
+        // Testing ground setup: leave the intro on this PC. Stops MQ101 (0003372B) and undoes what it
+        // leaves on the player: controls disabled, character-creation mode (no saving), AI driven,
+        // restrained. Papyrus natives called with their (VM, stack, self or static tag, args) form.
+        if (command == "skip_intro")
+        {
+            struct Game
+            {
+            };
+            using Quest = TESQuest;
+            auto* pPlayer = PlayerCharacter::Get();
+            auto* pIntro = Cast<TESQuest>(TESForm::GetById(0x0003372B));
+            if (!pPlayer)
+                return Error(id, "player not found");
+            // Each native only if it was found by name (a missing one was a call to address 0).
+            std::string missing;
+            PAPYRUS_FUNCTION(void, Quest, Stop);
+            if (!s_pStop)
+                missing += "Quest.Stop ";
+            else if (pIntro)
+                s_pStop(pIntro);
+            PAPYRUS_FUNCTION(void, Game, SetInChargen, bool, bool, bool);
+            if (!s_pSetInChargen)
+                missing += "Game.SetInChargen ";
+            else
+                s_pSetInChargen(nullptr, false, false, false);
+            PAPYRUS_FUNCTION(void, Game, EnablePlayerControls, bool, bool, bool, bool, bool, bool, bool, bool, int32_t);
+            if (!s_pEnablePlayerControls)
+                missing += "Game.EnablePlayerControls ";
+            else
+                s_pEnablePlayerControls(nullptr, true, true, true, true, true, true, true, true, 0);
+            PAPYRUS_FUNCTION(void, Game, SetPlayerAIDriven, bool);
+            if (!s_pSetPlayerAIDriven)
+                missing += "Game.SetPlayerAIDriven ";
+            else
+                s_pSetPlayerAIDriven(nullptr, false);
+            PAPYRUS_FUNCTION(void, Actor, SetRestrained, bool);
+            if (!s_pSetRestrained)
+                missing += "Actor.SetRestrained ";
+            else
+                s_pSetRestrained(pPlayer, false);
+            return Result(id, fmt::format("\"introStopped\":{},\"missing\":\"{}\"", JsonBool(pIntro != nullptr), missing));
+        }
+        // Testing ground (docs: C:\Tools\skyrim_re\testground.ps1). Move this PC's player to a
+        // persistent reference (a map marker), offset sideways so players do not overlap.
+        if (command == "teleport_player")
+        {
+            // A worldspace and a position (the marker's, read from the plugin): the marker reference
+            // itself is only loaded while its cell is.
+            const auto worldText = GetJsonString(acLine, "world");
+            const auto offsetText = GetJsonString(acLine, "offset");
+            auto* pWorldSpace = worldText.empty() ? nullptr : Cast<TESWorldSpace>(TESForm::GetById(std::stoul(worldText, nullptr, 16)));
+            auto* pPlayer = PlayerCharacter::Get();
+            if (!pWorldSpace || !pPlayer || GetJsonString(acLine, "x").empty())
+                return Error(id, "worldspace, position or player missing");
+            NiPoint3 target{};
+            target.x = std::stof(GetJsonString(acLine, "x")) + (offsetText.empty() ? 0.f : std::stof(offsetText));
+            target.y = std::stof(GetJsonString(acLine, "y"));
+            target.z = std::stof(GetJsonString(acLine, "z"));
+            auto* pCell = ModManager::Get()->GetCellFromCoordinates(static_cast<int32_t>(std::floor(target.x / 4096.f)),
+                static_cast<int32_t>(std::floor(target.y / 4096.f)), pWorldSpace, true);
+            if (!pCell)
+                return Error(id, "exterior cell not found");
+            pPlayer->MoveTo(pCell, target);
+            return Result(id, fmt::format("\"cell\":\"{:X}\",\"x\":{:.0f},\"y\":{:.0f},\"z\":{:.0f}", pCell->formID,
+                target.x, target.y, target.z));
+        }
+        // Place an actor (a base form) in front of this PC's player.
+        if (command == "spawn_actor")
+        {
+            const auto baseText = GetJsonString(acLine, "base");
+            const auto distanceText = GetJsonString(acLine, "distance");
+            auto* pBase = baseText.empty() ? nullptr : TESForm::GetById(std::stoul(baseText, nullptr, 16));
+            auto* pPlayer = PlayerCharacter::Get();
+            if (!pBase || !pPlayer)
+                return Error(id, "base form or player not found");
+            using ObjectReference = TESObjectREFR;
+            PAPYRUS_FUNCTION(TESObjectREFR*, ObjectReference, PlaceAtMe, TESForm*, int32_t, bool, bool);
+            auto* pPlaced = s_pPlaceAtMe(pPlayer, pBase, 1, false, false);
+            if (!pPlaced)
+                return Error(id, "PlaceAtMe returned nothing");
+            const float distance = distanceText.empty() ? 300.f : std::stof(distanceText);
+            NiPoint3 target = pPlayer->position;
+            target.x += std::sin(pPlayer->rotation.z) * distance;
+            target.y += std::cos(pPlayer->rotation.z) * distance;
+            pPlaced->MoveTo(pPlayer->parentCell, target);
+            return Result(id, fmt::format("\"form_id\":\"{:X}\"", pPlaced->formID));
+        }
+        // Knock an actor away from this PC's player (so it ragdolls), then kill it.
+        if (command == "kill_actor")
+        {
+            const auto form = GetJsonString(acLine, "form_id");
+            const auto pushText = GetJsonString(acLine, "push");
+            auto* pActor = form.empty() ? nullptr : Cast<Actor>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            auto* pPlayer = PlayerCharacter::Get();
+            if (!pActor || !pPlayer || !pActor->currentProcess)
+                return Error(id, "actor not found");
+            const float push = pushText.empty() ? 20.f : std::stof(pushText);
+            pActor->currentProcess->KnockExplosion(pActor, &pPlayer->position, push);
+            pActor->Kill();
+            return Result(id, fmt::format("\"push\":{}", push));
+        }
+        // An actor's state for comparing the PCs: life and knock state, position, ragdoll bodies, worn items.
+        if (command == "actor_state")
+        {
+            const auto form = GetJsonString(acLine, "form_id");
+            auto* pActor = form.empty() ? nullptr : Cast<Actor>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            // Or the nearest non-player actor within 500 units of x,y,z (temporary actors have
+            // different form ids on each PC).
+            if (!pActor && !GetJsonString(acLine, "x").empty())
+            {
+                const float x = std::stof(GetJsonString(acLine, "x")), y = std::stof(GetJsonString(acLine, "y")),
+                            z = std::stof(GetJsonString(acLine, "z"));
+                float best = 500.f;
+                auto view = m_world.view<FormIdComponent>();
+                for (auto entity : view)
+                {
+                    auto* pCandidate = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                    if (!pCandidate || !pCandidate->GetExtension() || pCandidate->GetExtension()->IsPlayer())
+                        continue;
+                    const float dx = pCandidate->position.x - x, dy = pCandidate->position.y - y, dz = pCandidate->position.z - z;
+                    const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (distance < best)
+                    {
+                        best = distance;
+                        pActor = pCandidate;
+                    }
+                }
+            }
+            if (!pActor)
+                return Error(id, "actor not found");
+            const uint32_t flags1 = pActor->actorState.flags1;
+            std::string worn = "[";
+            int wornCount = 0;
+            for (const auto& entry : pActor->GetActorInventory().Entries)
+            {
+                if (!entry.IsWorn())
+                    continue;
+                worn += fmt::format("{}\"{:X}:{:X}\"", wornCount++ ? "," : "", entry.BaseId.ModId, entry.BaseId.BaseId);
+            }
+            worn += "]";
+            const auto* pRoot = pActor->GetNiNode();
+            return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
+                "\"has3D\":{},\"bodies\":{},\"worn\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
+                CorpseRagdollService::DescribeRagdollBodies(pActor), worn));
+        }
         if (command == "ref_bodies")
         {
             const auto form = GetJsonString(acLine, "form_id");
