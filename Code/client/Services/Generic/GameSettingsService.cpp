@@ -787,6 +787,8 @@ void GameSettingsService::ApplyRuntime(const GameSettingsSnapshot& acSettings, b
             SetFloatSetting(key.c_str(), Clamp(value, 0.f, 1.f));
         SetSoundCategoryVolume(category, value);
     }
+    // The playing music track does not pick up category changes by itself.
+    AudioPreview::SyncMusicVolume();
     SetFloatSetting("fGamma:Display", Clamp(acSettings.Gamma, 0.5f, 1.5f));
     // Address Library 388988 is the live fGamma data used by the vanilla
     // Journal Menu's OptionChange case on 1.7.104. Writing it explicitly

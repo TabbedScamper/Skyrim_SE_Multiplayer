@@ -32,4 +32,10 @@ void NotifyCategoryVolumesChanged() noexcept;
 // handler (ID 53310): its default case takes the category form ID as the
 // option number. Same path the vanilla Audio menu uses; master uses option 27.
 void SetCategoryVolumeVanilla(uint32_t aCategoryFormId, float aValue) noexcept;
+
+// Category volume only reaches sounds created after a change, so the music
+// track that is already playing (the title theme, a long exploration track)
+// keeps its old level. This rescales the playing track's own sound handles to
+// the current Music level (or 0 while another channel is being previewed).
+void SyncMusicVolume() noexcept;
 } // namespace AudioPreview

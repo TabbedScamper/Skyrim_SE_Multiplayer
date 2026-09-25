@@ -62,6 +62,40 @@ const std::vector<std::pair<const char*, const char*>> kSurfaces = {
 // The only SNDR under AudioCategoryVOCGeneral; dialogue lines are not sound descriptors.
 const std::vector<const char*> kVoiceLines = {"NPCDraugrVoiceTaunt"};
 
+// ---- playing music track (BGSMusicSingleTrack, vtable ID 191021) ----
+// Handles at +0x68 and +0x74 (FUN_140326690 creates them, FUN_140326750
+// fades/pauses both). Palette tracks play single tracks, so this covers them.
+constexpr size_t kTrackHandleA = 0x68;
+constexpr size_t kTrackHandleB = 0x74;
+using TTrackFn = void (*)(void*);
+TTrackFn s_realTrackPlay = nullptr;
+TTrackFn s_realTrackStop = nullptr;
+void* s_currentTrack = nullptr;
+float s_musicLevelAtTrackStart = 1.f;
+bool s_musicMutedForPreview = false;
+
+float MusicUserLevel() noexcept
+{
+    // BGSSoundCategory user volume (BSISoundCategory +0x20 = form +0x50).
+    auto* pForm = TESForm::GetById(0x00071E64); // AudioCategoryMUS
+    return pForm ? *reinterpret_cast<const float*>(reinterpret_cast<uint8_t*>(pForm) + 0x50) : 1.f;
+}
+
+void HookTrackPlay(void* apTrack)
+{
+    s_realTrackPlay(apTrack);
+    s_currentTrack = apTrack;
+    s_musicLevelAtTrackStart = MusicUserLevel();
+    AudioPreview::SyncMusicVolume();
+}
+
+void HookTrackStop(void* apTrack)
+{
+    s_realTrackStop(apTrack);
+    if (apTrack == s_currentTrack)
+        s_currentTrack = nullptr;
+}
+
 struct State
 {
     std::string Channel;
@@ -104,11 +138,15 @@ void RestoreMuted() noexcept
         SetCategoryVolume(formId, volume);
     s_state.Muted.clear();
     (void)any;
+    s_musicMutedForPreview = false;
+    AudioPreview::SyncMusicVolume();
 }
 
 void MuteOthers(const std::string& acChannel) noexcept
 {
     RestoreMuted();
+    s_musicMutedForPreview = acChannel != "music" && acChannel != "master";
+    AudioPreview::SyncMusicVolume();
     for (const auto formId : MutedFor(acChannel))
     {
         if (auto* pInterface = CategoryInterface(formId))
@@ -253,6 +291,33 @@ void SetCategoryVolumeVanilla(uint32_t aCategoryFormId, float aValue) noexcept
     reinterpret_cast<void (*)(void*)>(s_optionChange.GetPtr())(&callback);
 }
 
+void SyncMusicVolume() noexcept
+{
+    using TIsValid = bool (*)(const SoundHandle*);
+    using TSetVolume = bool (*)(SoundHandle*, float);
+    static VersionDbPtr<void> s_isValid(67621);   // BSSoundHandle::IsValid
+    static VersionDbPtr<void> s_setVolume(67626); // BSSoundHandle::SetVolume
+
+    // Title-screen theme: the Main Menu plays it itself (FUN_14095ea10, ID 52185)
+    // into a global handle (ID 383021) with no sound category, so no category
+    // slider reaches it - only master. Its level is the handle volume itself.
+    static VersionDbPtr<SoundHandle> s_titleMusic(383021);
+    if (auto* pTitle = s_titleMusic.Get(); pTitle && reinterpret_cast<TIsValid>(s_isValid.GetPtr())(pTitle))
+        reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(pTitle, s_musicMutedForPreview ? 0.f : MusicUserLevel());
+
+    if (!s_currentTrack)
+        return;
+    // The category already applied the start-of-track level; scale by the change since.
+    const float start = std::max(0.01f, s_musicLevelAtTrackStart);
+    const float gain = s_musicMutedForPreview ? 0.f : std::clamp(MusicUserLevel() / start, 0.f, 1.f / start);
+    for (const size_t offset : {kTrackHandleA, kTrackHandleB})
+    {
+        auto* pHandle = reinterpret_cast<SoundHandle*>(static_cast<uint8_t*>(s_currentTrack) + offset);
+        if (reinterpret_cast<TIsValid>(s_isValid.GetPtr())(pHandle))
+            reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(pHandle, gain);
+    }
+}
+
 void NotifyCategoryVolumesChanged() noexcept
 {
     using TGetSingleton = void* (*)();
@@ -288,3 +353,36 @@ void Tick() noexcept
         s_state.NextSound = now + PlayNext(s_state.Channel);
 }
 } // namespace AudioPreview
+
+// Main Menu music start (FUN_14095ea10, ID 52185): apply the saved Music
+// level to the title theme as soon as it starts. Register arguments are
+// forwarded untouched.
+using TTitleMusic = void (*)(void*, void*, void*, void*);
+static TTitleMusic RealTitleMusic = nullptr;
+static void HookTitleMusic(void* a1, void* a2, void* a3, void* a4)
+{
+    RealTitleMusic(a1, a2, a3, a4);
+    AudioPreview::SyncMusicVolume();
+}
+
+static TiltedPhoques::Initializer s_musicTrackHooks(
+    []()
+    {
+        static VersionDbPtr<void> s_titleMusicStart(52185);
+        RealTitleMusic = reinterpret_cast<TTitleMusic>(s_titleMusicStart.GetPtr());
+        if (RealTitleMusic)
+            TP_HOOK(&RealTitleMusic, HookTitleMusic);
+
+        static VersionDbPtr<void*> s_vtable(191021); // BGSMusicSingleTrack vtable
+        auto** pVtable = s_vtable.Get();
+        if (!pVtable)
+            return;
+        DWORD oldProtect{};
+        if (!VirtualProtect(pVtable + 2, 2 * sizeof(void*), PAGE_READWRITE, &oldProtect))
+            return;
+        s_realTrackPlay = reinterpret_cast<TTrackFn>(pVtable[2]); // DoPlay (FUN_140326690)
+        s_realTrackStop = reinterpret_cast<TTrackFn>(pVtable[3]); // DoPause/Finish (FUN_140326750)
+        pVtable[2] = reinterpret_cast<void*>(&HookTrackPlay);
+        pVtable[3] = reinterpret_cast<void*>(&HookTrackStop);
+        VirtualProtect(pVtable + 2, 2 * sizeof(void*), oldProtect, &oldProtect);
+    });
