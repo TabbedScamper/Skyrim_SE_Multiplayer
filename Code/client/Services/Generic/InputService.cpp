@@ -143,6 +143,11 @@ bool IsNativeCursorMenuOpen() noexcept
 }
 } // namespace
 
+bool InputService::IsPointerHandedToShell() noexcept
+{
+    return s_shellOwnsPointer;
+}
+
 void InputService::RequestCursorUpdate() noexcept
 {
     if (const auto* pWindow = BSGraphics::GetMainWindow(); pWindow && pWindow->hWnd)
@@ -661,7 +666,7 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         {
             const auto mouse = input.data.mouse;
 
-            if (active)
+            if (active && !s_shellOwnsPointer)
             {
                 // One visible cursor: CEF draws its own only when Skyrim's
                 // Cursor Menu is not open to draw the native one.

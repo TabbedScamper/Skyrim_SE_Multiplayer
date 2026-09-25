@@ -16,6 +16,9 @@ struct InputService
     static void NotifyControllerInput() noexcept;
     // Safe from any thread: re-evaluates Windows pointer ownership on the window thread.
     static void RequestCursorUpdate() noexcept;
+    // Windows key "quick escape": game input is frozen and the desktop owns
+    // the pointer until the player clicks back in or refocuses the game.
+    static bool IsPointerHandedToShell() noexcept;
 
     // Posted to the game window by RequestCursorUpdate.
     static constexpr UINT cCursorUpdateMessage = WM_APP + 0x3C1;

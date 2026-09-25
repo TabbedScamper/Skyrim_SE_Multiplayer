@@ -2,6 +2,7 @@
 #include <BSGraphics/BSGraphicsRenderer.h>
 #include <Games/Skyrim/BSInput/InputPollDiagnostic.h>
 #include <Services/OverlayService.h>
+#include <Services/InputService.h>
 #include <World.h>
 
 struct BSInputDeviceManager;
@@ -16,10 +17,14 @@ void Hook_BSInputDeviceManager_PollInputDevices(BSInputDeviceManager* inputDevic
     // the same D-pad/A press to the native menu underneath the options page.
     static auto s_resumeGameInputAt = std::chrono::steady_clock::time_point{};
     const bool overlayActive = World::Get().GetOverlayService().GetActive();
-    if (overlayActive)
+    // The Windows key hands the pointer to the desktop: freeze game input
+    // (camera, movement, keys) exactly where it is. The resume delay keeps the
+    // click that returns to the game from also landing as an attack.
+    const bool handedToShell = InputService::IsPointerHandedToShell();
+    if (overlayActive || handedToShell)
         s_resumeGameInputAt = std::chrono::steady_clock::now() + 250ms;
 
-    if (!BSGraphics::GetMainWindow()->IsForeground())
+    if (!BSGraphics::GetMainWindow()->IsForeground() || handedToShell)
     {
         g_inputPollDiagnostic.Unfocused.fetch_add(1, std::memory_order_relaxed);
         return;
