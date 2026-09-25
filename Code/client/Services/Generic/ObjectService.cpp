@@ -1067,6 +1067,17 @@ struct StepTarget
 // farther than this (Havok units) it is placed there at once.
 constexpr float kFollowTimeConstant = 0.1f;
 constexpr float kFollowTeleport = 3.f;
+
+// Follow probe (per body, logged every 5 s): steps, placements (far off or keyframed), largest gap.
+struct FollowProbe
+{
+    uint32_t Steps{};
+    uint32_t Teleports{};
+    uint32_t KeyframedPlacements{};
+    float MaxErrorUnits{};
+    std::chrono::steady_clock::time_point NextLog{};
+};
+std::unordered_map<void*, FollowProbe> s_followProbes;
 std::mutex s_stepTargetsLock;
 std::vector<StepTarget> s_stepTargets;
 std::vector<StepTarget> s_stepTargetsBuilding;
@@ -1195,6 +1206,21 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
                 const glm::vec3 error = wanted - current;
                 using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
                 POINTER_SKYRIMSE(std::remove_pointer_t<TSetPositionAndRotation>, s_placeBody, 60898);
+                auto& probe = s_followProbes[target.Body];
+                ++probe.Steps;
+                probe.MaxErrorUnits = (std::max)(probe.MaxErrorUnits, glm::length(error) * kHavokToGameUnits);
+                if (pBody->motionType == 4)
+                    ++probe.KeyframedPlacements;
+                else if (glm::length(error) > kFollowTeleport)
+                    ++probe.Teleports;
+                if (const auto now = std::chrono::steady_clock::now(); now >= probe.NextLog)
+                {
+                    if (probe.Steps > 1)
+                        spdlog::info("Follow body {}: {} steps, {} teleports, {} keyframed placements, largest gap {:.1f} u",
+                            fmt::ptr(target.Body), probe.Steps, probe.Teleports, probe.KeyframedPlacements, probe.MaxErrorUnits);
+                    probe = FollowProbe{};
+                    probe.NextLog = now + std::chrono::seconds(5);
+                }
                 if (glm::length(error) > kFollowTeleport || pBody->motionType == 4)
                 {
                     alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
