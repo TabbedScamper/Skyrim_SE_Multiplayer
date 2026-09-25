@@ -143,6 +143,37 @@ bool IsNativeCursorMenuOpen() noexcept
 }
 } // namespace
 
+namespace
+{
+// bBackgroundMouse:Controls (Setting ID 388492, bool value at +8). Skyrim
+// reads it when it opens the mouse (FUN_140e13080: DirectInput cooperative
+// level 6 = non-exclusive instead of 5 = exclusive) and in its menu cursor
+// update (FUN_14117a340: cursor = GetCursorPos in the client area instead of
+// raw deltas x fMouseCursorSpeed). With it on, every cursor follows the real
+// Windows pointer: Windows speed/acceleration apply and remote-desktop input
+// (absolute positions) no longer moves the cursor in large steps. The camera
+// still reads raw DirectInput deltas. Confinement comes from UpdateCursorOwnership.
+bool* BackgroundMouseFlag() noexcept
+{
+    static VersionDbPtr<uint8_t> s_setting(388492);
+    auto* pSetting = s_setting.Get();
+    return pSetting ? reinterpret_cast<bool*>(pSetting + 8) : nullptr;
+}
+
+bool UsesSystemPointer() noexcept
+{
+    const auto* pFlag = BackgroundMouseFlag();
+    return pFlag && *pFlag;
+}
+} // namespace
+
+// Before the game creates its mouse device. No shipped INI sets the key, so
+// the value survives INI loading unless a player sets bBackgroundMouse=0.
+static TiltedPhoques::Initializer s_backgroundMouse([]() {
+    if (auto* pFlag = BackgroundMouseFlag())
+        *pFlag = true;
+});
+
 bool InputService::IsPointerHandedToShell() noexcept
 {
     return s_shellOwnsPointer;
@@ -627,9 +658,17 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     ScreenToClient(hwnd, &position);
     position = MapClientToOverlay(hwnd, position, pRenderer.get());
 
+    const bool systemPointer = UsesSystemPointer();
     if (active)
     {
-        position = GetOverlayMousePosition(pRenderer.get());
+        if (systemPointer)
+        {
+            // Keep the raw accumulator in step so a fallback never jumps.
+            s_overlayMouseX = position.x;
+            s_overlayMouseY = position.y;
+        }
+        else
+            position = GetOverlayMousePosition(pRenderer.get());
         if (s_pOverlay->GetTitleScreen())
             SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
     }
@@ -685,7 +724,8 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 // One visible cursor: CEF draws its own only when Skyrim's
                 // Cursor Menu is not open to draw the native one.
                 pRenderer->SetCursorVisible(!IsNativeCursorMenuOpen());
-                position = AdvanceOverlayMouse(hwnd, mouse, pRenderer.get());
+                if (!systemPointer)
+                    position = AdvanceOverlayMouse(hwnd, mouse, pRenderer.get());
                 if (s_pOverlay->GetTitleScreen())
                     SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
                 ProcessMouseMove(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y));
