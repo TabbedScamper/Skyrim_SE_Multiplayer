@@ -2222,6 +2222,30 @@ void ObjectService::ApplyRemotePhysics() noexcept
             pReference->position = position;
             pReference->SetRotation(rotation.x, rotation.y, rotation.z);
             pReference->Update3DPosition(true);
+            // Writing the position does not move a reference into the exterior cell it
+            // now stands in. Measured: the follower's cart kept its start cell, and when
+            // that cell detached behind the players the cart (and the player riding it)
+            // unloaded mid-road. Hand it to the new cell the way the engine does for a
+            // Havok-moved reference (ID 19826 calls 19799 with the worldspace). MoveTo is
+            // not usable here: it disables and re-enables the reference, reloading its 3D
+            // and body, which measured as 7,000+ unit jumps on every crossing.
+            if (auto* pCell = pReference->parentCell; pCell && !(pCell->cellFlags & 1))
+            {
+                if (auto* pWorldSpace = pReference->GetWorldSpace())
+                {
+                    const auto gridX = static_cast<int32_t>(std::floor(position.x / 4096.f));
+                    const auto gridY = static_cast<int32_t>(std::floor(position.y / 4096.f));
+                    auto* pTarget = ModManager::Get()->GetCellFromCoordinates(gridX, gridY, pWorldSpace, false);
+                    if (pTarget && pTarget != pCell && pTarget->IsAttached())
+                    {
+                        spdlog::info("Host-driven body {:X} crossed from cell {:X} to {:X}", it->first, pCell->formID,
+                            pTarget->formID);
+                        using TUpdateParentCell = void(TESObjectREFR*, TESObjectCELL*, TESWorldSpace*);
+                        POINTER_SKYRIMSE(TUpdateParentCell, s_updateParentCell, 19799);
+                        s_updateParentCell.Get()(pReference, nullptr, pWorldSpace);
+                    }
+                }
+            }
             // Keep the (keyframed) Havok body with the reference, at the host's offset between
             // its body origin and reference position (the centre of mass is not the origin).
             DynamicBody body{};
