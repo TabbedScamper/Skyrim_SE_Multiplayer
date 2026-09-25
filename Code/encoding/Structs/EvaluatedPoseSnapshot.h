@@ -2,6 +2,7 @@
 
 #include <TiltedCore/Buffer.hpp>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -73,6 +74,13 @@ struct EvaluatedPoseSnapshot
         return true;
     }
 
+    // Packed per bone (~12 bytes instead of 40), so every nearby actor can stream at 20 Hz:
+    //  translation: 1 flag bit; 3 x 16-bit fixed point (0.01 units, +-327.67) or 3 raw floats
+    //  rotation:    smallest-three quaternion, 2-bit index + 3 x 15 bits (about 0.003 degrees)
+    //  scale:       1 flag bit for (1,1,1), otherwise 3 raw floats
+    static constexpr float kTranslationStep = 0.01f;
+    static constexpr float kRotationRange = 0.70710678f;
+
     void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
     {
         const bool valid = IsValid();
@@ -84,12 +92,44 @@ struct EvaluatedPoseSnapshot
         aWriter.WriteBits(SourceTick, 64);
         for (const auto& bone : Bones)
         {
+            const bool packed = std::abs(bone.Translation[0]) < 327.f && std::abs(bone.Translation[1]) < 327.f &&
+                std::abs(bone.Translation[2]) < 327.f;
+            aWriter.WriteBits(packed ? 1 : 0, 1);
             for (float value : bone.Translation)
-                aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
-            for (float value : bone.Rotation)
-                aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
-            for (float value : bone.Scale)
-                aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
+            {
+                if (packed)
+                    aWriter.WriteBits(static_cast<uint16_t>(static_cast<int16_t>(std::lround(value / kTranslationStep))), 16);
+                else
+                    aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
+            }
+
+            // Smallest three: drop the largest component (sign-normalized to positive).
+            std::array<float, 4> q = bone.Rotation;
+            float norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+            if (!(norm > 0.f))
+            {
+                q = {0.f, 0.f, 0.f, 1.f};
+                norm = 1.f;
+            }
+            uint32_t largest = 0;
+            for (uint32_t i = 1; i < 4; ++i)
+                if (std::abs(q[i]) > std::abs(q[largest]))
+                    largest = i;
+            const float sign = q[largest] < 0.f ? -1.f : 1.f;
+            aWriter.WriteBits(largest, 2);
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+                if (i == largest)
+                    continue;
+                const float value = std::clamp(sign * q[i] / norm / kRotationRange, -1.f, 1.f);
+                aWriter.WriteBits(static_cast<uint32_t>(std::lround((value * 0.5f + 0.5f) * 32767.f)), 15);
+            }
+
+            const bool unitScale = bone.Scale[0] == 1.f && bone.Scale[1] == 1.f && bone.Scale[2] == 1.f;
+            aWriter.WriteBits(unitScale ? 1 : 0, 1);
+            if (!unitScale)
+                for (float value : bone.Scale)
+                    aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
         }
     }
 
@@ -109,24 +149,49 @@ struct EvaluatedPoseSnapshot
         Bones.resize(static_cast<size_t>(count));
         for (auto& bone : Bones)
         {
+            uint64_t packed{};
+            aReader.ReadBits(packed, 1);
             for (float& value : bone.Translation)
             {
                 uint64_t bits{};
-                aReader.ReadBits(bits, 32);
-                value = std::bit_cast<float>(static_cast<uint32_t>(bits));
+                if (packed)
+                {
+                    aReader.ReadBits(bits, 16);
+                    value = static_cast<float>(static_cast<int16_t>(static_cast<uint16_t>(bits))) * kTranslationStep;
+                }
+                else
+                {
+                    aReader.ReadBits(bits, 32);
+                    value = std::bit_cast<float>(static_cast<uint32_t>(bits));
+                }
             }
-            for (float& value : bone.Rotation)
+
+            uint64_t largest{};
+            aReader.ReadBits(largest, 2);
+            float sum = 0.f;
+            for (uint32_t i = 0; i < 4; ++i)
             {
+                if (i == largest)
+                    continue;
                 uint64_t bits{};
-                aReader.ReadBits(bits, 32);
-                value = std::bit_cast<float>(static_cast<uint32_t>(bits));
+                aReader.ReadBits(bits, 15);
+                const float value = (static_cast<float>(bits) / 32767.f * 2.f - 1.f) * kRotationRange;
+                bone.Rotation[i] = value;
+                sum += value * value;
             }
-            for (float& value : bone.Scale)
-            {
-                uint64_t bits{};
-                aReader.ReadBits(bits, 32);
-                value = std::bit_cast<float>(static_cast<uint32_t>(bits));
-            }
+            bone.Rotation[largest] = std::sqrt((std::max)(0.f, 1.f - sum));
+
+            uint64_t unitScale{};
+            aReader.ReadBits(unitScale, 1);
+            if (unitScale)
+                bone.Scale = {1.f, 1.f, 1.f};
+            else
+                for (float& value : bone.Scale)
+                {
+                    uint64_t bits{};
+                    aReader.ReadBits(bits, 32);
+                    value = std::bit_cast<float>(static_cast<uint32_t>(bits));
+                }
         }
         if (!IsValid())
             throw std::runtime_error("invalid evaluated pose transform");

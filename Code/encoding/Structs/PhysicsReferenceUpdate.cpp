@@ -33,6 +33,11 @@ void PhysicsReferenceUpdate::Serialize(TiltedPhoques::Buffer::Writer& aWriter) c
     {
         for (const float value : BodyTransform)
             WriteFloat(aWriter, value);
+        const auto count = (std::min)(ChildBodies.size(), kMaxChildBodies);
+        aWriter.WriteBits(count, 8);
+        for (size_t i = 0; i < count; ++i)
+            for (const float value : ChildBodies[i])
+                WriteFloat(aWriter, value);
     }
 }
 
@@ -46,9 +51,17 @@ void PhysicsReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
     MotionType = static_cast<uint8_t>(motionType);
     LinearVelocity = {ReadFloat(aReader), ReadFloat(aReader), ReadFloat(aReader)};
     BodyTransform.fill(0.f);
+    ChildBodies.clear();
     if (MotionType == 3)
     {
         for (float& value : BodyTransform)
             value = ReadFloat(aReader);
+        uint64_t count{};
+        aReader.ReadBits(count, 8);
+        count = (std::min)(static_cast<size_t>(count), kMaxChildBodies);
+        ChildBodies.resize(count);
+        for (auto& body : ChildBodies)
+            for (float& value : body)
+                value = ReadFloat(aReader);
     }
 }

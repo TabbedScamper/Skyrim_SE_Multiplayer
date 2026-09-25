@@ -3971,6 +3971,46 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Error(id, "direct save is disabled after a paired cinematic hang; use gameplay_key quicksave after control handoff");
         if (command == "test_checkpoint_status")
             return Error(id, "direct save is disabled after a paired cinematic hang");
+        // Every physics body in a reference's 3D tree (carts: body, wheels, harness...).
+        if (command == "ref_bodies")
+        {
+            const auto form = GetJsonString(acLine, "form_id");
+            auto* pRef = form.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            if (!pRef || !pRef->GetNiNode())
+                return Error(id, "reference or 3D not found");
+            std::string bodies = "[";
+            int emitted = 0;
+            std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth)
+            {
+                if (!apNode || aDepth > 8 || emitted > 64)
+                    return;
+                const char* pName = *reinterpret_cast<const char* const*>(reinterpret_cast<const uint8_t*>(apNode) + 0x10);
+                if (apNode->collisionObject)
+                {
+                    void* pWrapper{};
+                    void* pBody{};
+                    ActorPoseDiagnosticViews::RigidBody state{};
+                    const bool readable = ReadNative(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
+                        ReadNative(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody && ReadNative(pBody, state);
+                    const auto& lr = apNode->local.rotate.entry;
+                    const auto& wr = apNode->world.rotate.entry;
+                    bodies += fmt::format("{}{{\"name\":\"{}\",\"depth\":{},\"readable\":{},\"motionType\":{},\"body\":[{},{},{}],\"node\":[{},{},{}],"
+                        "\"localRot\":[{:.4f},{:.4f},{:.4f},{:.4f}],\"worldRot\":[{:.4f},{:.4f},{:.4f},{:.4f}],\"bodyRot\":[{:.4f},{:.4f},{:.4f},{:.4f}]}}",
+                        emitted++ ? "," : "", EscapeJson(pName ? pName : ""), aDepth, JsonBool(readable), readable ? state.motionType : -1,
+                        state.transform[12] * 70.f, state.transform[13] * 70.f, state.transform[14] * 70.f, apNode->world.translate.x,
+                        apNode->world.translate.y, apNode->world.translate.z, lr[0][0], lr[0][1], lr[1][0], lr[2][2], wr[0][0], wr[0][1],
+                        wr[1][0], wr[2][2], state.transform[0], state.transform[1], state.transform[4], state.transform[10]);
+                }
+                if (auto* pAsNode = apNode->AsNode())
+                {
+                    for (uint16_t i = 0; i < pAsNode->children.length; ++i)
+                        walk(pAsNode->children.data[i], aDepth + 1);
+                }
+            };
+            walk(pRef->GetNiNode(), 0);
+            bodies += "]";
+            return Result(id, fmt::format("\"bodies\":{}", bodies));
+        }
         // An actor's 3D root and its parent chain (name, owning reference, world position).
         if (command == "actor_3d_parent")
         {
@@ -4000,6 +4040,18 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (!enabled.empty())
                 PoseCopyAuthority::SetEnabled(enabled != "false");
             return Result(id, PoseCopyAuthority::StatsJson());
+        }
+        if (command == "root_body_write")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetRootBodyWriteEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "cell_handoff")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetCellHandoffEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         // Plays an idle (form ID, hex) on the local player, e.g. 10C00D IdleWalkingCameraEnd.
         if (command == "player_idle")

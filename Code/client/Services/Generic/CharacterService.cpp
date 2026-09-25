@@ -2327,6 +2327,28 @@ void CharacterService::RunLocalUpdates() const noexcept
     static size_t nextPoseActor = 0;
     const size_t firstPoseActor = actorCount ? nextPoseActor % actorCount : 0;
     size_t actorIndex = 0;
+
+    // The actors nearest a player get a full pose every snapshot (20 Hz); the rest share the
+    // remaining slots round-robin. Sparse samples (one per 100-150 ms) made nearby NPCs on the
+    // other PC jitter as they caught up between poses.
+    constexpr size_t cNearPoseActors = 16;
+    constexpr size_t cRotatingPoseActors = 4;
+    Set<entt::entity> nearPoseActors;
+    {
+        std::vector<std::pair<float, entt::entity>> distances;
+        auto* pLocalPlayer = PlayerCharacter::Get();
+        for (auto entity : animatedLocalView)
+        {
+            auto* pActor = Cast<Actor>(TESForm::GetById(animatedLocalView.get<FormIdComponent>(entity).Id));
+            if (!pActor || !pLocalPlayer || pActor == pLocalPlayer)
+                continue;
+            const auto d = pActor->position - pLocalPlayer->position;
+            distances.emplace_back(d.x * d.x + d.y * d.y + d.z * d.z, entity);
+        }
+        std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (size_t i = 0; i < distances.size() && i < cNearPoseActors; ++i)
+            nearPoseActors.insert(distances[i].second);
+    }
     uint64_t selectedSerializeUs = 0;
     uint32_t selectedActors = 0;
 
@@ -2341,8 +2363,10 @@ void CharacterService::RunLocalUpdates() const noexcept
         // not include an unbounded number of full 99-bone actor poses here.
         // A production stream still needs priority, compression, and a
         // post-animation capture seam before enabling visual writes by default.
-        const bool capturePose = actorCount &&
-            ((actorIndex + actorCount - firstPoseActor) % actorCount) < 8;
+        const bool nearActor = nearPoseActors.contains(entity);
+        const bool capturePose = actorCount && (nearActor ||
+            (formIdComponent.Id == 0x14) ||
+            ((actorIndex + actorCount - firstPoseActor) % actorCount) < cRotatingPoseActors);
         const auto serializeStarted = capturePose ?
             std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         AnimationSystem::Serialize(m_world, message, localComponent,
@@ -2364,7 +2388,7 @@ void CharacterService::RunLocalUpdates() const noexcept
         ++actorIndex;
     }
 
-    nextPoseActor += 8;
+    nextPoseActor += cRotatingPoseActors;
     m_localPoseBatches.fetch_add(1, std::memory_order_relaxed);
     m_localPoseActors.fetch_add(selectedActors, std::memory_order_relaxed);
     m_localPoseTotalUs.fetch_add(selectedSerializeUs, std::memory_order_relaxed);

@@ -27,10 +27,12 @@ struct CorpseRagdollRequest final : ClientMessage
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
     bool operator==(const CorpseRagdollRequest& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Bodies == acRhs.Bodies;
+        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && Bodies == acRhs.Bodies;
     }
 
     uint32_t ServerId{};
+    // Shared-clock tick of the owner frame the bodies were read in.
+    uint64_t Tick{};
     TiltedPhoques::Vector<CorpseRagdollBody> Bodies{};
 };
 

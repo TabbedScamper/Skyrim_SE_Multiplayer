@@ -27,6 +27,9 @@ class ObjectService final : public BSTEventSink<TESActivateEvent>
 {
 public:
     ObjectService(World&, entt::dispatcher&, TransportService&);
+    // Test switch for the exterior-cell handoff of host-driven bodies.
+    static void SetCellHandoffEnabled(bool aEnabled) noexcept;
+    static void SetRootBodyWriteEnabled(bool aEnabled) noexcept;
 
     struct RemotePhysicsDiagnostic
     {
@@ -281,6 +284,8 @@ private:
             uint64_t Tick{};
             NiPoint3 Position{};
             NiPoint3 Rotation{};
+            // The reference's other bodies (PhysicsReferenceUpdate::ChildBodies).
+            std::vector<std::array<float, 7>> Children{};
         };
         std::array<Sample, 12> Samples{};
         uint32_t SampleCount{};

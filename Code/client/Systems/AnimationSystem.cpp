@@ -269,10 +269,13 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
                 update.EvaluatedPose.SourceTick = aMovementSnapshot.Tick;
             animationComponent.LastSentPose = update.EvaluatedPose;
         }
+        // Render-bone snapshots were a second full copy of the skeleton per pose; bone playback
+        // (PoseCopyAuthority) uses the evaluated pose, so keep them local for diagnostics only.
         if (!update.VisualBones.Bones.empty())
         {
             update.VisualBones.SourceTick = aMovementSnapshot.Tick;
             animationComponent.LastSentVisualBones = update.VisualBones;
+            update.VisualBones = {};
         }
     }
 

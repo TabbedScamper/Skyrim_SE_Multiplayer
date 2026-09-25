@@ -13,9 +13,10 @@ struct NotifyCorpseRagdoll final : ServerMessage
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
     bool operator==(const NotifyCorpseRagdoll& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Bodies == acRhs.Bodies;
+        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && Bodies == acRhs.Bodies;
     }
 
     uint32_t ServerId{};
+    uint64_t Tick{};
     TiltedPhoques::Vector<CorpseRagdollBody> Bodies{};
 };

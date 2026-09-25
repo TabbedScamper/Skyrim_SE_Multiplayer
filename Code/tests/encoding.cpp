@@ -931,8 +931,18 @@ TEST_CASE("Packets", "[encoding.packets]")
 
         REQUIRE(recvMessage.Updates[1].UpdatedMovement == sendMessage.Updates[1].UpdatedMovement);
         REQUIRE(recvMessage.Updates[1].CombatTargetServerId == 42);
-        REQUIRE(recvMessage.Updates[1].EvaluatedPose == pose);
-        REQUIRE(recvMessage.Updates[1].EvaluatedPose.Checksum() == pose.Checksum());
+        // The pose is packed (0.01-unit translation, 15-bit smallest-three rotation): compare within that.
+        const auto& received = recvMessage.Updates[1].EvaluatedPose;
+        REQUIRE(received.GraphDescriptor == pose.GraphDescriptor);
+        REQUIRE(received.SourceTick == pose.SourceTick);
+        REQUIRE(received.Bones.size() == pose.Bones.size());
+        for (int i = 0; i < 3; ++i)
+            REQUIRE(std::abs(received.Bones[0].Translation[i] - pose.Bones[0].Translation[i]) <= 0.005f);
+        float dot = 0.f;
+        for (int i = 0; i < 4; ++i)
+            dot += received.Bones[0].Rotation[i] * pose.Bones[0].Rotation[i];
+        REQUIRE(std::abs(dot) > 0.99999f);
+        REQUIRE(received.Bones[0].Scale == pose.Bones[0].Scale);
         REQUIRE(recvMessage.Updates[1].VisualBones == visual);
         REQUIRE(recvMessage.Updates[1].VisualBones.Checksum() == visual.Checksum());
     }
@@ -949,6 +959,42 @@ TEST_CASE("Evaluated pose transport bounds", "[encoding.pose]")
     REQUIRE(pose.IsValid());
     pose.Bones[0].Rotation[0] = std::numeric_limits<float>::infinity();
     REQUIRE_FALSE(pose.IsValid());
+}
+
+TEST_CASE("Evaluated pose packing keeps every bone within tolerance", "[encoding.pose]")
+{
+    EvaluatedPoseSnapshot pose;
+    pose.GraphDescriptor = 1;
+    pose.SourceTick = 99;
+    for (int i = 0; i < 99; ++i)
+    {
+        EvaluatedPoseSnapshot::Bone bone{};
+        const float a = static_cast<float>(i) * 0.37f;
+        bone.Translation = {std::sin(a) * 40.f, std::cos(a) * 12.f, i == 0 ? 500.f : -3.f};
+        const float half = a * 0.5f;
+        const float axis[3]{0.26726124f, 0.53452248f, 0.80178373f}; // unit length
+        bone.Rotation = {axis[0] * std::sin(half), axis[1] * std::sin(half), axis[2] * std::sin(half), std::cos(half)};
+        bone.Scale = i == 7 ? std::array<float, 3>{1.1f, 1.1f, 1.1f} : std::array<float, 3>{1.f, 1.f, 1.f};
+        pose.Bones.push_back(bone);
+    }
+    Buffer buffer(8000);
+    Buffer::Writer writer(&buffer);
+    pose.Serialize(writer);
+    REQUIRE(writer.GetBytePosition() < 99 * 14 + 32);
+    Buffer::Reader reader(&buffer);
+    EvaluatedPoseSnapshot received;
+    received.Deserialize(reader);
+    REQUIRE(received.Bones.size() == 99);
+    for (size_t b = 0; b < 99; ++b)
+    {
+        for (int i = 0; i < 3; ++i)
+            REQUIRE(std::abs(received.Bones[b].Translation[i] - pose.Bones[b].Translation[i]) <= 0.005f);
+        float dot = 0.f;
+        for (int i = 0; i < 4; ++i)
+            dot += received.Bones[b].Rotation[i] * pose.Bones[b].Rotation[i];
+        REQUIRE(std::abs(dot) > 0.99999f);
+        REQUIRE(received.Bones[b].Scale == pose.Bones[b].Scale);
+    }
 }
 
 TEST_CASE("Visual bone transport bounds", "[encoding.visual_pose]")

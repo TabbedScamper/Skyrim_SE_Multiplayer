@@ -10,7 +10,9 @@
 #include <Games/Skyrim/Actor.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
+#include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Utils.h>
+#include <AI/AIProcess.h>
 
 #include <chrono>
 #include <cmath>
@@ -25,8 +27,11 @@ constexpr float kHavokToGameUnits = 70.f;
 constexpr float kSettledLinear = 0.03f;
 constexpr float kSettledAngular = 0.05f;
 constexpr uint64_t kSettleMs = 1500;
+constexpr uint64_t kStreamMs = 50;
 constexpr uint64_t kResendMs = 5000;
-// Follower bodies further than this from the owner's pose are put back (game units).
+// Presentation past the newest sample by more than this: the owner stopped streaming (settled).
+constexpr uint64_t kHoldMs = 300;
+// A settled follower ragdoll further than this from the owner's pose is put back (game units).
 constexpr float kDriftGameUnits = 0.25f;
 
 uint64_t NowMs() noexcept
@@ -41,6 +46,13 @@ template <class T> bool ReadNative(const void* apSource, T& aTarget) noexcept
     return apSource && ReadProcessMemory(GetCurrentProcess(), apSource, &aTarget, sizeof(T), &copied) && copied == sizeof(T);
 }
 
+// Dying, dead, knocked down or ragdolling (ActorState1 lifeState bits 21-24, knockState 25-27).
+bool PhysicsOwnsSkeleton(const Actor* apActor) noexcept
+{
+    const uint32_t flags1 = apActor->actorState.flags1;
+    return ((flags1 >> 21) & 0xF) != 0 || ((flags1 >> 25) & 0x7) != 0;
+}
+
 struct GraphRef
 {
     BSAnimationGraphManager* pManager{};
@@ -51,8 +63,8 @@ struct GraphRef
     }
 };
 
-// The active behavior graph and its ragdoll rigid bodies (hkpRigidBody*), in ragdoll order.
-bool GetRagdollBodies(Actor* apActor, void*& aGraph, Vector<RigidBody*>& aBodies) noexcept
+// The active behavior graph's ragdoll rigid bodies (hkpRigidBody*), in ragdoll order.
+bool GetRagdollBodies(Actor* apActor, Vector<RigidBody*>& aBodies) noexcept
 {
     aBodies.clear();
     GraphRef ref;
@@ -79,56 +91,40 @@ bool GetRagdollBodies(Actor* apActor, void*& aGraph, Vector<RigidBody*>& aBodies
             return false;
         aBodies.push_back(static_cast<RigidBody*>(pBody));
     }
-    aGraph = pGraph;
     return true;
 }
 
 // hkTransform rotation columns are transform[0..2], [4..6], [8..10].
 void MatrixToQuaternion(const float* t, float* q) noexcept
 {
-    const float m00 = t[0], m10 = t[1], m20 = t[2];
-    const float m01 = t[4], m11 = t[5], m21 = t[6];
-    const float m02 = t[8], m12 = t[9], m22 = t[10];
+    const float m00 = t[0], m10 = t[1], m20 = t[2], m01 = t[4], m11 = t[5], m21 = t[6], m02 = t[8], m12 = t[9], m22 = t[10];
     const float trace = m00 + m11 + m22;
     if (trace > 0.f)
     {
         const float s = std::sqrt(trace + 1.f) * 2.f;
-        q[3] = 0.25f * s;
-        q[0] = (m21 - m12) / s;
-        q[1] = (m02 - m20) / s;
-        q[2] = (m10 - m01) / s;
+        q[3] = 0.25f * s; q[0] = (m21 - m12) / s; q[1] = (m02 - m20) / s; q[2] = (m10 - m01) / s;
     }
     else if (m00 > m11 && m00 > m22)
     {
         const float s = std::sqrt(1.f + m00 - m11 - m22) * 2.f;
-        q[3] = (m21 - m12) / s;
-        q[0] = 0.25f * s;
-        q[1] = (m01 + m10) / s;
-        q[2] = (m02 + m20) / s;
+        q[3] = (m21 - m12) / s; q[0] = 0.25f * s; q[1] = (m01 + m10) / s; q[2] = (m02 + m20) / s;
     }
     else if (m11 > m22)
     {
         const float s = std::sqrt(1.f + m11 - m00 - m22) * 2.f;
-        q[3] = (m02 - m20) / s;
-        q[0] = (m01 + m10) / s;
-        q[1] = 0.25f * s;
-        q[2] = (m12 + m21) / s;
+        q[3] = (m02 - m20) / s; q[0] = (m01 + m10) / s; q[1] = 0.25f * s; q[2] = (m12 + m21) / s;
     }
     else
     {
         const float s = std::sqrt(1.f + m22 - m00 - m11) * 2.f;
-        q[3] = (m10 - m01) / s;
-        q[0] = (m02 + m20) / s;
-        q[1] = (m12 + m21) / s;
-        q[2] = 0.25f * s;
+        q[3] = (m10 - m01) / s; q[0] = (m02 + m20) / s; q[1] = (m12 + m21) / s; q[2] = 0.25f * s;
     }
     const float norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     for (int i = 0; i < 4; ++i)
         q[i] /= norm;
 }
 
-// hkpEntity::requestDeactivation (ID 60850): puts the body's simulation island to sleep (its
-// deactivation counters go to max), so a placed ragdoll stays exactly put until disturbed.
+// hkpEntity::requestDeactivation (ID 60850): sleep the body's island so it stays exactly put.
 void SleepBody(RigidBody* apBody) noexcept
 {
     using TRequestDeactivation = void(void*);
@@ -136,16 +132,46 @@ void SleepBody(RigidBody* apBody) noexcept
     s_requestDeactivation.Get()(apBody);
 }
 
-// hkpRigidBody::setPositionAndRotation(const hkVector4&, const hkQuaternion&) (ID 60898).
-void SetBodyPose(RigidBody* apBody, const float* apPosition, const float* apRotation) noexcept
+// Places a ragdoll body through its bhkRigidBody wrapper (hkpWorldObject user data, +0x18):
+// virtual slot 0x37 SetPositionAndRotation takes the bhkWorld write lock around
+// hkpRigidBody::setPositionAndRotation (ID 60898). The raw Havok call from our update crashed
+// (0x140B4CF03) when a physics step was running. Velocities are cleared so the solver does not
+// carry the body off before the next placement.
+bool SetBodyPose(RigidBody* apBody, const float* apPosition, const float* apRotation) noexcept
 {
+    void* pWrapper = nullptr;
+    void* pWrapped = nullptr;
+    void** pVtable = nullptr;
+    void* pMethod = nullptr;
+    if (!ReadNative(reinterpret_cast<const uint8_t*>(apBody) + 0x18, pWrapper) || !pWrapper ||
+        !ReadNative(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pWrapped) || pWrapped != apBody ||
+        !ReadNative(pWrapper, pVtable) || !pVtable || !ReadNative(pVtable + 0x37, pMethod) || !pMethod)
+        return false;
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(pMethod, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+        ((info.Protect & 0xFF) != PAGE_EXECUTE && (info.Protect & 0xFF) != PAGE_EXECUTE_READ &&
+         (info.Protect & 0xFF) != PAGE_EXECUTE_READWRITE && (info.Protect & 0xFF) != PAGE_EXECUTE_WRITECOPY))
+        return false;
     alignas(16) float position[4]{apPosition[0], apPosition[1], apPosition[2], 0.f};
     alignas(16) float rotation[4]{apRotation[0], apRotation[1], apRotation[2], apRotation[3]};
-    using TSetPositionAndRotation = void(void*, const float*, const float*);
-    POINTER_SKYRIMSE(TSetPositionAndRotation, s_setPose, 60898);
-    s_setPose.Get()(apBody, position, rotation);
+    using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
+    reinterpret_cast<TSetPositionAndRotation>(pMethod)(pWrapper, position, rotation);
     std::fill(std::begin(apBody->linearVelocity), std::end(apBody->linearVelocity), 0.f);
     std::fill(std::begin(apBody->angularVelocity), std::end(apBody->angularVelocity), 0.f);
+    return true;
+}
+
+bool Moving(const Vector<RigidBody*>& acBodies) noexcept
+{
+    for (auto* pBody : acBodies)
+    {
+        const float* v = pBody->linearVelocity;
+        const float* w = pBody->angularVelocity;
+        if (std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) > kSettledLinear ||
+            std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) > kSettledAngular)
+            return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -166,12 +192,29 @@ void CorpseRagdollService::OnDisconnected(const DisconnectedEvent&) noexcept
 
 void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage) noexcept
 {
-    auto& corpse = m_remote[acMessage.ServerId];
-    if (corpse.Bodies != acMessage.Bodies)
+    auto& ragdoll = m_remote[acMessage.ServerId];
+    const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
+    if (ragdoll.RingCount)
     {
-        corpse.Bodies = acMessage.Bodies;
-        corpse.NextCheckMs = 0;
+        const auto& newest = ragdoll.Ring[(ragdoll.RingNext + size - 1) % size];
+        if (acMessage.Tick <= newest.Tick)
+            return;
+        // A different body count is a different ragdoll (3D reloaded, another skeleton): restart.
+        if (newest.Bodies.size() != acMessage.Bodies.size())
+            ragdoll.RingCount = 0;
+        // A gap means a new ragdoll event (a later knockdown): knock this copy again if needed.
+        if (acMessage.Tick > newest.Tick + 2000)
+        {
+            ragdoll.Knocked = false;
+            ragdoll.LiveLogged = false;
+        }
     }
+    auto& sample = ragdoll.Ring[ragdoll.RingNext];
+    sample.Tick = acMessage.Tick;
+    sample.Bodies = acMessage.Bodies;
+    ragdoll.RingNext = (ragdoll.RingNext + 1) % size;
+    ragdoll.RingCount = (std::min)(ragdoll.RingCount + 1, size);
+    ragdoll.Asleep = false;
 }
 
 void CorpseRagdollService::OnUpdate(const UpdateEvent&) noexcept
@@ -179,10 +222,11 @@ void CorpseRagdollService::OnUpdate(const UpdateEvent&) noexcept
     if (!m_transport.IsConnected())
         return;
     const auto now = NowMs();
-    if (now < m_nextTickMs)
-        return;
-    m_nextTickMs = now + 250;
-    CaptureOwned(now);
+    if (now >= m_nextTickMs)
+    {
+        m_nextTickMs = now + kStreamMs;
+        CaptureOwned(now);
+    }
     ApplyRemote(now);
 }
 
@@ -193,38 +237,34 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
     for (auto entity : view)
     {
         auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
-        if (!pActor || !pActor->IsDead() || !pActor->GetNiNode())
+        if (!pActor || !pActor->GetNiNode() || !PhysicsOwnsSkeleton(pActor))
             continue;
         const uint32_t serverId = view.get<LocalComponent>(entity).Id;
-        void* pGraph{};
         Vector<RigidBody*> bodies;
-        if (!GetRagdollBodies(pActor, pGraph, bodies))
+        if (!GetRagdollBodies(pActor, bodies))
             continue;
         seen.insert(serverId);
 
-        bool settled = true;
-        for (auto* pBody : bodies)
-        {
-            const float* v = pBody->linearVelocity;
-            const float* w = pBody->angularVelocity;
-            if (std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) > kSettledLinear ||
-                std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) > kSettledAngular)
-                settled = false;
-        }
         auto& owned = m_owned[serverId];
-        if (!settled)
+        const bool moving = Moving(bodies);
+        if (moving)
         {
             owned.SettledSinceMs = 0;
-            owned.LastSentMs = 0;
-            continue;
+            owned.SentSettled = false;
         }
-        if (!owned.SettledSinceMs)
-            owned.SettledSinceMs = aNowMs;
-        if (aNowMs - owned.SettledSinceMs < kSettleMs || (owned.LastSentMs && aNowMs - owned.LastSentMs < kResendMs))
-            continue;
+        else
+        {
+            if (!owned.SettledSinceMs)
+                owned.SettledSinceMs = aNowMs;
+            // Keep streaming briefly after it stops so the follower lands on the resting pose,
+            // then resend it every few seconds for late arrivals.
+            if (owned.SentSettled && aNowMs - owned.LastSentMs < kResendMs)
+                continue;
+        }
 
         CorpseRagdollRequest request{};
         request.ServerId = serverId;
+        request.Tick = PoseCopyAuthority::GetCurrentTick();
         for (auto* pBody : bodies)
         {
             CorpseRagdollBody body{};
@@ -236,8 +276,10 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
         }
         m_transport.Send(request);
         if (!owned.LastSentMs)
-            spdlog::info("Corpse {:X} (server {:X}) settled: sent {} ragdoll bodies", pActor->formID, serverId, bodies.size());
+            spdlog::info("Ragdoll {:X} (server {:X}): streaming {} bodies", pActor->formID, serverId, bodies.size());
         owned.LastSentMs = aNowMs;
+        if (!moving && aNowMs - owned.SettledSinceMs >= kSettleMs)
+            owned.SentSettled = true;
     }
     for (auto it = m_owned.begin(); it != m_owned.end();)
         it = seen.contains(it->first) ? std::next(it) : m_owned.erase(it);
@@ -245,61 +287,111 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
 
 void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
 {
+    const uint64_t presentation = PoseCopyAuthority::GetPresentationTick();
     for (auto it = m_remote.begin(); it != m_remote.end(); ++it)
     {
-        auto& corpse = it.value();
-        if (aNowMs < corpse.NextCheckMs)
+        auto& ragdoll = it.value();
+        if (!ragdoll.RingCount)
             continue;
-        corpse.NextCheckMs = aNowMs + 1000;
+        const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
+        const auto sample = [&](uint32_t i) -> const Sample& { return ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i) % size]; };
+        const auto& newest = sample(ragdoll.RingCount - 1);
+        const bool settled = presentation > newest.Tick + kHoldMs;
+        if (settled && ragdoll.Asleep && aNowMs < ragdoll.NextCheckMs)
+            continue;
+
         auto* pActor = Utils::GetByServerId<Actor>(it->first);
-        if (!pActor || !pActor->IsDead() || !pActor->GetNiNode())
+        if (!pActor || !pActor->GetNiNode())
+            continue;
+        if (!PhysicsOwnsSkeleton(pActor))
         {
-            corpse.Keyframed = false;
+            // The owner's actor went ragdoll (death, shout, explosion) before this copy did: the
+            // death or knock sync arrives later (the intro prisoner fell for seconds on the owner
+            // while the follower copy was still animated). Knock it into ragdoll now with a
+            // zero-strength KnockExplosion so its bodies can follow the stream from this frame.
+            if (!settled && !ragdoll.Knocked && pActor->currentProcess)
+            {
+                ragdoll.Knocked = true;
+                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+                spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll to follow the owner", pActor->formID);
+            }
             continue;
         }
-        void* pGraph{};
         Vector<RigidBody*> bodies;
-        if (!GetRagdollBodies(pActor, pGraph, bodies))
+        if (!GetRagdollBodies(pActor, bodies))
             continue;
-        if (bodies.size() != corpse.Bodies.size())
+        if (bodies.size() != newest.Bodies.size())
         {
-            if (!corpse.CountMismatchLogged)
-                spdlog::warn("Corpse {:X}: {} local ragdoll bodies, owner sent {}", pActor->formID, bodies.size(), corpse.Bodies.size());
-            corpse.CountMismatchLogged = true;
+            if (!ragdoll.CountMismatchLogged)
+                spdlog::warn("Ragdoll {:X}: {} local bodies, owner sent {}", pActor->formID, bodies.size(), newest.Bodies.size());
+            ragdoll.CountMismatchLogged = true;
             continue;
         }
 
-        // The bodies stay simulated, placed at the owner's pose with zero velocity and put to sleep.
-        // (Motion types are not changed: BShkbAnimationGraph slot 8 keyframed nothing lasting, and a
-        // direct hkpRigidBody motion-type call (ID 60908) with guessed arguments crashed the game.)
+        // Owner pose at the presentation tick: interpolate between the bracketing samples, or hold
+        // the nearest end of the ring.
+        const Sample* pA = &newest;
+        const Sample* pB = &newest;
+        float t = 0.f;
+        if (presentation < sample(0).Tick)
+            pA = pB = &sample(0);
+        else
+        {
+            for (uint32_t i = 1; i < ragdoll.RingCount; ++i)
+            {
+                const auto& a = sample(i - 1);
+                const auto& b = sample(i);
+                if (presentation > b.Tick || a.Bodies.size() != b.Bodies.size())
+                    continue;
+                pA = &a;
+                pB = &b;
+                t = b.Tick > a.Tick ? static_cast<float>(presentation - a.Tick) / static_cast<float>(b.Tick - a.Tick) : 1.f;
+                break;
+            }
+        }
+
         float worstDrift = 0.f;
         for (size_t i = 0; i < bodies.size(); ++i)
         {
-            const auto& target = corpse.Bodies[i];
-            const float wanted[3]{(pActor->position.x + target.Position[0]) / kHavokToGameUnits,
-                (pActor->position.y + target.Position[1]) / kHavokToGameUnits,
-                (pActor->position.z + target.Position[2]) / kHavokToGameUnits};
-            const float dx = (bodies[i]->transform[12] - wanted[0]) * kHavokToGameUnits;
-            const float dy = (bodies[i]->transform[13] - wanted[1]) * kHavokToGameUnits;
-            const float dz = (bodies[i]->transform[14] - wanted[2]) * kHavokToGameUnits;
-            worstDrift = (std::max)(worstDrift, std::sqrt(dx * dx + dy * dy + dz * dz));
+            const auto& x = pA->Bodies[i];
+            const auto& y = pB->Bodies[i];
+            float wanted[3];
+            for (int axis = 0; axis < 3; ++axis)
+                wanted[axis] = ((&pActor->position.x)[axis] + x.Position[axis] + (y.Position[axis] - x.Position[axis]) * t) / kHavokToGameUnits;
+            for (int axis = 0; axis < 3; ++axis)
+                worstDrift = (std::max)(worstDrift, std::abs((bodies[i]->transform[12 + axis] - wanted[axis]) * kHavokToGameUnits));
+            float dot = 0.f;
+            for (int k = 0; k < 4; ++k)
+                dot += x.Rotation[k] * y.Rotation[k];
+            const float sign = dot < 0.f ? -1.f : 1.f;
+            float rotation[4];
+            float norm = 0.f;
+            for (int k = 0; k < 4; ++k)
+            {
+                rotation[k] = x.Rotation[k] + (sign * y.Rotation[k] - x.Rotation[k]) * t;
+                norm += rotation[k] * rotation[k];
+            }
+            norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
+            for (float& value : rotation)
+                value *= norm;
+            SetBodyPose(bodies[i], wanted, rotation);
         }
-        if (corpse.Keyframed && worstDrift <= kDriftGameUnits)
-            continue;
 
-        for (size_t i = 0; i < bodies.size(); ++i)
+        if (!settled && !ragdoll.LiveLogged)
         {
-            const auto& target = corpse.Bodies[i];
-            const float wanted[3]{(pActor->position.x + target.Position[0]) / kHavokToGameUnits,
-                (pActor->position.y + target.Position[1]) / kHavokToGameUnits,
-                (pActor->position.z + target.Position[2]) / kHavokToGameUnits};
-            SetBodyPose(bodies[i], wanted, target.Rotation);
-        }
-        for (auto* pBody : bodies)
-            SleepBody(pBody);
-        corpse.Keyframed = true;
-        if (corpse.Applications++ < 3)
-            spdlog::info("Corpse {:X}: placed {} ragdoll bodies at the owner's pose (drift was {:.2f})", pActor->formID,
+            ragdoll.LiveLogged = true;
+            spdlog::info("Ragdoll {:X}: following the owner's ragdoll live ({} bodies, drift {:.2f})", pActor->formID,
                 bodies.size(), worstDrift);
+        }
+        if (settled)
+        {
+            // The owner stopped streaming: the ragdoll rests at its final pose; sleep it there.
+            for (auto* pBody : bodies)
+                SleepBody(pBody);
+            if (!ragdoll.Asleep && ragdoll.Applications++ < 3)
+                spdlog::info("Ragdoll {:X}: resting at the owner's pose (drift was {:.2f})", pActor->formID, worstDrift);
+            ragdoll.Asleep = true;
+            ragdoll.NextCheckMs = aNowMs + 1000;
+        }
     }
 }

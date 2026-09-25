@@ -2,17 +2,23 @@
 
 #include <Messages/CorpseRagdollRequest.h>
 
+#include <array>
+
 struct World;
 struct TransportService;
 struct UpdateEvent;
 struct DisconnectedEvent;
 struct NotifyCorpseRagdoll;
 
-// Settled corpses look the same on every PC. Each PC used to simulate its own ragdoll for a
-// corpse (measured: 18 simulated bodies on both, different transforms, different bone poses).
-// The corpse's owner sends every ragdoll body once the corpse has settled (and again every 5 s
-// for late arrivals); the other PCs keyframe that corpse's whole ragdoll and place each body at
-// the owner's transform, relative to the corpse's synced position.
+// Ragdolls look the same on every PC, in real time: deaths, knockdowns, shouts, explosions.
+// Each PC used to simulate its own ragdoll for an actor (measured: 18 simulated bodies on both,
+// different transforms; the prisoner shot in the intro fell and spun differently on the follower).
+// The actor's owner streams every ragdoll body (relative to the actor) at 20 Hz while physics owns
+// the skeleton and the bodies move, and sends the settled pose afterwards (again every 5 s for
+// late arrivals). The other PCs, whose copy is also ragdolling, place each body at the owner's pose
+// on the shared presentation timeline (interpolated, like actor movement) and put the ragdoll to
+// sleep once it has settled. A copy that is not ragdolling shows the owner's ragdoll pose through
+// PoseCopyAuthority instead.
 class CorpseRagdollService
 {
 public:
@@ -20,15 +26,26 @@ public:
     TP_NOCOPYMOVE(CorpseRagdollService);
 
 private:
-    struct OwnedCorpse
+    struct OwnedRagdoll
     {
         uint64_t SettledSinceMs{};
         uint64_t LastSentMs{};
+        bool SentSettled{};
     };
-    struct RemoteCorpse
+    struct Sample
     {
+        uint64_t Tick{};
         Vector<CorpseRagdollBody> Bodies;
-        bool Keyframed{};
+    };
+    struct RemoteRagdoll
+    {
+        std::array<Sample, 12> Ring{};
+        uint32_t RingCount{};
+        uint32_t RingNext{};
+        bool Asleep{};
+        // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
+        bool Knocked{};
+        bool LiveLogged{};
         uint64_t NextCheckMs{};
         uint32_t Applications{};
         bool CountMismatchLogged{};
@@ -43,8 +60,8 @@ private:
     World& m_world;
     TransportService& m_transport;
     uint64_t m_nextTickMs{};
-    Map<uint32_t, OwnedCorpse> m_owned;
-    Map<uint32_t, RemoteCorpse> m_remote;
+    Map<uint32_t, OwnedRagdoll> m_owned;
+    Map<uint32_t, RemoteRagdoll> m_remote;
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_disconnectConnection;
     entt::scoped_connection m_ragdollConnection;

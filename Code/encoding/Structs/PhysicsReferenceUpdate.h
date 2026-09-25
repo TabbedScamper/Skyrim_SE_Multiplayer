@@ -2,6 +2,7 @@
 
 #include <Structs/GameId.h>
 #include <array>
+#include <vector>
 #include <glm/geometric.hpp>
 
 struct PhysicsReferenceUpdate
@@ -18,6 +19,11 @@ struct PhysicsReferenceUpdate
     // Host Havok transform in native units. A reference/node transform alone
     // cannot reproduce a constrained body or its body-to-node pivot.
     std::array<float, 16> BodyTransform{};
+    // The reference's other Havok bodies in 3D-tree order (cart wheels, yoke, harness): position
+    // relative to the root body (Havok units) and rotation quaternion (x, y, z, w). A follower
+    // that drives only the root body carries the rest rigidly, so wheels never turn.
+    static constexpr size_t kMaxChildBodies = 16;
+    std::vector<std::array<float, 7>> ChildBodies{};
 };
 
 // A dynamic Havok body can move or spin before TESObjectREFR::position changes.

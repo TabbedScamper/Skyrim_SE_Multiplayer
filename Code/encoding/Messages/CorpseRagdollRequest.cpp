@@ -34,6 +34,7 @@ void ReadBodies(TiltedPhoques::Buffer::Reader& aReader, TiltedPhoques::Vector<Co
 void CorpseRagdollRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
     TiltedPhoques::Serialization::WriteVarInt(aWriter, ServerId);
+    aWriter.WriteBits(Tick, 64);
     CorpseRagdollEncoding::WriteBodies(aWriter, Bodies);
 }
 
@@ -41,5 +42,6 @@ void CorpseRagdollRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader
 {
     ClientMessage::DeserializeRaw(aReader);
     ServerId = static_cast<uint32_t>(TiltedPhoques::Serialization::ReadVarInt(aReader));
+    aReader.ReadBits(Tick, 64);
     CorpseRagdollEncoding::ReadBodies(aReader, Bodies);
 }

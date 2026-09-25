@@ -32,7 +32,16 @@ struct RegistryEntry
 {
     uint32_t FormId{};
     Role Kind{};
+    const Actor* pActor{};
 };
+
+// Dying, dead, knocked down or ragdolling (ActorState1 lifeState bits 21-24, knockState 25-27):
+// physics owns the skeleton then. Forcing a living owner pose onto a ragdoll spun it around.
+bool PhysicsOwnsSkeleton(const Actor* apActor) noexcept
+{
+    const uint32_t flags1 = apActor->actorState.flags1;
+    return ((flags1 >> 21) & 0xF) != 0 || ((flags1 >> 25) & 0x7) != 0;
+}
 
 struct Sample
 {
@@ -61,6 +70,8 @@ std::atomic<uint64_t> s_presentationTick{0};
 std::atomic<uint64_t> s_currentTick{0};
 std::atomic<bool> s_enabled{true};
 std::atomic<uint64_t> s_captured{0}, s_applied{0}, s_fallback{0}, s_countMismatch{0};
+// Owner samples received, and the gap between consecutive samples of one actor (ms).
+std::atomic<uint64_t> s_samples{0}, s_gapTotalMs{0}, s_gapCount{0}, s_gapMaxMs{0}, s_gapsOver150{0};
 
 uint64_t NowMs() noexcept
 {
@@ -119,6 +130,12 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
         const auto it = s_registry.find(apBoneNodes);
         if (it == s_registry.end())
             return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
+        // The owner keeps capturing through a ragdoll (the physics-step copy, ID 63563, hands
+        // this hook the ragdoll pose), so a follower whose copy is still animated shows the
+        // owner's knockdown. A follower whose copy is itself ragdolling leaves it to physics;
+        // CorpseRagdollService drives those bodies.
+        if (it->second.Kind == Role::Apply && it->second.pActor && PhysicsOwnsSkeleton(it->second.pActor))
+            return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
         auto& pose = s_poses[it->second.FormId];
         if (it->second.Kind == Role::Capture)
         {
@@ -156,6 +173,8 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
             if (!useOverride && pose.RingCount)
             {
                 const auto& newest = sample(pose.RingCount - 1);
+                // Hold the owner pose through sample gaps rather than dropping back to the local
+                // graph: alternating owner and local poses read as NPCs jittering to catch up.
                 if (tick >= newest.Tick && tick - newest.Tick <= 250)
                 {
                     const uint32_t driven = (std::min)(count, newest.Count);
@@ -180,8 +199,7 @@ void RefreshRegistry(World& aWorld) noexcept
     const auto add = [&](const uint32_t aFormId, const Role aKind)
     {
         auto* pActor = Cast<Actor>(TESForm::GetById(aFormId));
-        // Corpses belong to the ragdoll sync (CorpseRagdollService).
-        if (!pActor || !pActor->GetNiNode() || pActor->IsDead())
+        if (!pActor || !pActor->GetNiNode())
             return;
         BSAnimationGraphManager* pManager{};
         if (!pActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
@@ -194,7 +212,7 @@ void RefreshRegistry(World& aWorld) noexcept
             {
                 auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(index));
                 if (pGraph)
-                    registry[pGraph + offsetof(AnimationGraph, boneNodes)] = {aFormId, aKind};
+                    registry[pGraph + offsetof(AnimationGraph, boneNodes)] = {aFormId, aKind, pActor};
             }
         }
         pManager->Release();
@@ -224,6 +242,16 @@ void SetPresentationTick(const uint64_t aTick) noexcept
 void SetCurrentTick(const uint64_t aTick) noexcept
 {
     s_currentTick.store(aTick, std::memory_order_relaxed);
+}
+
+uint64_t GetPresentationTick() noexcept
+{
+    return s_presentationTick.load(std::memory_order_relaxed);
+}
+
+uint64_t GetCurrentTick() noexcept
+{
+    return s_currentTick.load(std::memory_order_relaxed);
 }
 
 bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept
@@ -257,7 +285,17 @@ void PushOwnerSample(const uint32_t aFormId, const EvaluatedPoseSnapshot& acPose
         const auto& newest = pose.Ring[(pose.RingNext + kRingSize - 1) % kRingSize];
         if (aTick <= newest.Tick)
             return;
+        const uint64_t gap = aTick - newest.Tick;
+        if (gap < 5000)
+        {
+            s_gapTotalMs += gap;
+            ++s_gapCount;
+            s_gapsOver150 += gap > 150 ? 1 : 0;
+            uint64_t previous = s_gapMaxMs.load();
+            while (gap > previous && !s_gapMaxMs.compare_exchange_weak(previous, gap)) {}
+        }
     }
+    ++s_samples;
     auto& sample = pose.Ring[pose.RingNext];
     sample.Tick = aTick;
     sample.Count = static_cast<uint32_t>(acPose.Bones.size());
@@ -292,9 +330,11 @@ std::string StatsJson() noexcept
         std::lock_guard guard(s_lock);
         registered = s_registry.size();
     }
-    return fmt::format("\"enabled\":{},\"registered\":{},\"captured\":{},\"applied\":{},\"fallback\":{},\"countMismatch\":{}",
+    const auto gaps = s_gapCount.load();
+    return fmt::format("\"enabled\":{},\"registered\":{},\"captured\":{},\"applied\":{},\"fallback\":{},\"countMismatch\":{},"
+        "\"samples\":{},\"meanGapMs\":{},\"maxGapMs\":{},\"gapsOver150Ms\":{}",
         s_enabled.load() ? "true" : "false", registered, s_captured.load(), s_applied.load(), s_fallback.load(),
-        s_countMismatch.load());
+        s_countMismatch.load(), s_samples.load(), gaps ? s_gapTotalMs.load() / gaps : 0, s_gapMaxMs.load(), s_gapsOver150.load());
 }
 } // namespace PoseCopyAuthority
 

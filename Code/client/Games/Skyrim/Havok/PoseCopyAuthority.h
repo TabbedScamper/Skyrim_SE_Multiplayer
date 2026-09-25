@@ -24,6 +24,8 @@ void RefreshRegistry(World& aWorld) noexcept;
 void SetPresentationTick(uint64_t aTick) noexcept;
 // Main thread, every frame: the current shared-clock tick, stamped on captured poses.
 void SetCurrentTick(uint64_t aTick) noexcept;
+[[nodiscard]] uint64_t GetPresentationTick() noexcept;
+[[nodiscard]] uint64_t GetCurrentTick() noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.
 bool GetCapturedPose(uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept;

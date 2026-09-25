@@ -62,6 +62,10 @@ constexpr bool kHostDrivenMovingBodies = true;
 constexpr int64_t kHostDrivenMaxExtrapolationMs = 150;
 constexpr int64_t kHostDrivenHoldAfterMs = 300;
 constexpr float kHavokToGameUnits = 70.f;
+// Test switch: hand host-driven bodies to the exterior cell they move into.
+std::atomic<bool> s_cellHandoffEnabled{true};
+// Test switch: also write the root Havok body (a keyframed body otherwise follows its node).
+std::atomic<bool> s_rootBodyWriteEnabled{true};
 // Default-off, single-reference engine-boundary probe. The form ID is chosen
 // at runtime by the test bridge; no quest/cart reference is hardcoded.
 std::atomic<uint32_t> s_bodyPlaybackFormId{};
@@ -278,6 +282,129 @@ struct DynamicBody
     void* HavokBody{};
     ActorPoseDiagnosticViews::RigidBody State{};
 };
+
+// A child body: its bhkRigidBody wrapper and the hkpRigidBody it owns.
+struct ChildBody
+{
+    NiAVObject* Node{};
+    void* Wrapper{};
+    ActorPoseDiagnosticViews::RigidBody* Body{};
+};
+
+// NiMatrix3 (row-major entry[r][c]) <-> quaternion (x, y, z, w).
+void NiMatrixToQuaternion(const NiMatrix3& m, float* q) noexcept
+{
+    const auto& e = m.entry;
+    const float trace = e[0][0] + e[1][1] + e[2][2];
+    if (trace > 0.f)
+    {
+        const float s = std::sqrt(trace + 1.f) * 2.f;
+        q[3] = 0.25f * s; q[0] = (e[2][1] - e[1][2]) / s; q[1] = (e[0][2] - e[2][0]) / s; q[2] = (e[1][0] - e[0][1]) / s;
+    }
+    else if (e[0][0] > e[1][1] && e[0][0] > e[2][2])
+    {
+        const float s = std::sqrt(1.f + e[0][0] - e[1][1] - e[2][2]) * 2.f;
+        q[3] = (e[2][1] - e[1][2]) / s; q[0] = 0.25f * s; q[1] = (e[0][1] + e[1][0]) / s; q[2] = (e[0][2] + e[2][0]) / s;
+    }
+    else if (e[1][1] > e[2][2])
+    {
+        const float s = std::sqrt(1.f + e[1][1] - e[0][0] - e[2][2]) * 2.f;
+        q[3] = (e[0][2] - e[2][0]) / s; q[0] = (e[0][1] + e[1][0]) / s; q[1] = 0.25f * s; q[2] = (e[1][2] + e[2][1]) / s;
+    }
+    else
+    {
+        const float s = std::sqrt(1.f + e[2][2] - e[0][0] - e[1][1]) * 2.f;
+        q[3] = (e[1][0] - e[0][1]) / s; q[0] = (e[0][2] + e[2][0]) / s; q[1] = (e[1][2] + e[2][1]) / s; q[2] = 0.25f * s;
+    }
+}
+
+void QuaternionToNiMatrix(const float* q, NiMatrix3& m) noexcept
+{
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    auto& e = m.entry;
+    e[0][0] = 1.f - 2.f * (y * y + z * z); e[0][1] = 2.f * (x * y - z * w); e[0][2] = 2.f * (x * z + y * w);
+    e[1][0] = 2.f * (x * y + z * w); e[1][1] = 1.f - 2.f * (x * x + z * z); e[1][2] = 2.f * (y * z - x * w);
+    e[2][0] = 2.f * (x * z - y * w); e[2][1] = 2.f * (y * z + x * w); e[2][2] = 1.f - 2.f * (x * x + y * y);
+}
+
+// The reference's Havok bodies other than its root, in 3D-tree order (cart wheels, yoke). Only
+// real rigid bodies (valid motion type, in a world): a collision object can also hold a phantom.
+void CollectChildBodies(TESObjectREFR* apReference, std::vector<ChildBody>& arBodies) noexcept
+{
+    arBodies.clear();
+    auto* pRoot = apReference ? apReference->GetNiNode() : nullptr;
+    if (!pRoot)
+        return;
+    std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth)
+    {
+        if (!apNode || aDepth > 8 || arBodies.size() >= PhysicsReferenceUpdate::kMaxChildBodies)
+            return;
+        if (apNode != pRoot && apNode->collisionObject)
+        {
+            void* pWrapper = nullptr;
+            void* pBody = nullptr;
+            ActorPoseDiagnosticViews::RigidBody probe{};
+            if (ReadNativeMemory(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
+                ReadNativeMemory(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody &&
+                ReadNativeMemory(pBody, probe) && probe.world && probe.motionType >= 1 && probe.motionType <= 7)
+                arBodies.push_back({apNode, pWrapper, static_cast<ActorPoseDiagnosticViews::RigidBody*>(pBody)});
+        }
+        if (auto* pNode = apNode->AsNode())
+        {
+            for (uint16_t i = 0; i < pNode->children.length; ++i)
+                walk(pNode->children.data[i], aDepth + 1);
+        }
+    };
+    walk(pRoot, 0);
+}
+
+// hkTransform rotation columns (transform[0..2], [4..6], [8..10]) to a quaternion (x, y, z, w).
+void MatrixToQuaternion(const float* t, float* q) noexcept
+{
+    const float m00 = t[0], m10 = t[1], m20 = t[2], m01 = t[4], m11 = t[5], m21 = t[6], m02 = t[8], m12 = t[9], m22 = t[10];
+    const float trace = m00 + m11 + m22;
+    if (trace > 0.f)
+    {
+        const float s = std::sqrt(trace + 1.f) * 2.f;
+        q[3] = 0.25f * s; q[0] = (m21 - m12) / s; q[1] = (m02 - m20) / s; q[2] = (m10 - m01) / s;
+    }
+    else if (m00 > m11 && m00 > m22)
+    {
+        const float s = std::sqrt(1.f + m00 - m11 - m22) * 2.f;
+        q[3] = (m21 - m12) / s; q[0] = 0.25f * s; q[1] = (m01 + m10) / s; q[2] = (m02 + m20) / s;
+    }
+    else if (m11 > m22)
+    {
+        const float s = std::sqrt(1.f + m11 - m00 - m22) * 2.f;
+        q[3] = (m02 - m20) / s; q[0] = (m01 + m10) / s; q[1] = 0.25f * s; q[2] = (m12 + m21) / s;
+    }
+    else
+    {
+        const float s = std::sqrt(1.f + m22 - m00 - m11) * 2.f;
+        q[3] = (m10 - m01) / s; q[0] = (m02 + m20) / s; q[1] = (m12 + m21) / s; q[2] = 0.25f * s;
+    }
+}
+
+// bhkRigidBody virtual slot 0x37: SetPositionAndRotation(hkVector4, hkQuaternion). It takes the
+// bhkWorld write lock around hkpRigidBody::setPositionAndRotation (ID 60898); calling the raw
+// Havok function from our update crashed (0x140B4CF03) when a physics step was running.
+bool SetWrappedBodyPose(void* apWrapper, const float* apPosition, const float* apRotation) noexcept
+{
+    void** pVtable = nullptr;
+    void* pMethod = nullptr;
+    if (!ReadNativeMemory(apWrapper, pVtable) || !pVtable || !ReadNativeMemory(pVtable + 0x37, pMethod) || !pMethod)
+        return false;
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(pMethod, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+        ((info.Protect & 0xFF) != PAGE_EXECUTE && (info.Protect & 0xFF) != PAGE_EXECUTE_READ &&
+         (info.Protect & 0xFF) != PAGE_EXECUTE_READWRITE && (info.Protect & 0xFF) != PAGE_EXECUTE_WRITECOPY))
+        return false;
+    alignas(16) float position[4]{apPosition[0], apPosition[1], apPosition[2], 0.f};
+    alignas(16) float rotation[4]{apRotation[0], apRotation[1], apRotation[2], apRotation[3]};
+    using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
+    reinterpret_cast<TSetPositionAndRotation>(pMethod)(apWrapper, position, rotation);
+    return true;
+}
 
 bool GetDynamicBody(TESObjectREFR* apReference, DynamicBody& arBody,
     bool aAllowKeyframed = false) noexcept
@@ -1934,6 +2061,37 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
                 body.State.linearVelocity[1], body.State.linearVelocity[2]};
             std::copy(std::begin(body.State.transform),
                 std::end(body.State.transform), update.BodyTransform.begin());
+            std::vector<ChildBody> children;
+            CollectChildBodies(pReference, children);
+            // Each child node local transform: on the owner its dynamic body turns the node (the
+            // wheel spins); on a follower the bodies are keyframed and follow their nodes.
+            // Physics writes a dynamic child's WORLD transform and leaves its local at the authored
+            // value (measured: the host wheel local rotation stayed identity while its world turned),
+            // so send the effective local: parent world^-1 * child world.
+            for (const auto& childBody : children)
+            {
+                const NiAVObject* pParent = childBody.Node->parent;
+                if (!pParent)
+                    continue;
+                const auto& pw = pParent->world;
+                const auto& cw = childBody.Node->world;
+                NiMatrix3 localRotate{};
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        float sum = 0.f;
+                        for (int k = 0; k < 3; ++k)
+                            sum += pw.rotate.entry[k][r] * cw.rotate.entry[k][c];
+                        localRotate.entry[r][c] = sum;
+                    }
+                const float d[3]{cw.translate.x - pw.translate.x, cw.translate.y - pw.translate.y, cw.translate.z - pw.translate.z};
+                const float inverseScale = pw.scale != 0.f ? 1.f / pw.scale : 1.f;
+                std::array<float, 7> entry{};
+                for (int r = 0; r < 3; ++r)
+                    entry[r] = (pw.rotate.entry[0][r] * d[0] + pw.rotate.entry[1][r] * d[1] + pw.rotate.entry[2][r] * d[2]) * inverseScale;
+                NiMatrixToQuaternion(localRotate, entry.data() + 3);
+                update.ChildBodies.push_back(entry);
+            }
         }
         request.Updates.push_back(update);
         s_physicsHostUpdatesQueued.fetch_add(1, std::memory_order_relaxed);
@@ -2103,7 +2261,7 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             pose.LastReceived = std::chrono::steady_clock::now();
             pose.BodyDriven = true;
             pose.HostMotionType = update.MotionType;
-            pose.Samples[pose.SampleNext] = {acMessage.Tick, pose.Position, pose.Rotation};
+            pose.Samples[pose.SampleNext] = {acMessage.Tick, pose.Position, pose.Rotation, update.ChildBodies};
             pose.SampleNext = (pose.SampleNext + 1) % pose.Samples.size();
             pose.SampleCount = (std::min)(pose.SampleCount + 1, static_cast<uint32_t>(pose.Samples.size()));
             if (formId == s_preStepPlaybackFormId.load(
@@ -2197,6 +2355,10 @@ void ObjectService::ApplyRemotePhysics() noexcept
             };
             NiPoint3 position = sample(count - 1).Position;
             NiPoint3 rotation = sample(count - 1).Rotation;
+            // Child bodies interpolate between the same two samples (never extrapolated).
+            const RemoteReferencePose::Sample* pChildA = &sample(count - 1);
+            const RemoteReferencePose::Sample* pChildB = pChildA;
+            float childT = 0.f;
             if (renderTick <= static_cast<int64_t>(sample(0).Tick))
             {
                 position = sample(0).Position;
@@ -2206,6 +2368,13 @@ void ObjectService::ApplyRemotePhysics() noexcept
             {
                 // Past the newest sample: a late packet continues the last motion briefly;
                 // a body the host stopped sending (at rest) holds its last pose exactly.
+                // A body that was moving and then holds is a visible freeze: log it.
+                const int64_t starvedMs = renderTick - static_cast<int64_t>(sample(count - 1).Tick);
+                if (count >= 2 && starvedMs > kHostDrivenHoldAfterMs && starvedMs < kHostDrivenHoldAfterMs + 40 &&
+                    glm::length(glm::vec3{sample(count - 1).Position.x - sample(count - 2).Position.x,
+                        sample(count - 1).Position.y - sample(count - 2).Position.y,
+                        sample(count - 1).Position.z - sample(count - 2).Position.z}) > 1.f)
+                    spdlog::info("Host-driven body {:X} starved: no host sample for {} ms while moving", it->first, starvedMs);
                 if (count >= 2 && renderTick - static_cast<int64_t>(sample(count - 1).Tick) <= kHostDrivenHoldAfterMs)
                 {
                     const auto& a = sample(count - 2);
@@ -2235,6 +2404,9 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     position = a.Position + (b.Position - a.Position) * t;
                     rotation = glm::vec3{lerpAngle(a.Rotation.x, b.Rotation.x, t), lerpAngle(a.Rotation.y, b.Rotation.y, t),
                         lerpAngle(a.Rotation.z, b.Rotation.z, t)};
+                    pChildA = &a;
+                    pChildB = &b;
+                    childT = t;
                     break;
                 }
             }
@@ -2248,9 +2420,46 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 continue;
             }
             pose.AppliedRestTick = atRest ? newestTick : 0;
+            const glm::vec3 jump{position.x - pReference->position.x, position.y - pReference->position.y, position.z - pReference->position.z};
             pReference->position = position;
             pReference->SetRotation(rotation.x, rotation.y, rotation.z);
-            pReference->Update3DPosition(true);
+            // The other bodies (cart wheels, yoke): a keyframed body follows its node, so turn the
+            // nodes to the host pose; carried rigidly by the root they never turned.
+            if (!pChildA->Children.empty() && pChildA->Children.size() == pChildB->Children.size())
+            {
+                std::vector<ChildBody> childBodies;
+                CollectChildBodies(pReference, childBodies);
+                if (childBodies.size() == pChildA->Children.size())
+                {
+                    for (size_t i = 0; i < childBodies.size(); ++i)
+                    {
+                        const auto& x = pChildA->Children[i];
+                        const auto& y = pChildB->Children[i];
+                        auto& local = childBodies[i].Node->local;
+                        local.translate.x = x[0] + (y[0] - x[0]) * childT;
+                        local.translate.y = x[1] + (y[1] - x[1]) * childT;
+                        local.translate.z = x[2] + (y[2] - x[2]) * childT;
+                        float dot = 0.f;
+                        for (int k = 0; k < 4; ++k)
+                            dot += x[3 + k] * y[3 + k];
+                        const float sign = dot < 0.f ? -1.f : 1.f;
+                        float q[4];
+                        float norm = 0.f;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            q[k] = x[3 + k] + (sign * y[3 + k] - x[3 + k]) * childT;
+                            norm += q[k] * q[k];
+                        }
+                        norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
+                        for (float& value : q)
+                            value *= norm;
+                        QuaternionToNiMatrix(q, local.rotate);
+                    }
+                }
+            }
+            // Warp (reset render motion history) only on a real jump: warping every frame of a
+            // smoothly rolling cart made it flash under temporal anti-aliasing.
+            pReference->Update3DPosition(glm::dot(jump, jump) > 50.f * 50.f);
             // Writing the position does not move a reference into the exterior cell it
             // now stands in. Measured: the follower's cart kept its start cell, and when
             // that cell detached behind the players the cart (and the player riding it)
@@ -2258,7 +2467,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
             // Havok-moved reference (ID 19826 calls 19799 with the worldspace). MoveTo is
             // not usable here: it disables and re-enables the reference, reloading its 3D
             // and body, which measured as 7,000+ unit jumps on every crossing.
-            if (auto* pCell = pReference->parentCell; pCell && !(pCell->cellFlags & 1))
+            if (auto* pCell = pReference->parentCell; s_cellHandoffEnabled.load(std::memory_order_relaxed) && pCell && !(pCell->cellFlags & 1))
             {
                 if (auto* pWorldSpace = pReference->GetWorldSpace())
                 {
@@ -2284,7 +2493,11 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     pose.BodyTransform[13] * kHavokToGameUnits, pose.BodyTransform[14] * kHavokToGameUnits};
                 const glm::vec3 offset = hostBody - glm::vec3{pose.Position.x, pose.Position.y, pose.Position.z};
                 if (glm::dot(offset, offset) < 1000.f * 1000.f)
-                    SetDynamicBodyPosition(body, glm::vec3{position.x, position.y, position.z} + offset);
+                {
+                    const glm::vec3 rootTarget = glm::vec3{position.x, position.y, position.z} + offset;
+                    if (s_rootBodyWriteEnabled.load(std::memory_order_relaxed))
+                        SetDynamicBodyPosition(body, rootTarget);
+                }
             }
             ++it;
             continue;
@@ -2801,4 +3014,16 @@ BSTEventResult ObjectService::OnEvent(const TESActivateEvent* acEvent, const Eve
 #endif
 
     return BSTEventResult::kOk;
+}
+
+void ObjectService::SetRootBodyWriteEnabled(bool aEnabled) noexcept
+{
+    s_rootBodyWriteEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven root body write {}", aEnabled ? "on" : "off");
+}
+
+void ObjectService::SetCellHandoffEnabled(bool aEnabled) noexcept
+{
+    s_cellHandoffEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body cell handoff {}", aEnabled ? "on" : "off");
 }
