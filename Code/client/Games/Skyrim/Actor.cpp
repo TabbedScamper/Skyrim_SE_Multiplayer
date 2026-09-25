@@ -699,6 +699,17 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
         SetInventory(acInventory);
 
     SetMagicEquipment(acInventory.CurrentMagicEquipment);
+
+    // RemoveAllItems + re-equip leaves the worn forms right but not always their meshes.
+    // Measured on the follower: the Headsman wore the same 4 items as on the host but his root
+    // had 4 children instead of 8 (naked), and the Imperial horse lost its saddle and bridle.
+    // Actor::DoReset3D(true) (ID 40255) drops every biped part and rebuilds them from what is worn.
+    if (!GetExtension()->IsPlayer() && !IsDead() && GetNiNode())
+    {
+        TP_THIS_FUNCTION(TDoReset3D, void, Actor, bool aRebuildParts);
+        POINTER_SKYRIMSE(TDoReset3D, s_doReset3D, 40255);
+        TiltedPhoques::ThisCall(s_doReset3D, this, true);
+    }
 }
 
 void Actor::SetMagicEquipment(const MagicEquipment& acEquipment) noexcept
