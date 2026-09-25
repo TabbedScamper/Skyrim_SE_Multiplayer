@@ -57,6 +57,8 @@ private:
         bool Asleep{};
         // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
         bool Knocked{};
+        // The owner is dying (not only knocked down): this copy dies into ragdoll at the first sample.
+        bool OwnerDying{true};
         bool LiveLogged{};
         uint64_t NextCheckMs{};
         uint32_t Applications{};

@@ -1,3 +1,4 @@
+#include <Services/CreatorTogether.h>
 #include <Services/SmoothClock.h>
 #include <Services/CorpseRagdollService.h>
 #include "Forms/TESObjectCELL.h"
@@ -700,6 +701,12 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         m_pendingMounts[acMessage.ServerId] = {acMessage.MountedOnServerId, 0, 0};
 }
 
+namespace
+{
+// Leader-owned loaded actors a follower registered first: their spawn state is not applied.
+std::unordered_set<uint32_t> s_keepLocalSpawnState;
+} // namespace
+
 void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
     if (acMessage.OwnershipEpoch == 0)
@@ -803,10 +810,25 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     pActor->GetExtension()->SetRemote(true);
 
-    pActor->rotation.x = acMessage.Rotation.x;
-    pActor->rotation.z = acMessage.Rotation.y;
-    pActor->MoveTo(PlayerCharacter::Get()->parentCell, acMessage.Position);
-    pActor->SetActorValues(acMessage.InitialActorValues);
+    // The leader keeps its own loaded actors as they are: a follower that registered one first (its
+    // copy of a scene ran a moment ahead) must not teleport, re-equip or kill the leader's copy. The
+    // leader claims it right after. Applying the follower's spawn state moved the leader's scripted
+    // intro dragon off its flight (the scene waited for a landing that never came) and made the
+    // leader's beheaded prisoner loop create-and-remove every 6 s.
+    const bool keepLocalState = m_world.GetPartyService().IsLeader() && acMessage.FormId != GameId{} && !acMessage.IsPlayer &&
+        pActor->GetNiNode() != nullptr;
+    if (keepLocalState)
+    {
+        s_keepLocalSpawnState.insert(pActor->formID);
+        spdlog::info("Leader keeps its own state for {:X} (a follower registered it first)", pActor->formID);
+    }
+    else
+    {
+        pActor->rotation.x = acMessage.Rotation.x;
+        pActor->rotation.z = acMessage.Rotation.y;
+        pActor->MoveTo(PlayerCharacter::Get()->parentCell, acMessage.Position);
+        pActor->SetActorValues(acMessage.InitialActorValues);
+    }
 
     pActor->GetExtension()->SetPlayer(acMessage.IsPlayer);
     if (acMessage.IsPlayer)
@@ -816,7 +838,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
         m_world.emplace_or_replace<PlayerComponent>(*entity, acMessage.PlayerId);
     }
 
-    if (pActor->IsDead() != acMessage.IsDead)
+    if (!keepLocalState && pActor->IsDead() != acMessage.IsDead)
         acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
 
     spdlog::info("Spawn Request Is summon {}", acMessage.IsPlayerSummon);
@@ -1232,13 +1254,15 @@ void CharacterService::SendCreatorAppearance() noexcept
         if (tints[i]->texture)
             request.FaceTints.Entries[i].Name = tints[i]->texture->name.AsAscii();
     }
-    request.InCreator = creatorOpen;
+    // Still editing until Done (the creator stays open while the others finish; CreatorTogether).
+    request.InCreator = creatorOpen && !CreatorTogether::IsDone();
 
     uint64_t hash = 14695981039346656037ULL;
     for (const char c : request.AppearanceBuffer)
         hash = (hash ^ static_cast<uint8_t>(c)) * 1099511628211ULL;
     for (const auto& entry : request.FaceTints.Entries)
         hash = (hash ^ entry.Color ^ (static_cast<uint64_t>(entry.Alpha * 1000.f) << 32)) * 1099511628211ULL;
+    hash = (hash ^ static_cast<uint64_t>(request.InCreator)) * 1099511628211ULL; // Done counts as a change
     if (!closedNow && hash == m_lastCreatorAppearanceHash)
         return;
     m_lastCreatorAppearanceHash = hash;
@@ -1277,6 +1301,7 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
             s_creatorPlayers.erase(pActor->formID);
     }
 
+    CreatorTogether::SetRemoteReady(pActor->formID, !acMessage.InCreator);
     pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
     FaceGenSystem::Setup(m_world, *entityIt, acMessage.FaceTints);
     pActor->QueueReset3D(50);
@@ -2801,8 +2826,13 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         // By now, the actor has materialized in the world and is ready for further setup
 
-        pActor->SetActorInventory(waitingFor3D.SpawnRequest.InventoryContent);
-        pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
+        // The leader's own loaded actor keeps its inventory, factions and life state (see OnCharacterSpawn).
+        const bool keepLocalState = s_keepLocalSpawnState.erase(pActor->formID) != 0;
+        if (!keepLocalState)
+        {
+            pActor->SetActorInventory(waitingFor3D.SpawnRequest.InventoryContent);
+            pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
+        }
 
         if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
         {
@@ -2811,7 +2841,7 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         m_weaponDrawUpdates[pActor->formID] = {waitingFor3D.SpawnRequest.IsWeaponDrawn};
 
-        if (pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead)
+        if (!keepLocalState && pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead)
             waitingFor3D.SpawnRequest.IsDead ? pActor->Kill() : pActor->Respawn();
 
         if (pActor->IsVampireLord())

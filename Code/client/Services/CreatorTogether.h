@@ -20,6 +20,8 @@ void Update(World& aWorld, bool aHolding, bool aCreatorOpen) noexcept;
 [[nodiscard]] bool IsDone() noexcept;
 // Everyone is done: close the creator now.
 void Release() noexcept;
+// Another player's creator state (from its live look): true once it clicked Done.
+void SetRemoteReady(uint32_t aFormId, bool aReady) noexcept;
 // For InterpolationSystem: where a remote player's character is shown while the creator is open
 // here (on this player's spot, with its heading). False otherwise.
 [[nodiscard]] bool GetDisplay(uint32_t aFormId, NiPoint3& arPosition, float& arHeading) noexcept;

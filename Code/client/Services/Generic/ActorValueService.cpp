@@ -331,7 +331,9 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
         {
             if (pExtension->IsRemote())
             {
-                const uint64_t delay = World::Get().GetCharacterService().GetPresentationDelayMs();
+                // The owner's ragdoll stream kills this copy when its ragdoll starts (CorpseRagdollService); this
+            // is the fallback for a death without one.
+            const uint64_t delay = 5000;
                 s_pendingDeaths.push_back({pActor->formID, GetTickCount64() + delay});
             }
             else
@@ -443,7 +445,9 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
         // where the owner's ragdoll starts for the running intro prisoner) until its ragdoll caught up.
         if (acMessage.IsDead)
         {
-            const uint64_t delay = World::Get().GetCharacterService().GetPresentationDelayMs();
+            // The owner's ragdoll stream kills this copy when its ragdoll starts (CorpseRagdollService); this
+            // is the fallback for a death without one.
+            const uint64_t delay = 5000;
             s_pendingDeaths.push_back({pActor->formID, GetTickCount64() + delay});
             return;
         }

@@ -270,8 +270,10 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
         // A different body count is a different ragdoll (3D reloaded, another skeleton): restart.
         if (newest.Bodies.size() != acMessage.Bodies.size())
             ragdoll.RingCount = 0;
-        // A gap means a new ragdoll event (a later knockdown): knock this copy again if needed.
-        if (acMessage.Tick > newest.Tick + 2000)
+        // A gap means a new ragdoll event (a later knockdown): knock this copy again if needed. Not
+        // for a corpse: the settled resends every 5 s are the same event.
+        auto* pGapActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
+        if (acMessage.Tick > newest.Tick + 2000 && !(pGapActor && pGapActor->IsDead()))
         {
             ragdoll.Knocked = false;
             ragdoll.LiveLogged = false;
@@ -406,9 +408,14 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             if (!ragdoll.Knocked && presentation >= sample(0).Tick && pActor->currentProcess)
             {
                 ragdoll.Knocked = true;
-                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
-                spdlog::info("Ragdoll {:X}: knocked this copy into ragdoll at the owner's first sample (tick {}, presentation {})",
-                    pActor->formID, sample(0).Tick, presentation);
+                // Alive here until now (the owner's death animation came through the pose stream);
+                // a dying owner dies here too, into ragdoll; a knocked-down one is knocked.
+                if (pActor->IsDead() || ragdoll.OwnerDying)
+                    pActor->KillIntoRagdoll();
+                else
+                    pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+                spdlog::info("Ragdoll {:X}: this copy {} at the owner's first sample (tick {}, presentation {})", pActor->formID,
+                    ragdoll.OwnerDying ? "died into ragdoll" : "was knocked into ragdoll", sample(0).Tick, presentation);
             }
             else
                 skip(ragdoll.Knocked ? "knocked but not ragdolling" : presentation < sample(0).Tick ? "waiting for the first sample" :
@@ -430,8 +437,8 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             if (!ragdoll.Knocked && pActor->currentProcess)
             {
                 ragdoll.Knocked = true;
-                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
-                spdlog::info("Ragdoll {:X}: dying without ragdoll bodies; knocked into ragdoll at the owner's sample", pActor->formID);
+                pActor->KillIntoRagdoll();
+                spdlog::info("Ragdoll {:X}: dying without ragdoll bodies; killed into ragdoll at the owner's sample", pActor->formID);
             }
             skip("ragdoll bodies not found");
             continue;

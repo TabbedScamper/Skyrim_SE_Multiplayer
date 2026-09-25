@@ -7,6 +7,7 @@
 #include <Games/Skyrim/Interface/UI.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
+#include <Services/OverlayService.h>
 
 #include <atomic>
 #include <mutex>
@@ -28,6 +29,10 @@ bool s_prevKey{};
 bool s_nextKey{};
 bool s_hintShown{};
 std::unordered_map<uint32_t, bool> s_hiddenByUs; // form id -> hidden by this feature
+std::unordered_map<uint32_t, bool> s_remoteReady; // form id -> that player clicked Done
+int s_bannerPlayer{-1};
+int s_bannerCount{-1};
+int s_bannerReady{-1};
 
 bool IsRaceSexMenu(const BSFixedString* apName) noexcept
 {
@@ -105,6 +110,8 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             s_hiddenByUs.clear();
             s_view = 0;
             s_hintShown = false;
+            World::Get().GetOverlayService().SetCreatorView(false, 1, 1, false);
+            s_bannerPlayer = s_bannerCount = s_bannerReady = -1;
         }
         s_active = false;
         return;
@@ -129,11 +136,6 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
     if (s_view > s_remotePlayers.size())
         s_view = 0;
 
-    if (!s_hintShown)
-    {
-        s_hintShown = true;
-        ShowNotice("Press [ and ] to view the other players' characters");
-    }
 
     // [ and ] cycle whose character stands on the spot.
     const bool focus = GameInFocus();
@@ -154,14 +156,43 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
         s_view = wanted;
         const auto text = s_view == 0 ? std::string("Viewing: your character") :
                                         fmt::format("Viewing: player {} of {}", s_view + 1, count);
-        ShowNotice(text.c_str());
         spdlog::info("Character creator together: viewing {}", s_view == 0 ? 0x14 : s_remotePlayers[s_view - 1]);
     }
 
-    // Only the viewed character is visible.
-    SetHidden(PlayerCharacter::Get(), s_view != 0);
+    // Only the viewed character is visible; it stands on this player's spot, its 3D moved at once
+    // (the world is paused while the creator is open, so nothing else would move it).
+    auto* pPlayer = PlayerCharacter::Get();
+    SetHidden(pPlayer, s_view != 0);
     for (size_t i = 0; i < s_remotePlayers.size(); ++i)
-        SetHidden(Cast<Actor>(TESForm::GetById(s_remotePlayers[i])), s_view != i + 1);
+    {
+        auto* pRemote = Cast<Actor>(TESForm::GetById(s_remotePlayers[i]));
+        const bool viewed = s_view == i + 1;
+        SetHidden(pRemote, !viewed);
+        if (viewed && pRemote && pPlayer)
+        {
+            pRemote->position = pPlayer->position;
+            pRemote->SetRotation(pRemote->rotation.x, pRemote->rotation.y, pPlayer->rotation.z);
+            pRemote->Update3DPosition(true);
+        }
+    }
+
+    // The banner: whose character this is, and whether that player is ready.
+    const bool ready = s_view == 0 ? s_done.load() : s_remoteReady[s_remotePlayers[s_view - 1]];
+    const int player = static_cast<int>(s_view) + 1;
+    const int playerCount = static_cast<int>(count);
+    if (player != s_bannerPlayer || playerCount != s_bannerCount || static_cast<int>(ready) != s_bannerReady)
+    {
+        s_bannerPlayer = player;
+        s_bannerCount = playerCount;
+        s_bannerReady = static_cast<int>(ready);
+        World::Get().GetOverlayService().SetCreatorView(true, player, playerCount, ready);
+    }
+}
+
+void SetRemoteReady(const uint32_t aFormId, const bool aReady) noexcept
+{
+    std::lock_guard lock(s_lock);
+    s_remoteReady[aFormId] = aReady;
 }
 
 bool IsDone() noexcept

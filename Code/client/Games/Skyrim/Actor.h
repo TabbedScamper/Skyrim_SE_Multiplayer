@@ -230,6 +230,8 @@ struct Actor : TESObjectREFR
     static void FlushPendingReset3D() noexcept;
     // Rebuild this actor's 3D (DoReset3D) shortly, once (same queue as SetActorInventory).
     void QueueReset3D(uint32_t aDelayMs) noexcept;
+    // A remote copy dies here when its owner's ragdoll starts on this PC's timeline: ragdoll at once.
+    void KillIntoRagdoll() noexcept;
     void SetMagicEquipment(const MagicEquipment& acEquipment) noexcept;
     void SetEssentialEx(bool aSet) noexcept;
     void SetNoBleedoutRecovery(bool aSet) noexcept;

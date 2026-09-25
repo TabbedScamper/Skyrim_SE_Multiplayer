@@ -62,6 +62,8 @@ struct OverlayService
     OverlayApp* GetOverlayApp() const noexcept { return m_pOverlay.get(); }
 
     void SendSystemMessage(const std::string& acMessage);
+    // Character creation together: the banner over the creator (whose character is shown, ready or not).
+    void SetCreatorView(bool aVisible, int aPlayer, int aPlayerCount, bool aReady);
     void ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly = false);
     bool InjectTestControllerButton(const std::string& acButton) noexcept;
 

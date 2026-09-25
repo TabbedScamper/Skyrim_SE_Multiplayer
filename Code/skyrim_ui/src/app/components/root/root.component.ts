@@ -51,6 +51,7 @@ export class RootComponent implements OnInit {
   public debugFeedbackNote = '';
   public debugFeedbackNeedsNote = false;
   public debugFeedbackTitle = 'Visual check';
+  public readonly creatorView$ = this.client.creatorView.asObservable();
 
   @ViewChild('chat') private chatComp!: ChatComponent;
   @ViewChild(GroupComponent) private groupComponent: GroupComponent;

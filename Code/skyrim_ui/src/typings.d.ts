@@ -259,6 +259,9 @@ interface SkyrimTogether {
   on(event: 'gamepadInput', callback: (action: string, repeat: boolean) => void): void;
   on(event: 'gamepadScroll', callback: (amount: number) => void): void;
 
+  /** Character creation together: whose character the creator shows (player k of n) and whether it is ready. */
+  on(event: 'creatorView', callback: (visible: boolean, player: number, count: number, ready: boolean) => void): void;
+
   /** Remove listener from when the application is first initialized. */
   off(event: 'init', callback?: SkyrimTogetherTypes.InitCallback): void;
 
@@ -405,6 +408,7 @@ interface SkyrimTogether {
   off(event: 'gameSettingsApplied', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'gamepadInput', callback?: (action: string, repeat: boolean) => void): void;
   off(event: 'gamepadScroll', callback?: (amount: number) => void): void;
+  off(event: 'creatorView', callback?: (visible: boolean, player: number, count: number, ready: boolean) => void): void;
 
   /**
    * Connect to server at given address and port.

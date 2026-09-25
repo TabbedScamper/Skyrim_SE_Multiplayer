@@ -1,3 +1,11 @@
+<div *ngIf="(creatorView$ | async) as creator" class="creator-view-banner-host">
+  <div *ngIf="creator.visible" class="creator-view-banner">
+    <span class="creator-view-player">PLAYER {{ creator.player }}/{{ creator.count }}</span>
+    <span class="creator-view-state" [class.ready]="creator.ready">{{ creator.ready ? 'READY' : 'EDITING' }}</span>
+    <span *ngIf="creator.count > 1" class="creator-view-hint">[ &nbsp;/&nbsp; ] to view the other players</span>
+  </div>
+</div>
+
 <div *ngIf="debugPromptText" class="debug-feedback-backdrop" data-nav-scope="modal">
   <app-window class="debug-feedback-dialog" border="strip">
     <h2>{{ debugFeedbackTitle }}</h2>

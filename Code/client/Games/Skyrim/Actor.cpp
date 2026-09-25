@@ -991,6 +991,15 @@ void Actor::Kill() noexcept
     */
 }
 
+void Actor::KillIntoRagdoll() noexcept
+{
+    if (GetExtension()->IsPlayer())
+        return;
+    t_syncKill = true;
+    KillImpl(nullptr, 100.f, true, true);
+    t_syncKill = false;
+}
+
 void Actor::Reset() noexcept
 {
     using ObjectReference = TESObjectREFR;

@@ -538,6 +538,18 @@ void OverlayService::SendSystemMessage(const std::string& acMessage)
     m_pOverlay->ExecuteAsync("message", pArguments);
 }
 
+void OverlayService::SetCreatorView(const bool aVisible, const int aPlayer, const int aPlayerCount, const bool aReady)
+{
+    if (!m_pOverlay)
+        return;
+    auto pArguments = CefListValue::Create();
+    pArguments->SetBool(0, aVisible);
+    pArguments->SetInt(1, aPlayer);
+    pArguments->SetInt(2, aPlayerCount);
+    pArguments->SetBool(3, aReady);
+    m_pOverlay->ExecuteAsync("creatorView", pArguments);
+}
+
 void OverlayService::ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly)
 {
     if (!m_pOverlay)
