@@ -553,6 +553,20 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && (wParam == VK_LWIN || wParam == VK_RWIN))
         HandPointerToShell(hwnd);
 
+    // Skyrim's own WndProc (FUN_14065f270) answers WM_NCHITTEST and hides the
+    // pointer whenever it is over the client area, which is sent on every mouse
+    // move. While the desktop owns the pointer, answer it ourselves so the
+    // Windows cursor stays visible over the game.
+    if (uMsg == WM_NCHITTEST && !GameOwnsPointer(hwnd))
+    {
+        const LRESULT hit = DefWindowProcW(hwnd, uMsg, wParam, lParam);
+        if (hit != HTNOWHERE)
+        {
+            SetSystemCursorVisible(true);
+            return hit;
+        }
+    }
+
     if (uMsg == WM_SETCURSOR)
     {
         // The foreground HWND, not a remembered focus message, decides.
