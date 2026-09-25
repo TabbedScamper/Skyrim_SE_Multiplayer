@@ -146,6 +146,15 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             const String value = eventArgs->GetString(1).ToString().c_str();
             World::Get().GetGameSettingsService().QueuePreviewSetting(name, value);
         }
+        else if (eventName == "requestControlBindings")
+            World::Get().GetGameSettingsService().QueueRequestControlBindings();
+        else if (eventName == "startControlCapture")
+        {
+            const String event = eventArgs->GetString(0).ToString().c_str();
+            World::Get().GetGameSettingsService().QueueStartControlCapture(event, eventArgs->GetInt(1));
+        }
+        else if (eventName == "cancelControlCapture")
+            World::Get().GetGameSettingsService().QueueCancelControlCapture();
         else if (eventName == "confirmDisplaySettings")
             World::Get().GetGameSettingsService().QueueConfirmDisplaySettings();
         else if (eventName == "applyGameSettings")

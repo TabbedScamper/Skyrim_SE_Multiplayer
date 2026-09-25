@@ -182,6 +182,35 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
 
   submitDebugFeedback(_looksRight: boolean, _note: string): void {}
 
+  private mockBindings = [
+    ['Forward', 0, 0x11], ['Back', 0, 0x1f], ['Strafe Left', 0, 0x1e], ['Strafe Right', 0, 0x20],
+    ['Activate', 0, 0x12], ['Ready Weapon', 0, 0x13], ['Jump', 0, 0x39], ['Sprint', 0, 0x38],
+    ['Sneak', 0, 0x1d], ['Shout', 0, 0x2c], ['Toggle POV', 0, 0x21], ['Tween Menu', 0, 0x0f],
+    ['Wait', 0, 0x14], ['Journal', 0, 0x24], ['Quick Map', 0, 0x32], ['Favorites', 0, 0x10],
+    ['Left Attack/Block', 1, 1], ['Right Attack/Block', 1, 0],
+    ['Activate', 2, 0x1000], ['Tween Menu', 2, 0x2000], ['Ready Weapon', 2, 0x4000], ['Jump', 2, 0x8000],
+    ['Shout', 2, 0x0200], ['Sprint', 2, 0x0100], ['Left Attack/Block', 2, 9], ['Right Attack/Block', 2, 10],
+    ['Sneak', 2, 0x0040], ['Toggle POV', 2, 0x0080], ['Favorites', 2, 0x0001], ['Journal', 2, 0x0010],
+    ['Wait', 2, 0x0020], ['Hotkey1', 2, 0x0004], ['Hotkey2', 2, 0x0008],
+  ] as [string, number, number][];
+  private captureEvent?: { event: string; device: number };
+
+  requestControlBindings(): void {
+    this.emit('controlBindings', JSON.stringify({
+      controller: 'xbox',
+      bindings: this.mockBindings.map(([event, device, key]) => ({ event, device, key, remappable: true })),
+    }));
+  }
+
+  startControlCapture(event: string, device: number): void {
+    this.captureEvent = { event, device };
+  }
+
+  cancelControlCapture(): void {
+    this.captureEvent = undefined;
+    this.requestControlBindings();
+  }
+
   confirmDisplaySettings(): void {
     this.emit('gameSettingsApplied');
   }

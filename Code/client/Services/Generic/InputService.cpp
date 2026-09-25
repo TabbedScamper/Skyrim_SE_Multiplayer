@@ -18,6 +18,7 @@
 #include <Games/Skyrim/Interface/UI.h>
 #include <Games/Skyrim/Interface/IMenu.h>
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
+#include <Games/Skyrim/Interface/ControlBindings.h>
 
 #include <optional>
 
@@ -627,6 +628,23 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         {
             auto& imgui = World::Get().ctx().at<ImguiService>();
             imgui.RawInputHandler(input);
+        }
+
+        // An armed key-binding capture consumes the next key/button press.
+        if (ControlBindings::IsCapturing())
+        {
+            if (input.header.dwType == RIM_TYPEKEYBOARD && (input.data.keyboard.Flags & RI_KEY_BREAK) == 0 &&
+                ControlBindings::OnKeyboardScanCode(input.data.keyboard.MakeCode, (input.data.keyboard.Flags & RI_KEY_E0) != 0))
+                return 1;
+            if (input.header.dwType == RIM_TYPEMOUSE)
+            {
+                const auto flags = input.data.mouse.usButtonFlags;
+                const int button = (flags & RI_MOUSE_LEFT_BUTTON_DOWN) ? 0 : (flags & RI_MOUSE_RIGHT_BUTTON_DOWN) ? 1 :
+                    (flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) ? 2 : (flags & RI_MOUSE_BUTTON_4_DOWN) ? 3 :
+                    (flags & RI_MOUSE_BUTTON_5_DOWN) ? 4 : -1;
+                if (button >= 0 && ControlBindings::OnMouseButton(static_cast<uint32_t>(button)))
+                    return 1;
+            }
         }
 
         if (input.header.dwType == RIM_TYPEKEYBOARD)

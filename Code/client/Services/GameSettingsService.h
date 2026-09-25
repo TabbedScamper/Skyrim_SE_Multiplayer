@@ -56,6 +56,10 @@ struct GameSettingsService
     void QueueApplySettings(const GameSettingsSnapshot& acSettings) noexcept;
     void QueueRevertSettings() noexcept;
     void QueueResetSettings() noexcept;
+    // Key bindings (ControlBindings) and live audio previews.
+    void QueueRequestControlBindings() noexcept;
+    void QueueStartControlCapture(const String& acEvent, int aDevice) noexcept;
+    void QueueCancelControlCapture() noexcept;
     void OnMainLoop() noexcept;
     void OnWindowSizeChanged(WPARAM aSizeType) noexcept;
 

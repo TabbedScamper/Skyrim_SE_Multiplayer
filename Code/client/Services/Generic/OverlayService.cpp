@@ -13,6 +13,7 @@
 #include <World.h>
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
 #include <Games/Skyrim/Interface/MainMenuIntegration.h>
+#include <Games/Skyrim/Interface/ControlBindings.h>
 
 #include <Services/OverlayClient.h>
 #include <Services/InputService.h>
@@ -93,6 +94,26 @@ void PollControllerNavigation(OverlayApp* apOverlay, bool aActive)
     if (!connected)
     {
         s_previous = 0;
+        return;
+    }
+
+    // Key-binding capture takes the next real button/trigger press instead of
+    // menu navigation (raw state: the stick is not folded into the D-pad).
+    static WORD s_previousRaw = 0;
+    static bool s_previousLeftTrigger = false;
+    static bool s_previousRightTrigger = false;
+    const WORD rawPressed = state.Gamepad.wButtons & ~s_previousRaw;
+    const bool leftTrigger = state.Gamepad.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD;
+    const bool rightTrigger = state.Gamepad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD;
+    const bool capturing = ControlBindings::IsCapturing() &&
+        ControlBindings::OnGamepadButtons(rawPressed, leftTrigger && !s_previousLeftTrigger,
+            rightTrigger && !s_previousRightTrigger);
+    s_previousRaw = state.Gamepad.wButtons;
+    s_previousLeftTrigger = leftTrigger;
+    s_previousRightTrigger = rightTrigger;
+    if (capturing || ControlBindings::IsCapturing())
+    {
+        s_previous = state.Gamepad.wButtons;
         return;
     }
 

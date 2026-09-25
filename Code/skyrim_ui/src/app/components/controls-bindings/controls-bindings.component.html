@@ -1,0 +1,75 @@
+<div class="mode-switch" role="tablist">
+  <button role="tab" data-style-ornament="inverted" [attr.data-style-active]="mode === 'controller'" (click)="setMode('controller')">Controller</button>
+  <button role="tab" data-style-ornament="inverted" [attr.data-style-active]="mode === 'keyboard'" (click)="setMode('keyboard')">Keyboard &amp; mouse</button>
+</div>
+
+<p *ngIf="!state" class="hint center">Reading your key bindings...</p>
+
+<ng-container *ngIf="state && mode === 'controller'">
+  <svg class="pad" viewBox="-120 0 880 345" role="img" [attr.aria-label]="family + ' controller layout'">
+    <!-- body: outer shell, inner contour and grips give the wireframe depth -->
+    <path class="shell" d="M205,92 C250,84 290,96 320,96 C350,96 390,84 435,92 C485,100 505,140 522,205 C540,270 548,330 505,338 C470,344 448,300 425,272 L215,272 C192,300 170,344 135,338 C92,330 100,270 118,205 C135,140 155,100 205,92 Z" />
+    <path class="contour" d="M210,104 C252,97 290,108 320,108 C350,108 388,97 430,104 C474,112 492,148 507,205 C522,262 528,318 500,324 C476,328 456,294 432,262 L208,262 C184,294 164,328 140,324 C112,318 118,262 133,205 C148,148 166,112 210,104 Z" />
+    <path class="contour" d="M130,300 C140,320 150,330 160,332 M510,300 C500,320 490,330 480,332" />
+    <circle class="contour" cx="320" cy="118" r="9" />
+
+    <ng-container *ngFor="let b of buttons">
+      <polyline class="leader" [attr.points]="leader(b)" [class.lit]="focusKey === b.key" />
+      <g class="button" [class.lit]="focusKey === b.key" (mouseenter)="focusKey = b.key" (click)="focusKey = b.key">
+        <rect *ngIf="b.shape === 'trigger'" [attr.x]="b.x - 27" [attr.y]="b.y - 9" width="54" height="18" />
+        <rect *ngIf="b.shape === 'bumper'" [attr.x]="b.x - 36" [attr.y]="b.y - 6" width="72" height="12" />
+        <circle *ngIf="b.shape === 'small'" [attr.cx]="b.x" [attr.cy]="b.y" r="7" />
+        <circle *ngIf="b.shape === 'face'" [attr.cx]="b.x" [attr.cy]="b.y" r="12" />
+        <ng-container *ngIf="b.shape === 'stick'">
+          <circle [attr.cx]="b.x" [attr.cy]="b.y" r="25" />
+          <circle class="inner" [attr.cx]="b.x" [attr.cy]="b.y" r="14" />
+        </ng-container>
+        <rect *ngIf="b.shape === 'dpad'" [attr.x]="b.x - 8" [attr.y]="b.y - 8" width="16" height="16" />
+        <text *ngIf="b.shape === 'face'" class="glyph" [attr.x]="b.x" [attr.y]="b.y + 4">{{ padLabel(b.key).charAt(0) }}</text>
+      </g>
+      <text class="callout" [class.lit]="focusKey === b.key"
+        [attr.x]="b.side === 'left' ? 40 : 600" [attr.y]="b.labelY + 4"
+        [attr.text-anchor]="b.side === 'left' ? 'end' : 'start'"
+        (mouseenter)="focusKey = b.key">
+        <tspan class="name">{{ padLabel(b.key) }}</tspan>
+        <tspan class="action" [attr.x]="b.side === 'left' ? 40 : 600" dy="16">{{ actionsOn(b.key) }}</tspan>
+      </text>
+    </ng-container>
+  </svg>
+
+  <p class="hint center">Choose an action, then press the button you want for it.</p>
+  <div class="bindings">
+    <div *ngFor="let row of actions" class="binding" [class.lit]="isFocused(row)">
+      <span class="action-name">{{ row.label }}</span>
+      <button class="key" [class.capturing]="isCapturing(row.event, InputDevice.Gamepad)"
+        (click)="startCapture(row, InputDevice.Gamepad)">
+        {{ isCapturing(row.event, InputDevice.Gamepad) ? 'Press a button...' : keyName(InputDevice.Gamepad, row.gamepad) }}
+      </button>
+    </div>
+  </div>
+</ng-container>
+
+<ng-container *ngIf="state && mode === 'keyboard'">
+  <p class="hint center">Choose a key or mouse slot, then press the key or button you want.</p>
+  <div class="bindings keyboard">
+    <div class="binding head">
+      <span>Action</span><span>Keyboard</span><span>Mouse</span>
+    </div>
+    <div *ngFor="let row of actions" class="binding">
+      <span class="action-name">{{ row.label }}</span>
+      <button class="key" [class.capturing]="isCapturing(row.event, InputDevice.Keyboard)"
+        (click)="startCapture(row, InputDevice.Keyboard)">
+        {{ isCapturing(row.event, InputDevice.Keyboard) ? 'Press a key...' : keyName(InputDevice.Keyboard, row.keyboard) }}
+      </button>
+      <button class="key" [class.capturing]="isCapturing(row.event, InputDevice.Mouse)"
+        (click)="startCapture(row, InputDevice.Mouse)">
+        {{ isCapturing(row.event, InputDevice.Mouse) ? 'Click a button...' : keyName(InputDevice.Mouse, row.mouse) }}
+      </button>
+    </div>
+  </div>
+</ng-container>
+
+<p *ngIf="capture" class="capture-bar">
+  Waiting for input for <strong>{{ eventLabel(capture.event) }}</strong>. Press Esc to cancel.
+  If the key is already used, the two actions swap, like Skyrim's own menu.
+</p>

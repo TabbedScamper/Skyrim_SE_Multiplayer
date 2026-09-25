@@ -249,6 +249,7 @@ interface SkyrimTogether {
   ): void;
 
   on(event: 'gameSettings', callback: SkyrimTogetherTypes.GameSettingsCallback): void;
+  on(event: 'controlBindings', callback: (json: string) => void): void;
   on(event: 'displayPreviewStarted', callback: SkyrimTogetherTypes.VoidCallback): void;
   on(event: 'displayPreviewReverted', callback: SkyrimTogetherTypes.VoidCallback): void;
   on(event: 'gameSettingsApplied', callback: SkyrimTogetherTypes.VoidCallback): void;
@@ -392,6 +393,7 @@ interface SkyrimTogether {
   ): void;
 
   off(event: 'gameSettings', callback?: SkyrimTogetherTypes.GameSettingsCallback): void;
+  off(event: 'controlBindings', callback?: (json: string) => void): void;
   off(event: 'displayPreviewStarted', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'displayPreviewReverted', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'gameSettingsApplied', callback?: SkyrimTogetherTypes.VoidCallback): void;
@@ -471,6 +473,9 @@ interface SkyrimTogether {
   connectJoinedSteamSession(password: string): void;
 
   requestGameSettings(): void;
+  requestControlBindings(): void;
+  startControlCapture(event: string, device: number): void;
+  cancelControlCapture(): void;
 
   previewGameSetting(name: string, value: string): void;
 

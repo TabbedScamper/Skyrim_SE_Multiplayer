@@ -6,6 +6,7 @@ import { Debug } from '../models/debug';
 import { PartyInfo } from '../models/party-info';
 import { Player } from '../models/player';
 import { AudioDevice, DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
+import { ControlBindingsState } from '../models/control-bindings';
 import { ChatService } from './chat.service';
 import { CoopLobbyState } from '../models/coop-lobby-state';
 import { SteamLobbyState } from '../models/steam-lobby-state';
@@ -83,6 +84,7 @@ export class ClientService implements OnDestroy {
   public protocolMismatchChange = new BehaviorSubject(false);
 
   public gameSettingsChange = new ReplaySubject<GameSettingsPayload>(1);
+  public controlBindingsChange = new ReplaySubject<ControlBindingsState>(1);
   public displayPreviewStarted = new Subject<void>();
   public displayPreviewReverted = new Subject<void>();
   public gameSettingsApplied = new Subject<void>();
@@ -182,6 +184,14 @@ export class ClientService implements OnDestroy {
       this.onPartyInviteReceived.bind(this),
     );
     skyrimtogether.on('gameSettings', this.onGameSettings.bind(this));
+    skyrimtogether.on('controlBindings', (json: string) => {
+      try {
+        const state = JSON.parse(json) as ControlBindingsState;
+        this.zone.run(() => this.controlBindingsChange.next(state));
+      } catch {
+        // Malformed payload from an older client: keep the previous state.
+      }
+    });
     skyrimtogether.on('displayPreviewStarted', () => this.zone.run(() => this.displayPreviewStarted.next()));
     skyrimtogether.on('displayPreviewReverted', () => this.zone.run(() => this.displayPreviewReverted.next()));
     skyrimtogether.on('gameSettingsApplied', () => this.zone.run(() => this.gameSettingsApplied.next()));
@@ -233,6 +243,7 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('partyLeft');
     skyrimtogether.off('partyInviteReceived');
     skyrimtogether.off('gameSettings');
+    skyrimtogether.off('controlBindings');
     skyrimtogether.off('displayPreviewStarted');
     skyrimtogether.off('displayPreviewReverted');
     skyrimtogether.off('gameSettingsApplied');
@@ -291,6 +302,18 @@ export class ClientService implements OnDestroy {
 
   public requestGameSettings(): void {
     skyrimtogether.requestGameSettings();
+  }
+
+  public requestControlBindings(): void {
+    skyrimtogether.requestControlBindings?.();
+  }
+
+  public startControlCapture(event: string, device: number): void {
+    skyrimtogether.startControlCapture?.(event, device);
+  }
+
+  public cancelControlCapture(): void {
+    skyrimtogether.cancelControlCapture?.();
   }
 
   public previewGameSetting(name: string, value: number | boolean | string): void {

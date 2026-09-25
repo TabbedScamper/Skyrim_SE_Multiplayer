@@ -1,0 +1,193 @@
+@import 'env';
+@import 'functions/mod';
+
+$-dim: rgba(255, 255, 255, 0.5);
+$-separator: url('../../../assets/images/separator/single.svg');
+
+:host {
+  display: block;
+}
+
+.mode-switch {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  margin-bottom: 0.5rem;
+
+  button {
+    letter-spacing: 0.12em;
+  }
+}
+
+.hint {
+  margin: 0.4rem 0;
+  color: $-dim;
+  font-size: 0.85em;
+
+  &.center {
+    text-align: center;
+  }
+}
+
+// ---- wireframe controller: white line art on black ----
+.pad {
+  display: block;
+  width: 100%;
+  max-height: 24rem;
+  margin: 0 auto;
+
+  .shell {
+    fill: rgba(255, 255, 255, 0.02);
+    stroke: rgba(255, 255, 255, 0.9);
+    stroke-width: 1.6;
+  }
+
+  .contour {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.3);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+  }
+
+  .button {
+    cursor: pointer;
+
+    rect,
+    circle {
+      fill: #000;
+      stroke: rgba(255, 255, 255, 0.75);
+      stroke-width: 1.4;
+      transition: fill $-time-transition, stroke $-time-transition;
+    }
+
+    .inner {
+      stroke-dasharray: 2 2;
+      stroke: rgba(255, 255, 255, 0.4);
+    }
+
+    .glyph {
+      fill: rgba(255, 255, 255, 0.85);
+      font-size: 11px;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+
+    &.lit {
+      rect,
+      circle {
+        fill: rgba(255, 255, 255, 0.85);
+        stroke: #fff;
+      }
+
+      .glyph {
+        fill: #000;
+      }
+    }
+  }
+
+  .leader {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.22);
+    stroke-width: 1;
+
+    &.lit {
+      stroke: rgba(255, 255, 255, 0.9);
+    }
+  }
+
+  .callout {
+    cursor: default;
+    font-size: 12px;
+    fill: $-dim;
+
+    .name {
+      fill: rgba(255, 255, 255, 0.55);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-size: 13px;
+    }
+
+    .action {
+      fill: rgba(255, 255, 255, 0.9);
+      font-size: 16px;
+    }
+
+    &.lit .action {
+      fill: #fff;
+    }
+  }
+}
+
+// ---- binding list ----
+.bindings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 2rem;
+
+  &.keyboard {
+    grid-template-columns: 1fr;
+  }
+}
+
+.binding {
+  display: grid;
+  grid-template-columns: 1fr 9rem;
+  align-items: center;
+  min-height: 2.4rem;
+  border-bottom: 1px solid;
+  border-image: $-separator 3;
+
+  .keyboard & {
+    grid-template-columns: 1fr 10rem 10rem;
+  }
+
+  &.head span {
+    color: $-dim;
+    font-size: 0.8em;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  &.lit .action-name {
+    color: #fff;
+    text-shadow: 0 0 0.4rem rgba(255, 255, 255, 0.6);
+  }
+
+  .action-name {
+    letter-spacing: 0.03em;
+  }
+}
+
+.key {
+  justify-self: stretch;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+
+  &:hover {
+    opacity: 1;
+  }
+
+  &.capturing {
+    opacity: 1;
+    animation: pulse 1s ease-in-out infinite;
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.capture-bar {
+  position: sticky;
+  bottom: 0;
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.8rem;
+  background: rgba(0, 0, 0, 0.9);
+  border-top: 2px solid;
+  border-image: $-separator 3;
+  text-align: center;
+  font-size: 0.9em;
+}

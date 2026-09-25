@@ -42,6 +42,9 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     CreateFunction("connectJoinedSteamSession");
     CreateFunction("requestGameSettings");
     CreateFunction("previewGameSetting");
+    CreateFunction("requestControlBindings");
+    CreateFunction("startControlCapture");
+    CreateFunction("cancelControlCapture");
     CreateFunction("confirmDisplaySettings");
     CreateFunction("applyGameSettings");
     CreateFunction("revertGameSettings");

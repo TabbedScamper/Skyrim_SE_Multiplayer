@@ -10,6 +10,7 @@
 #include <DefaultObjectManager.h>
 #include <Games/Skyrim/Interface/MainMenuIntegration.h>
 #include <Games/Skyrim/Audio/AudioDeviceSelection.h>
+#include <Games/Skyrim/Interface/ControlBindings.h>
 #include <OverlayApp.hpp>
 
 #include <d3d11.h>
@@ -288,6 +289,40 @@ void GameSettingsService::QueueRevertSettings() noexcept
 void GameSettingsService::QueueResetSettings() noexcept
 {
     m_mainLoopTasks.Add([this]() { ResetSettings(); });
+    WakeWindowThread();
+}
+
+namespace
+{
+void SendControlBindings(const std::string& acJson)
+{
+    auto arguments = CefListValue::Create();
+    arguments->SetString(0, acJson);
+    World::Get().GetOverlayService().GetOverlayApp()->ExecuteAsync("controlBindings", arguments);
+}
+} // namespace
+
+void GameSettingsService::QueueRequestControlBindings() noexcept
+{
+    m_mainLoopTasks.Add([]() {
+        ControlBindings::SetBindingsChangedCallback(&SendControlBindings);
+        SendControlBindings(ControlBindings::BindingsJson());
+    });
+    WakeWindowThread();
+}
+
+void GameSettingsService::QueueStartControlCapture(const String& acEvent, int aDevice) noexcept
+{
+    m_mainLoopTasks.Add([event = std::string(acEvent.c_str()), aDevice]() {
+        if (aDevice >= 0 && aDevice <= 2)
+            ControlBindings::StartCapture(event, static_cast<ControlBindings::Device>(aDevice));
+    });
+    WakeWindowThread();
+}
+
+void GameSettingsService::QueueCancelControlCapture() noexcept
+{
+    m_mainLoopTasks.Add([]() { ControlBindings::CancelCapture(); });
     WakeWindowThread();
 }
 

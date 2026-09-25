@@ -29,6 +29,7 @@ import { PopupComponent } from './components/popup/popup.component';
 import { RootComponent } from './components/root/root.component';
 import { ServerListComponent } from './components/server-list/server-list.component';
 import { SettingsComponent } from './components/settings/settings.component';
+import { ControlsBindingsComponent } from './components/controls-bindings/controls-bindings.component';
 import { ToggleComponent } from './components/toggle/toggle.component';
 import { TitleCoopLobbyComponent } from './components/title-coop-lobby/title-coop-lobby.component';
 import { WindowComponent } from './components/window/window.component';
@@ -71,6 +72,7 @@ import { TranslocoRootModule } from './transloco-root.module';
     RootComponent,
     ServerListComponent,
     SettingsComponent,
+    ControlsBindingsComponent,
     ToggleComponent,
     TitleCoopLobbyComponent,
     WindowComponent,

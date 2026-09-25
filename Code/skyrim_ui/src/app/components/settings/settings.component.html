@@ -125,6 +125,9 @@
           <div class="row-label"><label for="controllerRumble">Controller vibration</label></div>
           <input type="checkbox" id="controllerRumble" [ngModel]="game.controllerRumble" (ngModelChange)="preview('controllerRumble', $event)" />
         </div>
+
+        <h3 class="separator"><span>Bindings</span></h3>
+        <app-controls-bindings></app-controls-bindings>
       </section>
 
       <!-- Accessibility -->
