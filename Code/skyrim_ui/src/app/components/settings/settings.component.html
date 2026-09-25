@@ -4,6 +4,8 @@
       *ngFor="let section of sections"
       role="tab"
       class="section-tab"
+      data-style-ornament="inverted"
+      [attr.data-style-active]="activeSection === section.id"
       [class.active]="activeSection === section.id"
       [attr.aria-selected]="activeSection === section.id"
       (click)="selectSection(section.id)"
@@ -16,7 +18,7 @@
     <ng-container *ngIf="gameSettings as game; else loadingGame">
       <!-- Display -->
       <section *ngIf="activeSection === 'display'">
-        <h2>Display</h2>
+        <h2 class="separator"><span>Display</span></h2>
         <div class="row">
           <div class="row-label">
             <label for="displayMode">Display mode</label>
@@ -43,7 +45,7 @@
         </div>
         <div class="row">
           <div class="row-label"><label for="vsync">Vertical sync</label><small>Prevents tearing; may add a little input latency.</small></div>
-          <input class="switch" type="checkbox" id="vsync" [ngModel]="game.vsync" (ngModelChange)="preview('vsync', $event)" />
+          <input type="checkbox" id="vsync" [ngModel]="game.vsync" (ngModelChange)="preview('vsync', $event)" />
         </div>
         <div class="row">
           <div class="row-label"><label for="gamma">Brightness</label></div>
@@ -56,7 +58,7 @@
 
       <!-- Audio -->
       <section *ngIf="activeSection === 'audio'">
-        <h2>Audio</h2>
+        <h2 class="separator"><span>Audio</span></h2>
         <div class="row">
           <div class="row-label">
             <label for="audioDevice">Output device</label>
@@ -80,10 +82,10 @@
           </div>
         </div>
 
-        <h3>Interface sounds</h3>
+        <h3 class="separator"><span>Interface sounds</span></h3>
         <div class="row">
           <div class="row-label"><label for="muted">{{ 'COMPONENT.SETTINGS.MUTE_UI' | transloco }}</label></div>
-          <input class="switch" type="checkbox" id="muted" [ngModel]="settings.muted | async" (ngModelChange)="settings.muted.next($event)" />
+          <input type="checkbox" id="muted" [ngModel]="settings.muted | async" (ngModelChange)="settings.muted.next($event)" />
         </div>
         <div class="row">
           <div class="row-label"><label for="volumeSlider">{{ 'COMPONENT.SETTINGS.UI_VOLUME' | transloco }}</label></div>
@@ -96,7 +98,7 @@
 
       <!-- Controls -->
       <section *ngIf="activeSection === 'controls'">
-        <h2>Controls</h2>
+        <h2 class="separator"><span>Controls</span></h2>
         <div class="row">
           <div class="row-label"><label for="mouseSensitivity">Mouse sensitivity</label></div>
           <div class="slider">
@@ -113,28 +115,28 @@
         </div>
         <div class="row">
           <div class="row-label"><label for="invertY">Invert Y axis</label></div>
-          <input class="switch" type="checkbox" id="invertY" [ngModel]="game.invertY" (ngModelChange)="preview('invertY', $event)" />
+          <input type="checkbox" id="invertY" [ngModel]="game.invertY" (ngModelChange)="preview('invertY', $event)" />
         </div>
         <div class="row">
           <div class="row-label"><label for="alwaysRun">Always run</label></div>
-          <input class="switch" type="checkbox" id="alwaysRun" [ngModel]="game.alwaysRun" (ngModelChange)="preview('alwaysRun', $event)" />
+          <input type="checkbox" id="alwaysRun" [ngModel]="game.alwaysRun" (ngModelChange)="preview('alwaysRun', $event)" />
         </div>
         <div class="row">
           <div class="row-label"><label for="controllerRumble">Controller vibration</label></div>
-          <input class="switch" type="checkbox" id="controllerRumble" [ngModel]="game.controllerRumble" (ngModelChange)="preview('controllerRumble', $event)" />
+          <input type="checkbox" id="controllerRumble" [ngModel]="game.controllerRumble" (ngModelChange)="preview('controllerRumble', $event)" />
         </div>
       </section>
 
       <!-- Accessibility -->
       <section *ngIf="activeSection === 'accessibility'">
-        <h2>Accessibility</h2>
+        <h2 class="separator"><span>Accessibility</span></h2>
         <div class="row">
           <div class="row-label"><label for="dialogueSubtitles">Dialogue subtitles</label></div>
-          <input class="switch" type="checkbox" id="dialogueSubtitles" [ngModel]="game.dialogueSubtitles" (ngModelChange)="preview('dialogueSubtitles', $event)" />
+          <input type="checkbox" id="dialogueSubtitles" [ngModel]="game.dialogueSubtitles" (ngModelChange)="preview('dialogueSubtitles', $event)" />
         </div>
         <div class="row">
           <div class="row-label"><label for="generalSubtitles">General subtitles</label><small>Nearby NPC chatter.</small></div>
-          <input class="switch" type="checkbox" id="generalSubtitles" [ngModel]="game.generalSubtitles" (ngModelChange)="preview('generalSubtitles', $event)" />
+          <input type="checkbox" id="generalSubtitles" [ngModel]="game.generalSubtitles" (ngModelChange)="preview('generalSubtitles', $event)" />
         </div>
         <div class="row">
           <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.FONT_SIZE' | transloco }}</label><small>Multiplayer interface text size.</small></div>
@@ -151,7 +153,7 @@
 
     <!-- Interface -->
     <section *ngIf="activeSection === 'interface'">
-      <h2>Interface</h2>
+      <h2 class="separator"><span>Interface</span></h2>
       <div class="row">
         <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.LANGUAGE' | transloco }}</label></div>
         <app-dropdown [noTranslate]="true" [ngModel]="settings.language | async" (ngModelChange)="settings.language.next($event)">
@@ -160,20 +162,20 @@
       </div>
       <div class="row">
         <div class="row-label"><label for="showDebug">{{ 'COMPONENT.SETTINGS.SHOW_DEBUG_INFO' | transloco }}</label><small>Connection and performance overlay.</small></div>
-        <input class="switch" type="checkbox" id="showDebug" [ngModel]="settings.isDebugShown | async" (ngModelChange)="settings.isDebugShown.next($event)" />
+        <input type="checkbox" id="showDebug" [ngModel]="settings.isDebugShown | async" (ngModelChange)="settings.isDebugShown.next($event)" />
       </div>
     </section>
 
     <!-- Party HUD -->
     <section *ngIf="activeSection === 'party'">
-      <h2>Party HUD</h2>
+      <h2 class="separator"><span>Party HUD</span></h2>
       <div class="row">
         <div class="row-label"><label for="showParty">{{ 'COMPONENT.SETTINGS.SHOW_PARTY' | transloco }}</label></div>
-        <input class="switch" type="checkbox" id="showParty" [ngModel]="settings.isPartyShown | async" (ngModelChange)="settings.isPartyShown.next($event)" />
+        <input type="checkbox" id="showParty" [ngModel]="settings.isPartyShown | async" (ngModelChange)="settings.isPartyShown.next($event)" />
       </div>
       <div class="row">
         <div class="row-label"><label for="autoHideParty">{{ 'COMPONENT.SETTINGS.AUTO_HIDE_PARTY' | transloco }}</label></div>
-        <input class="switch" type="checkbox" id="autoHideParty" [ngModel]="settings.autoHideParty | async" (ngModelChange)="settings.autoHideParty.next($event)" />
+        <input type="checkbox" id="autoHideParty" [ngModel]="settings.autoHideParty | async" (ngModelChange)="settings.autoHideParty.next($event)" />
       </div>
       <div class="row" [class.disabled]="!(settings.autoHideParty | async)">
         <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.AUTO_HIDE_PARTY_LENGTH' | transloco }}</label></div>
@@ -205,7 +207,7 @@
 
     <!-- About -->
     <section *ngIf="activeSection === 'about'">
-      <h2>About</h2>
+      <h2 class="separator"><span>About</span></h2>
       <div class="row">
         <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.VERSION.INFO' | transloco }}</label></div>
         <span class="version" [class.outdated]="isVersionOutdated | async">{{ clientVersion$ | async }}</span>

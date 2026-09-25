@@ -1,10 +1,10 @@
 @import 'env';
+@import 'functions/mod';
 
-@import 'functions/rem';
-
-$-accent: #d9c38a;
-$-muted: rgba(255, 255, 255, 0.55);
-$-line: rgba(255, 255, 255, 0.14);
+// Skyrim vocabulary only: white/grey on black, uppercase condensed type, the
+// repo's separator/arrow/checkbox art, square corners.
+$-dim: rgba(255, 255, 255, 0.5);
+$-faint: rgba(255, 255, 255, 0.35);
 
 :host {
   position: relative;
@@ -18,52 +18,29 @@ $-line: rgba(255, 255, 255, 0.14);
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 12rem 1fr;
-  gap: 2rem;
+  grid-template-columns: 13rem 1fr;
+  gap: 1.5rem;
 }
 
-// ---- section navigation ----
+// ---- section list: Skyrim menu entries, arrows slide in on the active one ----
 .sections {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  justify-content: center;
+  gap: 0.2rem;
   padding-right: 1.5rem;
-  border-right: 1px solid $-line;
+  border-right: 2px solid;
+  border-image: url('../../../assets/images/separator/single.svg') 3;
 }
 
 .section-tab {
-  position: relative;
-  text-align: left;
-  padding: 0.7rem 0.9rem;
-  opacity: 0.55;
-  letter-spacing: 0.06em;
-  transition: opacity $-time-transition, background $-time-transition;
-
-  &::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 20%;
-    bottom: 20%;
-    width: 2px;
-    background: $-accent;
-    transform: scaleY(0);
-    transition: transform $-time-transition;
-  }
-
-  &:hover,
-  &:focus-visible {
-    opacity: 0.9;
-    background: rgba(255, 255, 255, 0.05);
-  }
+  justify-content: center;
+  letter-spacing: 0.12em;
+  font-size: 1.1em;
+  opacity: 0.45;
 
   &.active {
     opacity: 1;
-    color: $-accent;
-
-    &::before {
-      transform: scaleY(1);
-    }
   }
 }
 
@@ -73,19 +50,21 @@ $-line: rgba(255, 255, 255, 0.14);
   min-height: 0;
   padding-right: 1rem;
 
-  h2 {
-    margin: 0 0 1.25rem;
-    font-size: 1.5em;
-    letter-spacing: 0.08em;
+  h2.separator {
+    margin: 0.25rem 0 1rem;
+    font-size: 1.35em;
+    font-weight: 400;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
   }
 
-  h3 {
-    margin: 2rem 0 0.5rem;
-    font-size: 1em;
-    letter-spacing: 0.1em;
+  h3.separator {
+    margin: 1.75rem 0 0.25rem;
+    font-size: 0.95em;
+    font-weight: 400;
+    letter-spacing: 0.16em;
     text-transform: uppercase;
-    color: $-muted;
+    color: $-dim;
   }
 }
 
@@ -94,25 +73,26 @@ $-line: rgba(255, 255, 255, 0.14);
   grid-template-columns: minmax(0, 1fr) 16rem;
   align-items: center;
   gap: 1.5rem;
-  padding: 0.85rem 0;
-  border-bottom: 1px solid $-line;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid;
+  border-image: url('../../../assets/images/separator/single.svg') 3;
 
   &.disabled {
-    opacity: 0.45;
+    opacity: 0.4;
   }
 
-  > input.switch {
+  > input[type='checkbox'] {
     justify-self: end;
+    margin-right: 0.35rem;
   }
 
   > app-dropdown,
-  > .slider,
-  > .version {
+  > .slider {
     width: 100%;
   }
 
   > .version {
-    text-align: right;
+    justify-self: end;
   }
 }
 
@@ -123,99 +103,59 @@ $-line: rgba(255, 255, 255, 0.14);
 
   label {
     font-size: 1.05em;
+    letter-spacing: 0.04em;
   }
 
   small {
-    color: $-muted;
+    color: $-dim;
     font-size: 0.85em;
     line-height: 1.3em;
   }
 }
 
 .warning {
-  color: #ffcf66 !important;
-}
+  color: mod($-color-background, 1) !important;
 
-.loading {
-  color: $-muted;
-}
-
-.version {
-  color: #8fd18f;
-
-  &.outdated {
-    color: #ff7a7a;
+  &::before {
+    content: '! ';
   }
 }
 
-// ---- slider with value chip ----
+.loading {
+  color: $-dim;
+  text-align: center;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.version.outdated {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+// ---- slider: the game's track and arrow thumb (styles.scss), value as plain text ----
 .slider {
   display: grid;
-  grid-template-columns: 1fr 3.5em;
+  grid-template-columns: 1fr 3em;
   align-items: center;
   gap: 0.75rem;
 
   input[type='range'] {
     width: 100%;
-    accent-color: $-accent;
   }
 
   output {
-    text-align: center;
-    padding: 0.25rem 0;
-    border: 1px solid $-line;
+    text-align: right;
+    color: $-dim;
     font-variant-numeric: tabular-nums;
   }
 }
 
-// ---- switch (a styled checkbox so ngModel keeps working) ----
-input.switch {
-  appearance: none;
-  position: relative;
-  width: 2.75rem;
-  height: 1.5rem;
-  // The global checkbox rule clamps to 1rem and paints a checkmark image.
-  max-width: none;
-  max-height: none;
-  background-image: none !important;
-  margin: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.08);
-  opacity: 1;
-  cursor: pointer;
-  transition: background $-time-transition, border-color $-time-transition;
-
-  &::after {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 0.2rem;
-    width: 1.05rem;
-    height: 1.05rem;
-    border-radius: 50%;
-    background: #e8e8e8;
-    transform: translateY(-50%);
-    transition: left $-time-transition, background $-time-transition;
-  }
-
-  &:checked {
-    background: rgba(217, 195, 138, 0.35);
-    border-color: $-accent;
-
-    &::after {
-      left: calc(100% - 1.25rem);
-      background: $-accent;
-    }
-  }
-}
-
 input:focus-visible,
-button:focus-visible,
 app-dropdown:focus-visible,
 app-dropdown:focus {
-  outline: 2px solid $-accent;
-  outline-offset: 3px;
+  outline: 1px solid $-faint;
+  outline-offset: 4px;
 }
 
 // ---- footer ----
@@ -224,14 +164,16 @@ app-dropdown:focus {
   display: flex;
   align-items: center;
   gap: 1rem;
-  margin-top: 1.25rem;
-  padding-top: 1rem;
-  border-top: 1px solid $-line;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 2px solid;
+  border-image: url('../../../assets/images/separator/single.svg') 3;
 
   .autosave {
     margin-right: auto;
-    color: $-muted;
+    color: $-dim;
     font-size: 0.85em;
+    letter-spacing: 0.04em;
   }
 }
 
@@ -242,18 +184,21 @@ app-dropdown:focus {
   z-index: 1000;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.78);
+  background: rgba(0, 0, 0, 0.8);
 }
 
 .display-confirm {
   width: min(32rem, 80%);
   padding: 2rem;
-  border: 1px solid $-accent;
-  background: #111;
+  border: 5px solid;
+  border-image: url('../../../assets/images/frame/simple.svg') 5 fill;
   text-align: center;
 
   h2 {
     margin-top: 0;
+    font-weight: 400;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
   }
 }
 

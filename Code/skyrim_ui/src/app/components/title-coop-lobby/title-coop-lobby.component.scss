@@ -1,10 +1,10 @@
 @import 'env';
 @import 'functions/mod';
 
-$-accent: #d9c38a;
-$-muted: #8c9696;
-$-line: rgba(255, 255, 255, 0.14);
-$-ready: #a9d8ae;
+// Skyrim vocabulary only: white/grey on black, uppercase condensed type, the
+// repo's frame/separator/arrow/checkbox art, square corners.
+$-dim: rgba(255, 255, 255, 0.5);
+$-separator: url('../../../assets/images/separator/single.svg');
 
 .coop-lobby {
   display: flex;
@@ -13,28 +13,28 @@ $-ready: #a9d8ae;
   max-height: calc(100vh - 4rem);
   box-sizing: border-box;
   color: mod($-color-background, 0.92);
-  padding: 2rem 2.5rem 1.5rem;
-  background: linear-gradient(110deg, rgba(5, 8, 10, 0.96), rgba(18, 22, 24, 0.91));
-  border: 1px solid rgba(210, 220, 220, 0.42);
-  box-shadow: 0 0 4rem #000;
+  padding: 1.5rem 2.5rem 1.1rem;
+  // The popup's app-window already draws the Skyrim frame.
+  background: rgba(0, 0, 0, 0.82);
   text-shadow: 0 1px 2px #000;
 }
 
 header {
   text-align: center;
-  margin-bottom: 1.25rem;
+  margin-bottom: 1rem;
 
   h1 {
     margin: 0;
-    letter-spacing: 0.22em;
     font-weight: 400;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
   }
 
   p {
-    margin: 0.4rem 0 0;
-    letter-spacing: 0.14em;
+    margin: 0.35rem 0 0;
+    letter-spacing: 0.2em;
     text-transform: uppercase;
-    color: #bfc8c8;
+    color: $-dim;
   }
 }
 
@@ -43,127 +43,128 @@ header {
   min-height: 0;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 1.5rem;
   overflow-y: auto;
 }
 
 .card {
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
-  padding: 1.25rem;
-  border: 1px solid $-line;
-  background: rgba(255, 255, 255, 0.03);
+  gap: 0.45rem;
+  padding: 0 1.75rem;
 
-  h2 {
-    margin: 0;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: #bfc8c8;
+  &.party {
+    padding-left: 0;
+    border-right: 2px solid;
+    border-image: $-separator 3;
   }
 
-  h3 {
-    margin: 0.8rem 0 0;
+  &.campaign {
+    padding-right: 0;
+  }
+
+  h2.separator,
+  h3.separator {
+    margin: 0.4rem 0 0.2rem;
+    font-weight: 400;
+    text-transform: uppercase;
+  }
+
+  h2.separator {
+    font-size: 1.2em;
+    letter-spacing: 0.2em;
+  }
+
+  h3.separator {
+    margin-top: 0.9rem;
     font-size: 0.9em;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: $-muted;
+    letter-spacing: 0.16em;
+    color: $-dim;
   }
 }
 
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.pill {
-  padding: 0.25rem 0.6rem;
-  border: 1px solid $-line;
-  font-size: 0.8em;
+.access-mode {
+  margin: -0.2rem 0 0;
+  text-align: center;
+  color: $-dim;
+  font-size: 0.9em;
   letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: $-muted;
-
-  &.ok {
-    color: $-ready;
-    border-color: rgba(169, 216, 174, 0.4);
-  }
 }
 
-// ---- roster ----
+// ---- roster: the game's checkbox art marks who is ready ----
 .roster {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  gap: 0.4rem;
 }
 
 .member {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.7rem 0.9rem;
-  background: rgba(255, 255, 255, 0.06);
+  gap: 0.8rem;
+  padding: 0.65rem 0.25rem;
+  border-bottom: 1px solid;
+  border-image: $-separator 3;
 
-  .dot {
-    width: 0.6rem;
-    height: 0.6rem;
-    border-radius: 50%;
-    background: #5a6262;
+  .mark {
+    width: 1rem;
+    height: 1rem;
+    background: url('../../../assets/images/checkbox/unchecked.svg') center / contain no-repeat;
+  }
+
+  .name {
+    font-size: 1.1em;
+    letter-spacing: 0.04em;
   }
 
   .badge {
-    padding: 0.1rem 0.45rem;
-    border: 1px solid $-accent;
-    color: $-accent;
-    font-size: 0.75em;
-    letter-spacing: 0.1em;
+    color: $-dim;
+    font-size: 0.8em;
+    letter-spacing: 0.16em;
     text-transform: uppercase;
   }
 
   .state {
-    color: $-muted;
+    color: $-dim;
+    font-size: 0.85em;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 
   &.ready {
-    .dot {
-      background: $-ready;
-      box-shadow: 0 0 0.4rem rgba(169, 216, 174, 0.6);
+    .mark {
+      background-image: url('../../../assets/images/checkbox/checked.svg');
     }
 
     .state {
-      color: $-ready;
+      color: mod($-color-background, 1);
     }
   }
 
   &.empty {
     grid-template-columns: 1fr;
-    color: $-muted;
+    color: $-dim;
     font-style: italic;
+  }
+
+  button.link {
+    grid-column: 2 / -1;
+    justify-self: start;
+    min-height: 0;
+    padding: 0.1rem 0;
+    font-size: 0.8em;
   }
 }
 
-button.link {
-  min-height: 0;
-  padding: 0.2rem 0.4rem;
-  font-size: 0.8em;
-  opacity: 0.7;
-}
-
 .wide {
-  width: 100%;
+  align-self: center;
 }
 
 // ---- join ----
 .join {
   display: grid;
-  gap: 0.5rem;
+  gap: 0.35rem;
   margin-top: auto;
-  padding-top: 0.8rem;
-  border-top: 1px solid $-line;
 }
 
 .friend {
@@ -171,11 +172,12 @@ button.link {
   justify-content: space-between;
   align-items: center;
   text-transform: none;
+  letter-spacing: 0.04em;
 
   small {
-    color: $-accent;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    color: $-dim;
   }
 }
 
@@ -183,76 +185,83 @@ button.link {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 0.5rem;
+  margin-top: 0.4rem;
 }
 
 .password-prompt {
   display: grid;
   gap: 0.5rem;
-  padding: 0.8rem;
-  border: 1px solid $-accent;
+  padding: 0.8rem 1rem;
+  border: 5px solid;
+  border-image: url('../../../assets/images/frame/simple.svg') 5 fill;
+
+  h3 {
+    margin: 0;
+    font-weight: 400;
+    letter-spacing: 0.1em;
+  }
 }
 
 // ---- campaign ----
 .choice {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
-
-  input {
-    grid-column: 1 / -1;
-  }
+  gap: 0.2rem;
 }
 
 .option {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.35rem;
-  padding: 0.9rem;
-  text-align: left;
-  border: 1px solid $-line;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 0.3rem;
+  min-height: 2.3rem;
 
-  small {
-    text-transform: none;
-    color: $-muted;
-    line-height: 1.25em;
+  strong {
+    font-weight: 400;
+    letter-spacing: 0.14em;
   }
 
   &.selected {
     opacity: 1;
-    border-color: $-accent;
-    background: rgba(217, 195, 138, 0.1);
-
-    strong {
-      color: $-accent;
-    }
   }
+}
+
+.option-hint {
+  margin: 0;
+  text-align: center;
+  color: $-dim;
+  font-size: 0.9em;
 }
 
 .chosen {
   margin: 0;
+  text-align: center;
   font-size: 1.1em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
-.setting-row {
+.setting-row,
+.switch-row {
   display: grid;
-  grid-template-columns: 1fr 12rem;
+  grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 0.8rem;
+  gap: 1rem;
+  min-height: 2.4rem;
+  padding: 0.1rem 0.25rem;
+  border-bottom: 1px solid;
+  border-image: $-separator 3;
+}
 
-  select {
-    color: white;
-    background: #20282a;
-    border: 1px solid #788689;
-  }
+.setting-row select {
+  min-width: 11rem;
+  color: white;
+  background: #0c0c0c;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .switch-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  min-height: 2.6rem;
   cursor: pointer;
 
   span {
@@ -262,58 +271,16 @@ button.link {
   }
 
   small {
-    color: $-muted;
+    color: $-dim;
     font-size: 0.85em;
   }
 
+  input[type='checkbox'] {
+    margin-right: 0.35rem;
+  }
+
   &.locked {
-    opacity: 0.6;
-    cursor: default;
-  }
-}
-
-input.switch {
-  appearance: none;
-  flex: 0 0 auto;
-  position: relative;
-  width: 2.75rem;
-  height: 1.5rem;
-  max-width: none;
-  max-height: none;
-  min-height: 0;
-  margin: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.08);
-  background-image: none !important;
-  opacity: 1;
-  cursor: pointer;
-  transition: background $-time-transition, border-color $-time-transition;
-
-  &::after {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 0.2rem;
-    width: 1.05rem;
-    height: 1.05rem;
-    border-radius: 50%;
-    background: #e8e8e8;
-    transform: translateY(-50%);
-    transition: left $-time-transition, background $-time-transition;
-  }
-
-  &:checked {
-    background: rgba(217, 195, 138, 0.35);
-    border-color: $-accent;
-
-    &::after {
-      left: calc(100% - 1.25rem);
-      background: $-accent;
-    }
-  }
-
-  &:disabled {
+    opacity: 0.55;
     cursor: default;
   }
 }
@@ -324,12 +291,15 @@ input.switch {
   dl {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 0.35rem 1rem;
+    gap: 0.3rem 1rem;
     margin: 0.5rem 0 0;
+    font-size: 0.9em;
   }
 
   dt {
-    color: $-muted;
+    color: $-dim;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
 
   dd {
@@ -339,77 +309,70 @@ input.switch {
 
 .muted {
   margin: 0;
-  color: $-muted;
+  color: $-dim;
   font-style: italic;
-}
-
-.ok {
-  color: $-ready;
+  font-size: 0.9em;
 }
 
 details summary {
   cursor: pointer;
-  color: $-muted;
+  color: $-dim;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.85em;
 }
 
-// ---- footer action bar ----
+// ---- action bar ----
 .bar {
   display: flex;
   align-items: center;
   gap: 0.8rem;
-  margin-top: 1.25rem;
-  padding-top: 1rem;
-  border-top: 1px solid $-line;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 2px solid;
+  border-image: $-separator 3;
 
   .status {
     flex: 1 1 auto;
-    text-align: right;
-    color: $-muted;
-  }
-
-  .ready.selected {
-    color: $-ready;
-    opacity: 1;
+    text-align: center;
+    color: $-dim;
+    letter-spacing: 0.06em;
   }
 
   .primary:not([disabled]) {
     opacity: 1;
-    color: $-accent;
   }
 }
 
 button,
 input:not([type='checkbox']),
 select {
-  min-height: 3rem;
+  min-height: 2.8rem;
 }
 
-button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 summary:focus-visible {
-  outline: 2px solid $-accent;
-  outline-offset: 2px;
-  color: white;
+  outline: 1px solid rgba(255, 255, 255, 0.4);
+  outline-offset: 3px;
+}
+
+button:focus-visible {
+  opacity: 1;
 }
 
 @media (max-height: 800px) {
   .coop-lobby {
-    padding: 1.2rem 1.6rem 1rem;
+    padding: 1.1rem 1.6rem 0.9rem;
   }
 
   header {
-    margin-bottom: 0.6rem;
-  }
-
-  .card {
-    padding: 0.9rem;
-    gap: 0.55rem;
+    margin-bottom: 0.5rem;
   }
 
   button,
   input:not([type='checkbox']),
   select {
-    min-height: 2.5rem;
+    min-height: 2.3rem;
   }
 }
