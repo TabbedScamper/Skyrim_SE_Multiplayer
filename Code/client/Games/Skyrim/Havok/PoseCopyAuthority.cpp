@@ -84,6 +84,14 @@ std::unordered_map<uint32_t, ActorPose> s_poses;
 std::atomic<uint64_t> s_presentationTick{0};
 std::atomic<uint32_t> s_presentationDelayMs{0};
 std::atomic<uint32_t> s_localMirror{0};
+std::mutex s_simulatingLock;
+std::unordered_map<uint32_t, bool> s_ragdollSimulating;
+
+bool RagdollSimulating(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_simulatingLock);
+    return s_ragdollSimulating.contains(aFormId);
+}
 // Actors whose owner sends fewer bones than this PC's skeleton copies (under s_lock): the bones
 // past the owner's count come from its held values, or from the local graph if never sent.
 struct ShortPose
@@ -171,7 +179,10 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
         // this hook the ragdoll pose), so a follower whose copy is still animated shows the
         // owner's knockdown. A follower whose copy is itself ragdolling leaves it to physics;
         // CorpseRagdollService drives those bodies.
-        if (it->second.Kind == Role::Apply && it->second.pActor && PhysicsOwnsSkeleton(it->second.pActor))
+        // Only once this copy's ragdoll is simulating: during a death animation the owner's pose
+        // (its death animation) still drives it, so both PCs show the same death.
+        if (it->second.Kind == Role::Apply && it->second.pActor && PhysicsOwnsSkeleton(it->second.pActor) &&
+            RagdollSimulating(it->second.pActor->formID))
             return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
         auto& pose = s_poses[it->second.FormId];
         if (it->second.Kind == Role::Capture)
@@ -331,6 +342,15 @@ double GetPresentationTimeMs() noexcept
     if (now <= delay)
         return static_cast<double>(s_presentationTick.load(std::memory_order_relaxed));
     return now - delay;
+}
+
+void SetRagdollSimulating(const uint32_t aFormId, const bool aSimulating) noexcept
+{
+    std::lock_guard lock(s_simulatingLock);
+    if (aSimulating)
+        s_ragdollSimulating[aFormId] = true;
+    else
+        s_ragdollSimulating.erase(aFormId);
 }
 
 void SetLocalMirror(const uint32_t aSourceFormId) noexcept

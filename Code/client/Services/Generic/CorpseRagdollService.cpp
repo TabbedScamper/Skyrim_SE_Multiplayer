@@ -97,6 +97,13 @@ bool GetRagdollBodies(Actor* apActor, Vector<RigidBody*>& aBodies) noexcept
     return true;
 }
 
+// The ragdoll is simulating: its bodies are in the world and not keyframed to the animation (a
+// death animation keyframes them, or keeps them out of the world, before the ragdoll takes over).
+bool RagdollSimulating(Actor* apActor, Vector<RigidBody*>& aBodies) noexcept
+{
+    return GetRagdollBodies(apActor, aBodies) && !aBodies.empty() && aBodies[0]->motionType != 4;
+}
+
 // hkTransform rotation columns are transform[0..2], [4..6], [8..10].
 void MatrixToQuaternion(const float* t, float* q) noexcept
 {
@@ -198,6 +205,18 @@ void CorpseRagdollService::OnMainFrame() noexcept
     if (!pService || !pService->m_applyOnMainFrame.load(std::memory_order_relaxed))
         return;
     std::lock_guard lock(pService->m_remoteLock);
+    // Publish which remote dying copies simulate their ragdoll (PoseCopyAuthority stands down then).
+    {
+        auto view = pService->m_world.view<FormIdComponent, RemoteComponent>();
+        for (auto entity : view)
+        {
+            auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+            if (!pActor || !pActor->GetNiNode())
+                continue;
+            Vector<RigidBody*> bodies;
+            PoseCopyAuthority::SetRagdollSimulating(pActor->formID, PhysicsOwnsSkeleton(pActor) && RagdollSimulating(pActor, bodies));
+        }
+    }
     pService->ApplyRemote(NowMs());
 }
 
@@ -298,7 +317,8 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             continue;
         const uint32_t serverId = view.get<LocalComponent>(entity).Id;
         Vector<RigidBody*> bodies;
-        if (!GetRagdollBodies(pActor, bodies))
+        // Streamed once the ragdoll simulates; during a death animation the pose stream carries it.
+        if (!RagdollSimulating(pActor, bodies))
             continue;
         seen.insert(serverId);
 
@@ -403,10 +423,10 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             continue;
         }
         Vector<RigidBody*> bodies;
-        if (!GetRagdollBodies(pActor, bodies))
+        if (!RagdollSimulating(pActor, bodies))
         {
-            // Dying here (the death sync) but its ragdoll bodies are not in the world yet (a death
-            // animation first): knock it so its bodies follow the owner's, whose ragdoll started.
+            // Dying here (the death sync) but its ragdoll not simulating yet (a death animation,
+            // the owner's through the pose stream): knock it now, as the owner's ragdoll started.
             if (!ragdoll.Knocked && pActor->currentProcess)
             {
                 ragdoll.Knocked = true;

@@ -31,6 +31,9 @@ void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
 // Cutscene follow: this PC's own player takes the pose of this actor (the leader's character
 // here); 0 turns it off. Applied from the next registry refresh.
 void SetLocalMirror(uint32_t aSourceFormId) noexcept;
+// Whether this actor's ragdoll bodies are simulating here (CorpseRagdollService, per frame). A
+// dying actor whose ragdoll is not simulating yet (a death animation) keeps taking its owner's pose.
+void SetRagdollSimulating(uint32_t aFormId, bool aSimulating) noexcept;
 [[nodiscard]] uint64_t GetCurrentTick() noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.

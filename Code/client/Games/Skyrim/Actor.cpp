@@ -981,7 +981,7 @@ void Actor::Kill() noexcept
 
     // TODO: these args are kind of bogus of course
     t_syncKill = true;
-    KillImpl(nullptr, 100.f, true, true);
+    KillImpl(nullptr, 100.f, true, !(pExtension && pExtension->IsRemote()));
     t_syncKill = false;
 
     // Papyrus kill will not go through if it is queued by a kill move
