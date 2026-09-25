@@ -8,77 +8,75 @@ export type ControllerModelId =
   | 'steam-deck' | 'steam-controller'
   | 'generic';
 
-export type ButtonShape = 'trigger' | 'bumper' | 'small' | 'face' | 'stick' | 'dpad';
-/** How a face button is marked: a letter, or a PlayStation symbol. */
-export type FaceGlyph = { letter: string } | { symbol: 'triangle' | 'circle' | 'cross' | 'square' };
-
 export interface PadButton {
   key: number;
   side: 'left' | 'right';
   /** Label row in viewBox units. */
   labelY: number;
-  shape: ButtonShape;
+  /** Centre of the button on the art, in viewBox units. */
   x: number;
   y: number;
-  glyph?: FaceGlyph;
-}
-
-/** Non-bindable detail drawn for recognition: touchpads, screens, guide buttons... */
-export interface Decoration {
-  kind: 'rect' | 'circle' | 'path';
-  d?: string;
-  x?: number;
-  y?: number;
-  w?: number;
-  h?: number;
-  r?: number;
-  dashed?: boolean;
+  /** Half size of the button's highlight ring. */
+  rx: number;
+  ry: number;
 }
 
 export interface ControllerModel {
   id: ControllerModelId;
   name: string;
-  body: string[];
-  decorations: Decoration[];
+  /** Front-view art (assets/images/controllers, see NOTICE.md there). */
+  art: { src: string; x: number; y: number; width: number; height: number };
   buttons: PadButton[];
   labels: Record<number, string>;
   note?: string;
 }
 
-// Shared coordinate frame: viewBox "-120 0 880 345"; callout columns at x=40 (left) and x=600 (right).
-const XBOX_BODY =
-  'M205,92 C250,84 290,96 320,96 C350,96 390,84 435,92 C485,100 505,140 522,205 C540,270 548,330 505,338 ' +
-  'C470,344 448,300 425,272 L215,272 C192,300 170,344 135,338 C92,330 100,270 118,205 C135,140 155,100 205,92 Z';
-const XBOX_CONTOUR =
-  'M210,104 C252,97 290,108 320,108 C350,108 388,97 430,104 C474,112 492,148 507,205 C522,262 528,318 500,324 ' +
-  'C476,328 456,294 432,262 L208,262 C184,294 164,328 140,324 C112,318 118,262 133,205 C148,148 166,112 210,104 Z';
+/** Button centre and size [cx, cy, w, h] in the art file's own units. */
+type Anchor = [number, number, number, number];
 
-const LETTERS = (a: string, b: string, x: string, y: string) => ({
-  [PAD.A]: { letter: a }, [PAD.B]: { letter: b }, [PAD.X]: { letter: x }, [PAD.Y]: { letter: y },
-});
+// Shared frame: viewBox "-120 0 880 345"; callout columns at x=40 (left) and
+// x=600 (right); the art is fitted inside ART_BOX between them.
+const ART_BOX = { x: 84, y: 4, width: 472, height: 337 };
 
-/** Offset-layout pad (Xbox, Switch Pro): left stick high, D-pad low. */
-function offsetButtons(glyphs: Record<number, FaceGlyph>, faceX = 425, faceY = 163): PadButton[] {
-  const face = (key: number, dx: number, dy: number, labelY: number): PadButton =>
-    ({ key, side: 'right', labelY, shape: 'face', x: faceX + dx, y: faceY + dy, glyph: glyphs[key] });
-  return [
-    { key: PAD.LeftTrigger, side: 'left', labelY: 40, shape: 'trigger', x: 215, y: 50 },
-    { key: PAD.LeftBumper, side: 'left', labelY: 76, shape: 'bumper', x: 215, y: 80 },
-    { key: PAD.Back, side: 'left', labelY: 112, shape: 'small', x: 288, y: 140 },
-    { key: PAD.LeftStick, side: 'left', labelY: 148, shape: 'stick', x: 220, y: 165 },
-    { key: PAD.DPadUp, side: 'left', labelY: 196, shape: 'dpad', x: 265, y: 223 },
-    { key: PAD.DPadLeft, side: 'left', labelY: 230, shape: 'dpad', x: 248, y: 240 },
-    { key: PAD.DPadRight, side: 'left', labelY: 264, shape: 'dpad', x: 282, y: 240 },
-    { key: PAD.DPadDown, side: 'left', labelY: 298, shape: 'dpad', x: 265, y: 257 },
-    { key: PAD.RightTrigger, side: 'right', labelY: 40, shape: 'trigger', x: 425, y: 50 },
-    { key: PAD.RightBumper, side: 'right', labelY: 76, shape: 'bumper', x: 425, y: 80 },
-    { key: PAD.Start, side: 'right', labelY: 112, shape: 'small', x: 352, y: 140 },
-    face(PAD.Y, 0, -26, 148),
-    face(PAD.X, -26, 0, 182),
-    face(PAD.B, 26, 0, 216),
-    face(PAD.A, 0, 26, 250),
-    { key: PAD.RightStick, side: 'right', labelY: 298, shape: 'stick', x: 372, y: 240 },
-  ];
+const LEFT_KEYS: number[] = [PAD.LeftTrigger, PAD.LeftBumper, PAD.Back, PAD.LeftStick, PAD.DPadUp, PAD.DPadLeft, PAD.DPadRight, PAD.DPadDown];
+
+/** D-pad arms around a centre, `reach` from it, each `size` square. */
+function dpad(cx: number, cy: number, reach: number, size: number): Record<number, Anchor> {
+  return {
+    [PAD.DPadUp]: [cx, cy - reach, size, size],
+    [PAD.DPadDown]: [cx, cy + reach, size, size],
+    [PAD.DPadLeft]: [cx - reach, cy, size, size],
+    [PAD.DPadRight]: [cx + reach, cy, size, size],
+  };
+}
+
+/**
+ * Places the art in the frame and maps each anchor onto it. Anchors were
+ * measured from the art's own labelled layers (e.g. "A Button", "Left Stick").
+ */
+function fromArt(
+  id: ControllerModelId, name: string, file: string, size: [number, number],
+  anchors: Record<number, Anchor>, labels: Record<number, string>, note?: string,
+): ControllerModel {
+  const [w, h] = size;
+  const scale = Math.min(ART_BOX.width / w, ART_BOX.height / h);
+  const ox = ART_BOX.x + (ART_BOX.width - w * scale) / 2;
+  const oy = ART_BOX.y + (ART_BOX.height - h * scale) / 2;
+  const buttons = Object.entries(anchors).map(([key, [cx, cy, bw, bh]]): PadButton => {
+    const x = ox + cx * scale, y = oy + cy * scale;
+    return {
+      key: +key,
+      side: LEFT_KEYS.includes(+key) ? 'left' : 'right',
+      labelY: y,
+      x, y,
+      rx: Math.max(7, (bw * scale) / 2 + 2),
+      ry: Math.max(7, (bh * scale) / 2 + 2),
+    };
+  });
+  return {
+    id, name, note, buttons, labels,
+    art: { src: `assets/images/controllers/${file}.svg`, x: ox, y: oy, width: w * scale, height: h * scale },
+  };
 }
 
 const XBOX_LABELS = (back: string, start: string): Record<number, string> => ({
@@ -87,144 +85,105 @@ const XBOX_LABELS = (back: string, start: string): Record<number, string> => ({
   [PAD.LeftStick]: 'LS', [PAD.RightStick]: 'RS', [PAD.Back]: back, [PAD.Start]: start,
 });
 
-function xbox(id: ControllerModelId, name: string, back: string, start: string, share: boolean): ControllerModel {
-  return {
-    id, name,
-    body: [XBOX_BODY],
-    decorations: [
-      { kind: 'path', d: XBOX_CONTOUR, dashed: true },
-      { kind: 'circle', x: 320, y: 118, r: 11 }, // guide
-      ...(share ? [{ kind: 'rect', x: 313, y: 150, w: 14, h: 9 } as Decoration] : []),
-      { kind: 'path', d: 'M130,300 C140,320 150,330 160,332 M510,300 C500,320 490,330 480,332', dashed: true },
-    ],
-    buttons: offsetButtons(LETTERS('A', 'B', 'X', 'Y')),
-    labels: XBOX_LABELS(back, start),
-  };
-}
+const PS_LABELS = (back: string): Record<number, string> => ({
+  [PAD.A]: 'Cross', [PAD.B]: 'Circle', [PAD.X]: 'Square', [PAD.Y]: 'Triangle',
+  [PAD.LeftBumper]: 'L1', [PAD.RightBumper]: 'R1', [PAD.LeftTrigger]: 'L2', [PAD.RightTrigger]: 'R2',
+  [PAD.LeftStick]: 'L3', [PAD.RightStick]: 'R3', [PAD.Back]: back, [PAD.Start]: 'Options',
+});
 
-// ---- PlayStation: symmetric sticks low, D-pad and face high, touchpad in the middle ----
-const PS_BODY =
-  'M195,96 C245,88 285,104 320,104 C355,104 395,88 445,96 C500,104 520,150 536,215 C552,285 548,338 506,342 ' +
-  'C476,345 454,308 432,278 L208,278 C186,308 164,345 134,342 C92,338 88,285 104,215 C120,150 140,104 195,96 Z';
+const xboxSeries = (id: ControllerModelId, name: string) => fromArt(id, name, 'xbox-series', [1534.7, 954], {
+  [PAD.LeftTrigger]: [306, 65, 169, 129], [PAD.RightTrigger]: [1216, 57, 166, 114],
+  [PAD.LeftBumper]: [345, 140, 240, 50], [PAD.RightBumper]: [1190, 140, 240, 50],
+  [PAD.Back]: [650, 420, 76, 70], [PAD.Start]: [884, 420, 76, 70],
+  [PAD.LeftStick]: [352, 443, 177, 176], [PAD.RightStick]: [976, 671, 180, 170],
+  ...dpad(558, 660, 62, 72),
+  [PAD.Y]: [1183, 311, 119, 110], [PAD.X]: [1071, 418, 114, 108], [PAD.B]: [1286, 407, 112, 107], [PAD.A]: [1177, 514, 110, 106],
+}, XBOX_LABELS('View', 'Menu'));
 
-function playstation(id: ControllerModelId, name: string, back: string): ControllerModel {
-  const face = (key: number, x: number, y: number, labelY: number, symbol: 'triangle' | 'circle' | 'cross' | 'square'): PadButton =>
-    ({ key, side: 'right', labelY, shape: 'face', x, y, glyph: { symbol } });
-  return {
-    id, name,
-    body: [PS_BODY],
-    decorations: [
-      { kind: 'rect', x: 266, y: 106, w: 108, h: 64 },  // touchpad
-      { kind: 'path', d: 'M270,176 L370,176', dashed: true }, // light bar
-      { kind: 'circle', x: 320, y: 206, r: 8 },  // PS button
-      { kind: 'rect', x: 312, y: 222, w: 16, h: 5 }, // mic mute
-      { kind: 'path', d: 'M118,300 C130,322 142,332 154,334 M522,300 C510,322 498,332 486,334', dashed: true },
-    ],
-    buttons: [
-      { key: PAD.LeftTrigger, side: 'left', labelY: 40, shape: 'trigger', x: 212, y: 52 },
-      { key: PAD.LeftBumper, side: 'left', labelY: 76, shape: 'bumper', x: 212, y: 82 },
-      { key: PAD.Back, side: 'left', labelY: 112, shape: 'small', x: 252, y: 114 },
-      { key: PAD.DPadUp, side: 'left', labelY: 148, shape: 'dpad', x: 200, y: 148 },
-      { key: PAD.DPadLeft, side: 'left', labelY: 182, shape: 'dpad', x: 183, y: 165 },
-      { key: PAD.DPadRight, side: 'left', labelY: 216, shape: 'dpad', x: 217, y: 165 },
-      { key: PAD.DPadDown, side: 'left', labelY: 250, shape: 'dpad', x: 200, y: 182 },
-      { key: PAD.LeftStick, side: 'left', labelY: 298, shape: 'stick', x: 266, y: 240 },
-      { key: PAD.RightTrigger, side: 'right', labelY: 40, shape: 'trigger', x: 428, y: 52 },
-      { key: PAD.RightBumper, side: 'right', labelY: 76, shape: 'bumper', x: 428, y: 82 },
-      { key: PAD.Start, side: 'right', labelY: 112, shape: 'small', x: 388, y: 114 },
-      face(PAD.Y, 440, 140, 148, 'triangle'),
-      face(PAD.X, 414, 166, 182, 'square'),
-      face(PAD.B, 466, 166, 216, 'circle'),
-      face(PAD.A, 440, 192, 250, 'cross'),
-      { key: PAD.RightStick, side: 'right', labelY: 298, shape: 'stick', x: 374, y: 240 },
-    ],
-    labels: {
-      [PAD.A]: 'Cross', [PAD.B]: 'Circle', [PAD.X]: 'Square', [PAD.Y]: 'Triangle',
-      [PAD.LeftBumper]: 'L1', [PAD.RightBumper]: 'R1', [PAD.LeftTrigger]: 'L2', [PAD.RightTrigger]: 'R2',
-      [PAD.LeftStick]: 'L3', [PAD.RightStick]: 'R3', [PAD.Back]: back, [PAD.Start]: 'Options',
-    },
-  };
-}
+const xboxOne = (id: ControllerModelId, name: string, back: string, start: string) => fromArt(id, name, 'xbox-one', [1543.2, 956.3], {
+  [PAD.LeftTrigger]: [291, 96, 206, 188], [PAD.RightTrigger]: [1254, 95, 208, 189],
+  [PAD.LeftBumper]: [330, 215, 240, 50], [PAD.RightBumper]: [1216, 215, 240, 50],
+  [PAD.Back]: [647, 495, 76, 70], [PAD.Start]: [894, 495, 76, 70],
+  [PAD.LeftStick]: [345, 512, 181, 180], [PAD.RightStick]: [985, 746, 186, 176],
+  ...dpad(551, 720, 62, 72),
+  [PAD.Y]: [1217, 388, 119, 110], [PAD.X]: [1092, 493, 120, 108], [PAD.B]: [1327, 480, 115, 107], [PAD.A]: [1203, 587, 115, 107],
+}, XBOX_LABELS(back, start));
 
-// ---- Nintendo Switch Pro: offset layout, face letters swapped by position ----
-const SWITCH_BODY =
-  'M200,94 C250,86 290,98 320,98 C350,98 390,86 440,94 C492,102 512,146 528,210 C544,276 540,334 500,338 ' +
-  'C470,341 450,304 428,276 L212,276 C190,304 170,341 140,338 C100,334 96,276 112,210 C128,146 148,102 200,94 Z';
+const xbox360 = fromArt('xbox-360', 'Xbox 360 Controller', 'xbox-360', [408.8, 252.8], {
+  [PAD.LeftTrigger]: [92, 19, 36, 39], [PAD.RightTrigger]: [325, 19, 36, 39],
+  [PAD.LeftBumper]: [78, 53, 81, 36], [PAD.RightBumper]: [336, 53, 74, 36],
+  [PAD.Back]: [157, 125, 29, 24], [PAD.Start]: [254, 125, 30, 23],
+  [PAD.LeftStick]: [79, 141, 54, 48], [PAD.RightStick]: [264, 203, 54, 46],
+  ...dpad(142, 190, 18, 20),
+  [PAD.Y]: [332, 99, 33, 30], [PAD.X]: [297, 127, 32, 28], [PAD.B]: [363, 125, 31, 29], [PAD.A]: [328, 154, 32, 26],
+}, XBOX_LABELS('Back', 'Start'));
 
-const switchPro: ControllerModel = {
-  id: 'switch-pro', name: 'Nintendo Switch Pro Controller',
-  body: [SWITCH_BODY],
-  decorations: [
-    { kind: 'circle', x: 344, y: 168, r: 7 }, // home
-    { kind: 'rect', x: 290, y: 162, w: 12, h: 12 }, // capture
-    { kind: 'path', d: 'M135,300 C145,320 155,330 165,332 M505,300 C495,320 485,330 475,332', dashed: true },
-  ],
-  // Skyrim's A (bottom) is Nintendo's B, and so on round the diamond.
-  buttons: offsetButtons(LETTERS('B', 'A', 'Y', 'X'), 420, 160),
-  labels: {
-    [PAD.A]: 'B', [PAD.B]: 'A', [PAD.X]: 'Y', [PAD.Y]: 'X',
-    [PAD.LeftBumper]: 'L', [PAD.RightBumper]: 'R', [PAD.LeftTrigger]: 'ZL', [PAD.RightTrigger]: 'ZR',
-    [PAD.LeftStick]: 'LS', [PAD.RightStick]: 'RS', [PAD.Back]: '-', [PAD.Start]: '+',
-  },
-};
+const dualsense = fromArt('dualsense', 'DualSense (PS5)', 'dualsense', [544.7, 302.9], {
+  [PAD.LeftTrigger]: [101, 29, 75, 57], [PAD.RightTrigger]: [444, 28, 75, 55],
+  [PAD.LeftBumper]: [97, 55, 81, 46], [PAD.RightBumper]: [448, 55, 81, 46],
+  [PAD.Back]: [140, 102, 18, 33], [PAD.Start]: [405, 102, 18, 34],
+  [PAD.LeftStick]: [183, 235, 65, 55], [PAD.RightStick]: [362, 236, 65, 55],
+  [PAD.DPadUp]: [97, 137, 32, 37], [PAD.DPadLeft]: [70, 160, 39, 30], [PAD.DPadDown]: [97, 181, 32, 35], [PAD.DPadRight]: [124, 160, 39, 30],
+  [PAD.Y]: [449, 125, 38, 35], [PAD.X]: [407, 160, 38, 33], [PAD.A]: [447, 193, 38, 31], [PAD.B]: [489, 158, 38, 35],
+}, PS_LABELS('Create'));
 
-// ---- Steam Deck: handheld, screen in the middle, trackpads below the sticks ----
-const DECK_BODY =
-  'M58,112 C58,94 74,86 96,86 L544,86 C566,86 582,94 582,112 L594,248 C598,298 578,330 542,330 ' +
-  'C508,330 492,302 470,292 L170,292 C148,302 132,330 98,330 C62,330 42,298 46,248 Z';
+const dualshock4 = fromArt('dualshock4', 'DualShock 4 (PS4)', 'dualshock4', [1542.6, 824.3], {
+  [PAD.LeftTrigger]: [315, 50, 172, 99], [PAD.RightTrigger]: [1228, 50, 173, 99],
+  [PAD.LeftBumper]: [310, 127, 203, 97], [PAD.RightBumper]: [1233, 127, 203, 97],
+  [PAD.Back]: [466, 270, 74, 112], [PAD.Start]: [1077, 270, 100, 112],
+  [PAD.LeftStick]: [533, 629, 173, 155], [PAD.RightStick]: [1009, 629, 173, 155],
+  [PAD.DPadUp]: [306, 344, 90, 120], [PAD.DPadRight]: [393, 421, 140, 85], [PAD.DPadDown]: [307, 496, 90, 128], [PAD.DPadLeft]: [221, 421, 138, 85],
+  [PAD.Y]: [1236, 324, 105, 94], [PAD.X]: [1127, 420, 105, 94], [PAD.B]: [1346, 420, 105, 94], [PAD.A]: [1236, 515, 105, 94],
+}, PS_LABELS('Share'));
 
-const steamDeck: ControllerModel = {
-  id: 'steam-deck', name: 'Steam Deck',
-  body: [DECK_BODY],
-  decorations: [
-    { kind: 'rect', x: 190, y: 100, w: 260, h: 164 }, // screen
-    { kind: 'rect', x: 198, y: 108, w: 244, h: 148, dashed: true },
-    { kind: 'rect', x: 96, y: 200, w: 62, h: 62 },  // left trackpad
-    { kind: 'rect', x: 482, y: 200, w: 62, h: 62 }, // right trackpad
-    { kind: 'rect', x: 72, y: 272, w: 14, h: 8 },   // steam button
-    { kind: 'circle', x: 560, y: 276, r: 5 },       // quick access
-  ],
-  buttons: [
-    { key: PAD.LeftTrigger, side: 'left', labelY: 40, shape: 'trigger', x: 115, y: 58 },
-    { key: PAD.LeftBumper, side: 'left', labelY: 76, shape: 'bumper', x: 115, y: 80 },
-    { key: PAD.Back, side: 'left', labelY: 112, shape: 'small', x: 176, y: 104 },
-    { key: PAD.LeftStick, side: 'left', labelY: 148, shape: 'stick', x: 160, y: 150 },
-    { key: PAD.DPadUp, side: 'left', labelY: 182, shape: 'dpad', x: 94, y: 128 },
-    { key: PAD.DPadLeft, side: 'left', labelY: 216, shape: 'dpad', x: 77, y: 145 },
-    { key: PAD.DPadRight, side: 'left', labelY: 250, shape: 'dpad', x: 111, y: 145 },
-    { key: PAD.DPadDown, side: 'left', labelY: 284, shape: 'dpad', x: 94, y: 162 },
-    { key: PAD.RightTrigger, side: 'right', labelY: 40, shape: 'trigger', x: 525, y: 58 },
-    { key: PAD.RightBumper, side: 'right', labelY: 76, shape: 'bumper', x: 525, y: 80 },
-    { key: PAD.Start, side: 'right', labelY: 112, shape: 'small', x: 464, y: 104 },
-    { key: PAD.Y, side: 'right', labelY: 148, shape: 'face', x: 546, y: 120, glyph: { letter: 'Y' } },
-    { key: PAD.X, side: 'right', labelY: 182, shape: 'face', x: 522, y: 144, glyph: { letter: 'X' } },
-    { key: PAD.B, side: 'right', labelY: 216, shape: 'face', x: 570, y: 144, glyph: { letter: 'B' } },
-    { key: PAD.A, side: 'right', labelY: 250, shape: 'face', x: 546, y: 168, glyph: { letter: 'A' } },
-    { key: PAD.RightStick, side: 'right', labelY: 284, shape: 'stick', x: 480, y: 150 },
-  ],
-  labels: {
-    [PAD.A]: 'A', [PAD.B]: 'B', [PAD.X]: 'X', [PAD.Y]: 'Y',
-    [PAD.LeftBumper]: 'L1', [PAD.RightBumper]: 'R1', [PAD.LeftTrigger]: 'L2', [PAD.RightTrigger]: 'R2',
-    [PAD.LeftStick]: 'L3', [PAD.RightStick]: 'R3', [PAD.Back]: 'View', [PAD.Start]: 'Menu',
-  },
-  note: 'Back grips (L4, L5, R4, R5) and trackpads are set up in Steam Input.',
-};
+// Skyrim's A (bottom) is Nintendo's B, and so on round the diamond.
+const switchPro = fromArt('switch-pro', 'Nintendo Switch Pro Controller', 'switch-pro', [419.1, 304.5], {
+  [PAD.LeftTrigger]: [96, 14, 74, 27], [PAD.RightTrigger]: [323, 14, 74, 27],
+  [PAD.LeftBumper]: [99, 31, 102, 24], [PAD.RightBumper]: [320, 31, 102, 24],
+  [PAD.Back]: [158, 66, 19, 19], [PAD.Start]: [261, 66, 18, 18],
+  [PAD.LeftStick]: [94, 97, 49, 49], [PAD.RightStick]: [264, 155, 50, 51],
+  ...dpad(146, 155, 19, 20),
+  [PAD.Y]: [320, 68, 30, 30], [PAD.X]: [287, 97, 30, 30], [PAD.B]: [353, 97, 30, 30], [PAD.A]: [320, 126, 30, 30],
+}, {
+  [PAD.A]: 'B', [PAD.B]: 'A', [PAD.X]: 'Y', [PAD.Y]: 'X',
+  [PAD.LeftBumper]: 'L', [PAD.RightBumper]: 'R', [PAD.LeftTrigger]: 'ZL', [PAD.RightTrigger]: 'ZR',
+  [PAD.LeftStick]: 'LS', [PAD.RightStick]: 'RS', [PAD.Back]: '-', [PAD.Start]: '+',
+});
 
-const steamController: ControllerModel = {
-  ...xbox('steam-controller', 'Steam Controller', 'Back', 'Start', false),
-  note: 'Trackpads and back grips are set up in Steam Input.',
-};
+// Front view: the triggers sit behind the shoulder buttons along the top edge.
+const steamDeck = fromArt('steam-deck', 'Steam Deck', 'steam-deck', [492.7, 200.9], {
+  [PAD.LeftTrigger]: [26, 7, 22, 8], [PAD.RightTrigger]: [466, 7, 22, 8],
+  [PAD.LeftBumper]: [62, 9, 34, 8], [PAD.RightBumper]: [430, 9, 34, 8],
+  [PAD.Back]: [57, 20, 15, 6], [PAD.Start]: [435, 20, 15, 6],
+  [PAD.LeftStick]: [78, 48, 33, 33], [PAD.RightStick]: [415, 48, 33, 33],
+  ...dpad(31, 40, 11, 12),
+  [PAD.Y]: [463, 25, 15, 15], [PAD.X]: [448, 40, 15, 15], [PAD.B]: [477, 40, 15, 15], [PAD.A]: [463, 54, 15, 15],
+}, {
+  [PAD.A]: 'A', [PAD.B]: 'B', [PAD.X]: 'X', [PAD.Y]: 'Y',
+  [PAD.LeftBumper]: 'L1', [PAD.RightBumper]: 'R1', [PAD.LeftTrigger]: 'L2', [PAD.RightTrigger]: 'R2',
+  [PAD.LeftStick]: 'L3', [PAD.RightStick]: 'R3', [PAD.Back]: 'View', [PAD.Start]: 'Menu',
+}, 'Back grips (L4, L5, R4, R5) and trackpads are set up in Steam Input.');
+
+// Skyrim sees the left trackpad as the D-pad and the right one as the right stick.
+const steamController = fromArt('steam-controller', 'Steam Controller', 'steam-controller', [416.8, 298.2], {
+  [PAD.LeftTrigger]: [88, 8, 51, 13], [PAD.RightTrigger]: [329, 8, 51, 13],
+  [PAD.LeftBumper]: [94, 17, 78, 10], [PAD.RightBumper]: [322, 17, 77, 10],
+  [PAD.Back]: [174, 88, 25, 14], [PAD.Start]: [242, 88, 25, 14],
+  [PAD.LeftStick]: [161, 151, 67, 67], [PAD.RightStick]: [322, 89, 106, 104],
+  ...dpad(94, 90, 27, 26),
+  [PAD.Y]: [257, 127, 23, 23], [PAD.X]: [234, 150, 23, 23], [PAD.B]: [281, 150, 23, 23], [PAD.A]: [257, 173, 23, 23],
+}, XBOX_LABELS('Back', 'Start'), 'Trackpads and back grips are set up in Steam Input.');
 
 export const CONTROLLER_MODELS: Record<ControllerModelId, ControllerModel> = {
-  'xbox-series': xbox('xbox-series', 'Xbox Series X|S Controller', 'View', 'Menu', true),
-  'xbox-one': xbox('xbox-one', 'Xbox One Controller', 'View', 'Menu', false),
-  'xbox-360': xbox('xbox-360', 'Xbox 360 Controller', 'Back', 'Start', false),
-  dualsense: playstation('dualsense', 'DualSense (PS5)', 'Create'),
-  dualshock4: playstation('dualshock4', 'DualShock 4 (PS4)', 'Share'),
+  'xbox-series': xboxSeries('xbox-series', 'Xbox Series X|S Controller'),
+  'xbox-one': xboxOne('xbox-one', 'Xbox One Controller', 'View', 'Menu'),
+  'xbox-360': xbox360,
+  dualsense,
+  dualshock4,
   'switch-pro': switchPro,
   'steam-deck': steamDeck,
   'steam-controller': steamController,
-  generic: { ...xbox('generic', 'Controller', 'Back', 'Start', false) },
+  generic: xboxOne('generic', 'Controller', 'Back', 'Start'),
 };
 
 export const MODEL_CHOICES: { id: ControllerModelId; name: string }[] =
