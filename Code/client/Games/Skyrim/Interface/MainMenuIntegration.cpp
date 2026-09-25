@@ -1,5 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
+#include <span>
+
 #include <Games/Skyrim/Interface/IMenu.h>
 #include <Games/Skyrim/Interface/MainMenuIntegration.h>
 #include <Games/Skyrim/Interface/UI.h>
@@ -222,6 +224,172 @@ template <class T> T ReadAt(const void* apBase, size_t aOffset)
 }
 }
 
+namespace
+{
+struct GRectF
+{
+    float Left{}, Top{}, Right{}, Bottom{};
+};
+struct GPointF
+{
+    float X{}, Y{};
+};
+using TGetRect = GRectF*(void*, GRectF*);
+using TTranslateLocalToScreen = bool(void*, const char*, const GPointF&, GPointF*, void*);
+
+// Layout snapshots: numeric state of every open Scaleform movie and of the
+// title-screen 3D logo, written to logs/ui-layout.jsonl. A snapshot taken
+// after a fresh launch at a resolution is the reference ("what the game does
+// by default"); one taken after a live resize to the same resolution must match it.
+std::chrono::steady_clock::time_point s_layoutSnapshotDue{};
+const char* s_layoutSnapshotTag = nullptr;
+uint32_t s_layoutRefreshCount = 0;
+
+void ScheduleLayoutSnapshot(const char* acTag, std::chrono::milliseconds aDelay)
+{
+    s_layoutSnapshotTag = acTag;
+    s_layoutSnapshotDue = std::chrono::steady_clock::now() + aDelay;
+}
+
+// Paths inside Main Menu.swf (StartMenu.as members of MenuHolder.Menu_mc).
+constexpr const char* cMainMenuParts[]{
+    "_root.MenuHolder", "_root.MenuHolder.Menu_mc", "_root.MenuHolder.Menu_mc.MainListHolder",
+    "_root.MenuHolder.Menu_mc.MainList", "_root.MenuHolder.Menu_mc.Logo_mc",
+    "_root.MenuHolder.Menu_mc.BottomButtons_mc", "_root.MenuHolder.Menu_mc.VersionText",
+    "_root.MenuHolder.Menu_mc.MessageOfTheDay_mc", "_root.MenuHolder.Menu_mc.SaveLoadListHolder",
+    "_root.MenuHolder.Menu_mc.GamerTagWidget_mc", "_root.MenuHolder.Menu_mc.CharacterSelectionHint",
+    "_root.MenuHolder.Menu_mc.DLCPanel", "_root.MenuHolder.Menu_mc.LoginHolder_mc"};
+
+// Widgets the loading screens pin to screen edges in their InitExtensions.
+constexpr const char* cLoadingMenuParts[]{"_root.Menu_mc", "_root.Menu_mc.LevelMeterRect", "_root.Menu_mc.LoadingTextFader"};
+constexpr const char* cSpinnerParts[]{"_root.Menu_mc", "_root.Menu_mc.LoadingIconHolder"};
+
+std::span<const char* const> PartsOf(const char* acMenu)
+{
+    if (std::strcmp(acMenu, "Main Menu") == 0)
+        return cMainMenuParts;
+    if (std::strcmp(acMenu, "Loading Menu") == 0)
+        return cLoadingMenuParts;
+    if (std::strcmp(acMenu, "LoadWaitSpinner") == 0)
+        return cSpinnerParts;
+    return {};
+}
+
+std::string MovieLayoutJson(void* apMovie, std::span<const char* const> aParts)
+{
+    auto* pVtable = *reinterpret_cast<uintptr_t**>(apMovie);
+    ScaleformViewport viewport{};
+    reinterpret_cast<TGetViewport*>(pVtable[0x1A])(apMovie, &viewport);
+    GRectF visible{}, safe{};
+    reinterpret_cast<TGetRect*>(pVtable[0x1F])(apMovie, &visible);
+    reinterpret_cast<TGetRect*>(pVtable[0x22])(apMovie, &safe);
+    std::string json = fmt::format(
+        "\"viewport\":[{},{},{},{},{},{}],\"vpScale\":{},\"vpAspect\":{},\"vpFlags\":{},\"scaleMode\":{},\"align\":{},"
+        "\"visible\":[{:.2f},{:.2f},{:.2f},{:.2f}],\"safe\":[{:.2f},{:.2f},{:.2f},{:.2f}]",
+        viewport.BufferWidth, viewport.BufferHeight, viewport.Left, viewport.Top, viewport.Width, viewport.Height,
+        viewport.Scale, viewport.AspectRatio, viewport.Flags,
+        reinterpret_cast<TGetViewScaleMode*>(pVtable[0x1C])(apMovie),
+        reinterpret_cast<TGetViewAlignment*>(pVtable[0x1E])(apMovie), visible.Left, visible.Top, visible.Right,
+        visible.Bottom, safe.Left, safe.Top, safe.Right, safe.Bottom);
+    if (aParts.empty())
+        return json;
+
+    // Where each part lands on screen: its local origin, and the screen
+    // distance of a 100-unit local step (the part's effective scale).
+    const auto translate = reinterpret_cast<TTranslateLocalToScreen*>(pVtable[0x41]);
+    // The user matrix is multiplied in unconditionally (FUN_140d039e0), so it must be a real identity.
+    float identity[6]{1.f, 0.f, 0.f, 0.f, 1.f, 0.f};
+    json += ",\"parts\":{";
+    bool first = true;
+    for (const auto* pPath : aParts)
+    {
+        GPointF origin{}, step{};
+        if (!translate(apMovie, pPath, GPointF{0.f, 0.f}, &origin, identity) ||
+            !translate(apMovie, pPath, GPointF{100.f, 100.f}, &step, identity))
+            continue;
+        json += fmt::format("{}\"{}\":[{:.2f},{:.2f},{:.4f},{:.4f}]", first ? "" : ",",
+            pPath, origin.X, origin.Y, (step.X - origin.X) / 100.f,
+            (step.Y - origin.Y) / 100.f);
+        first = false;
+    }
+    json += "}";
+    return json;
+}
+
+void WriteLayoutSnapshot(const char* acTag)
+{
+    auto* pUI = UI::Get();
+    auto* pWindow = BSGraphics::GetMainWindow();
+    if (!pUI || !pWindow || !pWindow->pSwapChain)
+        return;
+    DXGI_SWAP_CHAIN_DESC swapDesc{};
+    if (FAILED(pWindow->pSwapChain->GetDesc(&swapDesc)))
+        return;
+
+    static VersionDbPtr<uint8_t> s_graphicsState(411479);
+    static VersionDbPtr<uint8_t> s_letterbox(411491);
+    static VersionDbPtr<float> s_letterboxA(390947);
+    static VersionDbPtr<float> s_letterboxB(390948);
+    static VersionDbPtr<float> s_safeWideX(389570);
+    static VersionDbPtr<float> s_safeWideY(389573);
+    static VersionDbPtr<float> s_safeX(389576);
+    static VersionDbPtr<float> s_safeY(389579);
+    const auto* pState = reinterpret_cast<const GraphicsStateLayout*>(s_graphicsState.Get());
+
+    std::string json = fmt::format(
+        "{{\"tag\":\"{}\",\"refreshes\":{},\"swap\":[{},{}],\"state\":[{},{},{},{}],\"letterbox\":[{},{},{}],"
+        "\"safeZone\":[{},{},{},{}]",
+        acTag, s_layoutRefreshCount, swapDesc.BufferDesc.Width, swapDesc.BufferDesc.Height,
+        pState ? pState->ScreenWidth : 0, pState ? pState->ScreenHeight : 0, pState ? pState->FrameBufferWidth : 0,
+        pState ? pState->FrameBufferHeight : 0, s_letterbox.Get() ? *s_letterbox.Get() : 0,
+        s_letterboxA.Get() ? *s_letterboxA.Get() : 0.f, s_letterboxB.Get() ? *s_letterboxB.Get() : 0.f,
+        s_safeWideX.Get() ? *s_safeWideX.Get() : 0.f, s_safeWideY.Get() ? *s_safeWideY.Get() : 0.f,
+        s_safeX.Get() ? *s_safeX.Get() : 0.f, s_safeY.Get() ? *s_safeY.Get() : 0.f);
+
+    json += ",\"menus\":{";
+    bool first = true;
+    for (const auto& entry : pUI->menuMap)
+    {
+        const char* pName = entry.key.AsAscii();
+        auto* pMenu = entry.value.spMenu;
+        if (!pName || !pMenu || !pMenu->uiMovie)
+            continue;
+        json += fmt::format("{}\"{}\":{{{}}}", first ? "" : ",", pName,
+            MovieLayoutJson(pMenu->uiMovie, PartsOf(pName)));
+        first = false;
+    }
+    json += "}";
+
+    // Title-screen 3D logo camera (see RefreshMainMenu3DCamera and the F9 dump).
+    POINTER_SKYRIMSE(void*, s_ui3DSceneManager, 403560);
+    const auto* pManager = static_cast<const uint8_t*>(s_ui3DSceneManager.Get() ? *s_ui3DSceneManager.Get() : nullptr);
+    if (pManager)
+    {
+        const auto* pFrustum = reinterpret_cast<const float*>(pManager + 0xF8);
+        json += fmt::format(",\"ui3dFrustum\":[{:.5f},{:.5f},{:.5f},{:.5f},{:.3f},{:.1f}]", pFrustum[0], pFrustum[1],
+            pFrustum[2], pFrustum[3], pFrustum[4], pFrustum[5]);
+        // The NiCamera the logo is drawn with: frustum l/r/t/b at +0x150,
+        // near/far at +0x160/+0x164 (NiCamera::SetFrustum, FUN_140eefae0).
+        if (const auto* pCamera = *reinterpret_cast<const uint8_t* const*>(pManager + 0x20))
+        {
+            const auto* pCam = reinterpret_cast<const float*>(pCamera + 0x150);
+            json += fmt::format(",\"ui3dCamera\":[{:.5f},{:.5f},{:.5f},{:.5f},{:.3f},{:.1f}]", pCam[0], pCam[1], pCam[2],
+                pCam[3], pCam[4], pCam[5]);
+        }
+    }
+    if (auto* pMist = pUI->FindMenuByName(BSFixedString("Mist Menu")))
+        json += fmt::format(",\"mistFov\":{:.3f}", *reinterpret_cast<const float*>(reinterpret_cast<uintptr_t>(pMist) + 0x100));
+    json += "}\n";
+
+    const auto directory = TiltedPhoques::GetPath() / "logs";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    std::ofstream output(directory / "ui-layout.jsonl", std::ios::binary | std::ios::app);
+    output << json;
+    spdlog::info("UI layout snapshot '{}' written for {}x{}", acTag, swapDesc.BufferDesc.Width, swapDesc.BufferDesc.Height);
+}
+} // namespace
+
 void PollMainMenuOptions(IMenu* apMainMenu) noexcept
 {
     if (!apMainMenu || !apMainMenu->uiMovie)
@@ -236,8 +404,15 @@ void PollMainMenuOptions(IMenu* apMainMenu) noexcept
     if (!pVtable)
         return;
 
+    if (s_pMainMenuMovie != pMovie)
+        ScheduleLayoutSnapshot("open", std::chrono::milliseconds(4000));
     s_pMainMenuMovie = pMovie;
     ApplyMainMenuVisibility();
+    if (s_layoutSnapshotTag && std::chrono::steady_clock::now() >= s_layoutSnapshotDue)
+    {
+        WriteLayoutSnapshot(s_layoutSnapshotTag);
+        s_layoutSnapshotTag = nullptr;
+    }
 
     // World::Update is gameplay-driven and may be dormant on the title
     // screen. Steam lobby create/join completion still requires
@@ -407,18 +582,46 @@ void RefreshMainMenuLayout() noexcept
         spdlog::info("Updated native MenuCursor bounds {}x{} -> {}x{}", oldWidth, oldHeight, width, height);
     }
 
+    std::unordered_set<void*> openMovies;
+    for (auto* pMenu : pUI->menuStack)
+        if (pMenu && pMenu->uiMovie)
+            openMovies.insert(pMenu->uiMovie);
+
+    // Every menu that is alive, not only the open ones: the Loading Menu and
+    // LoadWaitSpinner are created once and kept between loads, so a menuStack
+    // walk left them at the old size (measured: native vs live snapshots).
     std::unordered_set<void*> refreshedMovies;
     uint32_t refreshedCount = 0;
-    for (auto* pMenu : pUI->menuStack)
+    for (const auto& entry : pUI->menuMap)
     {
+        auto* pMenu = entry.value.spMenu;
         if (!pMenu || !pMenu->uiMovie || !refreshedMovies.emplace(pMenu->uiMovie).second)
             continue;
 
         auto* pVtable = *reinterpret_cast<uintptr_t**>(pMenu->uiMovie);
-        if (pVtable && RefreshViewport(pMenu->uiMovie, pVtable, width, height))
+        if (!pVtable || !RefreshViewport(pMenu->uiMovie, pVtable, width, height))
+            continue;
+        ++refreshedCount;
+        pMenu->RefreshPlatform();
+
+        // Their InitExtensions only pins widgets to the screen edges (Lock)
+        // and resets their text, the same call BSScaleformManager::LoadMovie
+        // (ID 82325, VA 0x14116FDA0) makes after loading them. Main
+        // Menu.swf re-locks itself when Stage.visibleRect changes. Only while
+        // hidden: re-running it mid-load would blank the loading text.
+        const char* pName = entry.key.AsAscii();
+        if (pName && (std::strcmp(pName, "Loading Menu") == 0 || std::strcmp(pName, "LoadWaitSpinner") == 0) &&
+            !openMovies.contains(pMenu->uiMovie))
         {
-            ++refreshedCount;
-            pMenu->RefreshPlatform();
+            using TIsAvailable = bool(void*, const char*);
+            using TInvoke = bool(void*, const char*, const char*, ...);
+            static VersionDbPtr<void> s_invoke(82664);
+            auto* pInvoke = reinterpret_cast<TInvoke*>(s_invoke.GetPtr());
+            if (pInvoke && reinterpret_cast<TIsAvailable*>(pVtable[0x0A])(pMenu->uiMovie, "_root.InitExtensions"))
+            {
+                pInvoke(pMenu->uiMovie, "_root.InitExtensions", nullptr);
+                spdlog::info("Re-ran {} layout (InitExtensions) for {}x{}", pName, width, height);
+            }
         }
     }
 
@@ -439,6 +642,8 @@ void RefreshMainMenuLayout() noexcept
 
     RefreshMainMenu3DCamera();
 
+    ++s_layoutRefreshCount;
+    ScheduleLayoutSnapshot("live", std::chrono::milliseconds(3000));
     spdlog::info("Reinitialized {} live Scaleform movies for {}x{}", refreshedCount, width, height);
 }
 
@@ -670,3 +875,62 @@ void DumpMainMenuState(uint32_t aOverlayWidth, uint32_t aOverlayHeight) noexcept
         spdlog::error("F9 main-menu state dump failed with an unknown exception");
     }
 }
+
+// ---- Title logo framing ----
+// UI3DSceneManager::SetCameraFOV (ID 52742, VA 0x14098B1D0), called only by
+// the Mist Menu, keeps the horizontal half-width fixed at tan(fov/2)*0.75 and
+// derives the vertical from the screen aspect. The logo therefore grows with
+// every step wider than 16:9 (twice as tall at 32:9) and changes size whenever
+// the window changes shape. On screens wider than 16:9 this keeps the 16:9
+// vertical extent and widens the view instead, so the logo stays the same
+// size relative to the screen; 16:9 and narrower keep the game's own framing.
+namespace
+{
+using TSetCameraFOVHook = void (*)(void*, float);
+TSetCameraFOVHook RealSetCameraFOV = nullptr;
+
+void HookSetCameraFOV(void* apManager, float aFov)
+{
+    RealSetCameraFOV(apManager, aFov);
+
+    auto* pCamera = apManager ? *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(apManager) + 0x20) : nullptr;
+    static VersionDbPtr<uint8_t> s_graphicsState(411479);
+    const auto* pState = reinterpret_cast<const GraphicsStateLayout*>(s_graphicsState.Get());
+    if (!pCamera || !pState || !pState->ScreenWidth || !pState->ScreenHeight)
+        return;
+    const float aspect = static_cast<float>(pState->ScreenWidth) / static_cast<float>(pState->ScreenHeight);
+    if (aspect <= 16.f / 9.f + 0.001f)
+        return;
+
+    // NiFrustum l, r, t, b, near, far, ortho at NiCamera+0x150 (FUN_140eefae0).
+    struct NiFrustum
+    {
+        float Left, Right, Top, Bottom, Near, Far;
+        bool Ortho;
+    };
+    NiFrustum frustum{};
+    std::memcpy(&frustum, pCamera + 0x150, 6 * sizeof(float));
+    frustum.Ortho = *(pCamera + 0x168) != 0;
+    const float halfHeight = frustum.Right * (9.f / 16.f);
+    if (!(halfHeight > 0.f))
+        return;
+    frustum.Top = halfHeight;
+    frustum.Bottom = -halfHeight;
+    frustum.Right = halfHeight * aspect;
+    frustum.Left = -frustum.Right;
+
+    using TSetFrustum = void (*)(void*, const NiFrustum*);
+    static VersionDbPtr<void> s_setFrustum(70626); // NiCamera::SetFrustum
+    if (auto* pSetFrustum = reinterpret_cast<TSetFrustum>(s_setFrustum.GetPtr()))
+        pSetFrustum(pCamera, &frustum);
+}
+
+TiltedPhoques::Initializer s_titleLogoFraming(
+    []()
+    {
+        static VersionDbPtr<void> s_setCameraFOV(52742);
+        RealSetCameraFOV = reinterpret_cast<TSetCameraFOVHook>(s_setCameraFOV.GetPtr());
+        if (RealSetCameraFOV)
+            TP_HOOK(&RealSetCameraFOV, HookSetCameraFOV);
+    });
+} // namespace
