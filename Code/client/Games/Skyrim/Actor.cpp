@@ -683,6 +683,12 @@ int32_t Actor::GetGoldAmount() const noexcept
     return TiltedPhoques::ThisCall(s_getGoldAmount, this);
 }
 
+namespace
+{
+// Actors whose biped parts SetActorInventory asked to rebuild, and when.
+std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> s_pendingReset3D;
+} // namespace
+
 void Actor::SetActorInventory(const Inventory& acInventory) noexcept
 {
     spdlog::info("Setting inventory for actor {:X}", formID);
@@ -703,12 +709,32 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
     // RemoveAllItems + re-equip leaves the worn forms right but not always their meshes.
     // Measured on the follower: the Headsman wore the same 4 items as on the host but his root
     // had 4 children instead of 8 (naked), and the Imperial horse lost its saddle and bridle.
-    // Actor::DoReset3D(true) (ID 40255) drops every biped part and rebuilds them from what is worn.
-    if (!GetExtension()->IsPlayer() && !IsDead() && GetNiNode())
+    // Queue one biped rebuild per actor; inventory is often applied twice in a few ms while a
+    // save loads, and rebuilding immediately each time raced the actor update (a crash in the
+    // native per-actor update 15 s into a Continue).
+    if (!GetExtension()->IsPlayer())
+        s_pendingReset3D[formID] = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+}
+
+void Actor::FlushPendingReset3D() noexcept
+{
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = s_pendingReset3D.begin(); it != s_pendingReset3D.end();)
     {
-        TP_THIS_FUNCTION(TDoReset3D, void, Actor, bool aRebuildParts);
-        POINTER_SKYRIMSE(TDoReset3D, s_doReset3D, 40255);
-        TiltedPhoques::ThisCall(s_doReset3D, this, true);
+        if (now < it->second)
+        {
+            ++it;
+            continue;
+        }
+        // Actor::DoReset3D(true) (ID 40255) drops every biped part and rebuilds them from what is worn.
+        auto* pActor = Cast<Actor>(TESForm::GetById(it->first));
+        if (pActor && !pActor->GetExtension()->IsPlayer() && !pActor->IsDead() && pActor->GetNiNode())
+        {
+            TP_THIS_FUNCTION(TDoReset3D, void, Actor, bool aRebuildParts);
+            POINTER_SKYRIMSE(TDoReset3D, s_doReset3D, 40255);
+            TiltedPhoques::ThisCall(s_doReset3D, pActor, true);
+        }
+        it = s_pendingReset3D.erase(it);
     }
 }
 

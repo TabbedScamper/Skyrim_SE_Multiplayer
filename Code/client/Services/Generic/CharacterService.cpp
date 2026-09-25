@@ -385,6 +385,8 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    Actor::FlushPendingReset3D();
+
     // Discovery emits ActorAddedEvent only once per high-process lifetime.
     // New Game can expose the player (and scene actors) before their cell is
     // attached, so an assignment deferred then otherwise never retries.

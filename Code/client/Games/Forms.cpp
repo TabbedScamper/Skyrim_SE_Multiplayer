@@ -33,14 +33,49 @@ void TESNPC::Serialize(String* apSaveBuffer) const noexcept
     apSaveBuffer->assign(saveBuffer.buffer, saveBuffer.position);
 
     saveBuffer.buffer = nullptr;
+
+    // The native NPC save (TESNPC vtable slot 14) writes no body weight or height, so the peer
+    // built the remote player at the default (measured: the host's armor meshes loaded at [75%]
+    // on the host and [50%] on the follower). Carry both as a trailer that Deserialize strips
+    // before the native load. The armor loader (FUN_140218e50) takes the weight from the last
+    // NPC in the faceNPC chain, not from this record (measured: player base 0x7 said 100 while
+    // its meshes loaded at 75), so send that one; the peer's copy has no chain.
+    const TESNPC* pBody = this;
+    for (int depth = 0; pBody->faceNPC && pBody->faceNPC != pBody && depth < 16; ++depth)
+        pBody = pBody->faceNPC;
+    const float bodyWeight = pBody->weight;
+    const float bodyHeight = height;
+    if (formID == 0x7)
+        spdlog::info("Sending player body: weight {} (record {}) height {}", bodyWeight, weight, bodyHeight);
+    apSaveBuffer->append(kBodyTrailerTag, sizeof(kBodyTrailerTag));
+    apSaveBuffer->append(reinterpret_cast<const char*>(&bodyWeight), sizeof(bodyWeight));
+    apSaveBuffer->append(reinterpret_cast<const char*>(&bodyHeight), sizeof(bodyHeight));
 }
 
 void TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
 {
     ScopedSaveLoadOverride saveLoadOverride;
 
+    constexpr size_t cTrailerSize = sizeof(kBodyTrailerTag) + sizeof(float) * 2;
+    size_t nativeSize = acBuffer.size();
+    if (nativeSize >= cTrailerSize &&
+        std::memcmp(acBuffer.data() + nativeSize - cTrailerSize, kBodyTrailerTag, sizeof(kBodyTrailerTag)) == 0)
+    {
+        nativeSize -= cTrailerSize;
+        float bodyWeight{}, bodyHeight{};
+        std::memcpy(&bodyWeight, acBuffer.data() + nativeSize + sizeof(kBodyTrailerTag), sizeof(float));
+        std::memcpy(&bodyHeight, acBuffer.data() + nativeSize + sizeof(kBodyTrailerTag) + sizeof(float), sizeof(float));
+        if (weight != bodyWeight || height != bodyHeight)
+            spdlog::info("Applying body to NPC {:X}: weight {} -> {}, height {} -> {}", formID, weight, bodyWeight,
+                height, bodyHeight);
+        if (std::isfinite(bodyWeight) && bodyWeight >= 0.f && bodyWeight <= 100.f)
+            weight = bodyWeight;
+        if (std::isfinite(bodyHeight) && bodyHeight > 0.f && bodyHeight < 10.f)
+            height = bodyHeight;
+    }
+
     BGSLoadFormBuffer loadBuffer(aChangeFlags);
-    loadBuffer.SetSize(acBuffer.size() & 0xFFFFFFFF);
+    loadBuffer.SetSize(nativeSize & 0xFFFFFFFF);
     loadBuffer.buffer = acBuffer.data();
     loadBuffer.formId = formID;
     loadBuffer.form = this;

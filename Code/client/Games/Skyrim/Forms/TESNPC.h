@@ -91,6 +91,8 @@ struct TESNPC : TESActorBase
     uintptr_t unk160;
 
     BGSHeadPart* GetHeadPart(uint32_t aType);
+    // Marks the body weight/height trailer Serialize appends after the native NPC save.
+    static constexpr char kBodyTrailerTag[4] = {'T', 'P', 'B', 'W'};
     void Serialize(String* apSaveBuffer) const noexcept;
     void Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept;
     void Initialize() noexcept;

@@ -226,6 +226,8 @@ struct Actor : TESObjectREFR
     void SetWeaponDrawnEx(bool aDraw) noexcept;
     void SetPackage(TESPackage* apPackage) noexcept;
     void SetActorInventory(const Inventory& aInventory) noexcept;
+    // Runs the biped-part rebuilds SetActorInventory queued (once per actor, after it settles).
+    static void FlushPendingReset3D() noexcept;
     void SetMagicEquipment(const MagicEquipment& acEquipment) noexcept;
     void SetEssentialEx(bool aSet) noexcept;
     void SetNoBleedoutRecovery(bool aSet) noexcept;
