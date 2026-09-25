@@ -8,6 +8,7 @@
 
 #include <Games/References.h>
 #include <World.h>
+#include <Services/ObjectService.h>
 
 void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aTick) noexcept
 {
@@ -53,6 +54,28 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     if (apActor->actorState.IsDeadState())
         return;
 
+    // Seated (ActorState1 sitSleepState, bits 14-17: 2 sitting down, 3 sitting): this PC's engine
+    // attaches the actor to its seat every frame, as the host's does, on a chair or on a moving cart
+    // alike. Placing it from the actor stream instead fought the seat and left the cart's driver
+    // and passengers trailing their cart. The owner's pose still drives the body.
+    const uint32_t sitSleepState = (apActor->actorState.flags1 >> 14) & 0xF;
+    {
+        // Diagnostic: each remote actor's sit state, every 10 s.
+        static std::unordered_map<uint32_t, uint64_t> s_nextSitLog;
+        auto& next = s_nextSitLog[apActor->formID];
+        if (aTick >= next)
+        {
+            next = aTick + 10000;
+            spdlog::info("Remote actor {:X}: sitSleepState {} flags1 {:08X} furniture-seated={}", apActor->formID, sitSleepState,
+                apActor->actorState.flags1, sitSleepState == 2 || sitSleepState == 3);
+        }
+    }
+    if (sitSleepState == 2 || sitSleepState == 3)
+    {
+        const auto& seated = aTick >= second.Tick ? second : first;
+        apActor->LoadAnimationVariables(seated.Variables);
+        return;
+    }
     apActor->ForcePosition(position);
     const auto& discrete = aTick >= second.Tick ? second : first;
     apActor->LoadAnimationVariables(discrete.Variables);

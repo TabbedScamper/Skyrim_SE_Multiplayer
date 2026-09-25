@@ -4041,6 +4041,24 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 PoseCopyAuthority::SetEnabled(enabled != "false");
             return Result(id, PoseCopyAuthority::StatsJson());
         }
+        if (command == "cart_physics")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetCartPhysicsEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "visual_lag_frame")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetVisualLagFrameEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "body_velocity")
+        {
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            ObjectService::SetBodyVelocityEnabled(enabled);
+            return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
         if (command == "cart_smoothing")
         {
             const bool enabled = GetJsonString(acLine, "enabled") != "false";

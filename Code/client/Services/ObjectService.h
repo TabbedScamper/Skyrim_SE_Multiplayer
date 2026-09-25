@@ -40,6 +40,13 @@ public:
     static void SetPhysicsStampEnabled(bool aEnabled) noexcept;
     static void SetHermitePlaybackEnabled(bool aEnabled) noexcept;
     static void SetCartSmoothingEnabled(bool aEnabled) noexcept;
+    static void SetBodyVelocityEnabled(bool aEnabled) noexcept;
+    static void SetVisualLagFrameEnabled(bool aEnabled) noexcept;
+    static void SetCartPhysicsEnabled(bool aEnabled) noexcept;
+    // A remote actor at this host position (played-back timeline) that rides a host-driven
+    // reference (a cart's driver or passenger) is placed with that reference on the main thread;
+    // returns true when the caller must not place it itself. Any thread.
+    static bool AttachRider(Actor* apActor, const NiPoint3& acHostPosition, float aHostHeading) noexcept;
     // Called by the Main::Update hook on the game's main thread, before the frame's jobs.
     static void OnMainFrame() noexcept;
     // After Main::Update (the frame is drawn): end-of-frame probe of host-driven bodies.
@@ -302,6 +309,9 @@ private:
             std::vector<std::array<float, 7>> Children{};
             // The host body's linear velocity, game units per second.
             NiPoint3 Velocity{};
+            // The host body's own pose, Havok units, and rotation (x, y, z, w).
+            glm::vec3 BodyPosition{};
+            glm::vec4 BodyRotation{0.f, 0.f, 0.f, 1.f};
         };
         std::array<Sample, 12> Samples{};
         uint32_t SampleCount{};
@@ -321,6 +331,24 @@ private:
         float ProbeEndTurnMax{};
         float ProbeEndChildMoveMax{};
         float ProbeEndChildTurnMax{};
+        // The played-back target this frame before smoothing (riders are matched against it).
+        // Dynamic follow (see s_cartPhysicsEnabled): this copy's body is simulated, steered to the host.
+        bool DynamicFollow{};
+        // The previous frame's played-back transform: what the node shows (see kVisualLagFrame).
+        glm::vec3 PreviousDrawnPosition{};
+        glm::vec3 PreviousDrawnRotation{};
+        bool HasPreviousDrawn{};
+        glm::vec3 PlaybackTarget{};
+        float PlaybackHeading{};
+        bool HasPlaybackTarget{};
+        // The played-back motion this frame (game units per second, radians per second).
+        glm::vec3 RenderVelocity{};
+        float LastFrameSeconds{};
+        glm::vec3 RenderAngular{};
+        glm::vec3 LastRendered{};
+        glm::vec3 LastRenderedRotation{};
+        std::chrono::steady_clock::time_point LastRenderedAt{};
+        bool HasLastRendered{};
         // Smoothing of the played-back transform (see kCartSmoothingMs).
         bool SmoothHas{};
         glm::vec3 SmoothPosition{};

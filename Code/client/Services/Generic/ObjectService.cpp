@@ -1,4 +1,5 @@
 #include <Services/SmoothClock.h>
+#include <Games/ActorExtension.h>
 #include <Services/ObjectService.h>
 
 #include <World.h>
@@ -107,9 +108,122 @@ struct HostRenderProbe
     float SpeedSum{};
     float ChangeSum{};
     float ChangeMax{};
+    glm::vec3 Direction{};
     std::chrono::steady_clock::time_point NextLog{};
 };
 std::unordered_map<uint32_t, HostRenderProbe> s_hostRenderProbes;
+
+// How far the nearest mount (the horse pulling this cart) is ahead of the reference along its
+// direction of travel. Compared between the PCs it measures the follower's playback lag.
+float MountLead(const TESObjectREFR* apReference, const glm::vec3& acDirection, uint32_t& arMountId) noexcept
+{
+    arMountId = 0;
+    glm::vec2 direction{acDirection.x, acDirection.y};
+    if (glm::length(direction) < 1.f)
+        return 0.f;
+    direction = glm::normalize(direction);
+    const glm::vec2 origin{apReference->position.x, apReference->position.y};
+    float best = 250.f;
+    float lead = 0.f;
+    auto view = World::Get().view<FormIdComponent>();
+    for (auto entity : view)
+    {
+        auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        // The nearest NPC riding it (the driver): not a player.
+        if (!pActor || !pActor->GetExtension() || pActor->GetExtension()->IsPlayer())
+            continue;
+        const glm::vec2 offset = glm::vec2{pActor->position.x, pActor->position.y} - origin;
+        const float distance = glm::length(offset);
+        if (distance < best)
+        {
+            best = distance;
+            lead = glm::dot(offset, direction);
+            arMountId = pActor->formID;
+        }
+    }
+    return lead;
+}
+
+// Drawn gap: the nearest NPC's rendered root node against the reference's rendered node, along
+// the direction of travel, sampled at the end of a frame (after drawing). Logged every 5 s.
+struct DrawnGapProbe
+{
+    uint32_t Samples{};
+    float Sum{};
+    float Min{1e9f};
+    float Max{-1e9f};
+    uint32_t ActorId{};
+    uint32_t SitState{};
+    uint32_t BoneSamples{};
+    float BoneSum{};
+    float BoneMin{1e9f};
+    float BoneMax{-1e9f};
+    std::chrono::steady_clock::time_point NextLog{};
+};
+std::unordered_map<uint32_t, DrawnGapProbe> s_drawnGapProbes;
+
+void ProbeDrawnGap(const char* apSide, TESObjectREFR* apReference, const glm::vec3& acDirection) noexcept
+{
+    const auto* pNode = apReference ? apReference->GetNiNode() : nullptr;
+    glm::vec2 direction{acDirection.x, acDirection.y};
+    if (!pNode || glm::length(direction) < 1.f)
+        return;
+    direction = glm::normalize(direction);
+    const glm::vec2 origin{pNode->world.translate.x, pNode->world.translate.y};
+    float best = 250.f;
+    float gap = 0.f;
+    uint32_t actorId = 0;
+    Actor* pNearest = nullptr;
+    auto view = World::Get().view<FormIdComponent>();
+    for (auto entity : view)
+    {
+        auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        if (!pActor || !pActor->GetExtension() || pActor->GetExtension()->IsPlayer())
+            continue;
+        const auto* pActorNode = pActor->GetNiNode();
+        if (!pActorNode)
+            continue;
+        const glm::vec2 offset = glm::vec2{pActorNode->world.translate.x, pActorNode->world.translate.y} - origin;
+        if (glm::length(offset) < best)
+        {
+            best = glm::length(offset);
+            gap = glm::dot(offset, direction);
+            actorId = pActor->formID;
+            pNearest = pActor;
+        }
+    }
+    if (!actorId)
+        return;
+    auto& probe = s_drawnGapProbes[apReference->formID];
+    ++probe.Samples;
+    probe.Sum += gap;
+    probe.Min = (std::min)(probe.Min, gap);
+    probe.Max = (std::max)(probe.Max, gap);
+    probe.ActorId = actorId;
+    probe.SitState = pNearest ? (pNearest->actorState.flags1 >> 14) & 0xF : 0;
+    // The drawn body: its pelvis bone, whose world transform the animation update computes.
+    static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+    if (auto* pRoot = pNearest ? pNearest->GetNiNode() : nullptr)
+    {
+        if (auto* pBone = pRoot->GetByName(s_pelvis))
+        {
+            const float boneGap = glm::dot(glm::vec2{pBone->world.translate.x, pBone->world.translate.y} - origin, direction);
+            ++probe.BoneSamples;
+            probe.BoneSum += boneGap;
+            probe.BoneMin = (std::min)(probe.BoneMin, boneGap);
+            probe.BoneMax = (std::max)(probe.BoneMax, boneGap);
+        }
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= probe.NextLog)
+    {
+        spdlog::info("{} drawn gap {:X}: nearest NPC {:X} root node {:.1f} u along travel (min {:.1f} max {:.1f}), pelvis {:.1f} "
+            "(min {:.1f} max {:.1f}), {} frames, sit state {}", apSide, apReference->formID, probe.ActorId, probe.Sum / probe.Samples, probe.Min,
+            probe.Max, probe.BoneSamples ? probe.BoneSum / probe.BoneSamples : 0.f, probe.BoneMin, probe.BoneMax, probe.Samples, probe.SitState);
+        probe = DrawnGapProbe{};
+        probe.NextLog = now + std::chrono::seconds(5);
+    }
+}
 
 void ProbeHostRender() noexcept
 {
@@ -132,6 +246,10 @@ void ProbeHostRender() noexcept
                 probe.ChangeSum += change;
                 probe.ChangeMax = (std::max)(probe.ChangeMax, change);
                 probe.LastSpeed = speed;
+                if (glm::length(shown - probe.Last) > 0.01f)
+                    probe.Direction = shown - probe.Last;
+                if (speed > 20.f)
+                    ProbeDrawnGap("Host", pReference, probe.Direction * 1000.f);
                 ++probe.Frames;
             }
         }
@@ -140,9 +258,11 @@ void ProbeHostRender() noexcept
         probe.Has = true;
         if (now >= probe.NextLog && probe.Frames)
         {
+            uint32_t mountId = 0;
+            const float lead = MountLead(pReference, probe.Direction * 1000.f, mountId);
             if (probe.SpeedSum / probe.Frames > 5.f)
-                spdlog::info("Host body {:X} render: {} frames, speed {:.0f} u/s, speed change mean {:.0f} max {:.0f}", formId,
-                    probe.Frames, probe.SpeedSum / probe.Frames, probe.ChangeSum / probe.Frames, probe.ChangeMax);
+                spdlog::info("Host body {:X} render: {} frames, speed {:.0f} u/s, speed change mean {:.0f} max {:.0f}, rider {:X} lead {:.1f} u",
+                    formId, probe.Frames, probe.SpeedSum / probe.Frames, probe.ChangeSum / probe.Frames, probe.ChangeMax, mountId, lead);
             probe.Frames = 0;
             probe.SpeedSum = probe.ChangeSum = probe.ChangeMax = 0.f;
             probe.NextLog = now + std::chrono::seconds(5);
@@ -220,17 +340,62 @@ std::atomic<uint64_t> s_worldUpdateLastEndNs{};
 std::atomic<uint64_t> s_worldUpdateStartNs{};
 std::atomic<uint64_t> s_worldUpdateLastStartNs{};
 std::atomic<int32_t> s_worldUpdatesRunning{};
-std::atomic<bool> s_physicsStampEnabled{true};
+// Off: stamping the cart's samples earlier than the actors' (read in the same frame) made the cart
+// play back about 25 ms ahead of its horse, driver and passengers.
+std::atomic<bool> s_physicsStampEnabled{false};
 // Host-driven bodies follow a curve through the host samples that also matches the host body's
 // velocity at each one. Straight lines between samples changed speed at every sample (the sampled
 // positions carry up to half the speed in timing noise), which showed as the cart surging.
 std::atomic<bool> s_hermitePlaybackEnabled{true};
 // Host-driven bodies: the played-back transform (root and every child part) follows the host's
-// path through a critically damped filter with this time constant, read this far ahead on the
-// host's timeline so the filter's lag cancels at steady speed. The host's samples carry timing
-// noise that no interpolation removes; the filter does, at no cost in position.
-std::atomic<bool> s_cartSmoothingEnabled{true};
+// path through a critically damped filter with this time constant. The host's samples carry timing
+// noise that no interpolation removes; the filter does. Its lag is not compensated: the actors
+// riding a cart play back that much later too (measured: reading the path 50 ms ahead put the
+// cart 6 to 12 units ahead of its driver, who sits exactly at the cart's position on the host).
+// Off: it also filtered out the host cart's real jolts (the bumps the host's camera rides). The
+// smooth clock and the body velocity removed the jitter it was added for.
+std::atomic<bool> s_cartSmoothingEnabled{false};
 constexpr float kCartSmoothingMs = 50.f;
+// The keyframed body of a host-driven reference carries the played-back motion as its velocity.
+// Placed with zero velocity every frame, it was a platform that jumps instead of moving: what
+// stood or sat on it (the player riding the intro cart) was pushed out and settled back every
+// frame, and the whole cart vibrated against the view while it moved.
+std::atomic<bool> s_bodyVelocityEnabled{true};
+// The node of a host-driven reference shows the previous frame's pose; its body takes the current
+// one. On the host the physics step moves a cart after the actors' animation update, so the cart,
+// the bones of the riders seated from it and the rest of the frame show one moment. Written at the
+// start of the frame here, the cart was drawn a frame ahead of its riders' bodies.
+std::atomic<bool> s_visualLagFrameEnabled{true};
+// Host-driven moving bodies stay simulated here (dynamic), steered every physics step to the host's
+// pose: its velocity plus a correction. Keyframed playback moved the follower's cart like a puppet,
+// without the host cart's jolts, and its riders and camera with it ("floaty").
+std::atomic<bool> s_cartPhysicsEnabled{true};
+
+// Remote actors riding a host-driven reference: on the host the engine seats a cart's driver and
+// passengers at the cart's own position; here their position came from the actor stream, placed
+// later in the frame on the update job, and the cart was drawn ahead of its driver. A rider is
+// placed with the reference instead, right after it, at its host offset.
+struct Rider
+{
+    uint32_t ReferenceId{};
+    glm::vec3 Offset{};
+    std::chrono::steady_clock::time_point SeenAt{};
+    // Where the frame drew the rider against where it was placed (the engine's own actor update
+    // still moves it by about one frame of travel afterwards: measured 3 units at cart speed, 0.0
+    // on the host). Averaged and taken off the next placement.
+    glm::vec3 Drift{};
+    glm::vec3 Placed{};
+    bool HasPlaced{};
+    // The seat's heading against the reference's (a passenger faces sideways). Learned slowly from
+    // the actor stream, whose latency otherwise turned riders after their cart.
+    float HeadingOffset{};
+    bool HasHeadingOffset{};
+};
+std::unordered_map<uint32_t, Rider> s_riders; // actor form id -> ride (under m_remotePhysicsLock)
+// The match allows for the actor stream playing back later than the body stream (measured 4 to 5
+// units at cart speed). The seat is the reference's own position: the engine seats a rider there
+// (measured 0.0 units on the host); the offset seen here is only that latency gap.
+constexpr float kRiderMatchUnits = 20.f;
 std::atomic<uint64_t> s_nativeStepCalls{};
 std::atomic<uint32_t> s_nativeStepLastThreadId{};
 std::atomic<uint32_t> s_nativeStepLastDurationUs{};
@@ -883,6 +1048,29 @@ WorldUpdateFn* s_originalWorldUpdate{};
 using NativeStepFn = int(void*, float);
 NativeStepFn* s_originalNativeStep{};
 
+// Host-driven bodies moving with a velocity: placed inside the physics step (its real dt known) so
+// the step lands each exactly where its reference is drawn. The engine seats a rider from the body;
+// placing it from our update with the previous frame's duration left the driver shaking by +-3 units.
+struct StepTarget
+{
+    void* World{};
+    void* Body{};
+    float Position[3]{};  // Havok units, where the body must be after the step
+    float Velocity[3]{};  // Havok units per second
+    // Dynamic follow: steer a simulated body to this pose instead of placing it.
+    bool Dynamic{};
+    float Rotation[4]{0.f, 0.f, 0.f, 1.f}; // x, y, z, w
+    float Angular[3]{};   // radians per second
+};
+
+// Dynamic follow: a simulated body reaches the host's pose within this time constant (seconds);
+// farther than this (Havok units) it is placed there at once.
+constexpr float kFollowTimeConstant = 0.1f;
+constexpr float kFollowTeleport = 3.f;
+std::mutex s_stepTargetsLock;
+std::vector<StepTarget> s_stepTargets;
+std::vector<StepTarget> s_stepTargetsBuilding;
+
 struct PreStepTarget
 {
     uint32_t FormId{};
@@ -990,6 +1178,60 @@ bool SetNativeBodyPose(void* apWrapper, const glm::vec3& acPosition,
 int HookNativeStep(void* apWorld, float aDeltaTime)
 {
     const auto started = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(s_stepTargetsLock);
+        for (const auto& target : s_stepTargets)
+        {
+            if (target.World != apWorld || !target.Body)
+                continue;
+            auto* pBody = static_cast<ActorPoseDiagnosticViews::RigidBody*>(target.Body);
+            if (pBody->world != apWorld)
+                continue;
+            if (target.Dynamic)
+            {
+                // The host's motion plus a correction that closes the gap within the time constant.
+                const glm::vec3 current{pBody->transform[12], pBody->transform[13], pBody->transform[14]};
+                const glm::vec3 wanted{target.Position[0], target.Position[1], target.Position[2]};
+                const glm::vec3 error = wanted - current;
+                using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
+                POINTER_SKYRIMSE(std::remove_pointer_t<TSetPositionAndRotation>, s_placeBody, 60898);
+                if (glm::length(error) > kFollowTeleport)
+                {
+                    alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
+                    alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
+                    s_placeBody.Get()(target.Body, position, quaternion);
+                }
+                const glm::vec3 linear = glm::vec3{target.Velocity[0], target.Velocity[1], target.Velocity[2]} +
+                    error / kFollowTimeConstant;
+                float currentRotation[4];
+                MatrixToQuaternion(pBody->transform, currentRotation);
+                const glm::quat have{currentRotation[3], currentRotation[0], currentRotation[1], currentRotation[2]};
+                const glm::quat want{target.Rotation[3], target.Rotation[0], target.Rotation[1], target.Rotation[2]};
+                glm::quat delta = want * glm::conjugate(have);
+                if (delta.w < 0.f)
+                    delta = -delta;
+                const glm::vec3 turn = glm::vec3{delta.x, delta.y, delta.z} * 2.f / kFollowTimeConstant;
+                for (int k = 0; k < 3; ++k)
+                {
+                    pBody->linearVelocity[k] = linear[k];
+                    pBody->angularVelocity[k] = target.Angular[k] + turn[k];
+                }
+                continue;
+            }
+            float rotation[4];
+            MatrixToQuaternion(pBody->transform, rotation);
+            alignas(16) float position[4]{target.Position[0] - target.Velocity[0] * aDeltaTime,
+                target.Position[1] - target.Velocity[1] * aDeltaTime, target.Position[2] - target.Velocity[2] * aDeltaTime, 0.f};
+            alignas(16) float quaternion[4]{rotation[0], rotation[1], rotation[2], rotation[3]};
+            // hkpRigidBody::setPositionAndRotation (60898), unlocked: this is the stepping thread,
+            // before the step starts.
+            using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
+            POINTER_SKYRIMSE(std::remove_pointer_t<TSetPositionAndRotation>, s_setPositionAndRotation, 60898);
+            s_setPositionAndRotation.Get()(target.Body, position, quaternion);
+            for (int k = 0; k < 3; ++k)
+                pBody->linearVelocity[k] = target.Velocity[k];
+        }
+    }
     // bhkWorld::GetWorld1 (vtable slot 0x27) returns hkpWorld directly into
     // r13 before this wrapper is called. Its argument is not a bhkWorldM.
     const bool selectedWorld = apWorld &&
@@ -2486,6 +2728,14 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             pose.Samples[pose.SampleNext] = {acMessage.Tick, pose.Position, pose.Rotation, update.ChildBodies,
                 {}};
             {
+                auto& stored = pose.Samples[pose.SampleNext];
+                const auto& t = update.BodyTransform;
+                stored.BodyPosition = {t[12], t[13], t[14]};
+                const glm::quat bodyRotation = glm::normalize(glm::quat_cast(glm::mat3{glm::vec3{t[0], t[1], t[2]},
+                    glm::vec3{t[4], t[5], t[6]}, glm::vec3{t[8], t[9], t[10]}}));
+                stored.BodyRotation = {bodyRotation.x, bodyRotation.y, bodyRotation.z, bodyRotation.w};
+            }
+            {
                 auto& velocity = pose.Samples[pose.SampleNext].Velocity;
                 velocity.x = update.LinearVelocity.x * kHavokToGameUnits;
                 velocity.y = update.LinearVelocity.y * kHavokToGameUnits;
@@ -2564,6 +2814,58 @@ void ObjectService::OnMainFrame() noexcept
     pService->ApplyRemotePhysics();
 }
 
+bool ObjectService::AttachRider(Actor* apActor, const NiPoint3& acHostPosition, const float aHostHeading) noexcept
+{
+    auto* pService = s_objectService.load(std::memory_order_acquire);
+    if (!pService || !apActor || !pService->m_applyOnMainFrame.load(std::memory_order_relaxed))
+        return false;
+    std::lock_guard lock(pService->m_remotePhysicsLock);
+    const glm::vec3 host{acHostPosition.x, acHostPosition.y, acHostPosition.z};
+    for (const auto& [formId, pose] : pService->m_remoteReferencePoses)
+    {
+        if (!pose.HostDriven || !pose.HasPlaybackTarget)
+            continue;
+        const glm::vec3 offset = host - pose.PlaybackTarget;
+        if (glm::length(offset) > kRiderMatchUnits)
+            continue;
+        auto& rider = s_riders[apActor->formID];
+        if (rider.ReferenceId != formId)
+            spdlog::info("Actor {:X} rides host-driven body {:X} (offset {:.1f} u)", apActor->formID, formId, glm::length(offset));
+        rider.ReferenceId = formId;
+        rider.Offset = {};
+        const float headingOffset = std::remainder(aHostHeading - pose.PlaybackHeading, static_cast<float>(TiltedPhoques::Pi * 2));
+        if (!rider.HasHeadingOffset)
+        {
+            rider.HeadingOffset = headingOffset;
+            rider.HasHeadingOffset = true;
+        }
+        else
+            rider.HeadingOffset += std::remainder(headingOffset - rider.HeadingOffset, static_cast<float>(TiltedPhoques::Pi * 2)) * 0.01f;
+        rider.SeenAt = std::chrono::steady_clock::now();
+        return true;
+    }
+    s_riders.erase(apActor->formID);
+    return false;
+}
+
+void ObjectService::SetCartPhysicsEnabled(bool aEnabled) noexcept
+{
+    s_cartPhysicsEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven bodies {}", aEnabled ? "simulated and steered to the host" : "keyframed to the host");
+}
+
+void ObjectService::SetVisualLagFrameEnabled(bool aEnabled) noexcept
+{
+    s_visualLagFrameEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body node one frame behind its body {}", aEnabled ? "on" : "off");
+}
+
+void ObjectService::SetBodyVelocityEnabled(bool aEnabled) noexcept
+{
+    s_bodyVelocityEnabled.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Host-driven body velocity {}", aEnabled ? "on" : "off");
+}
+
 void ObjectService::SetCartSmoothingEnabled(bool aEnabled) noexcept
 {
     s_cartSmoothingEnabled.store(aEnabled, std::memory_order_relaxed);
@@ -2612,6 +2914,22 @@ void ObjectService::OnMainFrameEnd() noexcept
         if (!pNode)
             continue;
         ++pose.ProbeEndFrames;
+        // Rider drift: drawn root node against the seat (see Rider::Drift).
+        for (auto& [riderId, rider] : s_riders)
+        {
+            if (rider.ReferenceId != formId || !rider.HasPlaced)
+                continue;
+            auto* pRider = Cast<Actor>(TESForm::GetById(riderId));
+            const auto* pRiderNode = pRider ? pRider->GetNiNode() : nullptr;
+            if (!pRiderNode)
+                continue;
+            const glm::vec3 drawn{pRiderNode->world.translate.x, pRiderNode->world.translate.y, pRiderNode->world.translate.z};
+            const glm::vec3 error = drawn - rider.Placed;
+            if (glm::length(error) < 30.f)
+                rider.Drift += error * 0.2f;
+        }
+        if (glm::length(pose.RenderVelocity) > 20.f)
+            ProbeDrawnGap("Follower", pReference, pose.RenderVelocity);
         const float move = glm::length(glm::vec3{pNode->world.translate.x, pNode->world.translate.y, pNode->world.translate.z} -
             pose.ProbeWritten);
         const float turn = RotationAngleDegrees(pNode->world.rotate, pose.ProbeWrittenRotate);
@@ -2648,6 +2966,15 @@ void ObjectService::SetMainFramePlaybackEnabled(bool aEnabled) noexcept
 void ObjectService::ApplyRemotePhysics() noexcept
 {
     std::lock_guard lock(m_remotePhysicsLock);
+    s_stepTargetsBuilding.clear();
+    struct PublishStepTargets
+    {
+        ~PublishStepTargets()
+        {
+            std::lock_guard stepLock(s_stepTargetsLock);
+            s_stepTargets.swap(s_stepTargetsBuilding);
+        }
+    } publishStepTargets;
     const auto now = std::chrono::steady_clock::now();
     for (auto it = m_remoteReferencePoses.begin(); it != m_remoteReferencePoses.end();)
     {
@@ -2668,8 +2995,89 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 ++it;
                 continue;
             }
+            if (s_cartPhysicsEnabled.load(std::memory_order_relaxed))
+            {
+                if (!pose.DynamicFollow)
+                {
+                    pose.DynamicFollow = true;
+                    // The host's own motion type (box inertia for the intro carts).
+                    if (pose.HostDriven)
+                        pReference->SetMotionType(static_cast<TESObjectREFR::MotionType>(
+                            pose.HostMotionType >= 1 && pose.HostMotionType <= 3 ? pose.HostMotionType : 3), false);
+                    pose.HostDriven = false;
+                    spdlog::info("Host-driven body {:X}: simulated here, steered to the host's pose", it->first);
+                }
+                const uint32_t count = pose.SampleCount;
+                const uint32_t size = static_cast<uint32_t>(pose.Samples.size());
+                const auto sample = [&](uint32_t aIndex) -> const RemoteReferencePose::Sample&
+                { return pose.Samples[(pose.SampleNext + size - count + aIndex) % size]; };
+                const double renderTime = (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
+                    static_cast<double>(m_transport.GetClock().GetCurrentTick())) -
+                    static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs());
+                const RemoteReferencePose::Sample* pA = &sample(count - 1);
+                const RemoteReferencePose::Sample* pB = pA;
+                float t = 0.f;
+                if (renderTime <= static_cast<double>(sample(0).Tick))
+                    pA = pB = &sample(0);
+                else
+                {
+                    for (uint32_t i = 1; i < count; ++i)
+                    {
+                        const auto& a = sample(i - 1);
+                        const auto& b = sample(i);
+                        if (renderTime > static_cast<double>(b.Tick))
+                            continue;
+                        pA = &a;
+                        pB = &b;
+                        t = b.Tick > a.Tick ? static_cast<float>((renderTime - static_cast<double>(a.Tick)) /
+                            static_cast<double>(b.Tick - a.Tick)) : 1.f;
+                        break;
+                    }
+                }
+                // Past the newest sample for long, the host stopped sending (at rest): let physics settle it.
+                if (renderTime - static_cast<double>(sample(count - 1).Tick) > static_cast<double>(kHostDrivenHoldAfterMs))
+                {
+                    ++it;
+                    continue;
+                }
+                DynamicBody body{};
+                if (GetDynamicBody(pReference, body, false) && body.HavokBody && body.State.world)
+                {
+                    StepTarget target{body.State.world, body.HavokBody};
+                    target.Dynamic = true;
+                    const glm::vec3 position = pA->BodyPosition + (pB->BodyPosition - pA->BodyPosition) * t;
+                    const glm::quat qa{pA->BodyRotation.w, pA->BodyRotation.x, pA->BodyRotation.y, pA->BodyRotation.z};
+                    const glm::quat qb{pB->BodyRotation.w, pB->BodyRotation.x, pB->BodyRotation.y, pB->BodyRotation.z};
+                    const glm::quat rotation = glm::normalize(glm::slerp(qa, qb, t));
+                    const glm::vec3 velocity = (glm::vec3{pA->Velocity.x, pA->Velocity.y, pA->Velocity.z} +
+                        (glm::vec3{pB->Velocity.x, pB->Velocity.y, pB->Velocity.z} - glm::vec3{pA->Velocity.x, pA->Velocity.y,
+                            pA->Velocity.z}) * t) / kHavokToGameUnits;
+                    glm::vec3 angular{};
+                    if (pB->Tick > pA->Tick)
+                    {
+                        glm::quat step = qb * glm::conjugate(qa);
+                        if (step.w < 0.f)
+                            step = -step;
+                        angular = glm::vec3{step.x, step.y, step.z} * 2.f / (static_cast<float>(pB->Tick - pA->Tick) / 1000.f);
+                    }
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        target.Position[k] = position[k];
+                        target.Velocity[k] = velocity[k];
+                        target.Angular[k] = angular[k];
+                    }
+                    target.Rotation[0] = rotation.x;
+                    target.Rotation[1] = rotation.y;
+                    target.Rotation[2] = rotation.z;
+                    target.Rotation[3] = rotation.w;
+                    s_stepTargetsBuilding.push_back(target);
+                }
+                ++it;
+                continue;
+            }
             if (!pose.HostDriven)
             {
+                pose.DynamicFollow = false;
                 pose.HostDriven = pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
                 spdlog::info("Host-driven body {:X}: following the host's transform (keyframed={})", it->first,
                     pose.HostDriven);
@@ -2684,8 +3092,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
             const bool smoothing = s_cartSmoothingEnabled.load(std::memory_order_relaxed);
             const double renderTime = (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
                 static_cast<double>(m_transport.GetClock().GetCurrentTick())) -
-                static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs()) +
-                (smoothing ? static_cast<double>(kCartSmoothingMs) : 0.0);
+                static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs());
             const int64_t renderTick = static_cast<int64_t>(std::floor(renderTime));
 
             const auto lerpAngle = [](float aFrom, float aTo, float aT)
@@ -2772,6 +3179,9 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 continue;
             }
             pose.AppliedRestTick = atRest ? newestTick : 0;
+            pose.PlaybackTarget = {position.x, position.y, position.z};
+            pose.PlaybackHeading = rotation.z;
+            pose.HasPlaybackTarget = true;
             // Critically damped smoothing of the root (snap on a real jump, or when switched off).
             float smoothAlpha = 1.f;
             if (smoothing && pose.SmoothHas)
@@ -2809,6 +3219,29 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 smoothAlpha = 1.f;
             }
             pose.SmoothAt = now;
+            // The motion drawn this frame, for the body's velocity below.
+            {
+                const glm::vec3 drawn{position.x, position.y, position.z};
+                const glm::vec3 drawnRotation{rotation.x, rotation.y, rotation.z};
+                const float dtSeconds = std::chrono::duration<float>(now - pose.LastRenderedAt).count();
+                if (pose.HasLastRendered && dtSeconds > 0.f && dtSeconds < 0.2f && glm::length(drawn - pose.LastRendered) < 50.f)
+                {
+                    pose.RenderVelocity = (drawn - pose.LastRendered) / dtSeconds;
+                    pose.LastFrameSeconds = dtSeconds;
+                    for (int k = 0; k < 3; ++k)
+                        pose.RenderAngular[k] = std::remainder(drawnRotation[k] - pose.LastRenderedRotation[k],
+                            static_cast<float>(TiltedPhoques::Pi * 2)) / dtSeconds;
+                }
+                else
+                {
+                    pose.RenderVelocity = {};
+                    pose.RenderAngular = {};
+                }
+                pose.LastRendered = drawn;
+                pose.LastRenderedRotation = drawnRotation;
+                pose.LastRenderedAt = now;
+                pose.HasLastRendered = true;
+            }
             // Jitter probe: did anything move the node since our last write, and how even is our
             // own step (speed change between frames)?
             if (auto* pProbeNode = pReference->GetNiNode(); pProbeNode && pose.ProbeHas)
@@ -2862,6 +3295,10 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 if (now >= pose.ProbeNextLog && pose.ProbeFrames)
                 {
                     const float meanSpeed = pose.ProbeSpeedSum / pose.ProbeFrames;
+                    uint32_t mountId = 0;
+                    const float mountLead = MountLead(pReference, pose.RenderVelocity, mountId);
+                    if (meanSpeed > 5.f)
+                        spdlog::info("Host-driven body {:X} rider {:X} lead {:.1f} u", it->first, mountId, mountLead);
                     if (meanSpeed > 5.f)
                         spdlog::info("Host-driven body {:X} jitter: {} frames, speed {:.0f} u/s, speed change mean {:.0f} max {:.0f}, "
                             "turn-rate change mean {:.1f} max {:.1f} deg/s, moved by others {} (max {:.1f} u), children [{}] moved by "
@@ -2883,8 +3320,24 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 }
             }
             const glm::vec3 jump{position.x - pReference->position.x, position.y - pReference->position.y, position.z - pReference->position.z};
-            pReference->position = position;
-            pReference->SetRotation(rotation.x, rotation.y, rotation.z);
+            // The node shows the previous frame's pose (see s_visualLagFrameEnabled).
+            NiPoint3 drawnPosition = position;
+            NiPoint3 drawnRotation = rotation;
+            if (s_visualLagFrameEnabled.load(std::memory_order_relaxed) && pose.HasPreviousDrawn &&
+                glm::length(glm::vec3{position.x, position.y, position.z} - pose.PreviousDrawnPosition) < 50.f)
+            {
+                drawnPosition.x = pose.PreviousDrawnPosition.x;
+                drawnPosition.y = pose.PreviousDrawnPosition.y;
+                drawnPosition.z = pose.PreviousDrawnPosition.z;
+                drawnRotation.x = pose.PreviousDrawnRotation.x;
+                drawnRotation.y = pose.PreviousDrawnRotation.y;
+                drawnRotation.z = pose.PreviousDrawnRotation.z;
+            }
+            pose.PreviousDrawnPosition = {position.x, position.y, position.z};
+            pose.PreviousDrawnRotation = {rotation.x, rotation.y, rotation.z};
+            pose.HasPreviousDrawn = true;
+            pReference->position = drawnPosition;
+            pReference->SetRotation(drawnRotation.x, drawnRotation.y, drawnRotation.z);
             // The other bodies (cart wheels, yoke): a keyframed body follows its node, so turn the
             // nodes to the host pose; carried rigidly by the root they never turned.
             if (!pChildA->Children.empty() && pChildA->Children.size() == pChildB->Children.size())
@@ -2970,6 +3423,35 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     pose.ProbeChild0Rotate = probeChildren[0].Node->world.rotate;
                 }
             }
+            // Its riders, at their host offsets from it.
+            for (auto riderIt = s_riders.begin(); riderIt != s_riders.end();)
+            {
+                if (now - riderIt->second.SeenAt > std::chrono::milliseconds(500))
+                {
+                    riderIt = s_riders.erase(riderIt);
+                    continue;
+                }
+                if (riderIt->second.ReferenceId == it->first)
+                {
+                    if (auto* pRider = Cast<Actor>(TESForm::GetById(riderIt->first)); pRider && !pRider->actorState.IsDeadState())
+                    {
+                        const glm::vec3 seat = glm::vec3{position.x, position.y, position.z} + riderIt->second.Offset -
+                            riderIt->second.Drift;
+                        riderIt->second.Placed = glm::vec3{position.x, position.y, position.z} + riderIt->second.Offset;
+                        riderIt->second.HasPlaced = true;
+                        NiPoint3 seatPosition{};
+                        seatPosition.x = seat.x;
+                        seatPosition.y = seat.y;
+                        seatPosition.z = seat.z;
+                        pRider->ForcePosition(seatPosition);
+                        // Seated riders turn with their reference, as the engine seats them on the host.
+                        if (false && riderIt->second.HasHeadingOffset)
+                            pRider->SetRotation(pRider->rotation.x, pRider->rotation.y,
+                                std::remainder(rotation.z + riderIt->second.HeadingOffset, static_cast<float>(TiltedPhoques::Pi * 2)));
+                    }
+                }
+                ++riderIt;
+            }
             // Writing the position does not move a reference into the exterior cell it
             // now stands in. Measured: the follower's cart kept its start cell, and when
             // that cell detached behind the players the cart (and the player riding it)
@@ -3006,7 +3488,36 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 {
                     const glm::vec3 rootTarget = glm::vec3{position.x, position.y, position.z} + offset;
                     if (s_rootBodyWriteEnabled.load(std::memory_order_relaxed))
+                    {
+                        // With the body carrying the drawn velocity, this frame's physics step moves it
+                        // one frame further; place it that far back so it lands where the cart is drawn.
+                        // The engine seats a rider from the body: one frame ahead put the driver 3 units
+                        // in front of his cart (0.0 on the host).
                         SetDynamicBodyPosition(body, rootTarget);
+                        if (s_bodyVelocityEnabled.load(std::memory_order_relaxed) && body.HavokBody && body.State.world)
+                        {
+                            StepTarget target{body.State.world, body.HavokBody};
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                target.Position[k] = rootTarget[k] / kHavokToGameUnits;
+                                target.Velocity[k] = pose.RenderVelocity[k] / kHavokToGameUnits;
+                            }
+                            s_stepTargetsBuilding.push_back(target);
+                        }
+                        if (s_bodyVelocityEnabled.load(std::memory_order_relaxed) && body.HavokBody)
+                        {
+                            // Linear from the drawn motion; angular about world z from the heading
+                            // (Skyrim's heading turns clockwise, Havok's positive z counterclockwise).
+                            auto* pRigid = static_cast<ActorPoseDiagnosticViews::RigidBody*>(body.HavokBody);
+                            for (int k = 0; k < 3; ++k)
+                                pRigid->linearVelocity[k] = pose.RenderVelocity[k] / kHavokToGameUnits;
+                            pRigid->linearVelocity[3] = 0.f;
+                            pRigid->angularVelocity[0] = 0.f;
+                            pRigid->angularVelocity[1] = 0.f;
+                            pRigid->angularVelocity[2] = -pose.RenderAngular.z;
+                            pRigid->angularVelocity[3] = 0.f;
+                        }
+                    }
                 }
             }
             ++it;
