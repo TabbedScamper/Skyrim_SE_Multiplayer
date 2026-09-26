@@ -50,7 +50,6 @@ bool s_prevKey{};
 bool s_nextKey{};
 bool s_hintShown{};
 bool s_logAfterSwitch{};
-std::unordered_map<uint32_t, bool> s_hiddenByUs; // form id -> hidden by this feature
 std::unordered_map<uint32_t, bool> s_remoteReady; // form id -> that player clicked Done
 int s_bannerPlayer{-1};
 int s_bannerCount{-1};
@@ -87,42 +86,52 @@ void ShowNotice(const char* apText) noexcept
 // dragged the head bone, which the creator camera tracks, down to the feet. Restored when shown.
 std::unordered_map<uint32_t, std::vector<NiAVObject*>> s_hiddenMeshes;
 
-void CollectMeshes(NiAVObject* apNode, std::vector<NiAVObject*>& arMeshes, int aDepth) noexcept
+void CollectLeaves(NiAVObject* apNode, std::vector<NiAVObject*>& arLeaves, int aDepth) noexcept
 {
     if (!apNode || aDepth > 64)
         return;
     auto* pNode = apNode->AsNode();
     if (!pNode)
     {
-        if (!(apNode->flags & 1))
-            arMeshes.push_back(apNode);
+        arLeaves.push_back(apNode);
         return;
     }
     for (uint16_t i = 0; i < pNode->children.length; ++i)
-        CollectMeshes(pNode->children.data[i], arMeshes, aDepth + 1);
+        CollectLeaves(pNode->children.data[i], arLeaves, aDepth + 1);
 }
 
+// Main thread only. The cached meshes are only ever touched when they are still leaves of the
+// actor's current 3D: an appearance update rebuilds the 3D (freeing the old meshes), and writing
+// the hidden flag into those freed meshes corrupted the heap (a hard crash while cycling).
 void SetHidden(Actor* apActor, bool aHidden) noexcept
 {
     auto* pRoot = apActor ? apActor->GetNiNode() : nullptr;
     if (!pRoot)
+    {
+        if (apActor)
+            s_hiddenMeshes.erase(apActor->formID);
         return;
-    const bool hidden = s_hiddenByUs.contains(apActor->formID);
-    if (aHidden && !hidden)
-    {
-        auto& meshes = s_hiddenMeshes[apActor->formID];
-        meshes.clear();
-        CollectMeshes(pRoot, meshes, 0);
-        for (auto* pMesh : meshes)
-            pMesh->flags |= 1;
-        s_hiddenByUs[apActor->formID] = true;
     }
-    else if (!aHidden && hidden)
+    std::vector<NiAVObject*> leaves;
+    CollectLeaves(pRoot, leaves, 0);
+    auto& hiddenByUs = s_hiddenMeshes[apActor->formID];
+    // Forget meshes that are gone (freed by a rebuild), without touching them.
+    std::erase_if(hiddenByUs, [&leaves](NiAVObject* apMesh) { return std::find(leaves.begin(), leaves.end(), apMesh) == leaves.end(); });
+    if (aHidden)
     {
-        for (auto* pMesh : s_hiddenMeshes[apActor->formID])
+        // Every frame: a rebuilt 3D brings new, visible meshes.
+        for (auto* pLeaf : leaves)
+            if (!(pLeaf->flags & 1))
+            {
+                pLeaf->flags |= 1;
+                hiddenByUs.push_back(pLeaf);
+            }
+    }
+    else
+    {
+        for (auto* pMesh : hiddenByUs)
             pMesh->flags &= ~1u;
         s_hiddenMeshes.erase(apActor->formID);
-        s_hiddenByUs.erase(apActor->formID);
     }
 }
 
@@ -153,16 +162,7 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
     {
         if (s_active)
         {
-            // Leaving the creator: everyone visible again.
-            for (const auto& [formId, hidden] : s_hiddenByUs)
-            {
-                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
-                if (pActor && pActor->GetNiNode())
-                    for (auto* pMesh : s_hiddenMeshes[formId])
-                        pMesh->flags &= ~1u;
-            }
-            s_hiddenByUs.clear();
-            s_hiddenMeshes.clear();
+            // Leaving the creator: everyone is shown again, on the main thread (OnMainFrame).
             s_view = SIZE_MAX;
             s_hintShown = false;
             World::Get().GetOverlayService().SetCreatorView(false, 1, 1, false);
@@ -220,34 +220,7 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
         s_logAfterSwitch = true;
     }
 
-    // Only the viewed character is visible; it stands on this player's spot, its 3D moved at once
-    // (the world is paused while the creator is open, so nothing else would move it).
     auto* pPlayer = PlayerCharacter::Get();
-    for (size_t i = 0; i < s_players.size(); ++i)
-    {
-        const bool viewed = s_view == i;
-        if (s_players[i] == 0x14)
-        {
-            SetHidden(pPlayer, !viewed);
-            continue;
-        }
-        auto* pRemote = Cast<Actor>(TESForm::GetById(s_players[i]));
-        SetHidden(pRemote, !viewed);
-        if (viewed && pRemote && pPlayer)
-        {
-            pRemote->position = pPlayer->position;
-            pRemote->SetRotation(pRemote->rotation.x, pRemote->rotation.y, pPlayer->rotation.z);
-            pRemote->Update3DPosition(true);
-            // Its scene graph advanced each frame as the menu does for this player's (NiAVObject::Update).
-            if (auto* pRoot = pRemote->GetNiNode())
-            {
-                using TNiUpdate = void(NiAVObject*, void*);
-                POINTER_SKYRIMSE(TNiUpdate, s_niUpdate, 70251);
-                uint8_t updateData[16]{};
-                s_niUpdate.Get()(pRoot, updateData);
-            }
-        }
-    }
 
     // Diagnostic: what the switch did to the 3D (one line after each switch).
     if (s_logAfterSwitch && pPlayer && pPlayer->GetNiNode())
@@ -297,6 +270,52 @@ void Release() noexcept
 
 void OnMainFrame() noexcept
 {
+    {
+        std::lock_guard lock(s_lock);
+        auto* pPlayer = PlayerCharacter::Get();
+        if (!s_active)
+        {
+            // Not in the creator (any more): show everyone this feature hid (SetHidden erases the
+            // entry, so collect the ids first).
+            std::vector<uint32_t> hidden;
+            for (const auto& [formId, meshes] : s_hiddenMeshes)
+                hidden.push_back(formId);
+            for (const auto formId : hidden)
+                SetHidden(formId == 0x14 ? static_cast<Actor*>(pPlayer) : Cast<Actor>(TESForm::GetById(formId)), false);
+            s_hiddenMeshes.clear();
+        }
+        else if (s_view < s_players.size())
+        {
+            // Only the viewed character is visible; it stands on this player's spot, its 3D moved at once
+            // (the world is paused while the creator is open, so nothing else would move it).
+            for (size_t i = 0; i < s_players.size(); ++i)
+            {
+                const bool viewed = s_view == i;
+                if (s_players[i] == 0x14)
+                {
+                    SetHidden(pPlayer, !viewed);
+                    continue;
+                }
+                auto* pRemote = Cast<Actor>(TESForm::GetById(s_players[i]));
+                SetHidden(pRemote, !viewed);
+                if (viewed && pRemote && pPlayer)
+                {
+                    pRemote->position = pPlayer->position;
+                    pRemote->SetRotation(pRemote->rotation.x, pRemote->rotation.y, pPlayer->rotation.z);
+                    pRemote->Update3DPosition(true);
+                    // Its scene graph advanced each frame as the menu does for this player's (NiAVObject::Update).
+                    if (auto* pRoot = pRemote->GetNiNode())
+                    {
+                        using TNiUpdate = void(NiAVObject*, void*);
+                        POINTER_SKYRIMSE(TNiUpdate, s_niUpdate, 70251);
+                        uint8_t updateData[16]{};
+                        s_niUpdate.Get()(pRoot, updateData);
+                    }
+                }
+            }
+        }
+    }
+
     if (!s_releaseRequested.exchange(false))
         return;
     if (!s_done.exchange(false))
