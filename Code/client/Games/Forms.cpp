@@ -45,8 +45,6 @@ void TESNPC::Serialize(String* apSaveBuffer) const noexcept
         pBody = pBody->faceNPC;
     const float bodyWeight = pBody->weight;
     const float bodyHeight = height;
-    if (formID == 0x7)
-        spdlog::info("Sending player body: weight {} (record {}) height {}", bodyWeight, weight, bodyHeight);
     apSaveBuffer->append(kBodyTrailerTag, sizeof(kBodyTrailerTag));
     apSaveBuffer->append(reinterpret_cast<const char*>(&bodyWeight), sizeof(bodyWeight));
     apSaveBuffer->append(reinterpret_cast<const char*>(&bodyHeight), sizeof(bodyHeight));

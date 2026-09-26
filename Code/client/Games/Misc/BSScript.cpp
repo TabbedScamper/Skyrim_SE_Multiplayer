@@ -226,7 +226,8 @@ BSScript::CallResult TP_MAKE_THISCALL(HookNativePapyrusCall, BSScript::NativeFun
         spdlog::info("Title sequence native enter {} tick={}", pName, GetTickCount64());
     // Scripted player-state natives: which of these a quest/scene uses to drive the player
     // (auto-walk, restraints, camera) decides what a follower must mirror.
-    if (pName && pObject)
+    static std::atomic<uint32_t> s_scriptedSamples{0};
+    if (s_scriptedSamples.load(std::memory_order_relaxed) < 400 && pName && pObject)
     {
         static constexpr const char* s_scriptedPlayerNatives[] = {"SetPlayerAIDriven", "EvaluatePackage", "PathToReference",
             "SetDontMove", "SetRestrained", "ForceThirdPerson", "ForceFirstPerson", "PlayIdle", "MoveTo", "TranslateTo",
@@ -236,7 +237,6 @@ BSScript::CallResult TP_MAKE_THISCALL(HookNativePapyrusCall, BSScript::NativeFun
         {
             if (_stricmp(pName, pWatched) == 0)
             {
-                static std::atomic<uint32_t> s_scriptedSamples{0};
                 if (s_scriptedSamples.fetch_add(1, std::memory_order_relaxed) < 400)
                     spdlog::info("Scripted player native {}::{} tick={}", pObject, pName, GetTickCount64());
                 break;

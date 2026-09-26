@@ -18,6 +18,7 @@
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/NetImmerse/NiCamera.h>
 #include <Games/Skyrim/Havok/AnimationGraphUpdateTrace.h>
+#include <Services/GameTestService.h>
 
 #include <FunctionHook.hpp>
 
@@ -103,11 +104,15 @@ CameraService::NativeUpdateTrace CameraService::GetNativeUpdateTrace() const noe
 {
     NativeUpdateTrace result{};
     std::lock_guard lock(m_nativeTraceMutex);
-    result.Count = m_nativeTraceCount;
+    const auto now = GetTickCount64();
     const size_t start = (m_nativeTraceNext + m_nativeTrace.size() -
         m_nativeTraceCount) % m_nativeTrace.size();
-    for (size_t i = 0; i < result.Count; ++i)
-        result.Samples[i] = m_nativeTrace[(start + i) % m_nativeTrace.size()];
+    for (size_t i = 0; i < m_nativeTraceCount; ++i)
+    {
+        const auto& sample = m_nativeTrace[(start + i) % m_nativeTrace.size()];
+        if (now >= sample.TimeMs && now - sample.TimeMs <= 5000)
+            result.Samples[result.Count++] = sample;
+    }
     return result;
 }
 
@@ -259,7 +264,7 @@ void CameraService::HookCameraUpdate(TESCameraState* apState, void* apNextState)
 
     const uint64_t now = GetTickCount64();
     uint64_t nextTrace = pService->m_nextNativeTraceMs.load(std::memory_order_relaxed);
-    const bool sampleTrace = now >= nextTrace &&
+    const bool sampleTrace = GameTestService::IsDiagnosticCaptureArmed() && now >= nextTrace &&
         pService->m_nextNativeTraceMs.compare_exchange_strong(nextTrace, now + 50,
             std::memory_order_relaxed);
     auto* pPlayerCamera = PlayerCamera::Get();

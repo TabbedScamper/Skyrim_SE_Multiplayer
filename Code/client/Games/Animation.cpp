@@ -14,6 +14,7 @@
 
 #include <World.h>
 #include <Services/PartyService.h>
+#include <atomic>
 
 TP_THIS_FUNCTION(TPerformAction, uint8_t, ActorMediator, TESActionData* apAction);
 static TPerformAction* RealPerformAction;
@@ -40,7 +41,12 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
             const auto& party = World::Get().GetPartyService();
             if (party.IsInParty() && !party.IsLeader() && strstr(pEventName, "WalkingCameraStart") != nullptr)
             {
-                spdlog::info("Follower: skipped local walking-camera start ({})", pEventName);
+                static std::atomic<uint64_t> s_nextSuppressionLogMs{};
+                const auto now = GetTickCount64();
+                auto next = s_nextSuppressionLogMs.load(std::memory_order_relaxed);
+                if (now >= next && s_nextSuppressionLogMs.compare_exchange_strong(
+                        next, now + 10000, std::memory_order_relaxed))
+                    spdlog::info("Follower: skipped local walking-camera start ({})", pEventName);
                 return 0;
             }
             spdlog::info("Local player walking-camera action event={} tick={} idleForm={:08X} "

@@ -43,11 +43,7 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
             static_cast<float>(second.Tick - first.Tick);
 
     NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
-    // A player still in the character creator stands in front of this player here, facing it,
-    // not inside it (everyone creates on the same spot).
-    NiPoint3 creatorOffset{};
     float creatorHeading = 0.f;
-    (void)creatorOffset;
     // In the character creator every player's character stands on this player's spot (the one
     // being viewed is visible; see CreatorTogether).
     const bool creatorPreview = apActor && CreatorTogether::GetDisplay(apActor->formID, position, creatorHeading);
@@ -85,34 +81,51 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                 apActor->position.z);
             visibilityIt->second = visibility;
         }
+        // Diagnostic: a seated actor's body drawn away from its reference (the cart driver vanished
+        // before the stop with his 3D present and not hidden). Skeleton root vs actor position, 4 Hz,
+        // logged when it leaves or comes back within 80 units.
+        static std::unordered_map<uint32_t, std::pair<uint64_t, bool>> s_seatedDrift;
+        if (pRoot && (sitSleepState == 2 || sitSleepState == 3 || s_seatedDrift.contains(apActor->formID)))
+        {
+            auto& [nextCheck, away] = s_seatedDrift[apActor->formID];
+            if (aTick >= nextCheck)
+            {
+                nextCheck = aTick + 250;
+                static BSFixedString s_skeletonRoot("NPC Root [Root]");
+                if (auto* pSkeleton = const_cast<NiNode*>(pRoot)->GetByName(s_skeletonRoot))
+                {
+                    const auto& w = pSkeleton->world.translate;
+                    const float dx = w.x - apActor->position.x, dy = w.y - apActor->position.y, dz = w.z - apActor->position.z;
+                    const float drift = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if ((drift > 80.f) != away)
+                    {
+                        away = drift > 80.f;
+                        spdlog::info("Seated actor {:X}: body {} its reference ({:.0f} units; sit state {}, body at {:.0f}, {:.0f}, {:.0f}, "
+                            "reference at {:.0f}, {:.0f}, {:.0f})", apActor->formID, away ? "drawn away from" : "back at", drift,
+                            sitSleepState, w.x, w.y, w.z, apActor->position.x, apActor->position.y, apActor->position.z);
+                    }
+                }
+                if (sitSleepState != 2 && sitSleepState != 3 && !away)
+                    s_seatedDrift.erase(apActor->formID);
+            }
+        }
     }
+    static std::unordered_map<uint32_t, uint64_t> s_nextSitLog;
+    if (ObjectService::IsRenderDiagnosticsArmed())
     {
         // Diagnostic: each remote actor's sit state, every 10 s.
-        static std::unordered_map<uint32_t, uint64_t> s_nextSitLog;
+        const auto now = GetTickCount64();
+        std::erase_if(s_nextSitLog, [now](const auto& entry) { return now >= entry.second; });
         auto& next = s_nextSitLog[apActor->formID];
-        if (aTick >= next)
+        if (now >= next)
         {
-            next = aTick + 10000;
+            next = now + 10000;
             spdlog::info("Remote actor {:X}: sitSleepState {} flags1 {:08X} furniture-seated={}", apActor->formID, sitSleepState,
                 apActor->actorState.flags1, sitSleepState == 2 || sitSleepState == 3);
         }
     }
-    // Only while this PC's seat is the owner's: this PC's AI picks its own seat, and moved the front
-    // cart's passengers into the follower's cart. A seat far from the owner's position is wrong;
-    // the owner's position (and pose) place the actor then.
-    const float seatError = std::sqrt((apActor->position.x - position.x) * (apActor->position.x - position.x) +
-        (apActor->position.y - position.y) * (apActor->position.y - position.y) +
-        (apActor->position.z - position.z) * (apActor->position.z - position.z));
-    // Off: this PC's AI chose other seats than the owner's (the front cart's passengers in the
-    // follower's cart), and correcting a wrong seat flipped the actor 280 units every frame between
-    // the seat and the owner's position. The owner's position places seated actors too.
-    constexpr bool kSeatPlacesActor = false;
-    if (kSeatPlacesActor && (sitSleepState == 2 || sitSleepState == 3) && seatError < 100.f)
-    {
-        const auto& seated = aTick >= second.Tick ? second : first;
-        apActor->LoadAnimationVariables(seated.Variables);
-        return;
-    }
+    else if (!s_nextSitLog.empty())
+        s_nextSitLog.clear();
     {
         // Diagnostic: a jump of more than 150 units in one placement.
         const float jumpX = position.x - apActor->position.x, jumpY = position.y - apActor->position.y,

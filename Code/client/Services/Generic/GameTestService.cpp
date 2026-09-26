@@ -58,6 +58,17 @@ namespace
 {
 constexpr wchar_t cTestPipeName[] = LR"(\\.\pipe\SkyrimSEMultiplayer.Test)";
 constexpr DWORD cPipeRejectRemoteClients = 0x00000008;
+std::atomic<uint64_t> s_diagnosticCaptureUntilMs{};
+
+void ArmDiagnosticCapture(uint64_t aLeadMs = 0) noexcept
+{
+    const auto until = GetTickCount64() + (std::min)(aLeadMs, uint64_t{30000}) + 5000;
+    auto previous = s_diagnosticCaptureUntilMs.load(std::memory_order_relaxed);
+    while (previous < until && !s_diagnosticCaptureUntilMs.compare_exchange_weak(
+        previous, until, std::memory_order_relaxed))
+    {
+    }
+}
 
 std::string EscapeJson(const std::string& acValue)
 {
@@ -1064,6 +1075,29 @@ void AppendActorPoseDiagnostic(std::string& arSnapshot, Actor* apActor, const ch
 }
 }
 
+struct GameTestService::HitchSnapshotData
+{
+    uint64_t WorldTick{};
+    uint64_t SampleTimeMs{};
+    GameLoopDiagnostic FrameTiming{};
+    ObjectService::PreStepPlaybackDiagnostic Physics{};
+    ObjectService::WorldUpdateDiagnostic WorldPhysics{};
+    CharacterService::LocalPoseProductionDiagnostic PoseProduction{};
+    std::array<ReferenceMotionStats, 2> CartMotionStats{};
+    std::array<HitchCartSample, 64> CartHistory{};
+    uint32_t CartNext{};
+    uint32_t CartCount{};
+    std::array<HitchMotionEvent, 64> MotionEvents{};
+    uint32_t MotionNext{};
+    uint32_t MotionCount{};
+};
+
+bool GameTestService::IsDiagnosticCaptureArmed() noexcept
+{
+    const auto until = s_diagnosticCaptureUntilMs.load(std::memory_order_relaxed);
+    return until && GetTickCount64() < until;
+}
+
 GameTestService::GameTestService(World& aWorld) noexcept
     : m_world(aWorld)
     , m_pipeThread([this]() { PipeMain(); })
@@ -1367,136 +1401,33 @@ void GameTestService::OnGameThread() noexcept
         m_hitchCartNext = (m_hitchCartNext + 1) % m_hitchCartHistory.size();
         m_hitchCartCount = (std::min)(m_hitchCartCount + 1,
             static_cast<uint32_t>(m_hitchCartHistory.size()));
-        const auto physics = ObjectService::GetPreStepPlaybackDiagnostic();
-        const auto worldPhysics = ObjectService::GetWorldUpdateDiagnostic();
-        const auto poseProduction =
+        auto data = std::make_shared<HitchSnapshotData>();
+        data->WorldTick = m_world.GetTick();
+        data->SampleTimeMs = now;
+        data->FrameTiming = frameTiming;
+        data->Physics = ObjectService::GetPreStepPlaybackDiagnostic();
+        data->WorldPhysics = ObjectService::GetWorldUpdateDiagnostic();
+        data->PoseProduction =
             m_world.GetCharacterService().GetLocalPoseProductionDiagnostic();
-        std::string hitch = fmt::format(
-            "{{\"worldTick\":{},\"sampleTimeMs\":{},"
-            "\"worldLastGapUs\":{},\"worldMaxGapUs\":{},"
-            "\"worldMaxGameTestUs\":{},\"vmMaxAppUs\":{},"
-            "\"vmMaxOriginalUs\":{},\"hostPhysicsPackets\":{},"
-            "\"hostPhysicsUpdates\":{},\"hostBodyOnlyUpdates\":{},"
-            "\"followerPhysicsPackets\":{},\"hostLastScanUs\":{},"
-            "\"hostScanCount\":{},\"hostScanTotalUs\":{},"
-            "\"hostScanMaxUs\":{},\"hostScanLastReferencesVisited\":{},"
-            "\"hostScanLastCandidateCount\":{},"
-            "\"hostKnownRefreshLastUs\":{},\"hostKnownRefreshMaxUs\":{},\"hostKnownRefreshTotalUs\":{},"
-            "\"hostCurrentDiscoveryLastUs\":{},\"hostCurrentDiscoveryMaxUs\":{},\"hostCurrentDiscoveryTotalUs\":{},"
-            "\"hostGridDiscoveryLastUs\":{},\"hostGridDiscoveryMaxUs\":{},\"hostGridDiscoveryTotalUs\":{},"
-            "\"hostPruneLastUs\":{},\"hostPruneMaxUs\":{},\"hostPruneTotalUs\":{},"
-            "\"poseSelectedBatches\":{},\"poseSelectedActors\":{},"
-            "\"poseSelectedTotalUs\":{},\"poseSelectedMaxActorUs\":{},"
-            "\"poseSelectedLastBatchUs\":{},\"poseSelectedLastBatchActors\":{},"
-            "\"selectedBodyPeakStep\":{},"
-            "\"selectedBodyStepsOver75\":{},"
-            "\"selectedBodyPeakTimeMs\":{},"
-            "\"selectedBodyPeakDt\":{},"
-            "\"selectedBodyPeakPreLinearSpeed\":{},"
-            "\"selectedBodyPeakPostLinearSpeed\":{},"
-            "\"selectedBodyPeakPreAngularSpeed\":{},"
-            "\"selectedBodyPeakPostAngularSpeed\":{},"
-            "\"selectedBodyPeakMotionType\":{},"
-            "\"selectedBodyPeakTargetApplied\":{},"
-            "\"selectedBodyPeakTargetAgeMs\":{},"
-            "\"selectedBodyPeakVelocityAfterWrite\":{},"
-            "\"carts\":[",
-            m_world.GetTick(), now, frameTiming.WorldLastEntryGapUs,
-            frameTiming.WorldMaxEntryGapUs,
-            frameTiming.WorldMaxGameTestUs, frameTiming.VmMaxAppUs,
-            frameTiming.VmMaxOriginalUs, physics.HostPacketsSent,
-            physics.HostUpdatesQueued, physics.HostBodyOnlyUpdates,
-            physics.FollowerPacketsReceived, physics.LastHostScanDurationUs,
-            physics.HostScans, physics.HostScanTotalUs, physics.HostScanMaxUs,
-            physics.HostLastReferencesVisited, physics.HostLastCandidateCount,
-            physics.HostKnownRefreshLastUs, physics.HostKnownRefreshMaxUs,
-            physics.HostKnownRefreshTotalUs,
-            physics.HostCurrentDiscoveryLastUs, physics.HostCurrentDiscoveryMaxUs,
-            physics.HostCurrentDiscoveryTotalUs,
-            physics.HostGridDiscoveryLastUs, physics.HostGridDiscoveryMaxUs,
-            physics.HostGridDiscoveryTotalUs,
-            physics.HostPruneLastUs, physics.HostPruneMaxUs,
-            physics.HostPruneTotalUs,
-            poseProduction.Batches, poseProduction.Actors,
-            poseProduction.TotalUs, poseProduction.MaxActorUs,
-            poseProduction.LastBatchUs, poseProduction.LastBatchActors,
-            worldPhysics.PeakSelectedBodyStepDelta,
-            worldPhysics.SelectedBodyStepsOver75Units,
-            worldPhysics.PeakSelectedBodyStepTimeMs,
-            worldPhysics.PeakSelectedBodyStepDt,
-            worldPhysics.PeakSelectedBodyPreLinearSpeed,
-            worldPhysics.PeakSelectedBodyPostLinearSpeed,
-            worldPhysics.PeakSelectedBodyPreAngularSpeed,
-            worldPhysics.PeakSelectedBodyPostAngularSpeed,
-            worldPhysics.PeakSelectedBodyMotionType,
-            JsonBool(worldPhysics.PeakSelectedBodyTargetApplied),
-            worldPhysics.PeakSelectedBodyTargetAgeMs,
-            worldPhysics.PeakSelectedBodyVelocityAfterWrite);
-        for (size_t i = 0; i < std::size(cartIds); ++i)
-        {
-            if (i)
-                hitch += ',';
-            const auto& stats = m_introCartMotionStats[i];
-            hitch += fmt::format(
-                "{{\"formId\":{},\"samples\":{},\"peakStep\":{},"
-                "\"largeSteps\":{},\"position\":[{},{},{}]}}",
-                cartIds[i], stats.Samples, stats.PeakStep, stats.LargeSteps,
-                stats.Position[0], stats.Position[1], stats.Position[2]);
-        }
-        hitch += "],\"history\":[";
-        for (uint32_t i = 0; i < m_hitchCartCount; ++i)
-        {
-            const auto index = (m_hitchCartNext + m_hitchCartHistory.size() -
-                m_hitchCartCount + i) % m_hitchCartHistory.size();
-            const auto& sample = m_hitchCartHistory[index];
-            if (i)
-                hitch += ',';
-            hitch += fmt::format(
-                "{{\"tick\":{},\"present\":[{},{}],"
-                "\"position\":[[{},{},{}],[{},{},{}]],"
-                "\"horsePresent\":[{},{}],"
-                "\"horsePosition\":[[{},{},{}],[{},{},{}]]}}",
-                sample.WorldTick, JsonBool(sample.Present[0]),
-                JsonBool(sample.Present[1]),
-                sample.Position[0][0], sample.Position[0][1],
-                sample.Position[0][2], sample.Position[1][0],
-                sample.Position[1][1], sample.Position[1][2],
-                JsonBool(sample.HorsePresent[0]),
-                JsonBool(sample.HorsePresent[1]),
-                sample.HorsePosition[0][0], sample.HorsePosition[0][1],
-                sample.HorsePosition[0][2], sample.HorsePosition[1][0],
-                sample.HorsePosition[1][1], sample.HorsePosition[1][2]);
-        }
-        hitch += "],\"events\":[";
-        for (uint32_t i = 0; i < m_hitchMotionCount; ++i)
-        {
-            const auto index = (m_hitchMotionNext + m_hitchMotionEvents.size() -
-                m_hitchMotionCount + i) % m_hitchMotionEvents.size();
-            const auto& event = m_hitchMotionEvents[index];
-            if (i)
-                hitch += ',';
-            hitch += fmt::format(
-                "{{\"timeMs\":{},\"worldTick\":{},\"formId\":{},"
-                "\"worldGapUs\":{},\"vmGapUs\":{},"
-                "\"priorVmAppUs\":{},\"priorVmOriginalUs\":{},"
-                "\"priorGameTestUs\":{},\"cartDeltaMs\":{},"
-                "\"cartStep\":{},\"position\":[{},{},{}],"
-                "\"horsePresent\":{},\"horsePosition\":[{},{},{}]}}",
-                event.TimeMs, event.WorldTick, event.FormId,
-                event.WorldGapUs, event.VmGapUs,
-                event.PriorVmAppUs, event.PriorVmOriginalUs,
-                event.PriorGameTestUs, event.CartDeltaMs, event.CartStep,
-                event.Position[0], event.Position[1], event.Position[2],
-                JsonBool(event.HorsePresent), event.HorsePosition[0],
-                event.HorsePosition[1], event.HorsePosition[2]);
-        }
-        hitch += "]}";
+        data->CartMotionStats = m_introCartMotionStats;
+        data->CartHistory = m_hitchCartHistory;
+        data->CartNext = m_hitchCartNext;
+        data->CartCount = m_hitchCartCount;
+        data->MotionEvents = m_hitchMotionEvents;
+        data->MotionNext = m_hitchMotionNext;
+        data->MotionCount = m_hitchMotionCount;
+        // Publish one immutable numeric sample. The requesting window thread
+        // formats it after releasing the lock, independently of full snapshots.
         std::scoped_lock lock(m_snapshotMutex);
-        m_hitchSnapshot = std::move(hitch);
+        m_hitchSnapshot = std::move(data);
     }
     bool captureRequested = false;
     {
         std::scoped_lock lock(m_snapshotScheduleMutex);
+        const auto tick = m_world.GetTick();
+        if (m_snapshotTargetTick && m_snapshotTargetTick > tick &&
+            m_snapshotTargetTick - tick <= 5000)
+            ArmDiagnosticCapture();
         if (m_snapshotRelativeDueWallMs)
         {
             const bool sameEpoch = m_world.GetTransport().GetAuthorityEpoch() ==
@@ -1530,6 +1461,7 @@ void GameTestService::OnGameThread() noexcept
     if (!captureRequested)
         return;
 
+    ArmDiagnosticCapture();
     try
     {
         std::string snapshot = "{";
@@ -3523,6 +3455,143 @@ void GameTestService::OnGameThread() noexcept
     }
 }
 
+std::string GameTestService::GetHitchSnapshot() const
+{
+    std::shared_ptr<const HitchSnapshotData> data;
+    {
+        std::scoped_lock lock(m_snapshotMutex);
+        data = m_hitchSnapshot;
+    }
+    if (!data)
+        return "null";
+    constexpr uint32_t cartIds[]{0x000B9DF3, 0x000BB970};
+    const auto& frameTiming = data->FrameTiming;
+    const auto& physics = data->Physics;
+    const auto& worldPhysics = data->WorldPhysics;
+    const auto& poseProduction = data->PoseProduction;
+    std::string hitch = fmt::format(
+        "{{\"worldTick\":{},\"sampleTimeMs\":{},"
+        "\"worldLastGapUs\":{},\"worldMaxGapUs\":{},"
+        "\"worldMaxGameTestUs\":{},\"vmMaxAppUs\":{},"
+        "\"vmMaxOriginalUs\":{},\"hostPhysicsPackets\":{},"
+        "\"hostPhysicsUpdates\":{},\"hostBodyOnlyUpdates\":{},"
+        "\"followerPhysicsPackets\":{},\"hostLastScanUs\":{},"
+        "\"hostScanCount\":{},\"hostScanTotalUs\":{},"
+        "\"hostScanMaxUs\":{},\"hostScanLastReferencesVisited\":{},"
+        "\"hostScanLastCandidateCount\":{},"
+        "\"hostKnownRefreshLastUs\":{},\"hostKnownRefreshMaxUs\":{},\"hostKnownRefreshTotalUs\":{},"
+        "\"hostCurrentDiscoveryLastUs\":{},\"hostCurrentDiscoveryMaxUs\":{},\"hostCurrentDiscoveryTotalUs\":{},"
+        "\"hostGridDiscoveryLastUs\":{},\"hostGridDiscoveryMaxUs\":{},\"hostGridDiscoveryTotalUs\":{},"
+        "\"hostPruneLastUs\":{},\"hostPruneMaxUs\":{},\"hostPruneTotalUs\":{},"
+        "\"poseSelectedBatches\":{},\"poseSelectedActors\":{},"
+        "\"poseSelectedTotalUs\":{},\"poseSelectedMaxActorUs\":{},"
+        "\"poseSelectedLastBatchUs\":{},\"poseSelectedLastBatchActors\":{},"
+        "\"selectedBodyPeakStep\":{},"
+        "\"selectedBodyStepsOver75\":{},"
+        "\"selectedBodyPeakTimeMs\":{},"
+        "\"selectedBodyPeakDt\":{},"
+        "\"selectedBodyPeakPreLinearSpeed\":{},"
+        "\"selectedBodyPeakPostLinearSpeed\":{},"
+        "\"selectedBodyPeakPreAngularSpeed\":{},"
+        "\"selectedBodyPeakPostAngularSpeed\":{},"
+        "\"selectedBodyPeakMotionType\":{},"
+        "\"selectedBodyPeakTargetApplied\":{},"
+        "\"selectedBodyPeakTargetAgeMs\":{},"
+        "\"selectedBodyPeakVelocityAfterWrite\":{},"
+        "\"carts\":[",
+        data->WorldTick, data->SampleTimeMs, frameTiming.WorldLastEntryGapUs,
+        frameTiming.WorldMaxEntryGapUs,
+        frameTiming.WorldMaxGameTestUs, frameTiming.VmMaxAppUs,
+        frameTiming.VmMaxOriginalUs, physics.HostPacketsSent,
+        physics.HostUpdatesQueued, physics.HostBodyOnlyUpdates,
+        physics.FollowerPacketsReceived, physics.LastHostScanDurationUs,
+        physics.HostScans, physics.HostScanTotalUs, physics.HostScanMaxUs,
+        physics.HostLastReferencesVisited, physics.HostLastCandidateCount,
+        physics.HostKnownRefreshLastUs, physics.HostKnownRefreshMaxUs,
+        physics.HostKnownRefreshTotalUs,
+        physics.HostCurrentDiscoveryLastUs, physics.HostCurrentDiscoveryMaxUs,
+        physics.HostCurrentDiscoveryTotalUs,
+        physics.HostGridDiscoveryLastUs, physics.HostGridDiscoveryMaxUs,
+        physics.HostGridDiscoveryTotalUs,
+        physics.HostPruneLastUs, physics.HostPruneMaxUs,
+        physics.HostPruneTotalUs,
+        poseProduction.Batches, poseProduction.Actors,
+        poseProduction.TotalUs, poseProduction.MaxActorUs,
+        poseProduction.LastBatchUs, poseProduction.LastBatchActors,
+        worldPhysics.PeakSelectedBodyStepDelta,
+        worldPhysics.SelectedBodyStepsOver75Units,
+        worldPhysics.PeakSelectedBodyStepTimeMs,
+        worldPhysics.PeakSelectedBodyStepDt,
+        worldPhysics.PeakSelectedBodyPreLinearSpeed,
+        worldPhysics.PeakSelectedBodyPostLinearSpeed,
+        worldPhysics.PeakSelectedBodyPreAngularSpeed,
+        worldPhysics.PeakSelectedBodyPostAngularSpeed,
+        worldPhysics.PeakSelectedBodyMotionType,
+        JsonBool(worldPhysics.PeakSelectedBodyTargetApplied),
+        worldPhysics.PeakSelectedBodyTargetAgeMs,
+        worldPhysics.PeakSelectedBodyVelocityAfterWrite);
+    for (size_t i = 0; i < std::size(cartIds); ++i)
+    {
+        if (i)
+            hitch += ',';
+        const auto& stats = data->CartMotionStats[i];
+        hitch += fmt::format(
+            "{{\"formId\":{},\"samples\":{},\"peakStep\":{},"
+            "\"largeSteps\":{},\"position\":[{},{},{}]}}",
+            cartIds[i], stats.Samples, stats.PeakStep, stats.LargeSteps,
+            stats.Position[0], stats.Position[1], stats.Position[2]);
+    }
+    hitch += "],\"history\":[";
+    for (uint32_t i = 0; i < data->CartCount; ++i)
+    {
+        const auto index = (data->CartNext + data->CartHistory.size() -
+            data->CartCount + i) % data->CartHistory.size();
+        const auto& sample = data->CartHistory[index];
+        if (i)
+            hitch += ',';
+        hitch += fmt::format(
+            "{{\"tick\":{},\"present\":[{},{}],"
+            "\"position\":[[{},{},{}],[{},{},{}]],"
+            "\"horsePresent\":[{},{}],"
+            "\"horsePosition\":[[{},{},{}],[{},{},{}]]}}",
+            sample.WorldTick, JsonBool(sample.Present[0]),
+            JsonBool(sample.Present[1]),
+            sample.Position[0][0], sample.Position[0][1],
+            sample.Position[0][2], sample.Position[1][0],
+            sample.Position[1][1], sample.Position[1][2],
+            JsonBool(sample.HorsePresent[0]),
+            JsonBool(sample.HorsePresent[1]),
+            sample.HorsePosition[0][0], sample.HorsePosition[0][1],
+            sample.HorsePosition[0][2], sample.HorsePosition[1][0],
+            sample.HorsePosition[1][1], sample.HorsePosition[1][2]);
+    }
+    hitch += "],\"events\":[";
+    for (uint32_t i = 0; i < data->MotionCount; ++i)
+    {
+        const auto index = (data->MotionNext + data->MotionEvents.size() -
+            data->MotionCount + i) % data->MotionEvents.size();
+        const auto& event = data->MotionEvents[index];
+        if (i)
+            hitch += ',';
+        hitch += fmt::format(
+            "{{\"timeMs\":{},\"worldTick\":{},\"formId\":{},"
+            "\"worldGapUs\":{},\"vmGapUs\":{},"
+            "\"priorVmAppUs\":{},\"priorVmOriginalUs\":{},"
+            "\"priorGameTestUs\":{},\"cartDeltaMs\":{},"
+            "\"cartStep\":{},\"position\":[{},{},{}],"
+            "\"horsePresent\":{},\"horsePosition\":[{},{},{}]}}",
+            event.TimeMs, event.WorldTick, event.FormId,
+            event.WorldGapUs, event.VmGapUs,
+            event.PriorVmAppUs, event.PriorVmOriginalUs,
+            event.PriorGameTestUs, event.CartDeltaMs, event.CartStep,
+            event.Position[0], event.Position[1], event.Position[2],
+            JsonBool(event.HorsePresent), event.HorsePosition[0],
+            event.HorsePosition[1], event.HorsePosition[2]);
+    }
+    hitch += "]}";
+    return hitch;
+}
+
 std::string GameTestService::GetCachedGameSnapshot() const noexcept
 {
     std::scoped_lock lock(m_snapshotMutex);
@@ -3587,6 +3656,8 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 if (tickText.empty())
                     m_snapshotRelativeDueWallMs = GetTickCount64() + delay;
             }
+            ArmDiagnosticCapture(target > nowTick ? target - nowTick : 0);
+            ObjectService::ArmRenderDiagnostics();
             return Result(id, fmt::format("\"currentTick\":{},\"targetTick\":{},\"relative\":{}",
                 nowTick, target, JsonBool(tickText.empty())));
         }
@@ -3596,6 +3667,8 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const bool hadPending = m_snapshotRelativeDueWallMs || m_snapshotTargetTick;
             m_snapshotRelativeDueWallMs = 0;
             m_snapshotTargetTick = 0;
+            s_diagnosticCaptureUntilMs.store(0, std::memory_order_relaxed);
+            AnimationGraphUpdateTrace::WatchHolder(nullptr, 0);
             return Result(id, fmt::format("\"cancelled\":{}", JsonBool(hadPending)));
         }
         if (command == "game_snapshot")
@@ -3614,10 +3687,10 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         }
         if (command == "hitch_snapshot")
         {
-            std::scoped_lock lock(m_snapshotMutex);
-            if (m_hitchSnapshot == "null")
+            const auto hitch = GetHitchSnapshot();
+            if (hitch == "null")
                 return Error(id, "no hitch snapshot available");
-            return Result(id, fmt::format("\"game\":{}", m_hitchSnapshot));
+            return Result(id, fmt::format("\"game\":{}", hitch));
         }
         if (command == "game_pose_snapshot")
         {
@@ -3666,6 +3739,11 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                     return Error(id, "tick must be nonzero when enabling pose capture");
             }
             m_poseProbeTargetTick.store(targetTick, std::memory_order_relaxed);
+            if (enabled)
+            {
+                const auto nowTick = m_world.GetTick();
+                ArmDiagnosticCapture(targetTick > nowTick ? targetTick - nowTick : 0);
+            }
             return Result(id, fmt::format("\"enabled\":{},\"targetTick\":{}",
                 JsonBool(enabled), targetTick));
         }
@@ -4183,6 +4261,7 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         // Host-driven bone playback: stats, and "enabled":"false" to compare against local animation.
         if (command == "pose_authority")
         {
+            ObjectService::ArmRenderDiagnostics();
             const auto enabled = GetJsonString(acLine, "enabled");
             if (!enabled.empty())
                 PoseCopyAuthority::SetEnabled(enabled != "false");
@@ -4190,66 +4269,77 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         }
         if (command == "cart_physics")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetCartPhysicsEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "visual_lag_frame")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetVisualLagFrameEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "body_velocity")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetBodyVelocityEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "cart_smoothing")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetCartSmoothingEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "hermite_playback")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetHermitePlaybackEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "physics_stamp")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetPhysicsStampEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "main_frame_capture")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetMainFrameCaptureEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "main_frame_playback")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetMainFramePlaybackEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "host_driven_playback")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetHostDrivenPlaybackEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "root_body_write")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetRootBodyWriteEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
         }
         if (command == "cell_handoff")
         {
+            ObjectService::ArmRenderDiagnostics();
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetCellHandoffEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));

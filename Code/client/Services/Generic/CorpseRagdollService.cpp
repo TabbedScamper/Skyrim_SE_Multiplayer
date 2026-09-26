@@ -35,8 +35,6 @@ constexpr uint64_t kStreamMs = 50;
 constexpr uint64_t kResendMs = 5000;
 // Presentation past the newest sample by more than this: the owner stopped streaming (settled).
 constexpr uint64_t kHoldMs = 300;
-// A settled follower ragdoll further than this from the owner's pose is put back (game units).
-constexpr float kDriftGameUnits = 0.25f;
 
 uint64_t NowMs() noexcept
 {

@@ -24,6 +24,8 @@ struct GameTestService : BSTEventSink<TESTriggerEnterEvent>, BSTEventSink<TESTri
     void OnWindowThread() noexcept;
     void OnGameThread() noexcept;
     [[nodiscard]] std::string GetCachedGameSnapshot() const noexcept;
+    // Short, explicitly requested window for render bones and native camera tracing.
+    [[nodiscard]] static bool IsDiagnosticCaptureArmed() noexcept;
 
     BSTEventResult OnEvent(const TESTriggerEnterEvent* apEvent,
         const EventDispatcher<TESTriggerEnterEvent>*) override;
@@ -66,7 +68,9 @@ private:
     std::thread m_pipeThread;
     mutable std::mutex m_snapshotMutex;
     std::string m_gameSnapshot{"null"};
-    std::string m_hitchSnapshot{"null"};
+    struct HitchSnapshotData;
+    std::shared_ptr<const HitchSnapshotData> m_hitchSnapshot;
+    [[nodiscard]] std::string GetHitchSnapshot() const;
     uint64_t m_nextHitchSnapshotMs{};
     std::string m_lastPoseSnapshot{"null"};
     struct TimedGameSnapshot

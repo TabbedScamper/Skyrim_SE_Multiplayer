@@ -38,14 +38,11 @@
 
 namespace
 {
-// The paired 2026-09-22 intro trial still teleported carts. Keep the
-// experimental easing implementation for a body-level follow-up, but never
-// enable it in a distributed build until Havok/script ownership is validated.
-constexpr bool kEnablePerFrameReferenceCorrection = false;
-// The 2026-09-23 paired trial oversped the follower cart and increased
-// divergence. Keep the source-backed setter path for further body-timing
-// research, but ship observation only until body/scene ownership is resolved.
-constexpr bool kEnableDynamicBodyServo = false;
+std::atomic<uint64_t> s_renderDiagnosticsUntilMs{};
+// Published only by OnUpdate while holding m_remotePhysicsLock. Frame probes
+// resolve these IDs instead of iterating the update thread's ECS storage.
+std::vector<uint32_t> s_renderActorIds;
+uint64_t s_nextRenderActorsMs{};
 // Follower playback of the host's moving dynamic bodies (the Helgen carts first).
 // Two independent Havok simulations of a tethered cart cannot agree: the
 // follower's own step moved cart 0xBB970 100-117 game units in single 16-ms
@@ -100,6 +97,7 @@ std::unordered_map<uint32_t, HostSampleProbe> s_hostSampleProbes;
 // (physics-driven) node, so both screens are compared by one number.
 struct HostRenderProbe
 {
+    uint64_t LastSeenMs{};
     glm::vec3 Last{};
     std::chrono::steady_clock::time_point LastAt{};
     bool Has{};
@@ -118,6 +116,8 @@ std::unordered_map<uint32_t, HostRenderProbe> s_hostRenderProbes;
 float MountLead(const TESObjectREFR* apReference, const glm::vec3& acDirection, uint32_t& arMountId) noexcept
 {
     arMountId = 0;
+    if (!ObjectService::IsRenderDiagnosticsArmed())
+        return 0.f;
     glm::vec2 direction{acDirection.x, acDirection.y};
     if (glm::length(direction) < 1.f)
         return 0.f;
@@ -125,10 +125,9 @@ float MountLead(const TESObjectREFR* apReference, const glm::vec3& acDirection, 
     const glm::vec2 origin{apReference->position.x, apReference->position.y};
     float best = 250.f;
     float lead = 0.f;
-    auto view = World::Get().view<FormIdComponent>();
-    for (auto entity : view)
+    for (const auto publishedActorId : s_renderActorIds)
     {
-        auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        auto* pActor = Cast<Actor>(TESForm::GetById(publishedActorId));
         // The nearest NPC riding it (the driver): not a player.
         if (!pActor || !pActor->GetExtension() || pActor->GetExtension()->IsPlayer())
             continue;
@@ -148,6 +147,7 @@ float MountLead(const TESObjectREFR* apReference, const glm::vec3& acDirection, 
 // the direction of travel, sampled at the end of a frame (after drawing). Logged every 5 s.
 struct DrawnGapProbe
 {
+    uint64_t LastSeenMs{};
     uint32_t Samples{};
     float Sum{};
     float Min{1e9f};
@@ -164,6 +164,8 @@ std::unordered_map<uint32_t, DrawnGapProbe> s_drawnGapProbes;
 
 void ProbeDrawnGap(const char* apSide, TESObjectREFR* apReference, const glm::vec3& acDirection) noexcept
 {
+    if (!ObjectService::IsRenderDiagnosticsArmed())
+        return;
     const auto* pNode = apReference ? apReference->GetNiNode() : nullptr;
     glm::vec2 direction{acDirection.x, acDirection.y};
     if (!pNode || glm::length(direction) < 1.f)
@@ -174,10 +176,9 @@ void ProbeDrawnGap(const char* apSide, TESObjectREFR* apReference, const glm::ve
     float gap = 0.f;
     uint32_t actorId = 0;
     Actor* pNearest = nullptr;
-    auto view = World::Get().view<FormIdComponent>();
-    for (auto entity : view)
+    for (const auto publishedActorId : s_renderActorIds)
     {
-        auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        auto* pActor = Cast<Actor>(TESForm::GetById(publishedActorId));
         if (!pActor || !pActor->GetExtension() || pActor->GetExtension()->IsPlayer())
             continue;
         const auto* pActorNode = pActor->GetNiNode();
@@ -195,6 +196,7 @@ void ProbeDrawnGap(const char* apSide, TESObjectREFR* apReference, const glm::ve
     if (!actorId)
         return;
     auto& probe = s_drawnGapProbes[apReference->formID];
+    probe.LastSeenMs = GetTickCount64();
     ++probe.Samples;
     probe.Sum += gap;
     probe.Min = (std::min)(probe.Min, gap);
@@ -221,12 +223,15 @@ void ProbeDrawnGap(const char* apSide, TESObjectREFR* apReference, const glm::ve
             "(min {:.1f} max {:.1f}), {} frames, sit state {}", apSide, apReference->formID, probe.ActorId, probe.Sum / probe.Samples, probe.Min,
             probe.Max, probe.BoneSamples ? probe.BoneSum / probe.BoneSamples : 0.f, probe.BoneMin, probe.BoneMax, probe.Samples, probe.SitState);
         probe = DrawnGapProbe{};
+        probe.LastSeenMs = GetTickCount64();
         probe.NextLog = now + std::chrono::seconds(5);
     }
 }
 
 void ProbeHostRender() noexcept
 {
+    if (!ObjectService::IsRenderDiagnosticsArmed())
+        return;
     const auto now = std::chrono::steady_clock::now();
     for (auto& [formId, probe] : s_hostRenderProbes)
     {
@@ -654,27 +659,6 @@ void MatrixToQuaternion(const float* t, float* q) noexcept
         const float s = std::sqrt(1.f + m22 - m00 - m11) * 2.f;
         q[3] = (m10 - m01) / s; q[0] = (m02 + m20) / s; q[1] = (m12 + m21) / s; q[2] = 0.25f * s;
     }
-}
-
-// bhkRigidBody virtual slot 0x37: SetPositionAndRotation(hkVector4, hkQuaternion). It takes the
-// bhkWorld write lock around hkpRigidBody::setPositionAndRotation (ID 60898); calling the raw
-// Havok function from our update crashed (0x140B4CF03) when a physics step was running.
-bool SetWrappedBodyPose(void* apWrapper, const float* apPosition, const float* apRotation) noexcept
-{
-    void** pVtable = nullptr;
-    void* pMethod = nullptr;
-    if (!ReadNativeMemory(apWrapper, pVtable) || !pVtable || !ReadNativeMemory(pVtable + 0x37, pMethod) || !pMethod)
-        return false;
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(pMethod, &info, sizeof(info)) || info.State != MEM_COMMIT ||
-        ((info.Protect & 0xFF) != PAGE_EXECUTE && (info.Protect & 0xFF) != PAGE_EXECUTE_READ &&
-         (info.Protect & 0xFF) != PAGE_EXECUTE_READWRITE && (info.Protect & 0xFF) != PAGE_EXECUTE_WRITECOPY))
-        return false;
-    alignas(16) float position[4]{apPosition[0], apPosition[1], apPosition[2], 0.f};
-    alignas(16) float rotation[4]{apRotation[0], apRotation[1], apRotation[2], apRotation[3]};
-    using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
-    reinterpret_cast<TSetPositionAndRotation>(pMethod)(apWrapper, position, rotation);
-    return true;
 }
 
 bool GetDynamicBody(TESObjectREFR* apReference, DynamicBody& arBody,
@@ -2234,6 +2218,12 @@ void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
     {
         std::lock_guard lock(m_remotePhysicsLock);
         m_remoteReferencePoses.clear();
+        s_renderDiagnosticsUntilMs.store(0, std::memory_order_relaxed);
+        s_renderActorIds.clear();
+        s_hostRenderProbes.clear();
+        s_hostSampleProbes.clear();
+        s_drawnGapProbes.clear();
+        s_nextRenderActorsMs = 0;
     }
     m_physicsStreamCandidates.clear();
     m_gridDiscoveryCursor = 0;
@@ -2256,6 +2246,50 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
                 mainThread, s_updatesOffMain.load(), thread);
         }
     }
+    const auto diagnosticNow = GetTickCount64();
+    if (m_transport.IsConnected() && m_world.GetPartyService().IsInParty() &&
+        IsRenderDiagnosticsArmed())
+    {
+        if (diagnosticNow >= s_nextRenderActorsMs)
+        {
+            std::vector<uint32_t> actorIds;
+            auto view = m_world.view<FormIdComponent>();
+            for (auto entity : view)
+            {
+                const auto formId = view.get<FormIdComponent>(entity).Id;
+                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                if (pActor && pActor->loadedState && pActor->GetExtension() &&
+                    !pActor->GetExtension()->IsPlayer())
+                    actorIds.push_back(formId);
+            }
+            std::lock_guard lock(m_remotePhysicsLock);
+            s_renderActorIds.swap(actorIds);
+            const auto expired = [diagnosticNow](const auto& entry)
+            {
+                auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(entry.first));
+                return !pReference || !pReference->loadedState ||
+                    (diagnosticNow >= entry.second.LastSeenMs &&
+                        diagnosticNow - entry.second.LastSeenMs > 10000);
+            };
+            std::erase_if(s_hostRenderProbes, expired);
+            std::erase_if(s_drawnGapProbes, expired);
+            std::erase_if(s_hostSampleProbes, [](const auto& entry)
+            {
+                return !s_hostRenderProbes.contains(entry.first);
+            });
+            s_nextRenderActorsMs = diagnosticNow + 1000;
+        }
+    }
+    else if (s_nextRenderActorsMs)
+    {
+        std::lock_guard lock(m_remotePhysicsLock);
+        s_renderActorIds.clear();
+        s_hostRenderProbes.clear();
+        s_hostSampleProbes.clear();
+        s_drawnGapProbes.clear();
+        s_nextRenderActorsMs = 0;
+    }
+
     if (!m_transport.IsConnected() || !m_world.GetPartyService().IsInParty())
     {
         m_applyOnMainFrame.store(false, std::memory_order_relaxed);
@@ -2553,9 +2587,9 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
                 update.ChildBodies.push_back(entry);
             }
         }
-        if (!passive)
+        if (!passive && IsRenderDiagnosticsArmed())
         {
-            s_hostRenderProbes.try_emplace(pReference->formID);
+            s_hostRenderProbes[pReference->formID].LastSeenMs = GetTickCount64();
             auto& probe = s_hostSampleProbes[pReference->formID];
             const glm::vec3 position{update.Position.x, update.Position.y, update.Position.z};
             const float bodySpeed = glm::length(glm::vec3{update.LinearVelocity.x, update.LinearVelocity.y,
@@ -2762,6 +2796,11 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             pose.Rotation.x = update.Rotation.x;
             pose.Rotation.y = update.Rotation.y;
             pose.Rotation.z = update.Rotation.z;
+            // A periodic resend of the same resting pose must not re-arm its log.
+            // Reuse the stream's motion thresholds, including rotation-only motion.
+            if (glm::length(update.LinearVelocity) * kHavokToGameUnits > 2.f ||
+                PhysicsBodyMotionChanged(pose.BodyTransform, {}, update.BodyTransform, {}))
+                pose.LoggedFinalPose = false;
             pose.LinearVelocity = update.LinearVelocity;
             pose.BodyTransform = update.BodyTransform;
             pose.Tick = acMessage.Tick;
@@ -2809,28 +2848,13 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
         if (update.MotionType != 0 || !IsPassivePhysicsReference(pReference))
             continue;
 
-        if constexpr (!kEnablePerFrameReferenceCorrection)
-        {
-            pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
-            pReference->position.x = update.Position.x;
-            pReference->position.y = update.Position.y;
-            pReference->position.z = update.Position.z;
-            pReference->SetRotation(update.Rotation.x, update.Rotation.y, update.Rotation.z);
-            pReference->Update3DPosition(true);
-            continue;
-        }
-
-        auto& pose = m_remoteReferencePoses[formId];
-        if (pose.AuthorityEpoch == acMessage.AuthorityEpoch && acMessage.Tick <= pose.Tick)
-            continue;
-        pose.Position.x = update.Position.x;
-        pose.Position.y = update.Position.y;
-        pose.Position.z = update.Position.z;
-        pose.Rotation.x = update.Rotation.x;
-        pose.Rotation.y = update.Rotation.y;
-        pose.Rotation.z = update.Rotation.z;
-        pose.Tick = acMessage.Tick;
-        pose.AuthorityEpoch = acMessage.AuthorityEpoch;
+        pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
+        pReference->position.x = update.Position.x;
+        pReference->position.y = update.Position.y;
+        pReference->position.z = update.Position.z;
+        pReference->SetRotation(update.Rotation.x, update.Rotation.y, update.Rotation.z);
+        pReference->Update3DPosition(true);
+        continue;
     }
 }
 
@@ -2840,6 +2864,7 @@ void ObjectService::OnMainFrame() noexcept
     auto* pService = s_objectService.load(std::memory_order_acquire);
     if (!pService)
         return;
+    if (IsRenderDiagnosticsArmed())
     {
         std::lock_guard lock(pService->m_remotePhysicsLock);
         ProbeHostRender();
@@ -2890,6 +2915,24 @@ bool ObjectService::AttachRider(Actor* apActor, const NiPoint3& acHostPosition, 
     }
     s_riders.erase(apActor->formID);
     return false;
+}
+
+void ObjectService::ArmRenderDiagnostics() noexcept
+{
+    // Ride tests request a snapshot through coop-start-test before waiting up
+    // to five minutes and reading the cart/sit logs.
+    const auto until = GetTickCount64() + 360000;
+    auto previous = s_renderDiagnosticsUntilMs.load(std::memory_order_relaxed);
+    while (previous < until && !s_renderDiagnosticsUntilMs.compare_exchange_weak(
+        previous, until, std::memory_order_relaxed))
+    {
+    }
+}
+
+bool ObjectService::IsRenderDiagnosticsArmed() noexcept
+{
+    const auto until = s_renderDiagnosticsUntilMs.load(std::memory_order_relaxed);
+    return until && GetTickCount64() < until;
 }
 
 void ObjectService::SetCartPhysicsEnabled(bool aEnabled) noexcept
@@ -3127,7 +3170,11 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         {
                             // There (within a unit): this frame's step finishes it; then leave it at rest.
                             pose.SettledAtFinalPose = true;
-                            spdlog::info("Host-driven body {:X}: at the host's final pose", it->first);
+                            if (!pose.LoggedFinalPose)
+                            {
+                                pose.LoggedFinalPose = true;
+                                spdlog::info("Host-driven body {:X}: at the host's final pose", it->first);
+                            }
                         }
                     }
                     else if (pB->Tick > pA->Tick)
@@ -3702,50 +3749,6 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         std::memory_order_relaxed);
                 ++it;
                 continue;
-            }
-            if constexpr (!kEnableDynamicBodyServo)
-            {
-                ++it;
-                continue;
-            }
-            // Set the native dynamic body's velocity rather than warping its
-            // reference/mesh or changing its motion type. Havok and the cart
-            // script retain their normal integration and constraints.
-            if (now - pose.LastReceived > 350ms)
-            {
-                ++it;
-                continue;
-            }
-            DynamicBody body{};
-            if (!GetDynamicBody(pReference, body))
-            {
-                ++it;
-                continue;
-            }
-            const glm::vec3 current{body.State.linearVelocity[0],
-                body.State.linearVelocity[1], body.State.linearVelocity[2]};
-            const auto positionError = pose.Position - pReference->position;
-            const glm::vec3 error{positionError.x / kHavokToGameUnits,
-                positionError.y / kHavokToGameUnits,
-                positionError.z / kHavokToGameUnits};
-            glm::vec3 correction = error / 0.25f;
-            const float correctionSpeed = glm::length(correction);
-            if (correctionSpeed > 4.f)
-                correction *= 4.f / correctionSpeed;
-            const glm::vec3 target = pose.LinearVelocity + correction;
-            const float elapsed = pose.LastApplied == std::chrono::steady_clock::time_point{}
-                ? 1.f / 60.f
-                : std::clamp(std::chrono::duration<float>(now - pose.LastApplied).count(), 0.f, 0.05f);
-            pose.LastApplied = now;
-            const float alpha = 1.f - std::exp(-elapsed / 0.08f);
-            const glm::vec3 velocity = current + (target - current) * alpha;
-            const glm::vec3 delta = velocity - current;
-            if (glm::dot(delta, delta) > 0.0001f)
-            {
-                TP_THIS_FUNCTION(TSetLinearVelocity, void, void, const float*);
-                POINTER_SKYRIMSE(TSetLinearVelocity, setLinearVelocity, 78089);
-                const float nativeVelocity[4]{velocity.x, velocity.y, velocity.z, 0.f};
-                TiltedPhoques::ThisCall(setLinearVelocity, body.Wrapper, nativeVelocity);
             }
             ++it;
             continue;

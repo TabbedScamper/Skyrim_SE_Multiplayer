@@ -25,6 +25,7 @@
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
+#include <Services/GameTestService.h>
 
 extern thread_local const char* g_animErrorCode;
 
@@ -40,6 +41,7 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
 
     bool captured = false;
     bool visualCaptured = false;
+    const bool captureDiagnostics = GameTestService::IsDiagnosticCaptureArmed();
     // The exact array the engine last copied onto this actor's bones (PoseCopyAuthority hook on
     // ID 63856) rather than hkbCharacter::poseLocal, which a later copy can differ from.
     if (PoseCopyAuthority::GetCapturedPose(apActor->formID, arSnapshot))
@@ -47,6 +49,7 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
         arSnapshot.GraphDescriptor = apActor->GetExtension() ? apActor->GetExtension()->GraphDescriptorHash : 0;
         captured = true;
     }
+    if (!captured || captureDiagnostics)
     {
         BSScopedLock<BSRecursiveLock> graphLock(pManager->lock);
         const auto count = pManager->animationGraphs.size;
@@ -85,7 +88,8 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
                 }
 
                 const auto renderCount = graph.boneNodes.length;
-                if (renderCount > 0 && renderCount <= VisualBoneSnapshot::MaxBones &&
+                if (captureDiagnostics &&
+                    renderCount > 0 && renderCount <= VisualBoneSnapshot::MaxBones &&
                     graph.boneNodes.capacity >= renderCount && graph.boneNodes.data &&
                     graph.rootNode)
                 {
@@ -259,6 +263,8 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
         }
     }
 
+    if (!GameTestService::IsDiagnosticCaptureArmed())
+        animationComponent.LastSentVisualBones = {};
     if (aCapturePose)
     {
         CaptureEvaluatedPose(pActor, update.EvaluatedPose, update.VisualBones);
@@ -277,6 +283,8 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
             animationComponent.LastSentVisualBones = update.VisualBones;
             update.VisualBones = {};
         }
+        else
+            animationComponent.LastSentVisualBones = {};
     }
 
     if (const auto pCell = pActor->parentCell)

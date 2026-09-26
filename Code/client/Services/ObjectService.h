@@ -43,6 +43,8 @@ public:
     static void SetBodyVelocityEnabled(bool aEnabled) noexcept;
     static void SetVisualLagFrameEnabled(bool aEnabled) noexcept;
     static void SetCartPhysicsEnabled(bool aEnabled) noexcept;
+    static void ArmRenderDiagnostics() noexcept;
+    [[nodiscard]] static bool IsRenderDiagnosticsArmed() noexcept;
     // A remote actor at this host position (played-back timeline) that rides a host-driven
     // reference (a cart's driver or passenger) is placed with that reference on the main thread;
     // returns true when the caller must not place it itself. Any thread.
@@ -338,6 +340,7 @@ private:
         // Dynamic follow (see s_cartPhysicsEnabled): this copy's body is simulated, steered to the host.
         bool DynamicFollow{};
         bool SettledAtFinalPose{};
+        bool LoggedFinalPose{};
         // The previous frame's played-back transform: what the node shows (see kVisualLagFrame).
         glm::vec3 PreviousDrawnPosition{};
         glm::vec3 PreviousDrawnRotation{};

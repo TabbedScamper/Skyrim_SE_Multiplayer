@@ -29,6 +29,8 @@ std::atomic<uint64_t> s_totalCalls{};
 std::atomic<uint64_t> s_lastPostCallMs{};
 std::atomic<bool> s_hookRegistered{};
 std::atomic<uintptr_t> s_watchedHolder{};
+std::atomic<uint64_t> s_watchedUntilMs{};
+std::mutex s_watchedMutex;
 std::atomic<uint32_t> s_watchedFormId{};
 std::atomic<uint64_t> s_nextProbeMs{};
 std::atomic<uint32_t> s_poseBoneCount{};
@@ -169,7 +171,16 @@ void ProbeWatchedHolder(IAnimationGraphManagerHolder* apHolder,
     uint64_t aNow) noexcept
 {
     if (s_watchedHolder.load(std::memory_order_relaxed) !=
-        reinterpret_cast<uintptr_t>(apHolder))
+        reinterpret_cast<uintptr_t>(apHolder) ||
+        aNow >= s_watchedUntilMs.load(std::memory_order_relaxed))
+        return;
+    // Serialize watch replacement with a sample, without stalling graph work
+    // behind another diagnostic reader.
+    std::unique_lock watchLock(s_watchedMutex, std::try_to_lock);
+    if (!watchLock.owns_lock() ||
+        s_watchedHolder.load(std::memory_order_relaxed) !=
+            reinterpret_cast<uintptr_t>(apHolder) ||
+        aNow >= s_watchedUntilMs.load(std::memory_order_relaxed))
         return;
     auto next = s_nextProbeMs.load(std::memory_order_relaxed);
     if (aNow < next || !s_nextProbeMs.compare_exchange_strong(next,
@@ -345,12 +356,41 @@ TiltedPhoques::Initializer s_graphUpdateTraceInitializer([]()
 void AnimationGraphUpdateTrace::WatchHolder(
     const IAnimationGraphManagerHolder* apHolder, uint32_t aFormId) noexcept
 {
-    if (!apHolder || !aFormId)
+    std::lock_guard lock(s_watchedMutex);
+    const auto now = GetTickCount64();
+    const auto holder = reinterpret_cast<uintptr_t>(apHolder);
+    if (holder && aFormId &&
+        now < s_watchedUntilMs.load(std::memory_order_relaxed))
+    {
+        // Preserve the first eligible actor within a capture window.
+        if (holder == s_watchedHolder.load(std::memory_order_relaxed) &&
+            aFormId == s_watchedFormId.load(std::memory_order_relaxed))
+            s_watchedUntilMs.store(now + 5000, std::memory_order_relaxed);
         return;
-    uintptr_t expected{};
-    if (s_watchedHolder.compare_exchange_strong(expected,
-        reinterpret_cast<uintptr_t>(apHolder), std::memory_order_relaxed))
+    }
+    s_watchedHolder.store(0, std::memory_order_relaxed);
+    s_watchedUntilMs.store(0, std::memory_order_relaxed);
+    s_watchedFormId.store(0, std::memory_order_relaxed);
+    s_nextProbeMs.store(0, std::memory_order_relaxed);
+    s_poseBoneCount.store(0, std::memory_order_relaxed);
+    s_renderBoneCount.store(0, std::memory_order_relaxed);
+    s_validRenderNodeCount.store(0, std::memory_order_relaxed);
+    s_probeThreadId.store(0, std::memory_order_relaxed);
+    s_probeLastMs.store(0, std::memory_order_relaxed);
+    s_poseChecksum.store(0, std::memory_order_relaxed);
+    s_renderChecksum.store(0, std::memory_order_relaxed);
+    s_renderWorldChecksum.store(0, std::memory_order_relaxed);
+    s_probeSamples.store(0, std::memory_order_relaxed);
+    s_poseChanges.store(0, std::memory_order_relaxed);
+    s_renderChanges.store(0, std::memory_order_relaxed);
+    s_renderWorldChanges.store(0, std::memory_order_relaxed);
+    s_probeDurationUs.store(0, std::memory_order_relaxed);
+    if (holder && aFormId)
+    {
         s_watchedFormId.store(aFormId, std::memory_order_relaxed);
+        s_watchedUntilMs.store(now + 5000, std::memory_order_relaxed);
+        s_watchedHolder.store(holder, std::memory_order_relaxed);
+    }
 }
 
 void AnimationGraphUpdateTrace::WatchPlayerCameraObject(
@@ -414,6 +454,7 @@ AnimationGraphUpdateTrace::GetPlayerCameraObjectTrace() noexcept
 AnimationGraphUpdateTrace::WatchedPoseSample
 AnimationGraphUpdateTrace::GetWatchedPoseSample() noexcept
 {
+    std::lock_guard lock(s_watchedMutex);
     return {s_watchedFormId.load(std::memory_order_relaxed),
         s_poseBoneCount.load(std::memory_order_relaxed),
         s_renderBoneCount.load(std::memory_order_relaxed),
