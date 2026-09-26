@@ -21,6 +21,7 @@ class QuestService;
 struct QuestItemService;
 struct DoorVoteService;
 struct BusyLockService;
+struct SharedDropService;
 struct SceneTurnsService;
 struct HeadTrackService;
 struct DialogueListenService;
@@ -53,6 +54,7 @@ struct World : entt::registry
     QuestService& GetQuestService() noexcept;
     DoorVoteService& GetDoorVoteService() noexcept;
     BusyLockService& GetBusyLockService() noexcept;
+    SharedDropService& GetSharedDropService() noexcept;
     SceneTurnsService& GetSceneTurnsService() noexcept;
     HeadTrackService& GetHeadTrackService() noexcept;
     DialogueListenService& GetDialogueListenService() noexcept;

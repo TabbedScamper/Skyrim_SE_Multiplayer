@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/ActorValueService.h>
+#include <Services/CorpseRagdollService.h>
 #include <World.h>
 #include <Forms/ActorValueInfo.h>
 #include <Games/References.h>
@@ -127,8 +128,19 @@ void ActorValueService::OnUpdate(const UpdateEvent& acEvent) noexcept
                 ++it;
                 continue;
             }
-            if (auto* pActor = Cast<Actor>(TESForm::GetById(it->FormId)); pActor && !pActor->IsDead())
+            auto* pActor = Cast<Actor>(TESForm::GetById(it->FormId));
+            if (pActor && pActor->GetExtension()->IsRemote() && !pActor->IsDead())
+            {
+                // The stream owns the death transition, including presentation and
+                // binding retries. A timeout must not start another local fall.
+                if (CorpseRagdollService::IsFollowingOwner(it->FormId))
+                {
+                    it->DueMs = now + 5000;
+                    ++it;
+                    continue;
+                }
                 pActor->Kill();
+            }
             it = s_pendingDeaths.erase(it);
         }
     }
@@ -344,8 +356,8 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
             if (pExtension->IsRemote())
             {
                 // The owner's ragdoll stream kills this copy when its ragdoll starts (CorpseRagdollService); this
-            // is the fallback for a death without one.
-            const uint64_t delay = 5000;
+                // is the fallback for a death without one.
+                const uint64_t delay = 5000;
                 QueueDeath(pActor->formID, GetTickCount64() + delay);
             }
             else

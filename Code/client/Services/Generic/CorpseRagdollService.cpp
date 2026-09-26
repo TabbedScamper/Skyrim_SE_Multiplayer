@@ -581,6 +581,7 @@ void CorpseRagdollService::ResetOnMainFrame() noexcept
     ApplyRemote(NowMs(), true);
     m_owned.clear();
     m_remote.clear();
+    m_ended.clear();
     m_dismembers.clear();
     m_sentDismembers.clear();
     PoseCopyAuthority::ClearRagdollAuthority();
@@ -709,22 +710,19 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
     if (!acMessage.IsValid() || acMessage.Limb > 1)
         return;
     std::lock_guard lock(m_remoteLock);
-    if (acMessage.Limb)
-    {
-        NotifyDismember event{};
-        event.ServerId = acMessage.ServerId;
-        event.Limb = acMessage.Limb;
-        event.Tick = acMessage.DismemberTick;
-        OnDismember(event);
-    }
     const auto key = StreamKey(acMessage.ServerId, acMessage.Limb);
+    if (const auto ended = m_ended.find(key); ended != m_ended.end() && acMessage.Tick <= ended->second)
+        return;
     auto& ragdoll = m_remote[key];
     const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
     if (!acMessage.Active)
     {
         if ((!ragdoll.RingCount || acMessage.Tick > ragdoll.Ring[(ragdoll.RingNext + size - 1) % size].Tick) &&
             acMessage.Tick > ragdoll.EndTick)
+        {
             ragdoll.EndTick = acMessage.Tick;
+            m_ended[key] = acMessage.Tick;
+        }
         return;
     }
     if (acMessage.Tick <= ragdoll.EndTick)
@@ -738,19 +736,36 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
         {
             ragdoll.RingCount = 0;
             ragdoll.Knocked = false;
+            ragdoll.OwnerDying = false;
+            ragdoll.RetryTransitionMs = 0;
         }
     }
     ragdoll.EndTick = 0;
     ragdoll.DismemberTick = acMessage.DismemberTick;
+    if (acMessage.Limb)
+    {
+        NotifyDismember event{};
+        event.ServerId = acMessage.ServerId;
+        event.Limb = acMessage.Limb;
+        event.Tick = acMessage.DismemberTick;
+        OnDismember(event);
+    }
     if (!ragdoll.RingCount)
         spdlog::info("Ragdoll server {:X} limb {}: owner's stream received (tick {}, {} bodies)", acMessage.ServerId,
             acMessage.Limb, acMessage.Tick, acMessage.Bodies.size());
     if (!acMessage.Limb)
     {
-        if (auto* actor = Utils::GetByServerId<Actor>(acMessage.ServerId))
+        if (auto* actor = Utils::GetByServerId<Actor>(acMessage.ServerId); actor && actor->GetExtension()->IsRemote())
         {
             std::lock_guard followingLock(s_followingLock);
+            if (ragdoll.LocalFormId && ragdoll.LocalFormId != actor->formID)
+            {
+                s_followingSinceMs.erase(ragdoll.LocalFormId);
+                PoseCopyAuthority::SetRagdollPending(ragdoll.LocalFormId, false);
+                PoseCopyAuthority::SetRagdollSimulating(ragdoll.LocalFormId, false);
+            }
             s_followingSinceMs[actor->formID] = NowMs();
+            ragdoll.LocalFormId = actor->formID;
             PoseCopyAuthority::SetRagdollPending(actor->formID, true);
         }
     }
@@ -859,6 +874,7 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             if (!owned.LastSentMs)
                 spdlog::info("Ragdoll {:X} limb {} (server {:X}): streaming {} bodies", actor->formID, limb, serverId, bodies.size());
             owned.LastSentMs = aNowMs;
+            owned.LastTick = request.Tick;
             owned.SentSettled = request.Settled;
         }
     }
@@ -873,7 +889,7 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
         end.ServerId = static_cast<uint32_t>(it->first >> 32);
         end.Limb = static_cast<uint32_t>(it->first);
         end.DismemberTick = it.value().DismemberTick;
-        end.Tick = PoseCopyAuthority::GetCurrentTick();
+        end.Tick = (std::max)(PoseCopyAuthority::GetCurrentTick(), it.value().LastTick + 1);
         end.Active = false;
         if (m_transport.Send(end))
             it = m_owned.erase(it);
@@ -902,8 +918,10 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 spdlog::warn("Ragdoll server {:X} limb {}: waiting ({})", serverId, limb, reason);
             }
         };
+        const auto entity = Utils::FindEntityByServerId(serverId);
+        const bool locallyOwned = entity && m_world.all_of<LocalComponent>(*entity);
         const bool end = aRelease || (ragdoll.EndTick && presentation >= ragdoll.EndTick) ||
-            (actor && !actor->GetExtension()->IsRemote()) || !m_transport.IsConnected();
+            locallyOwned || !m_transport.IsConnected();
         if (end)
         {
             if (ragdoll.Binding)
@@ -933,11 +951,13 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         ++it;
         if (!ragdoll.RingCount)
             continue;
-        if (!actor || !actor->GetNiNode())
+        if (!actor || !actor->GetExtension()->IsRemote())
         {
+            if (ragdoll.Binding)
+                ragdoll.Binding->Active.store(false, std::memory_order_release);
             if (!limb && ragdoll.LocalFormId)
                 PoseCopyAuthority::SetRagdollSimulating(ragdoll.LocalFormId, false);
-            skip(!actor ? "no actor for server id" : "no 3D");
+            skip(!actor ? "no actor for server id" : "waiting for remote authority binding");
             continue;
         }
         if (!limb)
@@ -957,6 +977,20 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             PoseCopyAuthority::SetRagdollPending(actor->formID, true);
             PoseCopyAuthority::SetRagdollSimulating(actor->formID, false);
         }
+        const auto* root = actor->GetNiNode();
+        if (ragdoll.Root != root)
+        {
+            ragdoll.Root = root;
+            ragdoll.Knocked = false;
+            ragdoll.RetryTransitionMs = 0;
+            if (ragdoll.Binding)
+                ragdoll.Binding->Active.store(false, std::memory_order_release);
+        }
+        if (!root)
+        {
+            skip("no 3D");
+            continue;
+        }
         const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
         const auto sample = [&](uint32_t i) -> const Sample& { return ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i) % size]; };
         const auto& newest = sample(ragdoll.RingCount - 1);
@@ -968,7 +1002,8 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         bool ownerDyingNow = false;
         for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
             ownerDyingNow |= sample(i).Dying && sample(i).Tick <= presentation;
-        if (!limb && (!ragdoll.Knocked || (ownerDyingNow && !ragdoll.OwnerDying)))
+        if (!limb && aNowMs >= ragdoll.RetryTransitionMs &&
+            (!ragdoll.Knocked || (ownerDyingNow && !actor->IsDead())))
         {
             if (!actor->currentProcess)
             {
@@ -976,11 +1011,12 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 continue;
             }
             ragdoll.OwnerDying = ownerDyingNow;
-            if (ragdoll.OwnerDying)
+            if (ragdoll.OwnerDying && !actor->IsDead())
                 actor->KillIntoRagdoll();
             else if (!PhysicsOwnsSkeleton(actor))
                 actor->currentProcess->KnockExplosion(actor, &actor->position, 0.f);
             ragdoll.Knocked = true;
+            ragdoll.RetryTransitionMs = aNowMs + 250;
         }
         Vector<RigidBody*> bodies;
         void* driver{};
@@ -1015,7 +1051,8 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             skip("physics world unavailable for keyframe binding");
             continue;
         }
-        bool reset = ragdoll.BodyIds.size() != bodies.size() || ragdoll.PhysicsWorld != bodies.front()->world;
+        bool reset = ragdoll.BodyIds.size() != bodies.size() || ragdoll.PhysicsWorld != bodies.front()->world ||
+            (ragdoll.Binding && (!ragdoll.Binding->Active.load(std::memory_order_acquire) || ragdoll.Binding->Driver != driver));
         for (size_t i = 0; !reset && i < bodies.size(); ++i)
             reset = ragdoll.BodyIds[i] != bodies[i]->uid || ragdoll.BodyPointers[i] != bodies[i];
         if (reset)
@@ -1054,6 +1091,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 binding.Bodies.push_back(body);
                 binding.Ids.push_back(body->uid);
             }
+            spdlog::info("Ragdoll {:X} limb {} (server {:X}): bound {} bodies for owner placement", actor->formID, limb, serverId, bodies.size());
         }
         StepFrame::Stream stream;
         stream.Binding = ragdoll.Binding;

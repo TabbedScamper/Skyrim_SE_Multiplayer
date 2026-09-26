@@ -64,6 +64,9 @@ TEST_CASE("Player camera look survives movement encoding", "[encoding.movement]"
         received.LookDirection ^= 1u;
         REQUIRE(received != sent);
         received = sent;
+        received.LookDirection ^= 1u << 16;
+        REQUIRE(received != sent); // pitch alone must trigger a movement update
+        received = sent;
         received.HasLookDirection = false;
         REQUIRE(received != sent);
     }
@@ -77,7 +80,10 @@ TEST_CASE("Both movement message formats preserve independent player look direct
     {
         auto& movement = sent.Updates[player].UpdatedMovement;
         movement.HasLookDirection = player != 3; // native dialogue/disabled look
-        movement.LookDirection = movement.HasLookDirection ? player * 0x12345678u : 0u;
+        // Five independent pitches, including straight up/down, at the same
+        // yaw. Player 3 yields to native targeting instead of sending a look.
+        const uint32_t pitch = (player - 1) * 65535u / 4u;
+        movement.LookDirection = movement.HasLookDirection ? (pitch << 16) | 0x4000u : 0u;
     }
     sent.Updates[42].UpdatedMovement.Direction = 0.25f; // NPC without camera look
     Buffer clientBuffer(8192);

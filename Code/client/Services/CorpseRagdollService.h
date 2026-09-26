@@ -49,6 +49,7 @@ private:
     {
         uint64_t SettledSinceMs{};
         uint64_t LastSentMs{};
+        uint64_t LastTick{};
         bool SentSettled{};
         uint64_t DismemberTick{};
     };
@@ -74,6 +75,8 @@ private:
         const char* LastSkipReason{};
         uint64_t DismemberTick{};
         uint64_t EndTick{};
+        uint64_t RetryTransitionMs{};
+        const void* Root{};
         uint32_t LocalFormId{};
         Vector<uint32_t> BodyIds;
         Vector<const void*> BodyPointers;
@@ -104,6 +107,7 @@ private:
     uint64_t m_nextTickMs{};
     Map<uint64_t, OwnedRagdoll> m_owned;
     Map<uint64_t, RemoteRagdoll> m_remote;
+    Map<uint64_t, uint64_t> m_ended; // terminal tick survives binding/actor removal
     Map<uint32_t, Dismember> m_dismembers;
     Map<uint32_t, uint64_t> m_sentDismembers;
     std::recursive_mutex m_remoteLock;

@@ -1,5 +1,6 @@
 #include <Services/InventoryService.h>
 #include <Services/Generic/QuestItemService.h>
+#include <Services/Generic/SharedDropService.h>
 
 #include <Messages/RequestObjectInventoryChanges.h>
 #include <Messages/NotifyObjectInventoryChanges.h>
@@ -154,6 +155,11 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
     if (!m_transport.IsConnected())
         return;
 
+    // The post-drop native container event carries the actual world reference
+    // and count. SharedDropService reports that removal atomically with creation.
+    if (acEvent.Drop && acEvent.FormId == 0x14 && m_world.GetSharedDropService().TracksPlayerDrops())
+        return;
+
     auto view = m_world.view<FormIdComponent>();
 
     const auto iter = std::find_if(std::begin(view), std::end(view), [view, formId = acEvent.FormId](auto entity) { return view.get<FormIdComponent>(entity).Id == formId; });
@@ -294,10 +300,9 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
 
         ScopedInventoryOverride _;
 
-        if (acMessage.Drop)
-            pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
-        else
-            pActor->AddOrRemoveItem(acMessage.Item);
+        // Old Drop notifications are inventory removals only. World copies are
+        // created exclusively from a server-identified shared drop.
+        pActor->AddOrRemoveItem(acMessage.Item);
 
         return;
     }

@@ -23,6 +23,7 @@
 #include <Services/DoorVoteService.h>
 #include <Services/DialogueListenService.h>
 #include <Services/BusyLockService.h>
+#include <Services/SharedDropService.h>
 #include <Services/ReviveService.h>
 
 #include <CampaignLedger.h>
@@ -59,6 +60,7 @@ World::World()
     ctx().emplace<DoorVoteService>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher);
     ctx().emplace<BusyLockService>(*this, m_dispatcher);
+    ctx().emplace<SharedDropService>(*this, m_dispatcher);
     ctx().emplace<ReviveService>(*this, m_dispatcher);
     ctx().emplace<CameraService>(*this, m_dispatcher);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher);

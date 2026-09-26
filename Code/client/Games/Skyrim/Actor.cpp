@@ -1166,7 +1166,7 @@ static TDamageActor* RealDamageActor = nullptr;
 // scene or quest script, a local projectile) killed and ragdolled its copy on its own: the intro
 // prisoner was 70 units from the owner's ragdoll when the owner's stream arrived and snapped
 // across. The owner decides the death; this PC shows it through the death sync and the owner's
-// ragdoll stream. Our own death sync (Actor::Kill) and a kill by this PC's player still go through.
+// ragdoll stream. Only our authoritative death sync (Actor::Kill) goes through.
 TP_THIS_FUNCTION(TKillImpl, void, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant);
 static TKillImpl* RealKillImpl = nullptr;
 std::atomic<uint64_t> s_blockedRemoteKills{0};
@@ -1206,8 +1206,7 @@ void HookCreateHead(Actor* apActor, bool aArg)
 void TP_MAKE_THISCALL(HookKillImpl, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant)
 {
     const auto* pExtension = apThis ? apThis->GetExtension() : nullptr;
-    const bool attackerIsLocalPlayer = apAttacker && apAttacker->GetExtension() && apAttacker->GetExtension()->IsLocalPlayer();
-    if (!t_syncKill && pExtension && pExtension->IsRemote() && !pExtension->IsPlayer() && !attackerIsLocalPlayer)
+    if (!t_syncKill && pExtension && pExtension->IsRemote() && !pExtension->IsPlayer())
     {
         if (s_blockedRemoteKills.fetch_add(1, std::memory_order_relaxed) < 32)
             spdlog::info("Kept {:X} alive here: its owner decides the death (attacker {:X})", apThis->formID,

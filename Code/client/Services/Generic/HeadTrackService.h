@@ -15,6 +15,7 @@ struct HeadTrackService
     HeadTrackService(World& aWorld, entt::dispatcher& aDispatcher) noexcept;
 
     static void FillLocalMovement(Movement& aMovement) noexcept;
+    static bool IsCameraTracking(const Actor* apActor) noexcept;
     // Called on the movement presentation timeline, including stationary players.
     void UpdateRemote(Actor* apActor, uint64_t aTick) noexcept;
 

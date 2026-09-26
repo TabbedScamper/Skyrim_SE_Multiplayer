@@ -6,6 +6,8 @@
 #include <World.h>
 
 #include <atomic>
+#include <array>
+#include <optional>
 #include <vector>
 
 #include <Events/CharacterSpawnedEvent.h>
@@ -69,6 +71,49 @@ struct LeaderParkedActor
     uint32_t PartyId{};
     std::vector<uint32_t> Recipients;
 };
+
+// World-owned state: entity destruction/session teardown cannot leave stale locks.
+// Settled streams remain active; either limb pins the same actor's authority.
+struct RagdollRelayState
+{
+    std::array<uint64_t, 2> Ticks{};
+    std::array<uint64_t, 2> DismemberTicks{};
+    std::array<bool, 2> Active{};
+    std::optional<RequestOwnershipTransfer> PendingRelease;
+
+    bool IsActive() const noexcept { return Active[0] || Active[1]; }
+};
+
+bool HasActiveRagdoll(World& aWorld, entt::entity aEntity)
+{
+    const auto* state = aWorld.try_get<RagdollRelayState>(aEntity);
+    return state && state->IsActive();
+}
+
+// A disconnected owner cannot send its own end. End every limb reliably BEFORE
+// granting authority elsewhere, including to recipients now outside cell interest.
+void EndRagdollStreams(World& aWorld, entt::entity aEntity)
+{
+    auto* state = aWorld.try_get<RagdollRelayState>(aEntity);
+    if (!state)
+        return;
+    for (uint32_t limb = 0; limb < state->Active.size(); ++limb)
+    {
+        if (!state->Active[limb])
+            continue;
+        NotifyCorpseRagdoll end{};
+        end.ServerId = World::ToInteger(aEntity);
+        end.Limb = limb;
+        end.DismemberTick = state->DismemberTicks[limb];
+        end.Tick = (std::max)(GameServer::Get()->GetTick(), state->Ticks[limb] + 1);
+        end.Active = false;
+        GameServer::Get()->SendToPlayers(end);
+        state->Ticks[limb] = end.Tick;
+        state->Active[limb] = false;
+        spdlog::info("Ragdoll server {:X} limb {}: ended before owner removal at tick {}", end.ServerId, limb, end.Tick);
+    }
+    state->PendingRelease.reset();
+}
 
 // Dispatcher-owned free handler: no service pointer or connection outlives its World.
 void RelayDismember(const PacketEvent<DismemberRequest>& acMessage)
@@ -621,6 +666,14 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
         return;
     }
 
+    if (auto* state = m_world.try_get<RagdollRelayState>(cEntity); state && state->IsActive())
+    {
+        if (!state->PendingRelease)
+            spdlog::info("Ragdoll server {:X}: deferred ownership release until all limb streams end", message.ServerId);
+        state->PendingRelease = message;
+        return; // Do not teleport or invalidate the owner while it is streaming.
+    }
+
     auto& characterComponent = view.get<CharacterComponent>(*it);
     if (m_world.all_of<LeaderParkedActor>(cEntity))
         return;
@@ -678,6 +731,7 @@ void CharacterService::OnOwnershipTransferEvent(const OwnershipTransferEvent& ac
 
 void CharacterService::OnCharacterRemoveEvent(const CharacterRemoveEvent& acEvent) const noexcept
 {
+    EndRagdollStreams(m_world, static_cast<entt::entity>(acEvent.ServerId));
     ReleaseParkedActor(static_cast<entt::entity>(acEvent.ServerId));
     const auto view = m_world.view<OwnerComponent>();
     const auto it = view.find(static_cast<entt::entity>(acEvent.ServerId));
@@ -757,6 +811,14 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
             return;
     }
 
+    auto& state = m_world.get_or_emplace<RagdollRelayState>(entity);
+    const auto limb = acMessage.Packet.Limb;
+    if (acMessage.Packet.Tick <= state.Ticks[limb])
+        return;
+    state.Ticks[limb] = acMessage.Packet.Tick;
+    state.DismemberTicks[limb] = acMessage.Packet.DismemberTick;
+    state.Active[limb] = acMessage.Packet.Active;
+
     NotifyCorpseRagdoll notify{};
     notify.ServerId = acMessage.Packet.ServerId;
     notify.Tick = acMessage.Packet.Tick;
@@ -767,7 +829,17 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     notify.Dying = acMessage.Packet.Dying;
     std::copy(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin), std::begin(notify.Origin));
     notify.Bodies = bodies;
-    GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
+    if (notify.Active)
+        GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
+    else
+        GameServer::Get()->SendToPlayers(notify, acMessage.pPlayer);
+    if (!state.IsActive() && state.PendingRelease)
+    {
+        auto release = *state.PendingRelease;
+        state.PendingRelease.reset();
+        spdlog::info("Ragdoll server {:X}: all limb streams ended; resuming ownership release", notify.ServerId);
+        OnOwnershipTransferRequest(PacketEvent<RequestOwnershipTransfer>(&release, acMessage.pPlayer));
+    }
 }
 
 void CharacterService::OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequest>& acMessage) const noexcept
@@ -1360,6 +1432,9 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     if (pOldOwner == apPlayer)
         return true;
 
+    if (HasActiveRagdoll(m_world, aEntity))
+        return false;
+
     const uint32_t oldOwnerId = pOldOwner ? pOldOwner->GetId() : 0;
     const uint32_t oldEpoch = ownerComponent.OwnershipEpoch;
     uint32_t newEpoch = oldEpoch + 1;
@@ -1426,6 +1501,10 @@ void CharacterService::TransferToNextOwner(const entt::entity aEntity, const Own
 {
     if (m_world.all_of<LeaderParkedActor>(aEntity))
         return;
+    if (aReason == OwnershipTransferReason::OwnerUnavailable)
+        EndRagdollStreams(m_world, aEntity);
+    else if (HasActiveRagdoll(m_world, aEntity))
+        return; // A refused transfer must not fall through to entity destruction.
     const char* pReasonName = GetOwnershipTransferReasonName(aReason);
     const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
     const auto it = view.find(aEntity);

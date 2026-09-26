@@ -1,15 +1,19 @@
 #include <Services/SmoothClock.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/Generic/HeadTrackService.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 
 #include <World.h>
 #include <Components.h>
 #include <Games/Skyrim/Actor.h>
+#include <Games/ActorExtension.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
+#include <Games/Skyrim/NetImmerse/NiNode.h>
 
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -38,6 +42,7 @@ struct RegistryEntry
     uint32_t FormId{};
     Role Kind{};
     const Actor* pActor{};
+    std::bitset<kMaxBones> CameraLookBones;
 };
 
 // Dying, dead, knocked down or ragdolling (ActorState1 lifeState bits 21-24, knockState 25-27):
@@ -97,6 +102,7 @@ Vector<void*> s_controlledDrivers;
 struct RagdollRenderPose
 {
     void* Driver{};
+    QsTransform WorldFromModel{};
     std::vector<QsTransform> Bones;
 };
 std::unordered_map<const void*, RagdollRenderPose> s_ragdollRenderPoses;
@@ -107,6 +113,32 @@ using TDriveToPose = void(void*, float, void*, void*);
 TDriveToPose* RealDriveToPose{};
 using TReadRagdollPose = void(void*, void*, void*);
 TReadRagdollPose* RealReadRagdollPose{};
+using TSetWorldFromModel = void(void*, const QsTransform*);
+TSetWorldFromModel* RealSetWorldFromModel{};
+
+// PLANCK PostPostPhysicsHook retains BOTH tracks:
+// https://github.com/adamhynek/activeragdoll/blob/master/src/main.cpp
+// 58311 / 140ACA440 maps world bodies into locals relative to TRACK_WORLD_FROM_MODEL.
+// 63563 / 140BCAB40 applies that root with 63569 / 140BCB640 before copying bones.
+// 63581 / 140BCC7E0 can subsequently replace the root from local animation. Keeping
+// just the bones then renders the right physics pose in the wrong coordinate frame.
+// Keep the native root notification and its matching bone pose together. Do not
+// write actor positions or use MoveTo (which can replace the corpse's entire 3D).
+void HookSetWorldFromModel(void* apGraph, const QsTransform* apTransform)
+{
+    QsTransform root{};
+    bool controlled = false;
+    {
+        std::lock_guard lock(s_simulatingLock);
+        const auto it = s_ragdollRenderPoses.find(static_cast<uint8_t*>(apGraph) + offsetof(AnimationGraph, boneNodes));
+        if (it != s_ragdollRenderPoses.end())
+        {
+            root = it->second.WorldFromModel;
+            controlled = true;
+        }
+    }
+    RealSetWorldFromModel(apGraph, controlled ? &root : apTransform);
+}
 
 bool ControlledDriver(void* apDriver)
 {
@@ -156,8 +188,10 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
         const auto count = *reinterpret_cast<int16_t*>(tracks + 0x32);
         const auto capacity = *reinterpret_cast<int16_t*>(tracks + 0x30);
         const auto offset = *reinterpret_cast<int16_t*>(tracks + 0x34);
+        const auto rootOffset = *reinterpret_cast<int16_t*>(tracks + 0x14);
         const auto numBytes = *reinterpret_cast<int32_t*>(tracks);
         if (count > 0 && count <= capacity && count <= kMaxBones && offset >= 0 &&
+            rootOffset >= 0 && rootOffset + sizeof(QsTransform) <= static_cast<size_t>((std::max)(numBytes, 0)) &&
             offset + count * sizeof(QsTransform) <= static_cast<size_t>((std::max)(numBytes, 0)))
         {
             const auto* pose = reinterpret_cast<const QsTransform*>(tracks + offset);
@@ -165,11 +199,12 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
             auto& rendered = s_ragdollRenderPoses[character + 0xA0]; // graph +160 boneNodes
             if (rendered.Driver != apDriver)
             {
-                spdlog::info("Ragdoll driver {}: current-transform physics readback, {} rendered bones (async was {})",
+                spdlog::info("Ragdoll driver {}: current-transform physics readback, {} rendered bones paired with world-from-model (async was {})",
                     fmt::ptr(apDriver), count, asynchronous);
                 rendered.Bones.clear();
             }
             rendered.Driver = apDriver;
+            std::memcpy(&rendered.WorldFromModel, tracks + rootOffset, sizeof(QsTransform));
             // Like the native node copy, a short LOD pass leaves other bones alone.
             if (rendered.Bones.size() < static_cast<size_t>(count))
                 rendered.Bones.resize(count);
@@ -261,13 +296,32 @@ void FillUndriven(const ActorPose& acPose, const QsTransform* apLocal, const uin
 
 void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uint32_t aCount)
 {
-    if (!s_enabled.load(std::memory_order_relaxed) || !apPose || !apBoneNodes)
+    if (!apPose || !apBoneNodes)
         return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
 
     // The native clamps a negative or oversized count to the bone array length (+0x10).
     const auto length = *reinterpret_cast<const int32_t*>(static_cast<const uint8_t*>(apBoneNodes) + 0x10);
     const uint32_t count = (static_cast<int32_t>(aCount) < 0 || static_cast<int32_t>(aCount) > length) ? static_cast<uint32_t>((std::max)(length, 0)) : aCount;
     if (count == 0 || count > kMaxBones)
+        return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
+
+    // Physics bindings, unlike the animation registry, are refreshed every frame.
+    // A newly spawned/reloaded corpse must not wait for a registry refresh, and
+    // ApplyRemote's temporary simulating=false must not let animation overwrite it.
+    bool physicsPose = false;
+    {
+        std::lock_guard lock(s_simulatingLock);
+        const auto rendered = s_ragdollRenderPoses.find(apBoneNodes);
+        if (rendered != s_ragdollRenderPoses.end() && !rendered->second.Bones.empty())
+        {
+            std::copy_n(apPose, count, t_override.begin());
+            std::copy_n(rendered->second.Bones.begin(), (std::min)(static_cast<size_t>(count), rendered->second.Bones.size()), t_override.begin());
+            physicsPose = true;
+        }
+    }
+    if (physicsPose)
+        return RealCopyPoseToNodes(t_override.data(), apBoneNodes, aCount);
+    if (!s_enabled.load(std::memory_order_relaxed))
         return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
 
     bool useOverride = false;
@@ -282,15 +336,7 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
         // CorpseRagdollService drives those bodies.
         // Only once this copy's ragdoll is simulating: during a death animation the owner's pose
         // (its death animation) still drives it, so both PCs show the same death.
-        if (it->second.Kind == Role::Apply && it->second.pActor &&
-            RagdollSimulating(it->second.pActor->formID))
-        {
-            std::lock_guard lock(s_simulatingLock);
-            const auto rendered = s_ragdollRenderPoses.find(apBoneNodes);
-            if (rendered != s_ragdollRenderPoses.end() && rendered->second.Bones.size() >= count)
-                return RealCopyPoseToNodes(rendered->second.Bones.data(), apBoneNodes, aCount);
-            // Until physics readback exists, retain the streamed owner skeleton below.
-        }
+        // Until physics readback exists, retain the streamed owner skeleton below.
         auto& pose = s_poses[it->second.FormId];
         const bool living = it->second.pActor && !PhysicsOwnsSkeleton(it->second.pActor);
         if (it->second.Kind == Role::Capture)
@@ -409,6 +455,16 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 else
                     useOverride = false;
             }
+            if (useOverride && livingFallback && it->second.CameraLookBones.any() &&
+                HeadTrackService::IsCameraTracking(it->second.pActor))
+            {
+                // The receiving graph evaluated its own camera target. An
+                // owner pose (especially first-person/older samples) must not
+                // replace that head/neck result. All other bones stay owned.
+                for (uint32_t i = 0; i < count; ++i)
+                    if (it->second.CameraLookBones.test(i))
+                        t_override[i] = apPose[i];
+            }
             (useOverride ? s_applied : s_fallback).fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -469,7 +525,36 @@ void RefreshRegistry(World& aWorld) noexcept
             {
                 auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(index));
                 if (pGraph)
+                {
                     registry[pGraph + offsetof(AnimationGraph, boneNodes)] = {aKeyFormId ? aKeyFormId : aFormId, aKind, pActor};
+                    auto& entry = registry[pGraph + offsetof(AnimationGraph, boneNodes)];
+                    if (aKind == Role::Apply && pActor->GetExtension()->IsRemotePlayer())
+                    {
+                        static BSFixedString s_head("NPC Head [Head]");
+                        static BSFixedString s_neck("NPC Neck [Neck]");
+                        auto* pHead = pActor->GetNiNode()->GetByName(s_head);
+                        auto* pNeck = pActor->GetNiNode()->GetByName(s_neck);
+                        const auto& nodes = reinterpret_cast<const AnimationGraph*>(pGraph)->boneNodes;
+                        // ID 63856 / 140BDFA20 uses either a direct node, or
+                        // a BSFlattenedBoneTree entry (+130, stride 80, node +70).
+                        // Match node identity, never assume skeleton bone indices.
+                        for (uint32_t i = 0; nodes.data && i < nodes.length && i < kMaxBones; ++i)
+                        {
+                            const auto& bone = nodes.data[i];
+                            const void* pNode = bone.node;
+                            const auto index = static_cast<int32_t>(bone.unk08);
+                            if (pNode && index >= 0)
+                            {
+                                const auto* pEntries = *reinterpret_cast<const uint8_t* const*>(
+                                    static_cast<const uint8_t*>(pNode) + 0x130);
+                                pNode = pEntries ? *reinterpret_cast<void* const*>(pEntries +
+                                    static_cast<size_t>(index) * 0x80 + 0x70) : nullptr;
+                            }
+                            if (pNode && (pNode == pHead || pNode == pNeck))
+                                entry.CameraLookBones.set(i);
+                        }
+                    }
+                }
             }
         }
         pManager->Release();
@@ -692,4 +777,7 @@ static TiltedPhoques::Initializer s_poseCopyAuthorityHooks(
         POINTER_SKYRIMSE(TReadRagdollPose, readRagdollPose, 58293);
         RealReadRagdollPose = readRagdollPose.Get();
         TP_HOOK(&RealReadRagdollPose, HookReadRagdollPose);
+        POINTER_SKYRIMSE(TSetWorldFromModel, setWorldFromModel, 63569);
+        RealSetWorldFromModel = setWorldFromModel.Get();
+        TP_HOOK(&RealSetWorldFromModel, HookSetWorldFromModel);
     });

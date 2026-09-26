@@ -7,6 +7,7 @@
 #include <Services/PapyrusService.h>
 #include <Services/DoorVoteService.h>
 #include <Services/Generic/BusyLockService.h>
+#include <Services/Generic/SharedDropService.h>
 #include <Events/ActivateEvent.h>
 #include <Events/InventoryChangeEvent.h>
 #include <Events/ScriptAnimationEvent.h>
@@ -1030,6 +1031,9 @@ bool TP_MAKE_THISCALL(HookPlayAnimation, void, uint32_t auiStackID, TESObjectREF
 
 bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, uint8_t aUnk1, TESBoundObject* apObjectToGet, int32_t aCount, char aDefaultProcessing)
 {
+    if (World::Get().GetSharedDropService().TryHold(apThis, apActivator))
+        return true;
+
     if (World::Get().GetDoorVoteService().TryHold(apThis, apActivator, aUnk1, apObjectToGet, aCount, aDefaultProcessing, _ReturnAddress()))
         return true;
 

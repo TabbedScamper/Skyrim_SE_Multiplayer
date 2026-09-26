@@ -33,6 +33,7 @@
 #include <Services/CorpseRagdollService.h>
 #include <Services/DoorVoteService.h>
 #include <Services/Generic/BusyLockService.h>
+#include <Services/Generic/SharedDropService.h>
 #include <Services/TriggerGate.h>
 #include <Services/Generic/HeadTrackService.h>
 #include <Services/Generic/DialogueListenService.h>
@@ -169,6 +170,7 @@ World::World()
     ctx().emplace<DialogueListenService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher, m_transport);
     ctx().emplace<BusyLockService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<SharedDropService>(*this, m_dispatcher, m_transport);
     ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
     ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
@@ -275,6 +277,11 @@ DoorVoteService& World::GetDoorVoteService() noexcept
 BusyLockService& World::GetBusyLockService() noexcept
 {
     return ctx().at<BusyLockService>();
+}
+
+SharedDropService& World::GetSharedDropService() noexcept
+{
+    return ctx().at<SharedDropService>();
 }
 
 SceneTurnsService& World::GetSceneTurnsService() noexcept

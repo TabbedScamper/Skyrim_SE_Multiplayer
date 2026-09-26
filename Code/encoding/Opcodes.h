@@ -75,6 +75,7 @@ enum ClientOpcode : unsigned char
     kRequestPlayerCombatState,
     kBusyLockRequest,
     kRequestDialogueListen,
+    kRequestSharedDrop,
     kClientOpcodeMax
 };
 
@@ -152,5 +153,6 @@ enum ServerOpcode : unsigned char
     kNotifyPlayerCombatState,
     kNotifyBusyLock,
     kNotifyDialogueListen,
+    kNotifySharedDrop,
     kServerOpcodeMax
 };

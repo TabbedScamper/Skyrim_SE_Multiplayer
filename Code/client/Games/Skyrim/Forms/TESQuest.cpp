@@ -42,6 +42,10 @@ bool TP_MAKE_THISCALL(HookNativeSetStage, TESQuest, uint16_t aStage)
     if (party.IsInParty() && !party.IsLeader() && party.GetStartEpoch() != 0 &&
         party.GetSessionState() >= 1 && !ScopedQuestOverride::IsOverriden() &&
         !QuestService::IsNonSyncableQuest(apThis) && apThis->currentStage != aStage &&
+        // Not a stage that already ran here from the leader's update: this PC's own copy of a scene
+        // catching up late re-ran the execution's stage 145 after 160 and left the follower unable to
+        // move (160's unrestrain had already run and was not repeated).
+        !apThis->IsStageDone(aStage) &&
         QuestService::HostReachedStage(apThis->formID, aStage, party.GetStartEpoch()))
     {
         spdlog::info("Allowed follower quest stage form={:X} from={} to={}: the leader already reached it",

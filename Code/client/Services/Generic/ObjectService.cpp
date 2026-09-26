@@ -2,6 +2,7 @@
 #include <Games/ActorExtension.h>
 #include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/Generic/SharedDropService.h>
 
 #include <World.h>
 #include <Events/DisconnectedEvent.h>
@@ -39,6 +40,10 @@
 
 namespace
 {
+// Only locally admitted SharedDrop packets may enter the reserved identity
+// namespace. The legacy leader physics relay cannot authorize drop movement.
+thread_local uint32_t s_sharedDropGeneration{};
+std::unordered_map<uint32_t, uint32_t> s_sharedDropPoseGenerations;
 std::atomic<uint64_t> s_renderDiagnosticsUntilMs{};
 // Published only by OnUpdate while holding m_remotePhysicsLock. Frame probes
 // resolve these IDs instead of iterating the update thread's ECS storage.
@@ -2221,6 +2226,7 @@ void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
     {
         std::lock_guard lock(m_remotePhysicsLock);
         m_remoteReferencePoses.clear();
+        s_sharedDropPoseGenerations.clear();
         s_renderDiagnosticsUntilMs.store(0, std::memory_order_relaxed);
         s_renderActorIds.clear();
         s_hostRenderProbes.clear();
@@ -2376,7 +2382,17 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         }
     }
 
-    if (m_world.GetPartyService().IsLeader())
+    for (const auto& drop : m_world.GetSharedDropService().TakePhysics())
+    {
+        NotifyPhysicsReferencesMove message;
+        message.AuthorityEpoch = drop.Epoch;
+        message.Tick = drop.Tick;
+        message.Updates.push_back(drop.Physics);
+        s_sharedDropGeneration = drop.Generation;
+        OnPhysicsReferencesMove(message);
+        s_sharedDropGeneration = 0;
+    }
+    if (m_world.GetPartyService().IsLeader() && !m_world.GetSharedDropService().HasRemoteReferences())
     {
         // Promoted to leader: no host-driven bodies here any more; the native step must not keep
         // steering the last published ones.
@@ -2390,9 +2406,12 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         m_captureOnMainFrame.store(false, std::memory_order_relaxed);
         if (!mainFrame)
             ApplyRemotePhysics();
+        // A follower still owns the physics of its own dropped items.
+        CaptureHostPhysics(true);
         return;
     }
-    m_applyOnMainFrame.store(false, std::memory_order_relaxed);
+    // The leader can be the follower of a drop owned by another party member.
+    m_applyOnMainFrame.store(m_world.GetSharedDropService().HasRemoteReferences(), std::memory_order_relaxed);
 
     if (s_mainFrameCaptureEnabled.load(std::memory_order_relaxed))
     {
@@ -2452,6 +2471,12 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
             Cast<Actor>(pReference))
             return;
 
+        auto& sharedDrops = m_world.GetSharedDropService();
+        const bool shared = sharedDrops.IsShared(pReference->formID);
+        if (shared ? !sharedDrops.IsOwner(pReference->formID) :
+            (!m_world.GetPartyService().IsLeader() || pReference->IsTemporary()))
+            return;
+
         if (observed.contains(pReference->formID))
             return;
 
@@ -2462,7 +2487,7 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
         if (glm::dot(deltaFromPlayer, deltaFromPlayer) > 30000.f * 30000.f)
             return;
 
-        const bool passive = IsPassivePhysicsReference(pReference);
+        const bool passive = !shared && IsPassivePhysicsReference(pReference);
         DynamicBody body{};
         if (!passive && !GetDynamicBody(pReference, body, true))
             return;
@@ -2545,7 +2570,9 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
             return;
 
         PhysicsReferenceUpdate update{};
-        if (!m_world.GetModSystem().GetServerModId(pReference->formID, update.Id))
+        if (shared)
+            update.Id = sharedDrops.PhysicsId(pReference->formID);
+        else if (!m_world.GetModSystem().GetServerModId(pReference->formID, update.Id))
             return;
         update.Position = {previous.Position.x, previous.Position.y, previous.Position.z};
         update.Rotation = {previous.Rotation.x, previous.Rotation.y, previous.Rotation.z};
@@ -2558,6 +2585,9 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
                 body.State.linearVelocity[1], body.State.linearVelocity[2]};
             std::copy(std::begin(body.State.transform),
                 std::end(body.State.transform), update.BodyTransform.begin());
+            if (shared)
+                update.Position = {body.State.transform[12] * kHavokToGameUnits,
+                    body.State.transform[13] * kHavokToGameUnits, body.State.transform[14] * kHavokToGameUnits};
             std::vector<ChildBody> children;
             CollectChildBodies(pReference, children);
             // Each child node local transform: on the owner its dynamic body turns the node (the
@@ -2630,7 +2660,10 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
                 probe.NextLog = now + std::chrono::seconds(5);
             }
         }
-        request.Updates.push_back(update);
+        if (shared)
+            sharedDrops.SendPhysics(pReference->formID, update, request.Tick);
+        else
+            request.Updates.push_back(update);
         s_physicsHostUpdatesQueued.fetch_add(1, std::memory_order_relaxed);
         if (!passive && bodyMoved && !referenceMoved)
             s_physicsHostBodyOnlyUpdates.fetch_add(1,
@@ -2646,6 +2679,19 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
             previous.LastSentBodyVelocity = update.LinearVelocity;
         }
     };
+
+    // Known drop identities need no cell scan and must send their first falling
+    // sample immediately, even when the regular discovery sweep is not due.
+    for (const auto formId : m_world.GetSharedDropService().OwnedReferences())
+        processReference(Cast<TESObjectREFR>(TESForm::GetById(formId)));
+    if (!m_world.GetPartyService().IsLeader())
+    {
+        std::erase_if(m_referencePoses, [&](const auto& entry) { return !m_world.GetSharedDropService().IsOwner(entry.first); });
+        for (auto it = m_physicsStreamCandidates.begin(); it != m_physicsStreamCandidates.end();)
+            if (!m_world.GetSharedDropService().IsOwner(*it)) it = m_physicsStreamCandidates.erase(it);
+            else ++it;
+        return;
+    }
 
     auto scanCell = [&](TESObjectCELL* pCell)
     {
@@ -2761,7 +2807,7 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
 {
     std::lock_guard lock(m_remotePhysicsLock);
     const auto& party = m_world.GetPartyService();
-    if (!party.IsInParty() || party.IsLeader() ||
+    if (!party.IsInParty() ||
         acMessage.AuthorityEpoch != party.GetStartEpoch())
         return;
     s_physicsFollowerPacketsReceived.fetch_add(1,
@@ -2769,16 +2815,31 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
 
     for (const auto& update : acMessage.Updates)
     {
+        const bool shared = update.Id.ModId == SharedDropData::PhysicsModId;
+        if (shared && !s_sharedDropGeneration)
+            continue;
+        if (!shared && party.IsLeader())
+            continue;
         if (!std::isfinite(update.Position.x) || !std::isfinite(update.Position.y) ||
             !std::isfinite(update.Position.z) || !std::isfinite(update.Rotation.x) ||
             !std::isfinite(update.Rotation.y) || !std::isfinite(update.Rotation.z))
             continue;
-        const uint32_t formId = m_world.GetModSystem().GetGameId(update.Id);
+        const uint32_t formId = shared ? m_world.GetSharedDropService().ResolvePhysics(update.Id) :
+            m_world.GetModSystem().GetGameId(update.Id);
         auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
         if (!pReference || Cast<Actor>(pReference) || !pReference->loadedState)
             continue;
 
-        if (update.MotionType == 3 && !IsPassivePhysicsReference(pReference))
+        if (shared)
+        {
+            if (m_world.GetSharedDropService().PhysicsGeneration(formId) != s_sharedDropGeneration)
+                continue;
+            if (s_sharedDropPoseGenerations[formId] != s_sharedDropGeneration)
+                m_remoteReferencePoses.erase(formId);
+            s_sharedDropPoseGenerations[formId] = s_sharedDropGeneration;
+        }
+
+        if (update.MotionType == 3 && (shared || !IsPassivePhysicsReference(pReference)))
         {
             if (!std::isfinite(update.LinearVelocity.x) ||
                 !std::isfinite(update.LinearVelocity.y) ||
@@ -2867,6 +2928,7 @@ void ObjectService::OnMainFrame() noexcept
     auto* pService = s_objectService.load(std::memory_order_acquire);
     if (!pService)
         return;
+    pService->m_world.GetSharedDropService().OnMainFrame();
     if (IsRenderDiagnosticsArmed())
     {
         std::lock_guard lock(pService->m_remotePhysicsLock);
@@ -2876,7 +2938,6 @@ void ObjectService::OnMainFrame() noexcept
         s_mainFrameCaptureEnabled.load(std::memory_order_relaxed))
     {
         pService->CaptureHostPhysics(false);
-        return;
     }
     if (!pService->m_applyOnMainFrame.load(std::memory_order_relaxed) ||
         !s_mainFramePlaybackEnabled.load(std::memory_order_relaxed))
@@ -3069,7 +3130,11 @@ void ObjectService::ApplyRemotePhysics() noexcept
     for (auto it = m_remoteReferencePoses.begin(); it != m_remoteReferencePoses.end();)
     {
         auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(it->first));
+        const bool shared = m_world.GetSharedDropService().IsShared(it->first);
         if (!pReference || Cast<Actor>(pReference) || !pReference->loadedState ||
+            (s_sharedDropPoseGenerations.contains(it->first) && (!shared ||
+                s_sharedDropPoseGenerations[it->first] != m_world.GetSharedDropService().PhysicsGeneration(it->first))) ||
+            (shared ? m_world.GetSharedDropService().IsOwner(it->first) : m_world.GetPartyService().IsLeader()) ||
             it->second.AuthorityEpoch != m_world.GetPartyService().GetStartEpoch())
         {
             it = m_remoteReferencePoses.erase(it);

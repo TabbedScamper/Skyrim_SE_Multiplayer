@@ -5,6 +5,7 @@
 #include <Games/References.h>
 #include <PlayerCharacter.h>
 #include <AI/AIProcess.h>
+#include <BSAnimationGraphManager.h>
 #include <Camera/PlayerCamera.h>
 #include <Camera/TESCameraState.h>
 #include <Interface/UI.h>
@@ -36,6 +37,21 @@ constexpr size_t kMaxSamples = 32;
 using TProcessTracking = void(Actor*, float, NiAVObject*);
 TProcessTracking* s_processTracking = nullptr;
 
+// References: https://github.com/alandtse/CommonLibSSE-NG/blob/master/include/RE/B/BSLookAtModifier.h
+// https://github.com/adamhynek/activeragdoll/blob/master/src/main.cpp (modifier phase)
+// https://github.com/ersh1/TrueDirectionalMovement/blob/master/src/Hooks.cpp (spine/priority)
+// CommonLibSSE-NG BSLookAtModifier; confirmed in 1.7.104 modifyInternal,
+// ID 63350 / 140BBEAB0. Only the overall target cone is overridden, never
+// the individual bone limits/gains used by ID 63351 / 140BBF5C0.
+struct LookAtModifier
+{
+    uint8_t Pad[0x78];
+    float LimitAngleDegrees;
+};
+static_assert(offsetof(LookAtModifier, LimitAngleDegrees) == 0x78);
+using TModifyLookAt = void(LookAtModifier*, const void*, void*);
+TModifyLookAt* s_modifyLookAt = nullptr;
+
 struct PresentedLook
 {
     glm::vec2 Look{};
@@ -53,9 +69,44 @@ struct GraphOverride
     bool IsNPC{};
     bool Spine{};
     bool HeadTracking{};
+    const void* Character{};
+    uint64_t AppliedAt{};
 };
 std::mutex s_graphLock;
 std::unordered_map<uint32_t, GraphOverride> s_graphOverrides;
+
+void HookModifyLookAt(LookAtModifier* apModifier, const void* apContext, void* apOutput)
+{
+    // hkbContext+0 is the character, also read by native modify (63278).
+    // Match a registered graph address instead of guessing the character's
+    // owner or dereferencing a retained actor from an animation worker.
+    const void* pCharacter = apContext ? *static_cast<const void* const*>(apContext) : nullptr;
+    bool cameraTarget = false;
+    if (pCharacter)
+    {
+        const auto now = GetTickCount64();
+        std::lock_guard lock(s_graphLock);
+        for (const auto& [id, state] : s_graphOverrides)
+        {
+            if (state.Character == pCharacter && now - state.AppliedAt <= kStaleMs)
+            {
+                cameraTarget = true;
+                break;
+            }
+        }
+    }
+    if (!cameraTarget)
+        return s_modifyLookAt(apModifier, apContext, apOutput);
+
+    // Outside the cone, modifyInternal either switches tracking off or
+    // constructs a yaw-only direction about world up, losing target pitch.
+    // Accept our full 3D camera target for this evaluation; the native bone
+    // limits still distribute a bounded rotation over spine, neck and head.
+    const float limit = apModifier->LimitAngleDegrees;
+    apModifier->LimitAngleDegrees = 180.f;
+    s_modifyLookAt(apModifier, apContext, apOutput);
+    apModifier->LimitAngleDegrees = limit;
+}
 
 float ShortestAngle(float aFrom, float aTo) noexcept
 {
@@ -191,14 +242,31 @@ void HookProcessTracking(Actor* apActor, float aDelta, NiAVObject* apObject)
         !apActor->animationGraphHolder.GetVariableBool(&s_spine, &previous.Spine))
         return;
     previous.HeadTracking = (apActor->actorState.flags2 & (1u << 3)) != 0;
+    BSAnimationGraphManager* pManager{};
+    if (!apActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return;
+    {
+        BSScopedLock<BSRecursiveLock> lock(pManager->lock);
+        const auto index = pManager->animationGraphIndex;
+        if (index < pManager->animationGraphs.size)
+        {
+            if (auto* pGraph = pManager->animationGraphs.Get(index))
+                previous.Character = &pGraph->character;
+        }
+    }
+    pManager->Release();
+    if (!previous.Character)
+        return;
+    previous.AppliedAt = GetTickCount64();
     {
         std::lock_guard lock(s_graphLock);
         s_graphOverrides[apActor->formID] = previous;
     }
     apActor->actorState.flags2 |= 1u << 3;
     apActor->animationGraphHolder.SetVariableBool(&s_isNPC, true);
-    // Head and eyes only. A spine override would disturb combat/owner poses.
-    apActor->animationGraphHolder.SetVariableBool(&s_spine, false);
+    // Let the native per-bone limits share some look rotation with the upper
+    // body, as TDM does. RestoreGraph restores this before native targeting.
+    apActor->animationGraphHolder.SetVariableBool(&s_spine, true);
     const float horizontal = std::cos(look.x);
     NiPoint3 target = pHead->world.translate;
     target.x += 500.f * std::sin(look.y) * horizontal;
@@ -216,6 +284,11 @@ static TiltedPhoques::Initializer s_headTrackHooks([]()
     POINTER_SKYRIMSE(TProcessTracking, s_tracking, 38009);
     s_processTracking = s_tracking.Get();
     TP_HOOK(&s_processTracking, HookProcessTracking);
+    // BSLookAtModifier::modify, vtable slot 23, ID 63278 / 140BBA0C0.
+    // PLANCK also intercepts this phase; offsets above come from this exe.
+    POINTER_SKYRIMSE(TModifyLookAt, s_modify, 63278);
+    s_modifyLookAt = s_modify.Get();
+    TP_HOOK(&s_modifyLookAt, HookModifyLookAt);
 });
 }
 
@@ -241,6 +314,17 @@ void HeadTrackService::FillLocalMovement(Movement& aMovement) noexcept
     const auto packedPitch = static_cast<uint32_t>(std::lround(
         std::clamp(look.x / kPi + 0.5f, 0.f, 1.f) * 65535.f));
     aMovement.LookDirection = (packedPitch << 16) | packedYaw;
+}
+
+bool HeadTrackService::IsCameraTracking(const Actor* apActor) noexcept
+{
+    if (!CanTrack(apActor))
+        return false;
+    std::lock_guard lock(s_graphLock);
+    const auto it = s_graphOverrides.find(apActor->formID);
+    return it != s_graphOverrides.end() && it->second.ActorPtr == apActor &&
+        it->second.Process == apActor->currentProcess &&
+        GetTickCount64() - it->second.AppliedAt <= kStaleMs;
 }
 
 void HeadTrackService::OnMovement(const ServerReferencesMoveRequest& acMessage) noexcept

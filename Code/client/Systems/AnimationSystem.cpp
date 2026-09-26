@@ -29,6 +29,7 @@
 #include <Services/GameTestService.h>
 #include <Services/TransportService.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -71,6 +72,7 @@ struct PoseRequest
 std::mutex s_poseRequestLock;
 std::unordered_map<uint32_t, PoseRequest> s_poseRequests;
 std::atomic<uint64_t> s_fallbackGraphUpdates{}, s_interestGraphUpdates{}, s_posePackets{};
+std::atomic<uint64_t> s_remoteAnimationTasks{}, s_fallbackGraphUs{};
 
 // Selection runs on the network update thread. Native graph evaluation consumes
 // these one-shot requests on its own thread, then the next snapshot reads the copy.
@@ -173,28 +175,33 @@ void TP_MAKE_THISCALL(HookUpdateGraphManager, BSAnimationGraphManager, const Gra
 
 TP_THIS_FUNCTION(TActorUpdateAnimation, void, Actor, float);
 TActorUpdateAnimation* s_realActorUpdateAnimation{};
+TP_THIS_FUNCTION(TQueuedAnimationUpdate, void, TESObjectREFR, float);
+TQueuedAnimationUpdate* s_realQueuedAnimationUpdate{};
 
-void TP_MAKE_THISCALL(HookActorUpdateAnimation, Actor, float aDelta)
+bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
 {
     if (!apThis->GetExtension()->IsRemote() ||
         !World::Get().GetTransport().IsConnected() ||
         ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
         !PoseCopyAuthority::NeedsLocalGraph(apThis->formID))
-        return TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+        return false;
 
-    // ID 37356 is root motion, not graph evaluation. Replace this scheduled graph
-    // opportunity (ID 37361, slot 0x7D) rather than adding a second tick in ActorProcess
-    // or evaluating Havok from AnimationSystem::Update's network thread.
+    // Replace one native animation opportunity, never add a tick in the movement
+    // queue (ActorProcess, ID 37356) or the network-thread AnimationSystem::Update.
     auto* root = apThis->GetNiNode();
     if (!(aDelta > 0.f) || !std::isfinite(aDelta) || !root || !root->parent ||
         !apThis->currentProcess || !apThis->parentCell ||
         apThis->IsDeleted() || apThis->IsDisabled())
-        return;
+        return true;
+    const auto started = std::chrono::steady_clock::now();
     // Preserve the graph's world transform/scale synchronization before evaluating
-    // (ID 37364, 0x14067DA60). This updates hkbCharacter, not actor movement.
-    TP_THIS_FUNCTION(TSyncGraphTransform, bool, Actor);
-    POINTER_SKYRIMSE(TSyncGraphTransform, syncGraphTransform, 37364);
-    TiltedPhoques::ThisCall(syncGraphTransform, apThis);
+    // (ID 37364, 0x14067DA60). The queued caller has already done this.
+    if (!aTransformSynced)
+    {
+        TP_THIS_FUNCTION(TSyncGraphTransform, bool, Actor);
+        POINTER_SKYRIMSE(TSyncGraphTransform, syncGraphTransform, 37364);
+        TiltedPhoques::ThisCall(syncGraphTransform, apThis);
+    }
     GraphUpdateData data{};
     data.Delta = aDelta;
     using TFillUpdateData = void (*)(Actor*, GraphUpdateData*);
@@ -214,15 +221,52 @@ void TP_MAKE_THISCALL(HookActorUpdateAnimation, Actor, float aDelta)
         TiltedPhoques::ThisCall(s_realUpdateGraphManager, manager, &data);
         manager->Release();
         s_fallbackGraphUpdates.fetch_add(1, std::memory_order_relaxed);
+        s_fallbackGraphUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     }
+    // The normal finalize still passes through PoseCopyAuthority's copy hook
+    // (63856). Its living fallback resets the blend during gaps and blends incoming
+    // owner samples over 150 ms, including when we return to the native fresh path.
+    return true;
+}
+
+void TP_MAKE_THISCALL(HookActorUpdateAnimation, Actor, float aDelta)
+{
+    if (!UpdateRemoteGraph(apThis, aDelta, false))
+        TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+}
+
+void TP_MAKE_THISCALL(HookQueuedAnimationUpdate, TESObjectREFR, float aDelta)
+{
+    auto* actor = Cast<Actor>(apThis);
+    if (actor)
+    {
+        if (actor->GetExtension()->IsRemote())
+            s_remoteAnimationTasks.fetch_add(1, std::memory_order_relaxed);
+        if (UpdateRemoteGraph(actor, aDelta, true))
+            return;
+    }
+    TiltedPhoques::ThisCall(s_realQueuedAnimationUpdate, apThis, aDelta);
 }
 
 TiltedPhoques::Initializer s_distantAnimationInitializer([]() {
+    // 1.7.104: ProcessLists 41370/0x1407836E0 queues 41453/0x1407898E0,
+    // which syncs the graph then directly calls 20123/0x1402FDEB0. It never
+    // dispatches Actor slot 0x7D. Keep 37361 for the alternate serial path;
+    // 20123 replaces the queued evaluation in place, preserving the native task
+    // barrier, delta, actor selection, visibility and 63587/63575 LOD policy.
+    // PLANCK's src/main.cpp PlayerCharacter_UpdateAnimation_Hook is player-only:
+    // https://github.com/adamhynek/activeragdoll/blob/master/src/main.cpp
+    // Adopt the native-phase replacement pattern, not its VR offsets or a
+    // player-vtable-only hook for NPCs. CommonLib's update-data layout is above.
     POINTER_SKYRIMSE(TActorUpdateAnimation, actorUpdate, 37361);
+    POINTER_SKYRIMSE(TQueuedAnimationUpdate, queuedUpdate, 20123);
     POINTER_SKYRIMSE(TUpdateGraphManager, graphUpdate, 63358);
     s_realActorUpdateAnimation = actorUpdate.Get();
+    s_realQueuedAnimationUpdate = queuedUpdate.Get();
     s_realUpdateGraphManager = graphUpdate.Get();
     TP_HOOK(&s_realActorUpdateAnimation, HookActorUpdateAnimation);
+    TP_HOOK(&s_realQueuedAnimationUpdate, HookQueuedAnimationUpdate);
     TP_HOOK(&s_realUpdateGraphManager, HookUpdateGraphManager);
 });
 
@@ -501,10 +545,12 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
     if (const auto reportNow = GetTickCount64(); reportNow >= nextGraphReportMs)
     {
         nextGraphReportMs = reportNow + 5000;
-        spdlog::info("Distant animation: graphOnlyCalls={} interestCalls={} posesQueued={} (cumulative, native LOD retained)",
+        spdlog::info("Distant animation: graphOnlyCalls={} interestCalls={} posesQueued={} remoteAnimationTasks={} graphOnlyUs={} (cumulative, native LOD retained)",
             s_fallbackGraphUpdates.load(std::memory_order_relaxed),
             s_interestGraphUpdates.load(std::memory_order_relaxed),
-            s_posePackets.load(std::memory_order_relaxed));
+            s_posePackets.load(std::memory_order_relaxed),
+            s_remoteAnimationTasks.load(std::memory_order_relaxed),
+            s_fallbackGraphUs.load(std::memory_order_relaxed));
     }
 
     if (const auto pCell = pActor->parentCell)
