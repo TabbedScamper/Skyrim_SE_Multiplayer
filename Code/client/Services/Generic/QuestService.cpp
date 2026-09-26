@@ -291,18 +291,20 @@ void QuestService::OnQuestUpdate(const NotifyQuestUpdate& aUpdate) noexcept
         return;
 
     ScopedQuestOverride remoteQuestApply;
+    // Preserve ScriptSetStage's same-stage guard: startup reports currentStage 0 even when
+    // no stage has run. Reapplying it can execute a fragment or fail if stage 0 is absent.
     bool bResult = false;
     switch (aUpdate.Status)
     {
     case NotifyQuestUpdate::Started:
     {
-        bResult = pQuest->IsStageDone(aUpdate.Stage) || pQuest->SetStage(aUpdate.Stage);
+        bResult = pQuest->currentStage == aUpdate.Stage || pQuest->IsStageDone(aUpdate.Stage) || pQuest->SetStage(aUpdate.Stage);
         pQuest->SetActive(true);
         spdlog::info("Remote quest started: {:X}, stage: {}", formId, aUpdate.Stage);
         break;
     }
     case NotifyQuestUpdate::StageUpdate:
-        bResult = pQuest->IsStageDone(aUpdate.Stage) || pQuest->SetStage(aUpdate.Stage);
+        bResult = pQuest->currentStage == aUpdate.Stage || pQuest->IsStageDone(aUpdate.Stage) || pQuest->SetStage(aUpdate.Stage);
         spdlog::info("Remote quest updated: {:X}, stage: {}", formId, aUpdate.Stage);
         break;
     case NotifyQuestUpdate::Stopped:
