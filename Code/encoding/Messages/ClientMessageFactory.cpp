@@ -18,6 +18,8 @@ static struct ClientMessageFactoryInit
             {
                 auto ptr = TiltedPhoques::MakeUnique<T>();
                 ptr->DeserializeRaw(aReader);
+                if (!ptr->IsValid())
+                    return UniquePtr<ClientMessage>{nullptr};
                 return TiltedPhoques::CastUnique<ClientMessage>(std::move(ptr));
             };
 
@@ -31,12 +33,20 @@ static struct ClientMessageFactoryInit
 
 UniquePtr<ClientMessage> ClientMessageFactory::Extract(TiltedPhoques::Buffer::Reader& aReader) const noexcept
 {
-    uint64_t data;
-    aReader.ReadBits(data, sizeof(ClientOpcode) * 8);
+    uint64_t data{};
+    if (!aReader.ReadBits(data, sizeof(ClientOpcode) * 8))
+        return {nullptr};
 
     if (data >= kClientOpcodeMax) [[unlikely]]
         return {nullptr};
 
     const auto opcode = static_cast<ClientOpcode>(data);
-    return s_clientMessageExtractor[opcode](aReader);
+    try
+    {
+        return s_clientMessageExtractor[opcode](aReader);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
 }

@@ -44,6 +44,8 @@
 #include <Messages/NotifyActorTeleport.h>
 #include <Messages/CorpseRagdollRequest.h>
 #include <Messages/NotifyCorpseRagdoll.h>
+#include <Messages/RequestScriptedActorState.h>
+#include <Messages/NotifyScriptedActorState.h>
 
 #include <Setting.h>
 namespace
@@ -58,11 +60,19 @@ struct TemporaryActorProvenance
     glm::vec3 CreationPosition{};
     std::vector<uint32_t> BoundPlayerIds;
 };
+
+struct LeaderParkedActor
+{
+    NotifyScriptedActorState Message{};
+    uint32_t PartyId{};
+    std::vector<uint32_t> Recipients;
+};
 }
 
 CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
     , m_updateConnection(aDispatcher.sink<UpdateEvent>().connect<&CharacterService::OnUpdate>(this))
+    , m_scriptedActorStateConnection(aDispatcher.sink<PacketEvent<RequestScriptedActorState>>().connect<&CharacterService::OnScriptedActorState>(this))
     , m_interiorCellChangeEventConnection(aDispatcher.sink<CharacterInteriorCellChangeEvent>().connect<&CharacterService::OnCharacterInteriorCellChange>(this))
     , m_exteriorCellChangeEventConnection(aDispatcher.sink<CharacterExteriorCellChangeEvent>().connect<&CharacterService::OnCharacterExteriorCellChange>(this))
     , m_characterAssignRequestConnection(aDispatcher.sink<PacketEvent<AssignCharacterRequest>>().connect<&CharacterService::OnAssignCharacterRequest>(this))
@@ -154,9 +164,174 @@ void CharacterService::Serialize(World& aRegistry, entt::entity aEntity, Charact
 
 void CharacterService::OnUpdate(const UpdateEvent&) const noexcept
 {
+    UpdateParkedActors();
     ProcessFactionsChanges();
     ProcessMovementChanges();
     EnforceLeaderAuthority();
+}
+
+void CharacterService::OnScriptedActorState(const PacketEvent<RequestScriptedActorState>& acMessage) const noexcept
+{
+    const auto& state = acMessage.Packet.State;
+    const auto entity = static_cast<entt::entity>(state.ServerId);
+    auto view = m_world.view<OwnerComponent, CharacterComponent, FormIdComponent, CellIdComponent, MovementComponent>();
+    if (view.find(entity) == view.end())
+        return;
+    auto& party = m_world.GetPartyService();
+    const auto& owner = view.get<OwnerComponent>(entity);
+    const auto& character = view.get<CharacterComponent>(entity);
+    const auto& form = view.get<FormIdComponent>(entity).Id;
+    if (owner.GetOwner() != acMessage.pPlayer || !state.OwnershipEpoch || owner.OwnershipEpoch != state.OwnershipEpoch)
+        return;
+    const auto reply = [&](ScriptedActorPhase aPhase)
+    {
+        NotifyScriptedActorState notify;
+        notify.State = state;
+        notify.State.Phase = aPhase;
+        notify.FormId = form;
+        notify.LeaderPlayerId = acMessage.pPlayer->GetId();
+        acMessage.pPlayer->Send(notify);
+    };
+    if (!party.IsPlayerInParty(acMessage.pPlayer) || !party.IsPlayerLeader(acMessage.pPlayer) ||
+        character.IsPlayer() || character.IsPlayerSummon() || form.ModId == UINT32_MAX || form == GameId{})
+    {
+        reply(ScriptedActorPhase::Release);
+        return;
+    }
+    if (state.Phase != ScriptedActorPhase::Park && state.Phase != ScriptedActorPhase::Resume)
+        return;
+    if (!std::isfinite(state.Position.x) || !std::isfinite(state.Position.y) || !std::isfinite(state.Position.z))
+    {
+        reply(ScriptedActorPhase::Release);
+        return;
+    }
+
+    auto& cell = view.get<CellIdComponent>(entity);
+    if (state.Phase == ScriptedActorPhase::Park)
+    {
+        if (const auto* pParked = m_world.try_get<LeaderParkedActor>(entity))
+        {
+            acMessage.pPlayer->Send(pParked->Message);
+            return;
+        }
+        const auto& anchor = acMessage.Packet.Anchor;
+        const CellIdComponent anchorCell(anchor.CellId, anchor.WorldSpaceId,
+            GridCellCoords::CalculateGridCellCoords(anchor.Position));
+        if (anchor.CellId == GameId{} ||
+            !std::isfinite(anchor.Position.x) || !std::isfinite(anchor.Position.y) || !std::isfinite(anchor.Position.z) ||
+            !acMessage.pPlayer->GetCellComponent().IsInRange(anchorCell, character.IsDragon()))
+        {
+            reply(ScriptedActorPhase::Release);
+            return;
+        }
+        auto& parked = m_world.emplace<LeaderParkedActor>(entity);
+        parked.Message.State = state;
+        parked.Message.FormId = form;
+        parked.Message.LeaderPlayerId = acMessage.pPlayer->GetId();
+        parked.PartyId = *acMessage.pPlayer->GetParty().JoinedPartyId;
+        // The leader only parks a living native actor. A previous follower's
+        // death snapshot must not veto that authority or recreate the loop.
+        view.get<CharacterComponent>(entity).SetDead(false);
+        cell = anchorCell;
+        view.get<MovementComponent>(entity).Position = anchor.Position;
+        // Keep CellIdComponent at the last loaded location. It is the authority
+        // anchor, not the scripted destination in an unloaded holding cell.
+        view.get<MovementComponent>(entity).Sent = true;
+        for (auto* pPlayer : m_world.GetPlayerManager())
+        {
+            if (pPlayer->GetParty().JoinedPartyId == parked.PartyId)
+            {
+                pPlayer->Send(parked.Message);
+                parked.Recipients.push_back(pPlayer->GetId());
+            }
+        }
+        spdlog::info("Leader parked actor {:X} epoch {} cell {:X}:{:X} disabled={}",
+            state.ServerId, state.OwnershipEpoch, state.CellId.ModId, state.CellId.BaseId, state.Disabled);
+        return;
+    }
+
+    const auto* pParked = m_world.try_get<LeaderParkedActor>(entity);
+    if (!pParked)
+    {
+        reply(ScriptedActorPhase::Resume);
+        return;
+    }
+    if (state.Disabled || state.CellId == GameId{})
+    {
+        ReleaseParkedActor(entity);
+        return;
+    }
+    NotifyScriptedActorState notify = pParked->Message;
+    notify.State = state;
+    const auto recipients = pParked->Recipients;
+    m_world.remove<LeaderParkedActor>(entity);
+    cell.Cell = state.CellId;
+    cell.WorldSpaceId = state.WorldSpaceId;
+    cell.CenterCoords = GridCellCoords::CalculateGridCellCoords(state.Position);
+    view.get<MovementComponent>(entity).Position = state.Position;
+    view.get<MovementComponent>(entity).Sent = false;
+    for (auto* pPlayer : m_world.GetPlayerManager())
+    {
+        if (std::find(recipients.begin(), recipients.end(), pPlayer->GetId()) == recipients.end())
+            continue;
+        pPlayer->Send(notify);
+    }
+    spdlog::info("Leader resumed actor {:X} epoch {}", state.ServerId, state.OwnershipEpoch);
+}
+
+void CharacterService::ReleaseParkedActor(const entt::entity aEntity) const noexcept
+{
+    const auto* pParked = m_world.try_get<LeaderParkedActor>(aEntity);
+    if (!pParked)
+        return;
+    auto notify = pParked->Message;
+    notify.State.Phase = ScriptedActorPhase::Release;
+    const auto recipients = pParked->Recipients;
+    m_world.remove<LeaderParkedActor>(aEntity);
+    for (auto* pPlayer : m_world.GetPlayerManager())
+        if (std::find(recipients.begin(), recipients.end(), pPlayer->GetId()) != recipients.end())
+            pPlayer->Send(notify);
+    spdlog::info("Leader parking released actor {:X} epoch {}", notify.State.ServerId, notify.State.OwnershipEpoch);
+}
+
+void CharacterService::UpdateParkedActors() const noexcept
+{
+    const auto view = m_world.view<LeaderParkedActor, OwnerComponent, CellIdComponent, CharacterComponent>();
+    Vector<entt::entity> expired;
+    for (const auto entity : view)
+    {
+        auto& parked = view.get<LeaderParkedActor>(entity);
+        auto* pLeader = m_world.GetPlayerManager().GetById(parked.Message.LeaderPlayerId);
+        if (!pLeader || view.get<OwnerComponent>(entity).GetOwner() != pLeader ||
+            !m_world.GetPartyService().IsPlayerInParty(pLeader) ||
+            !m_world.GetPartyService().IsPlayerLeader(pLeader) ||
+            pLeader->GetParty().JoinedPartyId != parked.PartyId ||
+            !pLeader->GetCellComponent().IsInRange(view.get<CellIdComponent>(entity), view.get<CharacterComponent>(entity).IsDragon()))
+        {
+            expired.push_back(entity);
+            continue;
+        }
+        parked.Recipients.erase(std::remove_if(parked.Recipients.begin(), parked.Recipients.end(),
+            [&](uint32_t id)
+            {
+                const auto* pPlayer = m_world.GetPlayerManager().GetById(id);
+                return !pPlayer || pPlayer->GetParty().JoinedPartyId != parked.PartyId;
+            }), parked.Recipients.end());
+        for (auto* pPlayer : m_world.GetPlayerManager())
+        {
+            if (pPlayer->GetParty().JoinedPartyId == parked.PartyId &&
+                std::find(parked.Recipients.begin(), parked.Recipients.end(), pPlayer->GetId()) == parked.Recipients.end())
+            {
+                pPlayer->Send(parked.Message);
+                parked.Recipients.push_back(pPlayer->GetId());
+            }
+        }
+    }
+    for (const auto entity : expired)
+    {
+        ReleaseParkedActor(entity);
+        TransferToNextOwner(entity, OwnershipTransferReason::OwnerUnavailable);
+    }
 }
 
 // During a shared session the leader simulates every NPC it has in range; a follower only keeps
@@ -363,9 +538,28 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             response.Cookie = message.Cookie;
             response.Owner = isOwner;
             PopulateAssignmentResponse(*itor, response);
-            acMessage.pPlayer->Send(response);
 
             // The assignment response establishes a remote component before the grant arrives.
+            if (auto* pParked = m_world.try_get<LeaderParkedActor>(*itor))
+            {
+                if (isOwner)
+                {
+                    // Rediscovery first binds the retained ID, then the park
+                    // echo makes a loaded leader send the normal resume.
+                    acMessage.pPlayer->Send(response);
+                    acMessage.pPlayer->Send(pParked->Message);
+                    return;
+                }
+                else
+                {
+                    acMessage.pPlayer->Send(pParked->Message);
+                    acMessage.pPlayer->Send(response);
+                    if (std::find(pParked->Recipients.begin(), pParked->Recipients.end(), acMessage.pPlayer->GetId()) == pParked->Recipients.end())
+                        pParked->Recipients.push_back(acMessage.pPlayer->GetId());
+                    return;
+                }
+            }
+            acMessage.pPlayer->Send(response);
             if (transferToDiscoverer)
                 TransferOwnership(acMessage.pPlayer, *itor,
                     m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer)
@@ -410,6 +604,8 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
     }
 
     auto& characterComponent = view.get<CharacterComponent>(*it);
+    if (m_world.all_of<LeaderParkedActor>(cEntity))
+        return;
     if (characterComponent.IsPlayerSummon())
     {
         spdlog::info("Removing summon {:X} after player {:X} relinquished ownership", message.ServerId, acMessage.pPlayer->GetId());
@@ -453,6 +649,7 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
 
 void CharacterService::OnOwnershipTransferEvent(const OwnershipTransferEvent& acEvent) const noexcept
 {
+    ReleaseParkedActor(acEvent.Entity);
     // A disconnect starts a fresh search; previously unavailable clients may be ready now.
     const auto view = m_world.view<OwnerComponent>();
     if (const auto it = view.find(acEvent.Entity); it != view.end())
@@ -463,6 +660,7 @@ void CharacterService::OnOwnershipTransferEvent(const OwnershipTransferEvent& ac
 
 void CharacterService::OnCharacterRemoveEvent(const CharacterRemoveEvent& acEvent) const noexcept
 {
+    ReleaseParkedActor(static_cast<entt::entity>(acEvent.ServerId));
     const auto view = m_world.view<OwnerComponent>();
     const auto it = view.find(static_cast<entt::entity>(acEvent.ServerId));
     if (it == view.end())
@@ -585,6 +783,8 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
     for (auto& entry : message.Updates)
     {
         const auto entity = static_cast<entt::entity>(entry.first);
+        if (m_world.all_of<LeaderParkedActor>(entity))
+            continue;
 
         auto itor = view.find(entity);
         if (itor == std::end(view))
@@ -1043,6 +1243,8 @@ const char* CharacterService::GetOwnershipTransferReasonName(const OwnershipTran
 
 bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aEntity, const uint32_t aExpectedOwnershipEpoch, const OwnershipTransferReason aReason) const noexcept
 {
+    if (m_world.all_of<LeaderParkedActor>(aEntity))
+        return false;
     const uint32_t serverId = World::ToInteger(aEntity);
     const char* pReasonName = GetOwnershipTransferReasonName(aReason);
     const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent, FormIdComponent>();
@@ -1114,6 +1316,8 @@ bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aE
 
 bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aEntity, const OwnershipTransferReason aReason, const bool aResetInvalidOwners) const noexcept
 {
+    if (m_world.all_of<LeaderParkedActor>(aEntity))
+        return false;
     const char* pReasonName = GetOwnershipTransferReasonName(aReason);
     const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
     const auto it = view.find(aEntity);
@@ -1141,6 +1345,27 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     notify.CurrentActorData = BuildActorData(aEntity);
     notify.LeveledNpcPickId = view.get<CharacterComponent>(*it).LeveledNpcPickId.Id;
 
+    const auto* pForm = m_world.try_get<FormIdComponent>(aEntity);
+    const bool leaderGrant = m_world.GetPartyService().IsPlayerInParty(apPlayer) &&
+        m_world.GetPartyService().IsPlayerLeader(apPlayer) && pForm &&
+        pForm->Id.ModId != UINT32_MAX && !view.get<CharacterComponent>(*it).IsPlayer();
+    if (leaderGrant)
+    {
+        // Identity must precede the grant without invoking remote spawn side
+        // effects. The old epoch ensures the following grant remains newer.
+        NotifyScriptedActorState identity;
+        identity.State.ServerId = World::ToInteger(aEntity);
+        identity.State.OwnershipEpoch = oldEpoch;
+        identity.State.Phase = ScriptedActorPhase::Bind;
+        identity.State.CellId = view.get<CellIdComponent>(*it).Cell;
+        identity.State.WorldSpaceId = view.get<CellIdComponent>(*it).WorldSpaceId;
+        if (const auto* pMovement = m_world.try_get<MovementComponent>(aEntity))
+            identity.State.Position = pMovement->Position;
+        identity.FormId = pForm->Id;
+        identity.LeaderPlayerId = apPlayer->GetId();
+        apPlayer->Send(identity);
+    }
+
     ownerComponent.SetOwner(apPlayer);
     ownerComponent.OwnershipEpoch = newEpoch;
     if (auto* pAnimation = m_world.try_get<AnimationComponent>(aEntity))
@@ -1159,6 +1384,8 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     // The former owner may already be out of range, so notify it directly as well.
     if (pOldOwner)
         pOldOwner->Send(notify);
+    if (leaderGrant)
+        apPlayer->Send(notify);
 
     spdlog::info(
         "Transferred ownership of actor {:X} from player {:X} to player {:X} for {} (epoch {} to {})",
@@ -1169,6 +1396,8 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
 
 void CharacterService::TransferToNextOwner(const entt::entity aEntity, const OwnershipTransferReason aReason) const noexcept
 {
+    if (m_world.all_of<LeaderParkedActor>(aEntity))
+        return;
     const char* pReasonName = GetOwnershipTransferReasonName(aReason);
     const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
     const auto it = view.find(aEntity);

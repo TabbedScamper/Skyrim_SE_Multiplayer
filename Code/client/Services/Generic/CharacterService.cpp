@@ -73,10 +73,56 @@
 #include <Messages/SubtitleRequest.h>
 #include <Messages/NotifySubtitle.h>
 #include <Messages/NotifyActorTeleport.h>
+#include <Messages/RequestScriptedActorState.h>
 
 #include <World.h>
 #include <Games/TES.h>
 #include <Combat/CombatController.h>
+
+namespace
+{
+// This binding has identity, but must never consume a follower's presentation.
+struct LeaderNativeClaim
+{
+    uint32_t FormId{};
+    bool Parked{};
+    bool ResumeSent{};
+};
+
+bool IsLoadedActor(Actor* apActor) noexcept
+{
+    const auto* pCell = apActor ? apActor->GetParentCellEx() : nullptr;
+    return apActor && !apActor->IsDisabled() && !apActor->IsDeleted() &&
+        apActor->GetNiNode() && pCell && pCell->IsAttached();
+}
+
+bool IsLocationInPlayerRange(World& aWorld, const ScriptedActorState& acLocation, bool aIsDragon = false) noexcept
+{
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pCell = pPlayer ? pPlayer->GetParentCellEx() : nullptr;
+    if (!pCell || acLocation.CellId == GameId{})
+        return false;
+    auto* pWorld = pPlayer->GetWorldSpace();
+    if (!pWorld)
+        return !acLocation.WorldSpaceId && aWorld.GetModSystem().GetGameId(acLocation.CellId) == pCell->formID;
+    auto* pTES = TES::Get();
+    return pTES && aWorld.GetModSystem().GetGameId(acLocation.WorldSpaceId) == pWorld->formID &&
+        GridCellCoords::IsCellInGridCell(GridCellCoords::CalculateGridCellCoords(acLocation.Position),
+            GridCellCoords(pTES->centerGridX, pTES->centerGridY), aIsDragon);
+}
+
+ScriptedActorState GetActorLocation(World& aWorld, Actor* apActor) noexcept
+{
+    ScriptedActorState state;
+    if (const auto* pCell = apActor->GetParentCellEx())
+        aWorld.GetModSystem().GetServerModId(pCell->formID, state.CellId);
+    if (const auto* pWorld = apActor->GetWorldSpace())
+        aWorld.GetModSystem().GetServerModId(pWorld->formID, state.WorldSpaceId);
+    state.Position = apActor->position;
+    state.Disabled = apActor->IsDisabled();
+    return state;
+}
+}
 
 CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -84,6 +130,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
     , m_transport(aTransport)
 {
     m_referenceAddedConnection = m_dispatcher.sink<ActorAddedEvent>().connect<&CharacterService::OnActorAdded>(this);
+    m_scriptedActorStateConnection = m_dispatcher.sink<NotifyScriptedActorState>().connect<&CharacterService::OnScriptedActorState>(this);
     m_referenceRemovedConnection = m_dispatcher.sink<ActorRemovedEvent>().connect<&CharacterService::OnActorRemoved>(this);
 
     m_updateConnection = m_dispatcher.sink<UpdateEvent>().connect<&CharacterService::OnUpdate>(this);
@@ -126,6 +173,318 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
 void CharacterService::SetPresentationDelayMs(uint32_t aDelayMs) noexcept
 {
     m_presentationDelayMs.store(aDelayMs, std::memory_order_release);
+}
+
+bool CharacterService::IsLeaderNativeActor(Actor* apActor) const noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    return m_transport.IsOnline() && party.IsInParty() && party.IsLeader() && party.GetLeaderPlayerId() &&
+        apActor && apActor->formID != 0x14 && apActor->formID < 0xFF000000 &&
+        !apActor->IsTemporary() && !apActor->GetExtension()->IsRemotePlayer() && !apActor->IsPlayerSummon();
+}
+
+void CharacterService::ObserveDiscoveredActor(Actor* apActor) noexcept
+{
+    if (IsLeaderNativeActor(apActor) && IsLoadedActor(apActor))
+        m_loadedActorLocations[apActor->formID] = GetActorLocation(m_world, apActor);
+}
+
+bool CharacterService::IsActorDiscoverySuppressed(const uint32_t aFormId) const noexcept
+{
+    return m_parkedActors.find(aFormId) != m_parkedActors.end();
+}
+
+bool CharacterService::TryParkActor(const entt::entity aEntity, Actor* apActor) noexcept
+{
+    if (!IsLeaderNativeActor(apActor) || apActor->IsDead() || apActor->IsDeleted())
+        return false;
+    const auto* pLocal = m_world.try_get<LocalComponent>(aEntity);
+    const auto location = m_loadedActorLocations.find(apActor->formID);
+    if (!pLocal || location == m_loadedActorLocations.end() || !IsLocationInPlayerRange(m_world, location->second, apActor->IsDragon()))
+        return false;
+    // Losing high process alone is not a scripted departure.
+    const auto* pCell = apActor->GetParentCellEx();
+    if (!apActor->IsDisabled() && pCell && pCell->IsAttached())
+        return false;
+    RequestScriptedActorState request;
+    request.State = GetActorLocation(m_world, apActor);
+    request.State.ServerId = pLocal->Id;
+    request.State.OwnershipEpoch = pLocal->OwnershipEpoch;
+    request.Anchor = location->second;
+    if (!m_transport.Send(request))
+        return false;
+    auto& claim = m_world.get_or_emplace<LeaderNativeClaim>(aEntity);
+    claim.FormId = apActor->formID;
+    claim.Parked = true;
+    claim.ResumeSent = false;
+    m_world.remove<FormIdComponent, LocalAnimationComponent, CacheComponent, InterpolationComponent, RemoteAnimationComponent, WaitingFor3D>(aEntity);
+    m_pendingLeveledConforms.erase(apActor->formID);
+    m_weaponDrawUpdates.erase(apActor->formID);
+    spdlog::info("Scripted departure actor {:X} server {:X} epoch {} cell {:X}:{:X} disabled={}",
+        apActor->formID, request.State.ServerId, request.State.OwnershipEpoch,
+        request.State.CellId.ModId, request.State.CellId.BaseId, request.State.Disabled);
+    return true;
+}
+
+void CharacterService::OnScriptedActorState(const NotifyScriptedActorState& acMessage) noexcept
+{
+    const auto& state = acMessage.State;
+    const auto& party = m_world.GetPartyService();
+    const uint32_t formId = m_world.GetModSystem().GetGameId(acMessage.FormId);
+    if (!state.OwnershipEpoch || !formId || formId == 0x14 || formId >= 0xFF000000 ||
+        (state.Phase != ScriptedActorPhase::Park && state.Phase != ScriptedActorPhase::Resume &&
+            state.Phase != ScriptedActorPhase::Release && state.Phase != ScriptedActorPhase::Bind))
+        return;
+    auto entity = Utils::FindEntityByServerId(state.ServerId);
+    if (entity)
+    {
+        const auto* pLocal = m_world.try_get<LocalComponent>(*entity);
+        const auto* pRemote = m_world.try_get<RemoteComponent>(*entity);
+        const auto epoch = pLocal ? pLocal->OwnershipEpoch : pRemote ? pRemote->OwnershipEpoch : 0;
+        if (epoch > state.OwnershipEpoch)
+            return;
+    }
+    if (state.Phase == ScriptedActorPhase::Bind)
+    {
+        auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+        if (!IsLeaderNativeActor(pActor) || party.GetLeaderPlayerId() != acMessage.LeaderPlayerId ||
+            acMessage.LeaderPlayerId != m_transport.GetLocalPlayerId())
+            return;
+        if (entity && m_world.all_of<LocalComponent>(*entity))
+            return;
+        if (!entity)
+        {
+            auto forms = m_world.view<FormIdComponent>();
+            const auto it = std::find_if(forms.begin(), forms.end(), [forms, formId](auto e) { return forms.get<FormIdComponent>(e).Id == formId; });
+            entity = it == forms.end() ? m_world.create() : *it;
+        }
+        DeleteRemoteEntityComponents(*entity);
+        m_world.remove<FormIdComponent, WaitingForAssignmentComponent>(*entity);
+        m_world.emplace_or_replace<RemoteComponent>(*entity, state.ServerId, formId, state.OwnershipEpoch);
+        m_world.emplace_or_replace<LeaderNativeClaim>(*entity).FormId = formId;
+        m_loadedActorLocations.try_emplace(formId, state);
+        pActor->GetExtension()->SetRemote(false);
+        spdlog::info("Bound native leader identity actor {:X} server {:X} epoch {}", formId, state.ServerId, state.OwnershipEpoch);
+        return;
+    }
+    if (entity && acMessage.LeaderPlayerId == m_transport.GetLocalPlayerId())
+    {
+        if (auto* pClaim = m_world.try_get<LeaderNativeClaim>(*entity))
+        {
+            if (state.Phase == ScriptedActorPhase::Park)
+            {
+                pClaim->Parked = true;
+                m_world.remove<FormIdComponent, LocalAnimationComponent, CacheComponent>(*entity);
+            }
+            else if (state.Phase == ScriptedActorPhase::Resume)
+            {
+                pClaim->Parked = false;
+                pClaim->ResumeSent = false;
+            }
+            else if (state.Phase == ScriptedActorPhase::Release)
+            {
+                m_loadedActorLocations.erase(formId);
+                m_world.remove<LeaderNativeClaim>(*entity);
+                m_world.emplace_or_replace<FormIdComponent>(*entity, formId);
+                OnActorRemoved(ActorRemovedEvent(formId));
+                if (IsLoadedActor(Cast<Actor>(TESForm::GetById(formId))))
+                    OnActorAdded(ActorAddedEvent(formId));
+            }
+        }
+        return;
+    }
+    auto parked = m_parkedActors.find(formId);
+    if (state.Phase != ScriptedActorPhase::Park)
+    {
+        if (parked != m_parkedActors.end() && parked->second.Message.State.ServerId == state.ServerId &&
+            parked->second.Message.State.OwnershipEpoch <= state.OwnershipEpoch)
+            parked->second.Message = acMessage;
+        return;
+    }
+    if (!party.IsInParty() || party.IsLeader() || party.GetLeaderPlayerId() != acMessage.LeaderPlayerId)
+        return;
+    if (parked != m_parkedActors.end())
+    {
+        if (parked->second.Message.State.OwnershipEpoch > state.OwnershipEpoch)
+            return;
+        parked->second.Message = acMessage;
+        return;
+    }
+    if (!entity)
+    {
+        auto forms = m_world.view<FormIdComponent>();
+        const auto it = std::find_if(forms.begin(), forms.end(), [forms, formId](auto e) { return forms.get<FormIdComponent>(e).Id == formId; });
+        entity = it == forms.end() ? m_world.create() : *it;
+    }
+    DeleteRemoteEntityComponents(*entity);
+    m_world.remove<LocalComponent, LocalAnimationComponent, LeaderNativeClaim, DeferredAssignmentComponent>(*entity);
+    // Keep network identity, but exclude the parked actor from every service's
+    // form-based simulation and remote replay views until it is restored.
+    m_world.remove<FormIdComponent>(*entity);
+    m_world.emplace_or_replace<RemoteComponent>(*entity, state.ServerId, formId, state.OwnershipEpoch);
+    m_parkedActors[formId].Entity = *entity;
+    m_parkedActors[formId].Message = acMessage;
+    m_pendingLeveledConforms.erase(formId);
+    m_weaponDrawUpdates.erase(formId);
+    if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)))
+    {
+        pActor->GetExtension()->SetRemote(true);
+        pActor->GetExtension()->Reconciliation = ActorExtension::ReconciliationStage::None;
+        VisualPoseMailbox::Clear(&pActor->animationGraphHolder);
+    }
+    spdlog::info("Follower parked actor {:X} server {:X} epoch {}", formId, state.ServerId, state.OwnershipEpoch);
+}
+
+void CharacterService::RunScriptedActorUpdates() noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    for (auto it = m_parkedActors.begin(); it != m_parkedActors.end();)
+    {
+        auto& parked = it->second;
+        auto& state = parked.Message.State;
+        if (!m_transport.IsOnline() || !party.IsInParty() || party.GetLeaderPlayerId() != parked.Message.LeaderPlayerId || party.IsLeader())
+            state.Phase = ScriptedActorPhase::Release;
+        auto* pActor = Cast<Actor>(TESForm::GetById(it->first));
+        if (pActor && !pActor->IsDeleted())
+        {
+            // Actor::Disable (ID 37267, VA 1406754E0) queues ID 36978.
+            // Wait for that task before undoing our disable on resume/cleanup.
+            if (parked.DisablePending && pActor->IsDisabled() && !pActor->GetNiNode())
+                parked.DisablePending = false;
+            if (state.Phase == ScriptedActorPhase::Park && !pActor->IsDisabled() && !parked.DisablePending)
+            {
+                parked.DisabledByUs = true;
+                parked.DisablePending = true;
+                pActor->DisableImpl();
+            }
+            if (state.Phase == ScriptedActorPhase::Park || parked.DisablePending)
+            {
+                ++it;
+                continue;
+            }
+            if (state.Phase == ScriptedActorPhase::Resume)
+                MoveActor(pActor, state.WorldSpaceId, state.CellId, state.Position);
+            if ((parked.DisabledByUs || state.Phase == ScriptedActorPhase::Resume) && pActor->IsDisabled())
+                pActor->EnableImpl();
+        }
+        else if (state.Phase == ScriptedActorPhase::Park)
+        {
+            ++it;
+            continue;
+        }
+        const uint32_t formId = it->first;
+        const uint32_t serverId = state.ServerId;
+        const auto parkedEntity = parked.Entity;
+        const bool resume = state.Phase == ScriptedActorPhase::Resume;
+        it = m_parkedActors.erase(it);
+        if (pActor && !m_transport.IsOnline())
+            pActor->GetExtension()->SetRemote(false);
+        if (m_world.valid(parkedEntity))
+        {
+            m_world.remove<WaitingForAssignmentComponent>(parkedEntity);
+            m_world.emplace_or_replace<FormIdComponent>(parkedEntity, formId);
+            if (m_restoredOwnershipGrants.find(serverId) == m_restoredOwnershipGrants.end())
+            {
+                if (resume && m_transport.IsOnline())
+                {
+                    // Retain remote identity during restoration, including for
+                    // disconnect cleanup. Refresh the snapshot once 3D exists.
+                    if (IsLoadedActor(pActor))
+                    {
+                        CacheSystem::Setup(m_world, parkedEntity, pActor);
+                        RequestServerAssignment(parkedEntity);
+                    }
+                }
+                else
+                {
+                    DeleteRemoteEntityComponents(parkedEntity);
+                    if (pActor)
+                        pActor->GetExtension()->SetRemote(false);
+                    if (m_transport.IsOnline() && IsLoadedActor(pActor))
+                        ProcessNewEntity(parkedEntity);
+                }
+            }
+        }
+        spdlog::info("Follower parking cleared actor {:X} server {:X} resume={}", formId, serverId, resume);
+    }
+
+    for (auto it = m_restoredOwnershipGrants.begin(); it != m_restoredOwnershipGrants.end();)
+    {
+        const auto entity = Utils::FindEntityByServerId(it->first);
+        const auto* pRemote = entity ? m_world.try_get<RemoteComponent>(*entity) : nullptr;
+        auto* pActor = pRemote ? Cast<Actor>(TESForm::GetById(pRemote->CachedRefId)) : nullptr;
+        const auto* pCell = pActor ? pActor->GetParentCellEx() : nullptr;
+        if (pRemote && (IsActorDiscoverySuppressed(pRemote->CachedRefId) ||
+            (it->second.OwnerPlayerId == m_transport.GetLocalPlayerId() && pActor &&
+                !pActor->IsDeleted() && !pActor->IsDisabled() && pCell && pCell->IsAttached() && !pActor->GetNiNode())))
+        {
+            ++it;
+            continue;
+        }
+        const auto grant = it->second;
+        it = m_restoredOwnershipGrants.erase(it);
+        OnOwnershipTransfer(grant);
+    }
+
+    auto claims = m_world.view<LeaderNativeClaim>();
+    Vector<entt::entity> entities(claims.begin(), claims.end());
+    for (const auto entity : entities)
+    {
+        const auto formId = m_world.get<LeaderNativeClaim>(entity).FormId;
+        auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+        if (!IsLeaderNativeActor(pActor))
+        {
+            m_world.remove<LeaderNativeClaim>(entity);
+            m_world.emplace_or_replace<FormIdComponent>(entity, formId);
+            CancelServerAssignment(entity, formId);
+            if (IsLoadedActor(pActor))
+                ProcessNewEntity(entity);
+            continue;
+        }
+        auto* pLocal = m_world.try_get<LocalComponent>(entity);
+        if (!pLocal)
+            continue;
+        auto& claim = m_world.get<LeaderNativeClaim>(entity);
+        if (IsLoadedActor(pActor))
+        {
+            if (claim.Parked)
+            {
+                if (!claim.ResumeSent)
+                {
+                    RequestScriptedActorState request;
+                    request.State = GetActorLocation(m_world, pActor);
+                    request.State.ServerId = pLocal->Id;
+                    request.State.OwnershipEpoch = pLocal->OwnershipEpoch;
+                    request.State.Phase = ScriptedActorPhase::Resume;
+                    if (request.State.CellId == GameId{})
+                        continue;
+                    claim.ResumeSent = m_transport.Send(request);
+                    spdlog::info("Leader return actor {:X} server {:X} epoch {}", pActor->formID, pLocal->Id, pLocal->OwnershipEpoch);
+                }
+                continue;
+            }
+            if (!m_world.all_of<LocalAnimationComponent>(entity))
+            {
+                m_world.emplace_or_replace<FormIdComponent>(entity, formId);
+                CacheSystem::Setup(m_world, entity, pActor);
+                m_world.emplace<LocalAnimationComponent>(entity);
+                spdlog::info("Pending leader actor ready {:X} server {:X} epoch {}", pActor->formID, pLocal->Id, pLocal->OwnershipEpoch);
+            }
+        }
+        else if (!claim.Parked)
+        {
+            const auto location = m_loadedActorLocations.find(formId);
+            if (pActor->IsDead() || pActor->IsDeleted() || (location != m_loadedActorLocations.end() &&
+                location->second.CellId != GameId{} && !IsLocationInPlayerRange(m_world, location->second, pActor->IsDragon())))
+            {
+                m_world.remove<LeaderNativeClaim>(entity);
+                m_world.emplace_or_replace<FormIdComponent>(entity, formId);
+                OnActorRemoved(ActorRemovedEvent(formId));
+            }
+            else
+                TryParkActor(entity, pActor);
+        }
+    }
 }
 
 uint32_t CharacterService::GetPresentationDelayMs() const noexcept
@@ -282,6 +641,8 @@ void CharacterService::ReconcileActorData(
 
 bool CharacterService::RequestOwnership(const uint32_t aFormId, const uint32_t aServerId, const entt::entity aEntity) const noexcept
 {
+    if (IsActorDiscoverySuppressed(aFormId))
+        return false;
     Actor* pActor = Cast<Actor>(TESForm::GetById(aFormId));
     if (!pActor)
     {
@@ -328,7 +689,34 @@ void CharacterService::DeleteTempActor(const uint32_t aFormId) noexcept
 
 void CharacterService::OnActorAdded(const ActorAddedEvent& acEvent) noexcept
 {
+    if (IsActorDiscoverySuppressed(acEvent.FormId))
+        return;
     Actor* pActor = Cast<Actor>(TESForm::GetById(acEvent.FormId));
+    if (!pActor)
+        return;
+
+    for (const auto entity : m_world.view<LeaderNativeClaim>())
+        if (m_world.get<LeaderNativeClaim>(entity).FormId == acEvent.FormId)
+            return;
+
+    // Parked and pending native bindings retain their form across discovery.
+    auto forms = m_world.view<FormIdComponent>();
+    const auto existing = std::find_if(forms.begin(), forms.end(), [forms, &acEvent](auto e) { return forms.get<FormIdComponent>(e).Id == acEvent.FormId; });
+    if (existing != forms.end())
+    {
+        if (const auto* pRemote = m_world.try_get<RemoteComponent>(*existing); pRemote &&
+            !m_world.any_of<InterpolationComponent, WaitingForAssignmentComponent>(*existing))
+        {
+            if (m_restoredOwnershipGrants.find(pRemote->Id) == m_restoredOwnershipGrants.end())
+            {
+                CacheSystem::Setup(m_world, *existing, pActor);
+                RequestServerAssignment(*existing);
+            }
+            return;
+        }
+        ProcessNewEntity(*existing);
+        return;
+    }
 
     if (acEvent.FormId == 0x14)
     {
@@ -349,7 +737,7 @@ void CharacterService::OnActorAdded(const ActorAddedEvent& acEvent) noexcept
     if (it != std::end(view))
     {
         Actor* pActor = Cast<Actor>(TESForm::GetById(acEvent.FormId));
-        pActor->GetExtension()->SetRemote(true);
+        pActor->GetExtension()->SetRemote(!m_world.all_of<LeaderNativeClaim>(*it));
 
         entity = *it;
     }
@@ -364,6 +752,8 @@ void CharacterService::OnActorAdded(const ActorAddedEvent& acEvent) noexcept
 
 void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 {
+    if (IsActorDiscoverySuppressed(acEvent.FormId))
+        return;
     if (auto* pActor = Cast<Actor>(TESForm::GetById(acEvent.FormId)))
         pActor->GetExtension()->Reconciliation = ActorExtension::ReconciliationStage::None;
 
@@ -374,11 +764,31 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
     if (entityIt == view.end())
     {
+        for (const auto entity : m_world.view<LeaderNativeClaim>())
+            if (m_world.get<LeaderNativeClaim>(entity).FormId == acEvent.FormId)
+                return;
         spdlog::error("Actor to remove not found in form ids map {:X}", acEvent.FormId);
         return;
     }
 
     const auto cId = *entityIt;
+
+    if (auto* pActor = Cast<Actor>(TESForm::GetById(acEvent.FormId)))
+    {
+        const auto* pClaim = m_world.try_get<LeaderNativeClaim>(cId);
+        if ((pClaim && (pClaim->Parked || !m_world.all_of<LocalComponent>(cId))) || TryParkActor(cId, pActor))
+            return;
+        const auto location = m_loadedActorLocations.find(acEvent.FormId);
+        if (m_world.all_of<WaitingForAssignmentComponent>(cId) && IsLeaderNativeActor(pActor) &&
+            !pActor->IsDead() && !pActor->IsDeleted() && location != m_loadedActorLocations.end() &&
+            IsLocationInPlayerRange(m_world, location->second, pActor->IsDragon()))
+        {
+            m_world.emplace_or_replace<LeaderNativeClaim>(cId).FormId = acEvent.FormId;
+            return;
+        }
+    }
+    m_loadedActorLocations.erase(acEvent.FormId);
+    m_world.remove<LeaderNativeClaim>(cId);
 
     auto& formIdComponent = view.get<FormIdComponent>(cId);
     CancelServerAssignment(*entityIt, formIdComponent.Id);
@@ -396,6 +806,7 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    RunScriptedActorUpdates();
     EngineFixes::OnFrame();
     static uint64_t s_nextScriptedPackageMs = 0;
     if (const auto packageNow = GetTickCount64(); packageNow >= s_nextScriptedPackageMs)
@@ -474,6 +885,13 @@ void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const
 
 void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept
 {
+    m_loadedActorLocations.clear();
+    m_restoredOwnershipGrants.clear();
+    for (const auto entity : m_world.view<LeaderNativeClaim>())
+        m_world.emplace_or_replace<FormIdComponent>(entity, m_world.get<LeaderNativeClaim>(entity).FormId);
+    m_world.clear<LeaderNativeClaim>();
+    for (auto& [formId, parked] : m_parkedActors)
+        parked.Message.State.Phase = ScriptedActorPhase::Release;
     m_nextDeferredAssignmentRetryMs = 0;
     VisualPoseMailbox::SetPresentationTick(0);
     VisualPoseMailbox::SetApplyEnabled(false);
@@ -540,6 +958,8 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
     m_world.remove<ReplayedActionsDebugComponent>(cEntity);
 #endif
 
+    if (const auto* pRemote = m_world.try_get<RemoteComponent>(cEntity); pRemote && IsActorDiscoverySuppressed(pRemote->CachedRefId))
+        return;
     if (isCancelled)
     {
         if (acMessage.Owner)
@@ -592,6 +1012,32 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
     actorData.IsDead = acMessage.IsDead;
     actorData.IsWeaponDrawn = acMessage.IsWeaponDrawn;
 
+    if (IsActorDiscoverySuppressed(pActor->formID))
+    {
+        m_world.emplace_or_replace<RemoteComponent>(cEntity, acMessage.ServerId, pActor->formID, acMessage.OwnershipEpoch);
+        return;
+    }
+
+    if (!acMessage.Owner && IsLeaderNativeActor(pActor))
+    {
+        ScriptedActorState anchor;
+        anchor.CellId = acMessage.CellId;
+        anchor.WorldSpaceId = acMessage.WorldSpaceId;
+        anchor.Position = acMessage.Position;
+        if (IsLocationInPlayerRange(m_world, anchor, pActor->IsDragon()) || acMessage.CellId == GameId{})
+        {
+            m_loadedActorLocations.try_emplace(pActor->formID, anchor);
+            m_world.emplace_or_replace<RemoteComponent>(cEntity, acMessage.ServerId, pActor->formID, acMessage.OwnershipEpoch);
+            m_world.emplace_or_replace<LeaderNativeClaim>(cEntity).FormId = pActor->formID;
+            m_world.remove<InterpolationComponent, RemoteAnimationComponent, WaitingFor3D>(cEntity);
+            m_world.remove<FormIdComponent>(cEntity);
+            pActor->GetExtension()->SetRemote(false);
+            RequestOwnership(pActor->formID, acMessage.ServerId, cEntity);
+            spdlog::info("Pending leader assignment actor {:X} server {:X} epoch {}", pActor->formID, acMessage.ServerId, acMessage.OwnershipEpoch);
+            return;
+        }
+    }
+
     if (acMessage.Owner)
     {
         spdlog::info("Received local actor, form id: {:X}", pActor->formID);
@@ -600,7 +1046,7 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         // actor is newer than: apply none of it, and never mark it remote for the moment (its native
         // processing, actions and moves would be suppressed). A death the server knows of still applies.
         m_weaponDrawUpdates.erase(pActor->formID);
-        if (acMessage.IsDead && !pActor->IsDead())
+        if (!IsLeaderNativeActor(pActor) && acMessage.IsDead && !pActor->IsDead())
             pActor->Kill();
 
         auto& localAnimationComponent = m_world.emplace_or_replace<LocalAnimationComponent>(cEntity);
@@ -617,6 +1063,23 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         auto& localComponent = m_world.emplace_or_replace<LocalComponent>(cEntity, acMessage.ServerId, acMessage.OwnershipEpoch);
         localComponent.IsDead = acMessage.IsDead;
         localComponent.IsWeaponDrawn = acMessage.IsWeaponDrawn;
+        if (IsLeaderNativeActor(pActor))
+        {
+            ScriptedActorState anchor;
+            anchor.CellId = acMessage.CellId;
+            anchor.WorldSpaceId = acMessage.WorldSpaceId;
+            anchor.Position = acMessage.Position;
+            m_loadedActorLocations.try_emplace(pActor->formID, anchor);
+            m_world.emplace_or_replace<LeaderNativeClaim>(cEntity).FormId = pActor->formID;
+            localComponent.IsDead = pActor->IsDead();
+            localComponent.IsWeaponDrawn = pActor->actorState.IsWeaponDrawn();
+            if (!IsLoadedActor(pActor))
+            {
+                m_world.remove<LocalAnimationComponent>(cEntity);
+                TryParkActor(cEntity, pActor);
+                m_world.remove<FormIdComponent>(cEntity);
+            }
+        }
     }
     else
     {
@@ -701,14 +1164,12 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         m_pendingMounts[acMessage.ServerId] = {acMessage.MountedOnServerId, 0, 0};
 }
 
-namespace
-{
-// Leader-owned loaded actors a follower registered first: their spawn state is not applied.
-std::unordered_set<uint32_t> s_keepLocalSpawnState;
-} // namespace
-
 void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
+    if (acMessage.FormId != GameId{} && IsActorDiscoverySuppressed(m_world.GetModSystem().GetGameId(acMessage.FormId)))
+        return;
+    if (const auto existing = Utils::FindEntityByServerId(acMessage.ServerId); existing && m_world.all_of<LocalComponent>(*existing))
+        return;
     if (acMessage.OwnershipEpoch == 0)
     {
         spdlog::warn("Ignored spawn for actor {:X} because the ownership epoch is invalid", acMessage.ServerId);
@@ -801,42 +1262,38 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     spdlog::info("CharacterSpawnRequest, server id: {:X}, form id: {:X}", acMessage.ServerId, pActor->formID);
 
-    // The leader keeps its own loaded actors as they are: a follower that registered one first (its
-    // copy of a scene ran a moment ahead) must not teleport, re-equip or kill the leader's copy. The
-    // leader claims it right after. Applying the follower's spawn state moved the leader's scripted
-    // intro dragon off its flight (the scene waited for a landing that never came) and made the
-    // leader's beheaded prisoner loop create-and-remove every 6 s.
-    // Wherever it is: loaded or not (the intro dragon far off in the sky), or in a holding cell (the
-    // beheaded prisoner, whose copy on the follower was still alive and was resurrected on the
-    // leader every 6 s, stalling the execution scene).
-    const bool keepLocalState = m_world.GetPartyService().IsLeader() && acMessage.FormId != GameId{} && !acMessage.IsPlayer &&
-        pActor->formID < 0xFF000000;
-    // Nothing of the follower's copy is applied then, not even enabling it or marking it remote for a
-    // moment: a remote actor's native processing, actions and moves are suppressed, and the scene
-    // that needs it (the intro dragon's landing) stalls.
+    ScriptedActorState anchor;
+    anchor.CellId = acMessage.CellId;
+    anchor.Position = acMessage.Position;
+    if (auto* pCell = Cast<TESObjectCELL>(TESForm::GetById(m_world.GetModSystem().GetGameId(acMessage.CellId))); pCell && pCell->worldspace)
+        m_world.GetModSystem().GetServerModId(pCell->worldspace->formID, anchor.WorldSpaceId);
+    if (!acMessage.IsPlayer && IsLeaderNativeActor(pActor) &&
+        (IsLocationInPlayerRange(m_world, anchor, pActor->IsDragon()) || acMessage.CellId == GameId{}))
+    {
+        m_loadedActorLocations.try_emplace(pActor->formID, anchor);
+        DeleteRemoteEntityComponents(*entity);
+        m_world.remove<FormIdComponent>(*entity);
+        m_world.emplace_or_replace<RemoteComponent>(*entity, acMessage.ServerId, pActor->formID, acMessage.OwnershipEpoch);
+        m_world.emplace_or_replace<LeaderNativeClaim>(*entity).FormId = pActor->formID;
+        pActor->GetExtension()->SetRemote(false);
+        RequestOwnership(pActor->formID, acMessage.ServerId, *entity);
+        spdlog::info("Pending leader spawn actor {:X} server {:X} epoch {} has3D={}",
+            pActor->formID, acMessage.ServerId, acMessage.OwnershipEpoch, pActor->GetNiNode() != nullptr);
+        return;
+    }
 
     // Pending reconciliation re-enables the actor after applying the owner's pick.
-    if (!keepLocalState && pActor->IsDisabled() && pActor->GetExtension()->Reconciliation != ActorExtension::ReconciliationStage::WaitingForDisable)
+    if (pActor->IsDisabled() && pActor->GetExtension()->Reconciliation != ActorExtension::ReconciliationStage::WaitingForDisable)
     {
         spdlog::warn("Disabled actor is being re-enabled: {:X}", pActor->formID);
         pActor->EnableImpl();
     }
 
-    if (!keepLocalState)
-        pActor->GetExtension()->SetRemote(true);
-
-    if (keepLocalState)
-    {
-        s_keepLocalSpawnState.insert(pActor->formID);
-        spdlog::info("Leader keeps its own state for {:X} (a follower registered it first)", pActor->formID);
-    }
-    else
-    {
-        pActor->rotation.x = acMessage.Rotation.x;
-        pActor->rotation.z = acMessage.Rotation.y;
-        pActor->MoveTo(PlayerCharacter::Get()->parentCell, acMessage.Position);
-        pActor->SetActorValues(acMessage.InitialActorValues);
-    }
+    pActor->GetExtension()->SetRemote(true);
+    pActor->rotation.x = acMessage.Rotation.x;
+    pActor->rotation.z = acMessage.Rotation.y;
+    pActor->MoveTo(PlayerCharacter::Get()->parentCell, acMessage.Position);
+    pActor->SetActorValues(acMessage.InitialActorValues);
 
     pActor->GetExtension()->SetPlayer(acMessage.IsPlayer);
     if (acMessage.IsPlayer)
@@ -846,8 +1303,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
         m_world.emplace_or_replace<PlayerComponent>(*entity, acMessage.PlayerId);
     }
 
-    // A follower's copy can report a death the leader missed, never a resurrection.
-    if (pActor->IsDead() != acMessage.IsDead && (!keepLocalState || acMessage.IsDead))
+    if (pActor->IsDead() != acMessage.IsDead)
         acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
 
     spdlog::info("Spawn Request Is summon {}", acMessage.IsPlayerSummon);
@@ -859,7 +1315,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     }
 
     // Static references arrive with their own locally rolled leveled pick; conform to the owner's.
-    if (acMessage.FormId != GameId{} && !keepLocalState)
+    if (acMessage.FormId != GameId{})
         ApplyLeveledNpcPick(pActor, acMessage.LeveledNpcPickId);
 
     m_world.emplace_or_replace<RemoteComponent>(*entity, acMessage.ServerId, pActor->formID, acMessage.OwnershipEpoch);
@@ -873,8 +1329,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     auto& remoteAnimationComponent = m_world.get<RemoteAnimationComponent>(*entity);
 
-    if (!keepLocalState)
-        AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay);
+    AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay);
 
     if (acMessage.MountedOnServerId)
         m_pendingMounts[acMessage.ServerId] = {acMessage.MountedOnServerId, 0, 0};
@@ -1058,6 +1513,18 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
         return;
     }
 
+    for (auto& [formId, parked] : m_parkedActors)
+    {
+        if (parked.Message.State.ServerId != acMessage.ServerId)
+            continue;
+        auto& grant = m_restoredOwnershipGrants[acMessage.ServerId];
+        if (grant.OwnershipEpoch < acMessage.OwnershipEpoch)
+            grant = acMessage;
+        parked.Message.State.Phase = ScriptedActorPhase::Release;
+        spdlog::info("Deferred restored actor grant {:X} epoch {} until local disable completes", acMessage.ServerId, acMessage.OwnershipEpoch);
+        return;
+    }
+
     const bool isLocalOwner = acMessage.OwnerPlayerId == m_transport.GetLocalPlayerId();
     if (!entity)
     {
@@ -1084,6 +1551,12 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
     }
     const auto* pFormIdComponent = m_world.try_get<FormIdComponent>(cEntity);
     Actor* pActor = pFormIdComponent ? Cast<Actor>(TESForm::GetById(pFormIdComponent->Id)) : nullptr;
+    if (!pActor)
+        if (const auto* pClaim = m_world.try_get<LeaderNativeClaim>(cEntity))
+            pActor = Cast<Actor>(TESForm::GetById(pClaim->FormId));
+    if (!pActor)
+        if (const auto* pRemote = m_world.try_get<RemoteComponent>(cEntity))
+            pActor = Cast<Actor>(TESForm::GetById(pRemote->CachedRefId));
 
     // Preserve the accepted epoch's pick for actors that still need to be created.
     if (auto* pWaitingFor3D = m_world.try_get<WaitingFor3D>(cEntity))
@@ -1091,6 +1564,32 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
 
     if (isLocalOwner)
     {
+        if (IsLeaderNativeActor(pActor))
+        {
+            DeleteRemoteEntityComponents(cEntity);
+            m_world.emplace_or_replace<LeaderNativeClaim>(cEntity).FormId = pActor->formID;
+            auto& local = m_world.emplace_or_replace<LocalComponent>(cEntity, acMessage.ServerId, acMessage.OwnershipEpoch);
+            local.IsDead = pActor->IsDead();
+            local.IsWeaponDrawn = pActor->actorState.IsWeaponDrawn();
+            pActor->GetExtension()->SetRemote(false);
+            m_weaponDrawUpdates.erase(pActor->formID);
+            m_pendingLeveledConforms.erase(pActor->formID);
+            if (IsLoadedActor(pActor))
+            {
+                m_world.emplace_or_replace<FormIdComponent>(cEntity, pActor->formID);
+                CacheSystem::Setup(m_world, cEntity, pActor);
+                m_world.emplace_or_replace<LocalAnimationComponent>(cEntity);
+            }
+            else
+            {
+                m_world.remove<LocalAnimationComponent>(cEntity);
+                TryParkActor(cEntity, pActor);
+                m_world.remove<FormIdComponent>(cEntity);
+            }
+            spdlog::info("Accepted native leader grant actor {:X} server {:X} epoch {} pending3D={}",
+                pActor->formID, acMessage.ServerId, acMessage.OwnershipEpoch, !IsLoadedActor(pActor));
+            return;
+        }
         if (!pFormIdComponent || !pActor || !pActor->GetNiNode())
         {
             uint32_t cachedRefId = pFormIdComponent ? pFormIdComponent->Id : 0;
@@ -1135,7 +1634,10 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
     if (pActor)
         pActor->GetExtension()->SetRemote(true);
 
+    m_world.remove<LeaderNativeClaim>(cEntity);
     m_world.remove<LocalAnimationComponent, LocalComponent>(cEntity);
+    if (!pFormIdComponent && pActor)
+        pFormIdComponent = &m_world.emplace_or_replace<FormIdComponent>(cEntity, pActor->formID);
 
     if (pFormIdComponent)
     {
@@ -1160,6 +1662,21 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
 
 void CharacterService::OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) noexcept
 {
+    for (const auto& [formId, parked] : m_parkedActors)
+        if (parked.Message.State.ServerId == acMessage.ServerId && parked.Message.State.Phase == ScriptedActorPhase::Park)
+            return;
+    m_restoredOwnershipGrants.erase(acMessage.ServerId);
+    if (const auto entity = Utils::FindEntityByServerId(acMessage.ServerId); entity && m_world.all_of<LeaderNativeClaim>(*entity))
+    {
+        const auto formId = m_world.get<LeaderNativeClaim>(*entity).FormId;
+        m_loadedActorLocations.erase(formId);
+        m_world.remove<LeaderNativeClaim, LocalComponent, LocalAnimationComponent>(*entity);
+        m_world.emplace_or_replace<FormIdComponent>(*entity, formId);
+        DeleteRemoteEntityComponents(*entity);
+        if (IsLoadedActor(Cast<Actor>(TESForm::GetById(formId))))
+            ProcessNewEntity(*entity);
+        return;
+    }
     ClearMountRelationsForServerId(acMessage.ServerId);
     m_localMountSent.erase(acMessage.ServerId);
     auto view = m_world.view<RemoteComponent>();
@@ -1892,6 +2409,8 @@ void CharacterService::OnNotifyActorTeleport(const NotifyActorTeleport& acMessag
     auto& modSystem = m_world.GetModSystem();
 
     const uint32_t cActorId = World::Get().GetModSystem().GetGameId(acMessage.FormId);
+    if (IsActorDiscoverySuppressed(cActorId))
+        return;
     Actor* pActor = Cast<Actor>(TESForm::GetById(cActorId));
     if (!pActor)
     {
@@ -1972,6 +2491,8 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
         return;
 
     auto& formIdComponent = m_world.get<FormIdComponent>(aEntity);
+    if (IsActorDiscoverySuppressed(formIdComponent.Id) || m_world.all_of<LeaderNativeClaim, LocalComponent>(aEntity))
+        return;
 
     Actor* const pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
     if (!pActor)
@@ -2543,6 +3064,9 @@ void CharacterService::RunLocalUpdates() const noexcept
         auto& localComponent = animatedLocalView.get<LocalComponent>(entity);
         auto& animationComponent = animatedLocalView.get<LocalAnimationComponent>(entity);
         auto& formIdComponent = animatedLocalView.get<FormIdComponent>(entity);
+        auto* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
+        if (IsLeaderNativeActor(pActor) && !IsLoadedActor(pActor))
+            continue;
 
         // Bounded pose cadence trial: at most four full poses per 50 ms
         // movement snapshot. The client transport buffer is 64 KiB, so do
@@ -2836,23 +3360,13 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         // By now, the actor has materialized in the world and is ready for further setup
 
-        // The leader's own loaded actor keeps its inventory, factions and life state (see OnCharacterSpawn).
-        const bool keepLocalState = s_keepLocalSpawnState.erase(pActor->formID) != 0;
-        if (!keepLocalState)
-        {
-            pActor->SetActorInventory(waitingFor3D.SpawnRequest.InventoryContent);
-            pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
-        }
+        pActor->SetActorInventory(waitingFor3D.SpawnRequest.InventoryContent);
+        pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
+        if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
+            pActor->LoadAnimationVariables(waitingFor3D.SpawnRequest.ActionsToReplay.Actions[0].Variables);
+        m_weaponDrawUpdates[pActor->formID] = {waitingFor3D.SpawnRequest.IsWeaponDrawn};
 
-        if (!keepLocalState)
-        {
-            if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
-                pActor->LoadAnimationVariables(waitingFor3D.SpawnRequest.ActionsToReplay.Actions[0].Variables);
-
-            m_weaponDrawUpdates[pActor->formID] = {waitingFor3D.SpawnRequest.IsWeaponDrawn};
-        }
-
-        if (pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead && (!keepLocalState || waitingFor3D.SpawnRequest.IsDead))
+        if (pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead)
             waitingFor3D.SpawnRequest.IsDead ? pActor->Kill() : pActor->Respawn();
 
         if (pActor->IsVampireLord())

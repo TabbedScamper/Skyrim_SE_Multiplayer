@@ -27,6 +27,7 @@ struct SyncExperienceRequest;
 struct DialogueRequest;
 struct SubtitleRequest;
 struct Player;
+struct RequestScriptedActorState;
 
 /**
  * @brief Manages player and actor state.
@@ -53,6 +54,9 @@ protected:
 
     void OnUpdate(const UpdateEvent& acEvent) const noexcept;
     void EnforceLeaderAuthority() const noexcept;
+    void OnScriptedActorState(const PacketEvent<RequestScriptedActorState>& acMessage) const noexcept;
+    void UpdateParkedActors() const noexcept;
+    void ReleaseParkedActor(entt::entity aEntity) const noexcept;
     void OnCharacterExteriorCellChange(const CharacterExteriorCellChangeEvent& acEvent) const noexcept;
     void OnCharacterInteriorCellChange(const CharacterInteriorCellChangeEvent& acEvent) const noexcept;
     void OnAssignCharacterRequest(const PacketEvent<AssignCharacterRequest>& acMessage) const noexcept;
@@ -87,6 +91,7 @@ private:
     World& m_world;
 
     entt::scoped_connection m_updateConnection;
+    entt::scoped_connection m_scriptedActorStateConnection;
     entt::scoped_connection m_corpseRagdollConnection;
     entt::scoped_connection m_playerAppearanceConnection;
     entt::scoped_connection m_exteriorCellChangeEventConnection;

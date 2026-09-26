@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/DiscoveryService.h>
+#include <Services/CharacterService.h>
 #include <Games/TES.h>
 
 #include <Games/References.h>
@@ -211,6 +212,12 @@ void DiscoveryService::VisitForms() noexcept
     const auto visitor = [this](TESObjectREFR* apReference)
     {
         const auto formId = apReference->formID;
+
+        auto& characters = m_world.GetCharacterService();
+        if (characters.IsActorDiscoverySuppressed(formId))
+            return;
+        if (auto* pActor = Cast<Actor>(apReference))
+            characters.ObserveDiscoveredActor(pActor);
 
         if (!m_forms.count(formId))
         {

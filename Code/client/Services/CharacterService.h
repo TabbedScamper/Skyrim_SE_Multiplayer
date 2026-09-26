@@ -3,6 +3,8 @@
 #include "Structs/ActorData.h"
 #include <atomic>
 #include <unordered_map>
+#include <Messages/NotifyScriptedActorState.h>
+#include <Messages/NotifyOwnershipTransfer.h>
 
 struct ActorAddedEvent;
 struct ActorRemovedEvent;
@@ -110,6 +112,8 @@ struct CharacterService
     [[nodiscard]] uint32_t GetVehicleTrialImmediateHandle() const noexcept;
 
     bool RequestOwnership(uint32_t aFormId, uint32_t aServerId, entt::entity aEntity) const noexcept;
+    void ObserveDiscoveredActor(Actor* apActor) noexcept;
+    bool IsActorDiscoverySuppressed(uint32_t aFormId) const noexcept;
 
     void OnActorAdded(const ActorAddedEvent& acEvent) noexcept;
     void OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept;
@@ -139,6 +143,22 @@ public:
     static bool GetCreatorDisplayOffset(uint32_t aFormId, NiPoint3& arOffset, float& arHeading) noexcept;
 
 private:
+    bool IsLeaderNativeActor(Actor* apActor) const noexcept;
+    bool TryParkActor(entt::entity aEntity, Actor* apActor) noexcept;
+    void OnScriptedActorState(const NotifyScriptedActorState& acMessage) noexcept;
+    void RunScriptedActorUpdates() noexcept;
+    struct ParkedActor
+    {
+        entt::entity Entity{entt::null};
+        NotifyScriptedActorState Message{};
+        bool DisabledByUs{};
+        bool DisablePending{};
+    };
+    std::unordered_map<uint32_t, ScriptedActorState> m_loadedActorLocations;
+    std::unordered_map<uint32_t, ParkedActor> m_parkedActors;
+    std::unordered_map<uint32_t, NotifyOwnershipTransfer> m_restoredOwnershipGrants;
+    entt::scoped_connection m_scriptedActorStateConnection;
+
     void OnBeastFormChange(const BeastFormChangeEvent& acEvent) const noexcept;
     void OnAddExperienceEvent(const AddExperienceEvent& acEvent) noexcept;
     void OnNotifySyncExperience(const NotifySyncExperience& acMessage) noexcept;
