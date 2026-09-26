@@ -597,10 +597,12 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
     {
         spdlog::info("Received local actor, form id: {:X}", pActor->formID);
 
-        pActor->GetExtension()->SetRemote(true);
-        // The owner's assignment echoes an earlier snapshot of this very
-        // actor.  Its live native inventory is newer than that echo.
-        ReconcileActorData(cEntity, pActor, acMessage.OwnershipEpoch, actorData, false, true);
+        // The owner's assignment echoes an earlier snapshot of this very actor, which the live native
+        // actor is newer than: apply none of it, and never mark it remote for the moment (its native
+        // processing, actions and moves would be suppressed). A death the server knows of still applies.
+        m_weaponDrawUpdates.erase(pActor->formID);
+        if (acMessage.IsDead && !pActor->IsDead())
+            pActor->Kill();
 
         auto& localAnimationComponent = m_world.emplace_or_replace<LocalAnimationComponent>(cEntity);
 
@@ -616,7 +618,6 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
         auto& localComponent = m_world.emplace_or_replace<LocalComponent>(cEntity, acMessage.ServerId, acMessage.OwnershipEpoch);
         localComponent.IsDead = acMessage.IsDead;
         localComponent.IsWeaponDrawn = acMessage.IsWeaponDrawn;
-        pActor->GetExtension()->SetRemote(false);
     }
     else
     {
@@ -801,15 +802,6 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     spdlog::info("CharacterSpawnRequest, server id: {:X}, form id: {:X}", acMessage.ServerId, pActor->formID);
 
-    // Pending reconciliation re-enables the actor after applying the owner's pick.
-    if (pActor->IsDisabled() && pActor->GetExtension()->Reconciliation != ActorExtension::ReconciliationStage::WaitingForDisable)
-    {
-        spdlog::warn("Disabled actor is being re-enabled: {:X}", pActor->formID);
-        pActor->EnableImpl();
-    }
-
-    pActor->GetExtension()->SetRemote(true);
-
     // The leader keeps its own loaded actors as they are: a follower that registered one first (its
     // copy of a scene ran a moment ahead) must not teleport, re-equip or kill the leader's copy. The
     // leader claims it right after. Applying the follower's spawn state moved the leader's scripted
@@ -820,6 +812,20 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     // leader every 6 s, stalling the execution scene).
     const bool keepLocalState = m_world.GetPartyService().IsLeader() && acMessage.FormId != GameId{} && !acMessage.IsPlayer &&
         pActor->formID < 0xFF000000;
+    // Nothing of the follower's copy is applied then, not even enabling it or marking it remote for a
+    // moment: a remote actor's native processing, actions and moves are suppressed, and the scene
+    // that needs it (the intro dragon's landing) stalls.
+
+    // Pending reconciliation re-enables the actor after applying the owner's pick.
+    if (!keepLocalState && pActor->IsDisabled() && pActor->GetExtension()->Reconciliation != ActorExtension::ReconciliationStage::WaitingForDisable)
+    {
+        spdlog::warn("Disabled actor is being re-enabled: {:X}", pActor->formID);
+        pActor->EnableImpl();
+    }
+
+    if (!keepLocalState)
+        pActor->GetExtension()->SetRemote(true);
+
     if (keepLocalState)
     {
         s_keepLocalSpawnState.insert(pActor->formID);
@@ -854,7 +860,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     }
 
     // Static references arrive with their own locally rolled leveled pick; conform to the owner's.
-    if (acMessage.FormId != GameId{})
+    if (acMessage.FormId != GameId{} && !keepLocalState)
         ApplyLeveledNpcPick(pActor, acMessage.LeveledNpcPickId);
 
     m_world.emplace_or_replace<RemoteComponent>(*entity, acMessage.ServerId, pActor->formID, acMessage.OwnershipEpoch);
@@ -868,7 +874,8 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     auto& remoteAnimationComponent = m_world.get<RemoteAnimationComponent>(*entity);
 
-    AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay);
+    if (!keepLocalState)
+        AnimationSystem::AddActionsForReplay(remoteAnimationComponent, acMessage.ActionsToReplay);
 
     if (acMessage.MountedOnServerId)
         m_pendingMounts[acMessage.ServerId] = {acMessage.MountedOnServerId, 0, 0};
@@ -2838,12 +2845,13 @@ void CharacterService::RunRemoteUpdates() noexcept
             pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
         }
 
-        if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
+        if (!keepLocalState)
         {
-            pActor->LoadAnimationVariables(waitingFor3D.SpawnRequest.ActionsToReplay.Actions[0].Variables);
-        }
+            if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
+                pActor->LoadAnimationVariables(waitingFor3D.SpawnRequest.ActionsToReplay.Actions[0].Variables);
 
-        m_weaponDrawUpdates[pActor->formID] = {waitingFor3D.SpawnRequest.IsWeaponDrawn};
+            m_weaponDrawUpdates[pActor->formID] = {waitingFor3D.SpawnRequest.IsWeaponDrawn};
+        }
 
         if (pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead && (!keepLocalState || waitingFor3D.SpawnRequest.IsDead))
             waitingFor3D.SpawnRequest.IsDead ? pActor->Kill() : pActor->Respawn();
