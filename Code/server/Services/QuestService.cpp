@@ -13,7 +13,7 @@
 #include <CampaignLedger.h>
 namespace
 {
-Console::Setting bEnableMiscQuestSync{"Gameplay:bEnableMiscQuestSync", "Syncs miscellaneous quests (on by default: a follower in a party never runs its own quest stages, so an unsynced one would stall)", true};
+Console::Setting bEnableMiscQuestSync{"Gameplay:bEnableMiscQuestSync", "(Experimental) Syncs miscellaneous quests when possible. Off: each PC runs its own (they include system quests such as diseases and vampirism)", false};
 
 }
 

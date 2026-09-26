@@ -380,6 +380,9 @@ bool QuestService::RefreshAliasSession() noexcept
 
 bool QuestService::SendAliasFills(TESQuest* apQuest, const RequestQuestUpdate* apUpdate) noexcept
 {
+    // Only quests that are shared: a follower must never start another PC's system quest to take its fills.
+    if (!apQuest || IsNonSyncableQuest(apQuest))
+        return false;
     if (!RefreshAliasSession() || !m_world.GetPartyService().IsLeader())
         return false;
 
@@ -809,7 +812,11 @@ bool QuestService::IsNonSyncableQuest(TESQuest* apQuest)
     // Quests with no quest stages are never synced. Most TESQues::Type:: quests should
     // be synced, including Type::None and Type::Miscellaneous, but there are a few
     // known exceptions that should be excluded that are in the table.
-    return    apQuest->stages.Empty() 
+    // Type None and Miscellaneous quests run on each PC: they include the engine's system quests
+    // (diseases, vampirism, dialogue and favor managers) that must not be started on another PC, and
+    // the server does not relay them by default (Gameplay:bEnableMiscQuestSync).
+    return    apQuest->stages.Empty()
+           || apQuest->type == TESQuest::Type::None || apQuest->type == TESQuest::Type::Miscellaneous
            || std::find(kNonSyncableQuestIds.begin(), kNonSyncableQuestIds.end(), apQuest->formID) != kNonSyncableQuestIds.end();
 }
 
