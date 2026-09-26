@@ -7,8 +7,11 @@
 
 struct PhysicsReferenceUpdate
 {
+    static constexpr size_t MaxUpdates = 4096;
+    static constexpr size_t MinBits = 2 * 8 + 9 * 32 + 8;
+
     void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept;
-    void Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
+    void Deserialize(TiltedPhoques::Buffer::Reader& aReader);
 
     GameId Id{};
     glm::vec3 Position{};

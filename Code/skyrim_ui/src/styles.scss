@@ -21,6 +21,12 @@ input {
   }
 }
 
+app-settings button,
+app-title-coop-lobby button,
+app-controls-bindings button {
+  font-size: max(13px, 1rem);
+}
+
 ::selection {
   color: $-color-background;
   background: mod($-color-background, 1);

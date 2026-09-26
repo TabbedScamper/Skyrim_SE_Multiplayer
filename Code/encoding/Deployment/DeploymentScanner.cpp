@@ -104,6 +104,7 @@ bool ShouldSkip(const std::string_view acPath) noexcept
            acPath.starts_with("skyrimtogetherreborn/data/") || acPath.starts_with("skyrimtogetherreborn/debug-feedback/") ||
            acPath.starts_with("skyrimtogetherreborn/logs/") ||
            acPath == "skyrimtogetherreborn/config/stserver.ini" ||
+           acPath == "skyrimtogetherreborn/checkpoints.txt" ||
            acPath == "skyrimtogetherreborn/crashpad_handler.exe" || acPath == "skyrimtogetherreborn/crashpad_wer.dll" ||
            (acPath.starts_with("skyrimtogetherreborn/") && acPath.find(".pre-") != std::string_view::npos) ||
            acPath == "skyrimsemultiplayer.plugins.manifest";

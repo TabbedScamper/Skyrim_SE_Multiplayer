@@ -185,7 +185,6 @@ void StopSound() noexcept
 // previews play "in the head" like UI sounds, independent of any camera or
 // listener position (the title screen has no gameplay camera).
 constexpr uint32_t kOutputStereo = 0x0007EDCA;     // SOMStereo
-constexpr uint32_t kOutputDialogue2D = 0x000B5183; // SOMDialogue2D
 
 void PlayDescriptor(const char* apEditorId, uint32_t aOutputModel = kOutputStereo) noexcept
 {
@@ -314,6 +313,7 @@ namespace AudioPreview
 void KeepAlive(const std::string& acChannel) noexcept
 {
     const auto now = Clock::now();
+    s_state.Deadline = now + 1500ms;
     if (!s_state.Active || s_state.Channel != acChannel)
     {
         if (s_state.Active)
@@ -334,7 +334,6 @@ void KeepAlive(const std::string& acChannel) noexcept
         for (const auto& [formId, volume] : s_state.Muted)
             SetCategoryVolume(formId, 0.f);
     }
-    s_state.Deadline = now + 1500ms;
 }
 
 void SetCategoryVolumeVanilla(uint32_t aCategoryFormId, float aValue) noexcept

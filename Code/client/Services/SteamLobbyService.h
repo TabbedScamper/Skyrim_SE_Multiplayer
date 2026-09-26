@@ -4,6 +4,7 @@
 
 #include <Events/UpdateEvent.h>
 #include <Events/ConnectedEvent.h>
+#include <Events/DisconnectedEvent.h>
 
 struct World;
 
@@ -57,6 +58,7 @@ private:
 
     void OnUpdate(const UpdateEvent&) noexcept;
     void OnConnected(const ConnectedEvent&) noexcept;
+    void OnDisconnected(const DisconnectedEvent&) noexcept;
     bool Initialize() noexcept;
     bool StartLocalServer() noexcept;
     void StopLocalServer() noexcept;
@@ -82,6 +84,7 @@ private:
     World& m_world;
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_connectedConnection;
+    entt::scoped_connection m_disconnectedConnection;
     HMODULE m_steamModule{};
     void* m_matchmaking{};
     void* m_utils{};

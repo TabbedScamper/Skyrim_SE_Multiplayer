@@ -21,6 +21,10 @@ target(name)
         local uidir = path.join(target:scriptdir(), "..", "skyrim_ui", "src")
         os.cp(path.join(uidir, "assets", "images", "cursor.dds"), path.join(target:installdir(), "bin", "assets", "images", "cursor.dds"))
         os.cp(path.join(uidir, "assets", "images", "cursor.png"), path.join(target:installdir(), "bin", "assets", "images", "cursor.png"))
+        local audioSwitch = path.join(target:scriptdir(), "ThirdParty", "AudioSwitch")
+        for _, notice in ipairs({"LICENSE.txt", "NOTICE.md", "THIRD_PARTY_NOTICES.md"}) do
+            os.cp(path.join(audioSwitch, notice), path.join(target:installdir(), "bin", "ThirdParty", "AudioSwitch", notice))
+        end
         os.rm(path.join(target:installdir(), "bin", "**Tests.exe"))
     end)
 

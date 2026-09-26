@@ -1,6 +1,7 @@
 #include <Structs/Mods.h>
 #include <TiltedCore/Serialization.hpp>
 #include <algorithm>
+#include <Structs/CheckedRead.h>
 #include <cctype>
 #include <fstream>
 
@@ -22,7 +23,7 @@ void Mods::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
     aWriter.WriteBits(SchemaVersion, 8);
 
-    const uint16_t modCount = std::min(ModList.size(), size_t(4096)) & 0xFFFF;
+    const uint16_t modCount = std::min(ModList.size(), MaxMods) & 0xFFFF;
     aWriter.WriteBits(modCount, 13);
 
     for (size_t i = 0; i < modCount; ++i)
@@ -42,32 +43,49 @@ void Mods::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
     Deployment.Serialize(aWriter);
 }
 
-void Mods::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
+bool Mods::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    uint64_t data = 0;
-    aReader.ReadBits(data, 8);
-    SchemaVersion = data & 0xFF;
-
-    aReader.ReadBits(data, 13);
-
-    const size_t modCount = data & 0xFFFF;
-    ModList.resize(modCount);
-    for (size_t i = 0; i < modCount; ++i)
+    ModList.clear();
+    Deployment = {};
+    try
     {
-        aReader.ReadBits(data, 16);
-        ModList[i].Id = data & 0xFFFF;
-        ModList[i].IsLite = Serialization::ReadBool(aReader);
-        ModList[i].Filename = Serialization::ReadString(aReader);
-        ModList[i].HasFingerprint = Serialization::ReadBool(aReader);
-        if (ModList[i].HasFingerprint)
+        uint64_t data = 0;
+        CheckedRead::Bits(aReader, data, 8);
+        SchemaVersion = data & 0xFF;
+        if (SchemaVersion != CurrentSchemaVersion)
+            return false;
+
+        CheckedRead::Bits(aReader, data, 13);
+
+        const size_t modCount = data & 0xFFFF;
+        if (modCount > MaxMods || modCount > CheckedRead::RemainingBits(aReader) / 34)
+            return false;
+        ModList.resize(modCount);
+        for (size_t i = 0; i < modCount; ++i)
         {
-            aReader.ReadBits(ModList[i].ContentSize, 64);
-            aReader.ReadBytes(ModList[i].ContentSha256.data(), ModList[i].ContentSha256.size());
+            CheckedRead::Bits(aReader, data, 16);
+            ModList[i].Id = data & 0xFFFF;
+            ModList[i].IsLite = CheckedRead::Bool(aReader);
+            ModList[i].Filename = CheckedRead::String(aReader);
+            ModList[i].HasFingerprint = CheckedRead::Bool(aReader);
+            if (ModList[i].HasFingerprint)
+            {
+                CheckedRead::Bits(aReader, ModList[i].ContentSize, 64);
+                CheckedRead::Bytes(aReader, ModList[i].ContentSha256.data(), ModList[i].ContentSha256.size());
+            }
+            CheckedRead::Bits(aReader, data, 8);
+            ModList[i].MismatchFlags = data & 0xFF;
         }
-        aReader.ReadBits(data, 8);
-        ModList[i].MismatchFlags = data & 0xFF;
+        if (!Deployment.Deserialize(aReader))
+            throw std::runtime_error("invalid deployment manifest");
+        return true;
     }
-    Deployment.Deserialize(aReader);
+    catch (...)
+    {
+        ModList.clear();
+        Deployment = {};
+        return false;
+    }
 }
 
 bool Mods::FingerprintFile(const std::filesystem::path& acPath, Entry& aEntry) noexcept

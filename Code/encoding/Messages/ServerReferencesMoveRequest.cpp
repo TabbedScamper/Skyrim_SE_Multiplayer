@@ -1,5 +1,6 @@
 #include <Messages/ServerReferencesMoveRequest.h>
 #include <TiltedCore/Serialization.hpp>
+#include <Structs/CheckedRead.h>
 
 void ServerReferencesMoveRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -15,14 +16,27 @@ void ServerReferencesMoveRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aW
 
 void ServerReferencesMoveRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    ServerMessage::DeserializeRaw(aReader);
-
-    Tick = Serialization::ReadVarInt(aReader);
-    const auto count = Serialization::ReadVarInt(aReader);
-
-    for (auto i = 0u; i < count; ++i)
+    m_valid = false;
+    Updates.clear();
+    try
     {
-        const uint32_t cServerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-        Updates[cServerId].Deserialize(aReader);
+        ServerMessage::DeserializeRaw(aReader);
+
+        Tick = CheckedRead::VarInt(aReader);
+        const auto count = CheckedRead::VarInt(aReader);
+        if (count > 4096 ||
+            count > CheckedRead::RemainingBits(aReader) / 8)
+            throw std::runtime_error("reference update count exceeds limit");
+
+        for (auto i = 0u; i < count; ++i)
+        {
+            const uint32_t cServerId = CheckedRead::VarInt(aReader) & 0xFFFFFFFF;
+            Updates[cServerId].Deserialize(aReader);
+        }
+        m_valid = true;
+    }
+    catch (...)
+    {
+        Updates.clear();
     }
 }

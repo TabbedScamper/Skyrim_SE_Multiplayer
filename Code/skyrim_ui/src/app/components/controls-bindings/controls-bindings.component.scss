@@ -5,6 +5,7 @@ $-dim: rgba(255, 255, 255, 0.5);
 $-separator: url('../../../assets/images/separator/single.svg');
 
 :host {
+  font-size: max(13px, 1rem);
   display: block;
 }
 

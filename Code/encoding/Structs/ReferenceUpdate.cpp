@@ -1,6 +1,6 @@
 #include <Structs/ReferenceUpdate.h>
 #include <TiltedCore/Serialization.hpp>
-#include <stdexcept>
+#include <Structs/CheckedRead.h>
 
 using TiltedPhoques::Serialization;
 
@@ -34,11 +34,13 @@ void ReferenceUpdate::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const no
 void ReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
 {
     UpdatedMovement.Deserialize(aReader);
-    CombatTargetServerId = static_cast<uint32_t>(Serialization::ReadVarInt(aReader));
+    CombatTargetServerId = static_cast<uint32_t>(CheckedRead::VarInt(aReader));
 
-    const auto count = Serialization::ReadVarInt(aReader);
+    const auto count = CheckedRead::VarInt(aReader);
 
-    ActionEvents.resize(count);
+    if (count > 4096 || count > CheckedRead::RemainingBits(aReader) / 16)
+        throw std::runtime_error("action event count exceeds limit");
+    ActionEvents.resize(static_cast<size_t>(count));
 
     for (auto i = 0u; i < count; ++i)
     {

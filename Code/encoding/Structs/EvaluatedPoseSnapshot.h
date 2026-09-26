@@ -1,6 +1,7 @@
 #pragma once
 
 #include <TiltedCore/Buffer.hpp>
+#include <Structs/CheckedRead.h>
 
 #include <algorithm>
 #include <array>
@@ -136,7 +137,7 @@ struct EvaluatedPoseSnapshot
     void Deserialize(TiltedPhoques::Buffer::Reader& aReader)
     {
         uint64_t count{};
-        aReader.ReadBits(count, 8);
+        CheckedRead::Bits(aReader, count, 8);
         if (count > MaxBones)
             throw std::runtime_error("evaluated pose bone count exceeds limit");
         Bones.clear();
@@ -144,37 +145,37 @@ struct EvaluatedPoseSnapshot
         SourceTick = 0;
         if (count == 0)
             return;
-        aReader.ReadBits(GraphDescriptor, 64);
-        aReader.ReadBits(SourceTick, 64);
+        CheckedRead::Bits(aReader, GraphDescriptor, 64);
+        CheckedRead::Bits(aReader, SourceTick, 64);
         Bones.resize(static_cast<size_t>(count));
         for (auto& bone : Bones)
         {
             uint64_t packed{};
-            aReader.ReadBits(packed, 1);
+            CheckedRead::Bits(aReader, packed, 1);
             for (float& value : bone.Translation)
             {
                 uint64_t bits{};
                 if (packed)
                 {
-                    aReader.ReadBits(bits, 16);
+                    CheckedRead::Bits(aReader, bits, 16);
                     value = static_cast<float>(static_cast<int16_t>(static_cast<uint16_t>(bits))) * kTranslationStep;
                 }
                 else
                 {
-                    aReader.ReadBits(bits, 32);
+                    CheckedRead::Bits(aReader, bits, 32);
                     value = std::bit_cast<float>(static_cast<uint32_t>(bits));
                 }
             }
 
             uint64_t largest{};
-            aReader.ReadBits(largest, 2);
+            CheckedRead::Bits(aReader, largest, 2);
             float sum = 0.f;
             for (uint32_t i = 0; i < 4; ++i)
             {
                 if (i == largest)
                     continue;
                 uint64_t bits{};
-                aReader.ReadBits(bits, 15);
+                CheckedRead::Bits(aReader, bits, 15);
                 const float value = (static_cast<float>(bits) / 32767.f * 2.f - 1.f) * kRotationRange;
                 bone.Rotation[i] = value;
                 sum += value * value;
@@ -182,14 +183,14 @@ struct EvaluatedPoseSnapshot
             bone.Rotation[largest] = std::sqrt((std::max)(0.f, 1.f - sum));
 
             uint64_t unitScale{};
-            aReader.ReadBits(unitScale, 1);
+            CheckedRead::Bits(aReader, unitScale, 1);
             if (unitScale)
                 bone.Scale = {1.f, 1.f, 1.f};
             else
                 for (float& value : bone.Scale)
                 {
                     uint64_t bits{};
-                    aReader.ReadBits(bits, 32);
+                    CheckedRead::Bits(aReader, bits, 32);
                     value = std::bit_cast<float>(static_cast<uint32_t>(bits));
                 }
         }

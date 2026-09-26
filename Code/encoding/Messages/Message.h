@@ -25,6 +25,10 @@ struct ClientMessage : TiltedPhoques::AllocatorCompatible
     virtual void DeserializeDifferential(TiltedPhoques::Buffer::Reader& aReader) noexcept;
 
     [[nodiscard]] ClientOpcode GetOpcode() const noexcept;
+    [[nodiscard]] bool IsValid() const noexcept { return m_valid; }
+
+protected:
+    bool m_valid{true};
 
 private:
     ClientOpcode m_opcode;
@@ -46,6 +50,10 @@ struct ServerMessage : TiltedPhoques::AllocatorCompatible
     virtual void DeserializeDifferential(TiltedPhoques::Buffer::Reader& aReader) noexcept;
 
     [[nodiscard]] ServerOpcode GetOpcode() const noexcept;
+    [[nodiscard]] bool IsValid() const noexcept { return m_valid; }
+
+protected:
+    bool m_valid{true};
 
 private:
     ServerOpcode m_opcode;

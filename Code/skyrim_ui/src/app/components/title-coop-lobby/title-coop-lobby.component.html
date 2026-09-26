@@ -19,7 +19,8 @@
       </div>
       <p *ngIf="steam.lobbyId" class="access-mode">{{ steam.open ? (steam.passwordProtected ? 'Open to friends, password required' : 'Open to friends') : 'Invite only' }}</p>
 
-      <p *ngIf="!steam.lobbyId" class="muted">Creating your private session...</p>
+      <p *ngIf="!steam.lobbyId" class="muted">Host a private session or join a friend.</p>
+      <button *ngIf="!steam.lobbyId && !connected" class="wide" data-style-ornament="inverted" data-nav-default (click)="host()">Host session</button>
 
       <ul *ngIf="steam.lobbyId" class="roster">
         <li *ngFor="let name of steam.memberNames; let i = index" class="member" [class.ready]="isMemberReady(i)">

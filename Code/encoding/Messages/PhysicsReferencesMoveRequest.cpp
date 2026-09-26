@@ -1,5 +1,6 @@
 #include <Messages/PhysicsReferencesMoveRequest.h>
 #include <TiltedCore/Serialization.hpp>
+#include <Structs/CheckedRead.h>
 
 void PhysicsReferencesMoveRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -11,10 +12,23 @@ void PhysicsReferencesMoveRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& a
 
 void PhysicsReferencesMoveRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    ClientMessage::DeserializeRaw(aReader);
-    Tick = Serialization::ReadVarInt(aReader);
-    const auto count = Serialization::ReadVarInt(aReader);
-    Updates.resize(count);
-    for (auto& update : Updates)
-        update.Deserialize(aReader);
+    m_valid = false;
+    Updates.clear();
+    try
+    {
+        ClientMessage::DeserializeRaw(aReader);
+        Tick = CheckedRead::VarInt(aReader);
+        const auto count = CheckedRead::VarInt(aReader);
+        if (count > PhysicsReferenceUpdate::MaxUpdates ||
+            count > CheckedRead::RemainingBits(aReader) / PhysicsReferenceUpdate::MinBits)
+            throw std::runtime_error("reference update count exceeds limit");
+        Updates.resize(count);
+        for (auto& update : Updates)
+            update.Deserialize(aReader);
+        m_valid = true;
+    }
+    catch (...)
+    {
+        Updates.clear();
+    }
 }

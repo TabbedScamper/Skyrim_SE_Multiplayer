@@ -1,6 +1,7 @@
 #pragma once
 
 #include <TiltedCore/Buffer.hpp>
+#include <Structs/CheckedRead.h>
 
 #include <array>
 #include <bit>
@@ -121,37 +122,38 @@ struct VisualBoneSnapshot
     void Deserialize(TiltedPhoques::Buffer::Reader& aReader)
     {
         uint64_t count{};
-        aReader.ReadBits(count, 8);
+        CheckedRead::Bits(aReader, count, 8);
         if (count > MaxBones)
             throw std::runtime_error("visual bone count exceeds limit");
         GraphDescriptor = 0;
         SourceTick = 0;
         Bones.clear();
+        RootWorld = {};
         if (!count)
             return;
-        aReader.ReadBits(GraphDescriptor, 64);
-        aReader.ReadBits(SourceTick, 64);
+        CheckedRead::Bits(aReader, GraphDescriptor, 64);
+        CheckedRead::Bits(aReader, SourceTick, 64);
         const auto readBone = [&aReader](Bone& bone)
         {
             uint64_t present{};
-            aReader.ReadBits(present, 1);
+            CheckedRead::Bits(aReader, present, 1);
             bone.Present = present != 0;
             if (!bone.Present)
                 return;
             for (float& value : bone.Rotation)
             {
                 uint64_t bits{};
-                aReader.ReadBits(bits, 32);
+                CheckedRead::Bits(aReader, bits, 32);
                 value = std::bit_cast<float>(static_cast<uint32_t>(bits));
             }
             for (float& value : bone.Translation)
             {
                 uint64_t bits{};
-                aReader.ReadBits(bits, 32);
+                CheckedRead::Bits(aReader, bits, 32);
                 value = std::bit_cast<float>(static_cast<uint32_t>(bits));
             }
             uint64_t bits{};
-            aReader.ReadBits(bits, 32);
+            CheckedRead::Bits(aReader, bits, 32);
             bone.Scale = std::bit_cast<float>(static_cast<uint32_t>(bits));
         };
         readBone(RootWorld);

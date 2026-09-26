@@ -40,7 +40,7 @@ struct DeploymentManifest
     bool operator==(const DeploymentManifest& acRhs) const noexcept = default;
 
     void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept;
-    void Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
+    [[nodiscard]] bool Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
 
     [[nodiscard]] uint16_t MismatchedLayers(const DeploymentManifest& acRhs) const noexcept;
 };

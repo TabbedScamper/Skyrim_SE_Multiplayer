@@ -202,6 +202,7 @@ SteamLobbyService::SteamLobbyService(World& aWorld, entt::dispatcher& aDispatche
     : m_world(aWorld)
     , m_updateConnection(aDispatcher.sink<UpdateEvent>().connect<&SteamLobbyService::OnUpdate>(this))
     , m_connectedConnection(aDispatcher.sink<ConnectedEvent>().connect<&SteamLobbyService::OnConnected>(this))
+    , m_disconnectedConnection(aDispatcher.sink<DisconnectedEvent>().connect<&SteamLobbyService::OnDisconnected>(this))
 {
 }
 
@@ -212,12 +213,7 @@ SteamLobbyService::~SteamLobbyService() noexcept
             for (auto& pCallback : m_callbacks)
                 unregister(pCallback.get());
     LeaveSession();
-    if (m_serverJob)
-        CloseHandle(m_serverJob);
-    if (m_serverThread)
-        CloseHandle(m_serverThread);
-    if (m_serverProcess)
-        CloseHandle(m_serverProcess);
+    StopLocalServer();
 }
 
 bool SteamLobbyService::Initialize() noexcept
@@ -292,8 +288,8 @@ void SteamLobbyService::OnJoinRequested(const uint64_t aLobbyId, const uint64_t 
     std::erase_if(m_invites, [aLobbyId](const Invite& acInvite) { return acInvite.LobbyId == aLobbyId; });
     if (!aLobbyId || aLobbyId == m_lobbyId)
         return;
-    m_world.GetTransport().Close();
     LeaveSession();
+    m_world.GetTransport().Close();
     StopLocalServer();
     JoinSession(std::to_string(aLobbyId).c_str());
 }
@@ -349,12 +345,14 @@ void SteamLobbyService::UpdateRichPresence() noexcept
 {
     if (m_richPresenceLobby == m_lobbyId)
         return;
-    m_richPresenceLobby = m_lobbyId;
     const auto set = LoadSteamFunction<SetRichPresence>(m_steamModule, "SteamAPI_ISteamFriends_SetRichPresence");
     const auto clear = LoadSteamFunction<ClearRichPresence>(m_steamModule, "SteamAPI_ISteamFriends_ClearRichPresence");
-    if (!set || !clear)
+    if (!clear)
         return;
     clear(m_friends);
+    if (m_lobbyId && !set)
+        return;
+    m_richPresenceLobby = m_lobbyId;
     if (!m_lobbyId)
         return;
     const auto lobby = std::to_string(m_lobbyId);
@@ -428,6 +426,7 @@ void SteamLobbyService::HostSession() noexcept
     if (!m_apiCall)
     {
         ShowMessage("Steam refused to create the session.");
+        StopLocalServer();
         return;
     }
     m_pending = PendingOperation::Create;
@@ -475,8 +474,8 @@ void SteamLobbyService::JoinFriend(const uint64_t aSteamId) noexcept
     spdlog::info("Steam friend join resolved friend {} to lobby {} (current {})", aSteamId, game.LobbyId, m_lobbyId);
     if (game.LobbyId == m_lobbyId)
         return;
-    m_world.GetTransport().Close();
     LeaveSession();
+    m_world.GetTransport().Close();
     StopLocalServer();
     JoinSession(std::to_string(game.LobbyId).c_str());
 }
@@ -555,6 +554,18 @@ void SteamLobbyService::PumpCallbacks() noexcept
     if (runCallbacks)
         runCallbacks();
 
+    if (m_serverProcess && WaitForSingleObject(m_serverProcess, 0) == WAIT_OBJECT_0)
+    {
+        const bool wasHosting = m_isHost;
+        if (wasHosting)
+        {
+            LeaveSession();
+            m_world.GetTransport().Close();
+            ShowMessage("The session ended because the local server stopped. You can host or join again.");
+        }
+        StopLocalServer();
+    }
+
     const auto now = GetTickCount64();
     if (now >= m_nextLobbyRefresh)
     {
@@ -573,6 +584,8 @@ void SteamLobbyService::PumpCallbacks() noexcept
     if (failed)
     {
         ShowMessage("Steam session request failed.");
+        if (m_pending == PendingOperation::Create)
+            StopLocalServer();
         m_pending = PendingOperation::None;
         m_apiCall = 0;
         return;
@@ -646,6 +659,18 @@ void SteamLobbyService::OnConnected(const ConnectedEvent&) noexcept
         m_world.GetPartyService().CreateParty();
 }
 
+void SteamLobbyService::OnDisconnected(const DisconnectedEvent&) noexcept
+{
+    if (!m_lobbyId)
+        return;
+
+    const bool wasHosting = m_isHost;
+    LeaveSession();
+    if (wasHosting)
+        StopLocalServer();
+    ShowMessage("The session ended. You can host or join again.");
+}
+
 void SteamLobbyService::CompleteCreate() noexcept
 {
     const auto getResult = LoadSteamFunction<GetApiCallResult>(m_steamModule, "SteamAPI_ISteamUtils_GetAPICallResult");
@@ -658,6 +683,7 @@ void SteamLobbyService::CompleteCreate() noexcept
     {
         const auto message = fmt::format("Steam could not create the lobby (result {}).", result.Result);
         ShowMessage(message.c_str());
+        StopLocalServer();
     }
     else
     {
@@ -753,8 +779,8 @@ void SteamLobbyService::PublishLobbyState() noexcept
         return;
 
     auto arguments = CefListValue::Create();
-    arguments->SetString(0, std::to_string(m_lobbyId));
-    arguments->SetString(1, std::to_string(m_lobbyId ? getOwner(m_matchmaking, m_lobbyId) : 0));
+    arguments->SetString(0, m_lobbyId ? std::to_string(m_lobbyId) : "");
+    arguments->SetString(1, m_lobbyId ? std::to_string(getOwner(m_matchmaking, m_lobbyId)) : "");
     auto memberIds = CefListValue::Create();
     auto memberNames = CefListValue::Create();
     const int memberCount = m_lobbyId ? getMemberCount(m_matchmaking, m_lobbyId) : 0;
@@ -864,6 +890,8 @@ void SteamLobbyService::LeaveSession() noexcept
     m_joinEndpoint.clear();
     m_pending = PendingOperation::None;
     m_apiCall = 0;
+    if (m_steamModule && m_friends)
+        UpdateRichPresence();
     PublishLobbyState();
 }
 
@@ -873,12 +901,28 @@ void SteamLobbyService::StopLocalServer() noexcept
         TerminateProcess(m_serverProcess, 0);
     if (m_serverProcess)
         WaitForSingleObject(m_serverProcess, 3000);
+    if (m_serverThread)
+    {
+        CloseHandle(m_serverThread);
+        m_serverThread = nullptr;
+    }
+    if (m_serverJob)
+    {
+        CloseHandle(m_serverJob);
+        m_serverJob = nullptr;
+    }
+    if (m_serverProcess)
+    {
+        CloseHandle(m_serverProcess);
+        m_serverProcess = nullptr;
+    }
 }
 
 bool SteamLobbyService::StartLocalServer() noexcept
 {
     if (m_serverProcess && WaitForSingleObject(m_serverProcess, 0) == WAIT_TIMEOUT)
         return true;
+    StopLocalServer();
 
     wchar_t gamePath[MAX_PATH]{};
     if (!GetModuleFileNameW(nullptr, gamePath, MAX_PATH))
@@ -896,7 +940,12 @@ bool SteamLobbyService::StartLocalServer() noexcept
     m_serverJob = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    SetInformationJobObject(m_serverJob, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+    if (!m_serverJob || !SetInformationJobObject(m_serverJob, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+    {
+        StopLocalServer();
+        ShowMessage("The local server process could not be managed safely.");
+        return false;
+    }
 
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
@@ -905,17 +954,24 @@ bool SteamLobbyService::StartLocalServer() noexcept
     // Skyrim's root (for example, Data/Skyrim.esm). Starting in the server's
     // binary directory silently turns those into SkyrimTogetherReborn/Data/*
     // and makes the host reject its own otherwise-identical client.
-    if (!CreateProcessW(serverPath.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+    if (!CreateProcessW(serverPath.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
             gameDirectory.c_str(), &startup, &process))
     {
+        StopLocalServer();
         ShowMessage("The local Skyrim Together server could not start.");
         return false;
     }
 
     m_serverProcess = process.hProcess;
     m_serverThread = process.hThread;
-    if (m_serverJob)
-        AssignProcessToJobObject(m_serverJob, m_serverProcess);
+    if (!AssignProcessToJobObject(m_serverJob, m_serverProcess) || ResumeThread(m_serverThread) == static_cast<DWORD>(-1))
+    {
+        StopLocalServer();
+        ShowMessage("The local server process could not be managed safely.");
+        return false;
+    }
+    CloseHandle(m_serverThread);
+    m_serverThread = nullptr;
     return true;
 }
 

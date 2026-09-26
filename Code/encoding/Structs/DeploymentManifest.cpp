@@ -1,5 +1,6 @@
 #include <Structs/DeploymentManifest.h>
 #include <TiltedCore/Serialization.hpp>
+#include <Structs/CheckedRead.h>
 
 using TiltedPhoques::Serialization;
 
@@ -12,11 +13,11 @@ void SerializeFingerprint(TiltedPhoques::Buffer::Writer& aWriter, const Deployme
     aWriter.WriteBytes(acFingerprint.Root.data(), acFingerprint.Root.size());
 }
 
-void DeserializeFingerprint(TiltedPhoques::Buffer::Reader& aReader, DeploymentManifest::Fingerprint& aFingerprint) noexcept
+void DeserializeFingerprint(TiltedPhoques::Buffer::Reader& aReader, DeploymentManifest::Fingerprint& aFingerprint)
 {
-    aFingerprint.FileCount = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    aReader.ReadBits(aFingerprint.TotalSize, 64);
-    aReader.ReadBytes(aFingerprint.Root.data(), aFingerprint.Root.size());
+    aFingerprint.FileCount = CheckedRead::VarInt(aReader) & 0xFFFFFFFF;
+    CheckedRead::Bits(aReader, aFingerprint.TotalSize, 64);
+    CheckedRead::Bytes(aReader, aFingerprint.Root.data(), aFingerprint.Root.size());
 }
 }
 
@@ -29,15 +30,24 @@ void DeploymentManifest::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const
         SerializeFingerprint(aWriter, layer);
 }
 
-void DeploymentManifest::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
+bool DeploymentManifest::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    uint64_t value{};
-    aReader.ReadBits(value, 8);
-    SchemaVersion = value & 0xFF;
-    Complete = Serialization::ReadBool(aReader);
-    DeserializeFingerprint(aReader, AllFiles);
-    for (auto& layer : Layers)
-        DeserializeFingerprint(aReader, layer);
+    try
+    {
+        uint64_t value{};
+        CheckedRead::Bits(aReader, value, 8);
+        SchemaVersion = value & 0xFF;
+        Complete = CheckedRead::Bool(aReader);
+        DeserializeFingerprint(aReader, AllFiles);
+        for (auto& layer : Layers)
+            DeserializeFingerprint(aReader, layer);
+        return true;
+    }
+    catch (...)
+    {
+        *this = {};
+        return false;
+    }
 }
 
 uint16_t DeploymentManifest::MismatchedLayers(const DeploymentManifest& acRhs) const noexcept

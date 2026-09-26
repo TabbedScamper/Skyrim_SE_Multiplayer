@@ -12,6 +12,7 @@ using TiltedPhoques::Vector;
 struct Mods
 {
     static constexpr uint8_t CurrentSchemaVersion = 1;
+    static constexpr size_t MaxMods = 4096;
 
     enum Mismatch : uint8_t
     {
@@ -65,7 +66,7 @@ struct Mods
     bool operator!=(const Mods& acRhs) const noexcept;
 
     void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept;
-    void Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
+    [[nodiscard]] bool Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;
 
     [[nodiscard]] static bool FingerprintFile(const std::filesystem::path& acPath, Entry& aEntry) noexcept;
     [[nodiscard]] static Vector<Difference> Compare(const Mods& acExpected, const Mods& acActual) noexcept;

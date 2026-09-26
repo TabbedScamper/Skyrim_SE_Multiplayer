@@ -7,6 +7,7 @@ $-dim: rgba(255, 255, 255, 0.5);
 $-faint: rgba(255, 255, 255, 0.35);
 
 :host {
+  font-size: max(13px, 1rem);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -36,7 +37,7 @@ $-faint: rgba(255, 255, 255, 0.35);
 .section-tab {
   justify-content: center;
   letter-spacing: 0.12em;
-  font-size: 1.1em;
+  font-size: max(13px, 1.1em);
   opacity: 0.45;
 
   &.active {
@@ -52,7 +53,7 @@ $-faint: rgba(255, 255, 255, 0.35);
 
   h2.separator {
     margin: 0.25rem 0 1rem;
-    font-size: 1.35em;
+    font-size: max(13px, 1.35em);
     font-weight: 400;
     letter-spacing: 0.18em;
     text-transform: uppercase;
@@ -102,7 +103,7 @@ $-faint: rgba(255, 255, 255, 0.35);
   gap: 0.35rem;
 
   label {
-    font-size: 1.05em;
+    font-size: max(13px, 1.05em);
     letter-spacing: 0.04em;
   }
 

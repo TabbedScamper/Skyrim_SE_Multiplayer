@@ -167,6 +167,7 @@ export class SettingsComponent implements OnDestroy {
     this.stopAudioPreview();
     this.subscriptions.forEach(subscription => subscription.unsubscribe());
     if (this.previewTimer) clearInterval(this.previewTimer);
+    if (this.restoredTimer) clearTimeout(this.restoredTimer);
   }
 
   close() {

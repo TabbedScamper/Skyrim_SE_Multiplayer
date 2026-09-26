@@ -1,4 +1,5 @@
 #include <Messages/AuthenticationResponse.h>
+#include <Structs/CheckedRead.h>
 
 void AuthenticationResponse::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
@@ -16,14 +17,23 @@ void AuthenticationResponse::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter
 
 void AuthenticationResponse::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    Type = static_cast<ResponseType>(Serialization::ReadVarInt(aReader) & 0xFFFFFFFF);
-    SKSEActive = Serialization::ReadBool(aReader);
-    MO2Active = Serialization::ReadBool(aReader);
-    Version = Serialization::ReadString(aReader);
-    UserMods.Deserialize(aReader);
-    Settings.Deserialize(aReader);
-    PlayerId = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    CampaignId = Serialization::ReadString(aReader);
-    aReader.ReadBits(CampaignRevision, 64);
-    aReader.ReadBits(AuthorityEpoch, 64);
+    m_valid = false;
+    try
+    {
+        Type = static_cast<ResponseType>(CheckedRead::VarInt(aReader) & 0xFFFFFFFF);
+        SKSEActive = CheckedRead::Bool(aReader);
+        MO2Active = CheckedRead::Bool(aReader);
+        Version = CheckedRead::String(aReader);
+        if (!UserMods.Deserialize(aReader))
+            return;
+        Settings.Deserialize(aReader);
+        PlayerId = CheckedRead::VarInt(aReader) & 0xFFFFFFFF;
+        CampaignId = CheckedRead::String(aReader);
+        CheckedRead::Bits(aReader, CampaignRevision, 64);
+        CheckedRead::Bits(aReader, AuthorityEpoch, 64);
+        m_valid = true;
+    }
+    catch (...)
+    {
+    }
 }

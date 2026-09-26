@@ -1,5 +1,6 @@
 #include <Structs/PhysicsReferenceUpdate.h>
 #include <bit>
+#include <Structs/CheckedRead.h>
 
 namespace
 {
@@ -8,10 +9,10 @@ void WriteFloat(TiltedPhoques::Buffer::Writer& aWriter, float aValue) noexcept
     aWriter.WriteBits(std::bit_cast<uint32_t>(aValue), 32);
 }
 
-float ReadFloat(TiltedPhoques::Buffer::Reader& aReader) noexcept
+float ReadFloat(TiltedPhoques::Buffer::Reader& aReader)
 {
     uint64_t value{};
-    aReader.ReadBits(value, 32);
+    CheckedRead::Bits(aReader, value, 32);
     return std::bit_cast<float>(static_cast<uint32_t>(value));
 }
 }
@@ -41,13 +42,14 @@ void PhysicsReferenceUpdate::Serialize(TiltedPhoques::Buffer::Writer& aWriter) c
     }
 }
 
-void PhysicsReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
+void PhysicsReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
 {
-    Id.Deserialize(aReader);
+    Id.BaseId = static_cast<uint32_t>(CheckedRead::VarInt(aReader));
+    Id.ModId = static_cast<uint32_t>(CheckedRead::VarInt(aReader));
     Position = {ReadFloat(aReader), ReadFloat(aReader), ReadFloat(aReader)};
     Rotation = {ReadFloat(aReader), ReadFloat(aReader), ReadFloat(aReader)};
     uint64_t motionType{};
-    aReader.ReadBits(motionType, 8);
+    CheckedRead::Bits(aReader, motionType, 8);
     MotionType = static_cast<uint8_t>(motionType);
     LinearVelocity = {ReadFloat(aReader), ReadFloat(aReader), ReadFloat(aReader)};
     BodyTransform.fill(0.f);
@@ -57,8 +59,9 @@ void PhysicsReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
         for (float& value : BodyTransform)
             value = ReadFloat(aReader);
         uint64_t count{};
-        aReader.ReadBits(count, 8);
-        count = (std::min)(static_cast<size_t>(count), kMaxChildBodies);
+        CheckedRead::Bits(aReader, count, 8);
+        if (count > kMaxChildBodies || count > CheckedRead::RemainingBits(aReader) / (7 * 32))
+            throw std::runtime_error("physics child count exceeds limit");
         ChildBodies.resize(count);
         for (auto& body : ChildBodies)
             for (float& value : body)

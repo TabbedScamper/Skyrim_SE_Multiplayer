@@ -33,8 +33,9 @@ class Setting<T> extends BehaviorSubject<T> {
     private readonly storeService: StoreService,
     private storeKey: string,
     readonly defaultValue: T,
+    initialValue: T,
   ) {
-    super(defaultValue);
+    super(initialValue);
   }
 
   /** Back to the value it has on a fresh install. */
@@ -55,7 +56,7 @@ class SliderSetting extends Setting<number> {
     defaultValue: number,
   ) {
     const initialValue = storeService.getFloat(storeKey, defaultValue);
-    super(storeService, storeKey, initialValue);
+    super(storeService, storeKey, defaultValue, initialValue);
   }
 }
 
@@ -66,7 +67,7 @@ class ToggleSetting extends Setting<boolean> {
     defaultValue: boolean,
   ) {
     const initialValue = storeService.getBool(storeKey, defaultValue);
-    super(storeService, storeKey, initialValue);
+    super(storeService, storeKey, defaultValue, initialValue);
   }
 }
 
@@ -84,7 +85,7 @@ class SelectSetting<T extends string | number> extends Setting<T> {
     const initialValue = options.includes(storedValue)
       ? storedValue
       : defaultValue;
-    super(storeService, storeKey, initialValue);
+    super(storeService, storeKey, defaultValue, initialValue);
   }
 
   public next(value: T) {
