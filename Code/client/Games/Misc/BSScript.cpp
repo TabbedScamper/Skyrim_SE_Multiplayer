@@ -1,4 +1,5 @@
 #include <Misc/BSScript.h>
+#include <Services/ObjectService.h>
 #include <Misc/NativeFunction.h>
 
 #include <World.h>
@@ -227,7 +228,7 @@ BSScript::CallResult TP_MAKE_THISCALL(HookNativePapyrusCall, BSScript::NativeFun
     // Scripted player-state natives: which of these a quest/scene uses to drive the player
     // (auto-walk, restraints, camera) decides what a follower must mirror.
     static std::atomic<uint32_t> s_scriptedSamples{0};
-    if (s_scriptedSamples.load(std::memory_order_relaxed) < 400 && pName && pObject)
+    if (ObjectService::IsRenderDiagnosticsArmed() && s_scriptedSamples.load(std::memory_order_relaxed) < 400 && pName && pObject)
     {
         static constexpr const char* s_scriptedPlayerNatives[] = {"SetPlayerAIDriven", "EvaluatePackage", "PathToReference",
             "SetDontMove", "SetRestrained", "ForceThirdPerson", "ForceFirstPerson", "PlayIdle", "MoveTo", "TranslateTo",
@@ -256,8 +257,10 @@ BSScript::CallResult TP_MAKE_THISCALL(HookNativePapyrusCall, BSScript::NativeFun
             s_enablePlayerControlsCalls.fetch_add(1, std::memory_order_relaxed);
         s_lastControlCallTimeMs.store(tick, std::memory_order_relaxed);
         s_lastControlCallEnabled.store(isEnableControls, std::memory_order_relaxed);
+        // The stack walk copies VM strings a character at a time (about 90 ms per call): only when armed
+        // by a test command. Unarmed, the follower's repeated camera-bob calls stalled it for seconds.
         static std::atomic<uint32_t> s_controlTraceSamples{0};
-        if (s_controlTraceSamples.fetch_add(1, std::memory_order_relaxed) < 256)
+        if (ObjectService::IsRenderDiagnosticsArmed() && s_controlTraceSamples.fetch_add(1, std::memory_order_relaxed) < 256)
         {
             spdlog::info("Player control Papyrus native enter Game::{} tick={}", pName, tick);
             // The Call ABI passes a reference to BSTSmartPointer<Stack>, not

@@ -86,6 +86,57 @@ std::atomic<uint32_t> s_presentationDelayMs{0};
 std::atomic<uint32_t> s_localMirror{0};
 std::mutex s_simulatingLock;
 std::unordered_map<uint32_t, bool> s_ragdollSimulating;
+std::unordered_map<uint32_t, bool> s_ragdollPending;
+Vector<void*> s_controlledDrivers;
+
+// 58291 / 140AC6FB0 normally replaces controller targets and body motion types from the
+// local graph. Streamed copies use the same native controller backend with owner body targets.
+using TDriveToPose = void(void*, float, void*, void*);
+TDriveToPose* RealDriveToPose{};
+using TReadRagdollPose = void(void*, void*, void*);
+TReadRagdollPose* RealReadRagdollPose{};
+
+bool ControlledDriver(void* apDriver)
+{
+    std::lock_guard lock(s_simulatingLock);
+    return std::find(s_controlledDrivers.begin(), s_controlledDrivers.end(), apDriver) != s_controlledDrivers.end();
+}
+
+void HookDriveToPose(void* apDriver, float aDeltaTime, void* apContext, void* apOutput)
+{
+    if (ControlledDriver(apDriver))
+        return;
+    RealDriveToPose(apDriver, aDeltaTime, apContext, apOutput);
+}
+
+void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
+{
+    if (!ControlledDriver(apDriver))
+        return RealReadRagdollPose(apDriver, apContext, apOutput);
+    // 58293 / 140AC8B80 skips physics readback when +CB says every bone belongs to
+    // animation, or +C7/+C8 report no controller. Our bodies are keyframed to the OWNER,
+    // so run native mapping back to the rendered skeleton without the local blend-out.
+    auto* bytes = static_cast<uint8_t*>(apDriver);
+    uint8_t flags[6];
+    float fractions[2];
+    std::memcpy(flags, bytes + 0xC6, sizeof(flags));
+    std::memcpy(fractions, bytes + 0xB4, sizeof(fractions));
+    bytes[0xC6] = 1;
+    bytes[0xC7] = 0;
+    bytes[0xC8] = 1;
+    bytes[0xCA] = 0;
+    bytes[0xCB] = 0;
+    std::memset(bytes + 0xB4, 0, sizeof(fractions));
+    RealReadRagdollPose(apDriver, apContext, apOutput);
+    std::memcpy(bytes + 0xC6, flags, sizeof(flags));
+    std::memcpy(bytes + 0xB4, fractions, sizeof(fractions));
+}
+
+bool RagdollPending(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_simulatingLock);
+    return s_ragdollPending.contains(aFormId);
+}
 
 bool RagdollSimulating(uint32_t aFormId) noexcept
 {
@@ -207,6 +258,7 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
         }
         else
         {
+            const bool pendingRagdoll = RagdollPending(it->second.FormId);
             // Oldest-to-newest view of the ring; bracket the presentation tick.
             const auto size = static_cast<uint32_t>(pose.Ring.size());
             const auto sample = [&](uint32_t i) -> const Sample& { return pose.Ring[(pose.RingNext + size - pose.RingCount + i) % size]; };
@@ -244,7 +296,7 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 const auto& newest = sample(pose.RingCount - 1);
                 // Hold the owner pose through sample gaps rather than dropping back to the local
                 // graph: alternating owner and local poses read as NPCs jittering to catch up.
-                if (tick >= newest.Tick && tick - newest.Tick <= 250)
+                if (tick >= newest.Tick && (tick - newest.Tick <= 250 || pendingRagdoll))
                 {
                     const uint32_t driven = (std::min)(count, newest.Count);
                     if (driven < count)
@@ -261,7 +313,7 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 pose.Overriding = false;
                 pose.FreshSinceMs = 0;
             }
-            else if (!pose.Overriding)
+            else if (!pose.Overriding && !pendingRagdoll)
             {
                 if (!pose.FreshSinceMs)
                     pose.FreshSinceMs = nowMs;
@@ -279,6 +331,29 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
 
 namespace PoseCopyAuthority
 {
+void SetRagdollPending(uint32_t aFormId, bool aPending) noexcept
+{
+    std::lock_guard lock(s_simulatingLock);
+    if (aPending)
+        s_ragdollPending[aFormId] = true;
+    else
+        s_ragdollPending.erase(aFormId);
+}
+
+void SetControlledRagdollDrivers(const Vector<void*>& acDrivers) noexcept
+{
+    std::lock_guard lock(s_simulatingLock);
+    s_controlledDrivers = acDrivers;
+}
+
+void ClearRagdollAuthority() noexcept
+{
+    std::lock_guard lock(s_simulatingLock);
+    s_ragdollSimulating.clear();
+    s_ragdollPending.clear();
+    s_controlledDrivers.clear();
+}
+
 void RefreshRegistry(World& aWorld) noexcept
 {
     std::unordered_map<const void*, RegistryEntry> registry;
@@ -471,4 +546,10 @@ static TiltedPhoques::Initializer s_poseCopyAuthorityHooks(
         POINTER_SKYRIMSE(TCopyPoseToNodes, copyPoseToNodes, 63856);
         RealCopyPoseToNodes = copyPoseToNodes.Get();
         TP_HOOK(&RealCopyPoseToNodes, HookCopyPoseToNodes);
+        POINTER_SKYRIMSE(TDriveToPose, driveToPose, 58291);
+        RealDriveToPose = driveToPose.Get();
+        TP_HOOK(&RealDriveToPose, HookDriveToPose);
+        POINTER_SKYRIMSE(TReadRagdollPose, readRagdollPose, 58293);
+        RealReadRagdollPose = readRagdollPose.Get();
+        TP_HOOK(&RealReadRagdollPose, HookReadRagdollPose);
     });

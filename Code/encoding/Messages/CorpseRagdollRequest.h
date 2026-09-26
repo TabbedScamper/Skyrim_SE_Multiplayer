@@ -2,7 +2,7 @@
 
 #include "Message.h"
 
-// One ragdoll rigid body of a settled corpse: position relative to the actor's reference
+// One ragdoll rigid body: position relative to the actor's reference
 // position (game units) and world rotation as a quaternion (x, y, z, w).
 struct CorpseRagdollBody
 {
@@ -16,7 +16,7 @@ struct CorpseRagdollBody
     }
 };
 
-// Owner -> server: the settled ragdoll of a corpse the sender owns, every body in array order.
+// Owner -> server: a ragdoll or detached part, every body in native array order.
 struct CorpseRagdollRequest final : ClientMessage
 {
     static constexpr ClientOpcode Opcode = kCorpseRagdollRequest;
@@ -28,12 +28,19 @@ struct CorpseRagdollRequest final : ClientMessage
     bool operator==(const CorpseRagdollRequest& acRhs) const noexcept
     {
         return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && Bodies == acRhs.Bodies &&
+               Limb == acRhs.Limb && DismemberTick == acRhs.DismemberTick && Settled == acRhs.Settled && Active == acRhs.Active && Dying == acRhs.Dying &&
                std::equal(std::begin(Origin), std::end(Origin), std::begin(acRhs.Origin));
     }
 
     uint32_t ServerId{};
     // Shared-clock tick of the owner frame the bodies were read in.
     uint64_t Tick{};
+    // 0 is the actor ragdoll, 1 is the detached head. Detached streams name their reliable event.
+    uint32_t Limb{};
+    uint64_t DismemberTick{};
+    bool Settled{};
+    bool Active{true};
+    bool Dying{};
     // The owner's actor position; body positions are offsets from it. Placing them from the
     // receiver's own actor position followed that copy wherever its local ragdoll dragged it.
     float Origin[3]{};
@@ -43,5 +50,5 @@ struct CorpseRagdollRequest final : ClientMessage
 namespace CorpseRagdollEncoding
 {
 void WriteBodies(TiltedPhoques::Buffer::Writer& aWriter, const TiltedPhoques::Vector<CorpseRagdollBody>& acBodies) noexcept;
-void ReadBodies(TiltedPhoques::Buffer::Reader& aReader, TiltedPhoques::Vector<CorpseRagdollBody>& aBodies) noexcept;
+bool ReadBodies(TiltedPhoques::Buffer::Reader& aReader, TiltedPhoques::Vector<CorpseRagdollBody>& aBodies) noexcept;
 } // namespace CorpseRagdollEncoding

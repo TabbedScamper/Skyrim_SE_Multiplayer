@@ -58,6 +58,12 @@ bool TP_MAKE_THISCALL(HookNativeSetStage, TESQuest, uint16_t aStage)
         return false;
     }
 
+    // Quest startup may refill aliases after the network snapshot arrived.
+    // The native stage writer is the last gate before stage fragments are queued.
+    if (party.IsInParty() && !party.IsLeader() &&
+        !World::Get().GetQuestService().PrepareAliasesForStage(apThis))
+        return false;
+
     const bool result = TiltedPhoques::ThisCall(RealNativeSetStage, apThis, aStage);
     if (sample < 128 || isIntroQuest)
         spdlog::info("Native quest stage leave form={:X} stage={} result={}", apThis->formID, apThis->currentStage, result);
@@ -67,13 +73,48 @@ bool TP_MAKE_THISCALL(HookNativeSetStage, TESQuest, uint16_t aStage)
 
 TESObjectREFR* TESQuest::GetAliasedRef(uint32_t aAliasID) noexcept
 {
+    return TESObjectREFR::GetByHandle(GetAliasHandle(aAliasID));
+}
+
+uint32_t TESQuest::GetAliasHandle(uint32_t aAliasID) noexcept
+{
     TP_THIS_FUNCTION(TGetAliasedRef, BSPointerHandle<TESObjectREFR>*, TESQuest, BSPointerHandle<TESObjectREFR>*, uint32_t);
     POINTER_SKYRIMSE(TGetAliasedRef, getAliasedRef, 25066);
 
     BSPointerHandle<TESObjectREFR> result{};
     TiltedPhoques::ThisCall(getAliasedRef, this, &result, aAliasID);
 
-    return TESObjectREFR::GetByHandle(result.handle.iBits);
+    return result.handle.iBits;
+}
+
+bool BGSBaseAlias::IsReference() const noexcept
+{
+    // 1.7.104: ID 25042 tests QType (vtable slot 3), not the fill type.
+    return std::strcmp(QType().AsAscii(), "Ref") == 0;
+}
+
+BGSBaseAlias* TESQuest::GetReferenceAlias(uint32_t aAliasId) noexcept
+{
+    TP_THIS_FUNCTION(TGetReferenceAlias, BGSBaseAlias*, TESQuest, uint32_t);
+    POINTER_SKYRIMSE(TGetReferenceAlias, getReferenceAlias, 25042);
+    return TiltedPhoques::ThisCall(getReferenceAlias, this, aAliasId);
+}
+
+void TESQuest::ForceAliasReference(uint32_t aAliasId, TESObjectREFR* apReference) noexcept
+{
+    // ID 25052 (VA 1403D4FA0) maintains handles, persistence, reservations and scenes.
+    TP_THIS_FUNCTION(TForceAliasReference, void, TESQuest, uint32_t, TESObjectREFR*);
+    POINTER_SKYRIMSE(TForceAliasReference, forceAliasReference, 25052);
+    TiltedPhoques::ThisCall(forceAliasReference, this, aAliasId, apReference);
+}
+
+void TESQuest::ClearAliasReference(BGSBaseAlias* apAlias) noexcept
+{
+    // ID 25051 (VA 1403D4BC0) is the cleanup used by ForceRefTo and Papyrus Clear.
+    // The leader can have an empty required alias too; do not change its authored flags.
+    TP_THIS_FUNCTION(TClearAliasReference, void, TESQuest, BGSBaseAlias*);
+    POINTER_SKYRIMSE(TClearAliasReference, clearAliasReference, 25051);
+    TiltedPhoques::ThisCall(clearAliasReference, this, apAlias);
 }
 
 TESQuest::State TESQuest::getState()

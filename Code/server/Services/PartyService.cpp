@@ -27,6 +27,70 @@
 #include <Messages/NotifyCheckpointSave.h>
 #include <Messages/NotifySettingsChange.h>
 #include <Messages/NotifyPlayerJoined.h>
+#include <Messages/RequestPartyUnstuck.h>
+#include <Messages/NotifyPartyUnstuck.h>
+#include <World.h>
+
+#include <chrono>
+#include <unordered_map>
+
+namespace
+{
+struct PartyUnstuckRelay
+{
+    PartyUnstuckRelay(PartyService& aParty, entt::dispatcher& aDispatcher)
+        : Party(aParty)
+        , Connection(aDispatcher.sink<PacketEvent<RequestPartyUnstuck>>().connect<&PartyUnstuckRelay::OnRequest>(this))
+        , LeaveConnection(aDispatcher.sink<PlayerLeaveEvent>().connect<&PartyUnstuckRelay::OnLeave>(this))
+    {
+    }
+
+    void OnLeave(const PlayerLeaveEvent& acEvent)
+    {
+        // Connection IDs can be reused after a disconnect.
+        Last.erase(acEvent.pPlayer->GetId());
+    }
+
+    void OnRequest(const PacketEvent<RequestPartyUnstuck>& acPacket)
+    {
+        auto* pPlayer = acPacket.pPlayer;
+        if (!pPlayer || !Party.IsPlayerLeader(pPlayer))
+            return;
+        auto* pParty = Party.GetPlayerParty(pPlayer);
+        const auto& move = acPacket.Packet.Move;
+        if (!pParty || move.Epoch != pParty->StartEpoch || !move.IsValid())
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        auto& last = Last[pPlayer->GetId()];
+        if (now < last.Next || (last.Epoch == move.Epoch && move.Sequence <= last.Sequence))
+            return;
+        last = {move.Epoch, move.Sequence, now + std::chrono::milliseconds(1500)};
+        NotifyPartyUnstuck notify;
+        notify.Move = move;
+        notify.LeaderId = pPlayer->GetId();
+        for (auto* pMember : pParty->Members)
+        {
+            if (pMember && pMember != pPlayer)
+            {
+                pMember->Send(notify);
+                ++notify.Slot;
+            }
+        }
+        spdlog::info("Unstuck: host brought {} players (move relayed, sequence={})", notify.Slot, move.Sequence);
+    }
+
+    struct Stamp
+    {
+        uint64_t Epoch{};
+        uint64_t Sequence{};
+        std::chrono::steady_clock::time_point Next{};
+    };
+    PartyService& Party;
+    std::unordered_map<uint32_t, Stamp> Last;
+    entt::scoped_connection Connection;
+    entt::scoped_connection LeaveConnection;
+};
+}
 
 PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
     : m_world(aWorld)
@@ -46,6 +110,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyGameplaySettingsConnection(aDispatcher.sink<PacketEvent<PartyGameplaySettingsRequest>>().connect<&PartyService::OnPartyGameplaySettings>(this))
     , m_checkpointSaveConnection(aDispatcher.sink<PacketEvent<CheckpointSaveRequest>>().connect<&PartyService::OnCheckpointSave>(this))
 {
+    aWorld.ctx().emplace<PartyUnstuckRelay>(*this, aDispatcher);
 }
 
 const PartyService::Party* PartyService::GetById(uint32_t aId) const noexcept

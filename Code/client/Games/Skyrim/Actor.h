@@ -232,6 +232,8 @@ struct Actor : TESObjectREFR
     void QueueReset3D(uint32_t aDelayMs) noexcept;
     // A remote copy dies here when its owner's ragdoll starts on this PC's timeline: ragdoll at once.
     void KillIntoRagdoll() noexcept;
+    void ApplyRemoteDecapitation() noexcept;
+    NiNode* GetDetachedLimbNode(uint32_t aLimb) noexcept;
     void SetMagicEquipment(const MagicEquipment& acEquipment) noexcept;
     void SetEssentialEx(bool aSet) noexcept;
     void SetNoBleedoutRecovery(bool aSet) noexcept;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Messages/Message.h>
+#include <Messages/RequestPartyUnstuck.h>
 #include <Messages/RequestScriptedActorState.h>
 #include <MetaMessage.h>
 
@@ -11,6 +12,7 @@
 #include <Messages/RequestInventoryChanges.h>
 #include <Messages/RequestFactionsChanges.h>
 #include <Messages/RequestQuestUpdate.h>
+#include <Messages/RequestQuestAliasFills.h>
 #include <Messages/PartyInviteRequest.h>
 #include <Messages/PartyAcceptInviteRequest.h>
 #include <Messages/PartyLeaveRequest.h>
@@ -65,8 +67,11 @@
 #include <Messages/SceneTimelineRequest.h>
 #include <Messages/CheckpointSaveRequest.h>
 #include <Messages/CorpseRagdollRequest.h>
+#include <Messages/DismemberRequest.h>
 #include <Messages/PlayerAppearanceRequest.h>
 #include <Messages/LeaderControlRequest.h>
+#include <Messages/DoorVoteRequest.h>
+#include <Messages/ReviveRequest.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -76,7 +81,7 @@ struct ClientMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<
+        auto s_visitor = CreateMessageVisitor<ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
             RequestScriptedActorState, AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
             RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,

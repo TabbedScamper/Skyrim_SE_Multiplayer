@@ -28,6 +28,8 @@
 #include <Services/CameraService.h>
 #include <Services/SceneTimelineService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/DoorVoteService.h>
+#include <Services/TriggerGate.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -156,6 +158,8 @@ World::World()
     ctx().emplace<CalendarService>(*this, m_dispatcher, m_transport);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<DoorVoteService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
     ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CorpseRagdollService>(*this, m_dispatcher, m_transport);
@@ -164,6 +168,7 @@ World::World()
     ctx().emplace<MagicService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CommandService>(*this, m_transport, m_dispatcher);
     ctx().emplace<PlayerService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<ReviveService>(*this, m_dispatcher, m_transport);
     ctx().emplace<StringCacheService>(m_dispatcher);
     ctx().emplace<CombatService>(*this, m_transport, m_dispatcher);
     ctx().emplace<WeatherService>(*this, m_transport, m_dispatcher);
@@ -248,6 +253,11 @@ TransportService& World::GetTransport() noexcept
 QuestService& World::GetQuestService() noexcept
 {
     return ctx().at<QuestService>();
+}
+
+DoorVoteService& World::GetDoorVoteService() noexcept
+{
+    return ctx().at<DoorVoteService>();
 }
 
 ModSystem& World::GetModSystem() noexcept

@@ -5,6 +5,31 @@
 #include <Components/TESFullName.h>
 #include <Forms/BGSStoryManagerTree.h>
 
+struct TESQuest;
+struct Mod;
+
+struct BGSBaseAlias
+{
+    virtual ~BGSBaseAlias();
+    virtual bool Load(Mod*);
+    virtual void InitItem(TESForm*);
+    virtual const BSFixedString& QType() const;
+
+    BSFixedString aliasName;
+    TESQuest* owningQuest;
+    uint32_t aliasID;
+    uint32_t flags;
+    uint16_t fillType;
+    uint16_t pad22;
+    uint32_t pad24;
+
+    bool IsReference() const noexcept;
+};
+
+static_assert(sizeof(BGSBaseAlias) == 0x28);
+static_assert(offsetof(BGSBaseAlias, owningQuest) == 0x10);
+static_assert(offsetof(BGSBaseAlias, aliasID) == 0x18);
+
 struct BGSScene : TESForm
 {
     GameArray<void*> phases;
@@ -94,7 +119,7 @@ struct TESQuest : BGSStoryManagerTreeForm
     TESFullName fullName;
     GameArray<void*> instanceData;
     uint32_t currentInstanceID;
-    GameArray<void*> aliases; // 0x0058
+    GameArray<BGSBaseAlias*> aliases; // 0x0058
     char pad70[0xD8 - 0x70];
     float questDelay;     // 0x00D8
     uint16_t flags;       // 0x00DC default init: 256
@@ -120,6 +145,10 @@ struct TESQuest : BGSStoryManagerTreeForm
     char pad250[24];
 
     TESObjectREFR* GetAliasedRef(uint32_t aiAliasID) noexcept;
+    uint32_t GetAliasHandle(uint32_t aAliasId) noexcept;
+    BGSBaseAlias* GetReferenceAlias(uint32_t aAliasId) noexcept;
+    void ForceAliasReference(uint32_t aAliasId, TESObjectREFR* apReference) noexcept;
+    void ClearAliasReference(BGSBaseAlias* apAlias) noexcept;
 
     bool IsStageDone(uint16_t stageIndex);
     void SetCompleted(bool force);
@@ -144,6 +173,7 @@ struct TESQuest : BGSStoryManagerTreeForm
 };
 
 static_assert(sizeof(TESQuest) == 0x268);
+static_assert(offsetof(TESQuest, aliases) == 0x58);
 static_assert(offsetof(TESQuest, fullName) == 0x28);
 static_assert(offsetof(TESQuest, flags) == 0xDC);
 static_assert(offsetof(TESQuest, stages) == 0xE8);

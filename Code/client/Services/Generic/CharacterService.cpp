@@ -1790,7 +1790,11 @@ void CharacterService::SendCreatorAppearance() noexcept
     for (const char c : request.AppearanceBuffer)
         hash = (hash ^ static_cast<uint8_t>(c)) * 1099511628211ULL;
     for (const auto& entry : request.FaceTints.Entries)
-        hash = (hash ^ entry.Color ^ (static_cast<uint64_t>(entry.Alpha * 1000.f) << 32)) * 1099511628211ULL;
+    {
+        hash = (hash ^ entry.Color ^ (static_cast<uint64_t>(entry.Alpha * 1000.f) << 32) ^ entry.Type) * 1099511628211ULL;
+        for (const char c : entry.Name)
+            hash = (hash ^ static_cast<uint8_t>(c)) * 1099511628211ULL;
+    }
     hash = (hash ^ static_cast<uint64_t>(request.InCreator)) * 1099511628211ULL; // Done counts as a change
     if (!closedNow && hash == m_lastCreatorAppearanceHash)
         return;
@@ -1800,8 +1804,8 @@ void CharacterService::SendCreatorAppearance() noexcept
         spdlog::info("Character creator closed: sent the final look");
 }
 
-// Another player's look (live while they edit): applied to their character here, at most once a
-// second, and shown beside this player while they are still in the creator.
+// Another player's look (live while they edit): coalesced and applied to their character on the
+// main thread, before the creator sets its preview visibility.
 void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& acMessage) noexcept
 {
     auto view = m_world.view<FormIdComponent, RemoteComponent>();
@@ -1822,8 +1826,6 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
             if (!creatorPlayer.Slot)
                 creatorPlayer.Slot = static_cast<uint32_t>(s_creatorPlayers.size());
             const auto now = CreatorNowMs();
-            if (now < creatorPlayer.AppliedAtMs + 800)
-                return;
             creatorPlayer.AppliedAtMs = now;
         }
         else
@@ -1831,10 +1833,7 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
     }
 
     CreatorTogether::SetRemoteReady(pActor->formID, !acMessage.InCreator);
-    pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
-    FaceGenSystem::Setup(m_world, *entityIt, acMessage.FaceTints);
-    pActor->QueueReset3D(50);
-    spdlog::info("Player {:X}: {} look applied", pActor->formID, acMessage.InCreator ? "live creator" : "final");
+    CreatorTogether::QueueAppearance(pActor->formID, acMessage);
 }
 
 void CharacterService::OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept

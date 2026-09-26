@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Systems/FaceGenSystem.h>
+#include <Services/CreatorTogether.h>
 
 #include <Games/References.h>
 
@@ -59,14 +60,12 @@ using TCreateTints = void(__fastcall)(const GameArray<TintMask*>& acTints, NiRen
 
 void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFaceGenComponent) noexcept
 {
+    std::lock_guard appearanceLock(CreatorTogether::AppearanceMutex());
     POINTER_SKYRIMSE(NiRTTI, NiMaskedShaderRTTI, 414675);
     POINTER_SKYRIMSE(TCreateTexture, CreateTexture, 70717);
     POINTER_SKYRIMSE(TCreateResourceView, CreateResourceView, 77299);
     POINTER_SKYRIMSE(TCreateTints, CreateTints, 27040);
     POINTER_SKYRIMSE(TextureHolder, s_textureHolder, 411393);
-
-    if (aFaceGenComponent.Generated)
-        return;
 
     auto pTriBasedGeom = GetHeadTriBasedGeom(apActor, 1);
 
@@ -98,10 +97,29 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
         }
 
         BSMaskedShaderMaterial* pMaterial = static_cast<BSMaskedShaderMaterial*>(pLightingShader->material);
+        // Generated belongs to this head's material. A queued 3D rebuild may replace it after
+        // the previous head was tinted, so do not let the component suppress the new texture.
+        if (!pMaterial || (aFaceGenComponent.Generated && pMaterial->renderedTexture))
+        {
+            pShaderProperty->DecRef();
+            return;
+        }
 
         BSFixedString name("");
         auto pTexture = CreateTexture(name);
+        if (!pTexture)
+        {
+            pShaderProperty->DecRef();
+            return;
+        }
+        pTexture->IncRef();
         pTexture->buffer = CreateResourceView(s_textureHolder.Get(), 512, 512);
+        if (!pTexture->buffer)
+        {
+            pTexture->DecRef();
+            pShaderProperty->DecRef();
+            return;
+        }
 
         auto& tintsEntries = aFaceGenComponent.FaceTints.Entries;
 
@@ -138,6 +156,7 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
         Memory::Free(tints.data);
 
         pMaterial->renderedTexture = pTexture;
+        pTexture->DecRef();
 
         aFaceGenComponent.Generated = true;
     }
@@ -148,8 +167,10 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
 void FaceGenSystem::Setup(World& aWorld, const entt::entity aEntity, const Tints& acTints) noexcept
 {
     if (acTints.Entries.empty())
+    {
+        aWorld.remove<FaceGenComponent>(aEntity);
         return;
-
+    }
     auto& component = aWorld.emplace_or_replace<FaceGenComponent>(aEntity);
     component.FaceTints = acTints;
 }

@@ -6,6 +6,8 @@
 
 #include <Messages/RequestQuestUpdate.h>
 #include <Messages/NotifyQuestUpdate.h>
+#include <Messages/RequestQuestAliasFills.h>
+#include <Messages/NotifyQuestAliasFills.h>
 
 #include <Setting.h>
 #include <CampaignLedger.h>
@@ -19,9 +21,63 @@ QuestService::QuestService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
 {
     m_questUpdateConnection = aDispatcher.sink<PacketEvent<RequestQuestUpdate>>().connect<&QuestService::OnQuestChanges>(this);
+    m_aliasFillsConnection = aDispatcher.sink<PacketEvent<RequestQuestAliasFills>>().connect<&QuestService::OnAliasFills>(this);
 }
 
 void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessage) noexcept
+{
+    ProcessQuestChanges(acMessage, nullptr);
+}
+
+void QuestService::OnAliasFills(const PacketEvent<RequestQuestAliasFills>& acMessage) noexcept
+{
+    auto& partyService = m_world.GetPartyService();
+    auto* pParty = partyService.GetPlayerParty(acMessage.pPlayer);
+    const auto& fills = acMessage.Packet.Fills;
+    if (!pParty || !partyService.IsPlayerLeader(acMessage.pPlayer) ||
+        !acMessage.Packet.IsValid() || !fills.IsValid() || fills.AuthorityEpoch != pParty->StartEpoch)
+        return;
+
+    for (auto it = m_aliasSources.begin(); it != m_aliasSources.end();)
+    {
+        if (!partyService.GetById(it->first))
+            it = m_aliasSources.erase(it);
+        else
+            ++it;
+    }
+    const auto partyId = *acMessage.pPlayer->GetParty().JoinedPartyId;
+    auto& source = m_aliasSources[partyId];
+    if (source.Leader != pParty->LeaderPlayerId || source.Epoch != pParty->StartEpoch)
+        source = {pParty->LeaderPlayerId, pParty->StartEpoch, 0};
+    if (fills.Sequence <= source.Sequence)
+        return;
+    source.Sequence = fills.Sequence;
+
+    if (fills.HasStage)
+    {
+        RequestQuestUpdate update{};
+        update.Id = fills.Id;
+        update.Stage = fills.Stage;
+        update.Status = fills.Status;
+        update.ClientQuestType = fills.ClientQuestType;
+        update.TransactionId = fills.TransactionId;
+        if (ProcessQuestChanges(PacketEvent<RequestQuestUpdate>(&update, acMessage.pPlayer), &fills))
+            return;
+        // A rejected stage must not discard an otherwise valid alias snapshot.
+    }
+
+    NotifyQuestAliasFills notify;
+    notify.Fills = fills;
+    notify.Fills.HasStage = false;
+    notify.Fills.Stage = 0;
+    notify.Fills.Status = 0;
+    notify.Fills.ClientQuestType = 0;
+    notify.Fills.TransactionId = 0;
+    notify.LeaderPlayerId = pParty->LeaderPlayerId;
+    GameServer::Get()->SendToParty(notify, acMessage.pPlayer->GetParty(), acMessage.GetSender());
+}
+
+bool QuestService::ProcessQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessage, const QuestAliasFills* apFills) noexcept
 {
     const auto& message = acMessage.Packet;
 
@@ -32,7 +88,7 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
     {
         spdlog::warn("{}: rejected quest update from non-leader player {}, gameId {:X}, stage {}",
             __FUNCTION__, pPlayer->GetId(), message.Id.LogFormat(), message.Stage);
-        return;
+        return false;
     }
 
     auto& questComponent = pPlayer->GetQuestLogComponent();
@@ -49,7 +105,7 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
     if (notify.ClientQuestType == 0 ||  notify.ClientQuestType == 6) // Types None or Miscellaneous. Hard-coded to avoid client header file.
     {
         if (!bEnableMiscQuestSync)
-            return;
+            return false;
         spdlog::info("{}: syncing type none/misc quest to party, gameId {:X} questStage {} questStatus {} questType {}",
                      __FUNCTION__, notify.Id.LogFormat(), notify.Stage, notify.Status, notify.ClientQuestType);
     }
@@ -57,13 +113,13 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
     if (message.Status > RequestQuestUpdate::Stopped)
     {
         spdlog::warn("{}: rejected invalid quest status {} from player {}", __FUNCTION__, message.Status, pPlayer->GetId());
-        return;
+        return false;
     }
 
     if (message.TransactionId == 0)
     {
         spdlog::warn("{}: rejected quest update without a transaction id from player {}", __FUNCTION__, pPlayer->GetId());
-        return;
+        return false;
     }
 
     const auto transactionKey = fmt::format("quest:{}:{}", pPlayer->GetId(), message.TransactionId);
@@ -79,14 +135,14 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
     catch (const std::exception& exception)
     {
         spdlog::error("{}: failed to commit quest transaction {}: {}", __FUNCTION__, transactionKey, exception.what());
-        return;
+        return false;
     }
 
     if (!commit.Inserted)
     {
         spdlog::debug("{}: ignored duplicate quest transaction {} at revision {}",
             __FUNCTION__, transactionKey, commit.Entry.Revision);
-        return;
+        return false;
     }
 
     notify.TransactionId = message.TransactionId;
@@ -140,7 +196,19 @@ void QuestService::OnQuestChanges(const PacketEvent<RequestQuestUpdate>& acMessa
 
     const auto& partyComponent = acMessage.pPlayer->GetParty();
     if (!partyComponent.JoinedPartyId.has_value())
-        return;
+        return false;
 
-    GameServer::Get()->SendToParty(notify, partyComponent, acMessage.GetSender());
+    if (apFills)
+    {
+        // One packet carries both state and stage, so transport scheduling cannot separate them.
+        NotifyQuestAliasFills aliases;
+        aliases.Fills = *apFills;
+        aliases.Fills.Status = notify.Status;
+        aliases.Revision = notify.Revision;
+        aliases.LeaderPlayerId = pPlayer->GetId();
+        GameServer::Get()->SendToParty(aliases, partyComponent, acMessage.GetSender());
+    }
+    else
+        GameServer::Get()->SendToParty(notify, partyComponent, acMessage.GetSender());
+    return true;
 }

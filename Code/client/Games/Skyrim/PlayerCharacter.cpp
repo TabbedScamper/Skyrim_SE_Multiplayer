@@ -134,6 +134,25 @@ NiPoint3 PlayerCharacter::RespawnPlayer() noexcept
     return pos;
 }
 
+void PlayerCharacter::RespawnPlayerAt(TESObjectCELL* apCell, const NiPoint3& aPosition) noexcept
+{
+    if (!apCell)
+        return;
+    // Copy first: the caller may pass this player's position, which MoveTo changes.
+    const NiPoint3 position = aPosition;
+    SetNoBleedoutRecovery(false);
+    DispelAllSpells();
+    const float maximum = GetActorValue(ActorValueInfo::kHealth) - healthModifiers.damageModifier;
+    ForceActorValue(ActorValueOwner::ForceMode::DAMAGE, ActorValueInfo::kHealth, (std::max)(1.f, maximum));
+    using TSetLifeState = void(Actor*, uint32_t);
+    POINTER_SKYRIMSE(TSetLifeState, setLifeState, 37612);
+    setLifeState.Get()(this, 0);
+    BSFixedString stop("BleedoutStop");
+    SendAnimationEvent(&stop);
+    MoveTo(apCell, position);
+    SetNoBleedoutRecovery(true);
+}
+
 void PlayerCharacter::PayCrimeGoldToAllFactions() noexcept
 {
     // Yes, yes, this isn't great, but there's no "pay fines everywhere" function

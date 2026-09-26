@@ -3,6 +3,7 @@
 #include <Services/RunnerService.h>
 #include <Services/TransportService.h>
 #include <Services/PartyService.h>
+#include <Services/ReviveService.h>
 #include <Services/CharacterService.h>
 #include <Services/OverlayService.h>
 #include <Services/CharacterService.h>
@@ -17,6 +18,7 @@
 #include <Structs/ServerSettings.h>
 
 class QuestService;
+struct DoorVoteService;
 
 struct World : entt::registry
 {
@@ -43,6 +45,8 @@ struct World : entt::registry
     GameSettingsService& GetGameSettingsService() noexcept { return ctx().at<GameSettingsService>(); }
     GameTestService& GetGameTestService() noexcept { return ctx().at<GameTestService>(); }
     QuestService& GetQuestService() noexcept;
+    DoorVoteService& GetDoorVoteService() noexcept;
+    ReviveService& GetReviveService() noexcept { return ctx().at<ReviveService>(); }
 
     auto& GetDispatcher() noexcept { return m_dispatcher; }
 

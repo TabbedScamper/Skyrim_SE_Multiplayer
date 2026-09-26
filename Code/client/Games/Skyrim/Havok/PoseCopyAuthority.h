@@ -34,6 +34,11 @@ void SetLocalMirror(uint32_t aSourceFormId) noexcept;
 // Whether this actor's ragdoll bodies are simulating here (CorpseRagdollService, per frame). A
 // dying actor whose ragdoll is not simulating yet (a death animation) keeps taking its owner's pose.
 void SetRagdollSimulating(uint32_t aFormId, bool aSimulating) noexcept;
+// A received ragdoll must keep the owner's rendered pose while body binding retries.
+void SetRagdollPending(uint32_t aFormId, bool aPending) noexcept;
+// These drivers are controlled by streamed rigid-body targets. Their local animation drive is skipped.
+void SetControlledRagdollDrivers(const Vector<void*>& acDrivers) noexcept;
+void ClearRagdollAuthority() noexcept;
 [[nodiscard]] uint64_t GetCurrentTick() noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.

@@ -248,7 +248,10 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     {
         if (auto* pControls = PlayerControls::GetInstance())
         {
-            pControls->SetBlockPlayerInput(!releaseCreatorInput);
+            // Released for the creator; not blocked again when it closes (that locked the follower's look
+            // on the walk to the block).
+            if (releaseCreatorInput)
+                pControls->SetBlockPlayerInput(false);
             m_creatorInputReleased = releaseCreatorInput;
             spdlog::info("Follower character-creator input {} for epoch {}",
                 releaseCreatorInput ? "released" : "gated", m_startEpoch);
@@ -261,6 +264,15 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     // ordinary continued campaigns use the native loaded-cell/control state.
     // New Game: Done in the creator counts although the creator stays open (CreatorTogether holds it).
     const bool creatorDone = CreatorTogether::IsDone();
+    if (m_inParty && m_campaignMode == 1 && m_sessionState == 2 &&
+        m_gameplayReadySent && creatorOpen && !creatorDone)
+    {
+        PartyReadyRequest request;
+        request.Ready = false;
+        m_transport.Send(request);
+        m_gameplayReadySent = false;
+        spdlog::info("Character creator: withdrew gameplay readiness for epoch {}", m_startEpoch);
+    }
     if (m_inParty && m_sessionState == 2 && !m_gameplayReadySent &&
         !m_worldGateHeld && !m_waitingForWorldReady && pUI &&
         (!creatorOpen || creatorDone) && !pUI->GetMenuOpen(BSFixedString("Loading Menu")))
@@ -290,7 +302,7 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     // Character creation together: hold Done until every player is done, then close together.
     CreatorTogether::Update(m_world, m_inParty && m_campaignMode == 1 && m_sessionState == 2, creatorOpen);
     if (m_sessionState >= 3)
-        CreatorTogether::Release();
+        CreatorTogether::Release(true);
 
     // Cutscene follow: until the leader is free, the scene plays once, the leader's way (not during
     // the character creator, which CreatorTogether handles).
@@ -448,10 +460,12 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
                 m_worldGateHeld = false;
             }
             m_waitingForWorldReady = false;
-            // The leader drives the intro. Followers remain input-locked until
-            // the character-creation phase controller explicitly releases them.
+            // The leader drives the intro. A follower is not input-locked for it: the global block also
+            // kills looking, and the host can look around the whole intro (MQ101 leaves the look channel on).
+            // Cutscene follow disables the follower's movement, and its own copy of the intro's scripts
+            // disables the same control channels the host's do.
             if (auto* pControls = PlayerControls::GetInstance())
-                pControls->SetBlockPlayerInput(!m_isLeader);
+                pControls->SetBlockPlayerInput(false);
             spdlog::info("Shared-campaign world-ready barrier released for epoch {}", m_startEpoch);
         }
         else if (previousSessionState == 2 && m_sessionState == 3)
@@ -592,6 +606,15 @@ void PartyService::OnNotifyLeaderControl(const NotifyLeaderControl& acMessage) n
     auto* pPlayer = PlayerCharacter::Get();
     if (!pPlayer)
         return;
+    // Not while this player's own scene still holds it (seated, AI-driven, restrained): moving it then
+    // pulled the follower off the chopping block, and its stand-up (IdleFurnitureExit) never played. The
+    // leader resends free control every 5 s, so the gather happens once this player is free too.
+    const uint32_t sitSleepState = (pPlayer->actorState.flags1 >> 14) & 0xF;
+    if (!PlayerCollision::LocalHasFreeControl() || sitSleepState != 0)
+    {
+        spdlog::info("Leader has free control; this player is still in its own scene (sit state {}), gathered later", sitSleepState);
+        return;
+    }
     // The leader's character here, and this player's slot among the followers.
     Actor* pLeader = nullptr;
     auto view = m_world.view<FormIdComponent, PlayerComponent>();

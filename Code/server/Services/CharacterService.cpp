@@ -44,6 +44,8 @@
 #include <Messages/NotifyActorTeleport.h>
 #include <Messages/CorpseRagdollRequest.h>
 #include <Messages/NotifyCorpseRagdoll.h>
+#include <Messages/DismemberRequest.h>
+#include <Messages/NotifyDismember.h>
 #include <Messages/RequestScriptedActorState.h>
 #include <Messages/NotifyScriptedActorState.h>
 
@@ -67,6 +69,21 @@ struct LeaderParkedActor
     uint32_t PartyId{};
     std::vector<uint32_t> Recipients;
 };
+
+// Dispatcher-owned free handler: no service pointer or connection outlives its World.
+void RelayDismember(const PacketEvent<DismemberRequest>& acMessage)
+{
+    auto& world = GameServer::Get()->GetWorld();
+    OwnerView<CellIdComponent> view(world, acMessage.GetSender());
+    const auto entity = static_cast<entt::entity>(acMessage.Packet.ServerId);
+    if (!acMessage.Packet.IsValid() || acMessage.Packet.Limb != 1 || !acMessage.Packet.Tick || view.find(entity) == std::end(view))
+        return;
+    NotifyDismember notify{};
+    notify.ServerId = acMessage.Packet.ServerId;
+    notify.Limb = acMessage.Packet.Limb;
+    notify.Tick = acMessage.Packet.Tick;
+    GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);
+}
 }
 
 CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
@@ -92,6 +109,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher)
     , m_dialogueConnection(aDispatcher.sink<PacketEvent<DialogueRequest>>().connect<&CharacterService::OnDialogueRequest>(this))
     , m_subtitleConnection(aDispatcher.sink<PacketEvent<SubtitleRequest>>().connect<&CharacterService::OnSubtitleRequest>(this))
 {
+    aDispatcher.sink<PacketEvent<DismemberRequest>>().connect<&RelayDismember>();
 }
 
 void CharacterService::Serialize(World& aRegistry, entt::entity aEntity, CharacterSpawnRequest* apSpawnRequest) noexcept
@@ -721,7 +739,10 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     if (view.find(entity) == std::end(view))
         return;
     const auto& bodies = acMessage.Packet.Bodies;
-    if (bodies.empty() || bodies.size() > CorpseRagdollRequest::kMaxBodies)
+    if (!acMessage.Packet.IsValid() || acMessage.Packet.Limb > 1 ||
+        (acMessage.Packet.Active ? bodies.empty() : !bodies.empty()) || bodies.size() > CorpseRagdollRequest::kMaxBodies ||
+        (acMessage.Packet.Limb && (!acMessage.Packet.DismemberTick || acMessage.Packet.DismemberTick > acMessage.Packet.Tick ||
+            (acMessage.Packet.Active && bodies.size() != 1))))
         return;
     if (!std::all_of(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin),
             [](float v) { return std::isfinite(v) && std::abs(v) < 10'000'000.f; }))
@@ -731,7 +752,7 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
         float norm = 0.f;
         for (const float value : body.Rotation)
             norm += value * value;
-        if (!std::all_of(std::begin(body.Position), std::end(body.Position), [](float v) { return std::isfinite(v) && std::abs(v) < 2000.f; }) ||
+        if (!std::all_of(std::begin(body.Position), std::end(body.Position), [](float v) { return std::isfinite(v) && std::abs(v) < 10'000'000.f; }) ||
             !std::isfinite(norm) || std::abs(norm - 1.f) > 0.01f)
             return;
     }
@@ -739,6 +760,11 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     NotifyCorpseRagdoll notify{};
     notify.ServerId = acMessage.Packet.ServerId;
     notify.Tick = acMessage.Packet.Tick;
+    notify.Limb = acMessage.Packet.Limb;
+    notify.DismemberTick = acMessage.Packet.DismemberTick;
+    notify.Settled = acMessage.Packet.Settled;
+    notify.Active = acMessage.Packet.Active;
+    notify.Dying = acMessage.Packet.Dying;
     std::copy(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin), std::begin(notify.Origin));
     notify.Bodies = bodies;
     GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);

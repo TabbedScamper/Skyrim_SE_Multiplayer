@@ -19,6 +19,8 @@
 #include <Services/DiagnosticsService.h>
 #include <Services/CameraService.h>
 #include <Services/SceneTimelineService.h>
+#include <Services/DoorVoteService.h>
+#include <Services/ReviveService.h>
 
 #include <CampaignLedger.h>
 #include <console/Setting.h>
@@ -50,6 +52,8 @@ World::World()
     ctx().emplace<ServerListService>(*this, m_dispatcher);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
+    ctx().emplace<DoorVoteService>(*this, m_dispatcher);
+    ctx().emplace<ReviveService>(*this, m_dispatcher);
     ctx().emplace<CameraService>(*this, m_dispatcher);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher);
     ctx().emplace<ActorValueService>(*this, m_dispatcher);

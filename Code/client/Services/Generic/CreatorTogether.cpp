@@ -2,14 +2,22 @@
 
 #include <World.h>
 #include <Components.h>
+#include <Games/ActorExtension.h>
+#include <AI/AIProcess.h>
 #include <Games/Skyrim/Actor.h>
 #include <Games/Skyrim/PlayerCharacter.h>
 #include <Games/Skyrim/Interface/UI.h>
+#include <Games/Skyrim/Interface/IMenu.h>
+#include <Forms/TESNPC.h>
+#include <Forms/TESRace.h>
+#include <Messages/NotifyPlayerAppearance.h>
+#include <Systems/FaceGenSystem.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
 #include <Services/OverlayService.h>
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 
 namespace
@@ -19,6 +27,8 @@ TAddMessage* s_realAddMessage{};
 
 std::atomic<bool> s_holding{};
 std::atomic<bool> s_releaseRequested{};
+std::atomic<bool> s_forceReleaseRequested{};
+std::atomic<bool> s_participating{};
 std::atomic<bool> s_done{};
 std::atomic<bool> s_releasing{};
 
@@ -43,17 +53,73 @@ void HookBeginClosing(void* apMenu)
 }
 
 std::mutex s_lock;
+std::mutex s_appearanceLock;
 bool s_active{};                   // the creator is open here, in a party New Game
 std::vector<uint32_t> s_players;   // every player's character here (0x14 for this player), in party order
 size_t s_view{SIZE_MAX};           // index into s_players of the character shown
 bool s_prevKey{};
 bool s_nextKey{};
+bool s_editKey{};
 bool s_hintShown{};
 bool s_logAfterSwitch{};
 std::unordered_map<uint32_t, bool> s_remoteReady; // form id -> that player clicked Done
 int s_bannerPlayer{-1};
 int s_bannerCount{-1};
 int s_bannerReady{-1};
+int s_bannerLocalReady{-1};
+std::unordered_map<uint32_t, NotifyPlayerAppearance> s_pendingAppearances;
+std::unordered_map<uint32_t, NotifyPlayerAppearance> s_appliedAppearances;
+std::unordered_map<uint32_t, uint32_t> s_remoteActors;
+void* s_hiddenMovie{};
+bool s_movieWasVisible{};
+
+IMenu* GetCreatorMenu() noexcept
+{
+    auto* pUI = UI::Get();
+    const BSFixedString name("RaceSex Menu");
+    return pUI && pUI->GetMenuOpen(name) ? pUI->FindMenuByName(name) : nullptr;
+}
+
+void SetPanelsHidden(IMenu* apMenu, bool aHidden) noexcept
+{
+    auto* pMovie = apMenu ? apMenu->uiMovie : nullptr;
+    if (s_hiddenMovie && s_hiddenMovie != pMovie)
+        s_hiddenMovie = nullptr;
+    if (!pMovie)
+        return;
+    // GFxMovie slots 08/09; native DialogueMenu uses 08 at 14092a5a0 (ID 51506).
+    auto** pTable = *reinterpret_cast<void***>(pMovie);
+    const auto setVisible = reinterpret_cast<void (*)(void*, bool)>(pTable[8]);
+    const auto getVisible = reinterpret_cast<bool (*)(void*)>(pTable[9]);
+    if (aHidden)
+    {
+        if (!s_hiddenMovie)
+        {
+            s_movieWasVisible = getVisible(pMovie);
+            s_hiddenMovie = pMovie;
+            spdlog::info("Character creator: panels hidden, Backspace to edit again");
+        }
+        setVisible(pMovie, false);
+    }
+    else if (s_hiddenMovie)
+    {
+        setVisible(pMovie, s_movieWasVisible);
+        s_hiddenMovie = nullptr;
+        spdlog::info("Character creator: panels restored");
+    }
+}
+
+using TProcessCreatorMessage = UI_MESSAGE_RESULTS(IMenu*, UIMessage&);
+TProcessCreatorMessage* s_realProcessCreatorMessage{};
+
+UI_MESSAGE_RESULTS HookProcessCreatorMessage(IMenu* apMenu, UIMessage& aMessage)
+{
+    // SetVisible suppresses drawing, not keyboard/controller events to the focused movie.
+    if (s_holding.load() && s_done.load() && !s_releasing.load() &&
+        (aMessage.eType == UIMessage::kScaleformEvent || aMessage.eType == UIMessage::kUserEvent))
+        return UI_MESSAGE_RESULTS::kHandled;
+    return s_realProcessCreatorMessage(apMenu, aMessage);
+}
 
 bool IsRaceSexMenu(const BSFixedString* apName) noexcept
 {
@@ -84,7 +150,8 @@ void ShowNotice(const char* apText) noexcept
 // Hidden by hiding its meshes (NiAVObject flags bit 0 on every leaf of its 3D): the creator
 // ignores the root's flag (the engine sets it on the player every frame), and shrinking the root
 // dragged the head bone, which the creator camera tracks, down to the feet. Restored when shown.
-std::unordered_map<uint32_t, std::vector<NiAVObject*>> s_hiddenMeshes;
+using Mesh = std::shared_ptr<NiAVObject>;
+std::unordered_map<uint32_t, std::vector<Mesh>> s_hiddenMeshes;
 
 void CollectLeaves(NiAVObject* apNode, std::vector<NiAVObject*>& arLeaves, int aDepth) noexcept
 {
@@ -100,39 +167,42 @@ void CollectLeaves(NiAVObject* apNode, std::vector<NiAVObject*>& arLeaves, int a
         CollectLeaves(pNode->children.data[i], arLeaves, aDepth + 1);
 }
 
-// Main thread only. The cached meshes are only ever touched when they are still leaves of the
-// actor's current 3D: an appearance update rebuilds the 3D (freeing the old meshes), and writing
-// the hidden flag into those freed meshes corrupted the heap (a hard crash while cycling).
+// Main thread only. Retain only meshes we hid, restoring the flag before releasing each reference.
+// Detached parts can be reused by a rebuild; pointer membership alone did not own their lifetime.
 void SetHidden(Actor* apActor, bool aHidden) noexcept
 {
-    auto* pRoot = apActor ? apActor->GetNiNode() : nullptr;
+    if (!apActor)
+        return;
+    if (!aHidden)
+    {
+        s_hiddenMeshes.erase(apActor->formID);
+        return;
+    }
+    auto* pRoot = apActor->GetNiNode();
     if (!pRoot)
     {
-        if (apActor)
-            s_hiddenMeshes.erase(apActor->formID);
+        s_hiddenMeshes.erase(apActor->formID);
         return;
     }
     std::vector<NiAVObject*> leaves;
     CollectLeaves(pRoot, leaves, 0);
     auto& hiddenByUs = s_hiddenMeshes[apActor->formID];
-    // Forget meshes that are gone (freed by a rebuild), without touching them.
-    std::erase_if(hiddenByUs, [&leaves](NiAVObject* apMesh) { return std::find(leaves.begin(), leaves.end(), apMesh) == leaves.end(); });
-    if (aHidden)
-    {
-        // Every frame: a rebuilt 3D brings new, visible meshes.
-        for (auto* pLeaf : leaves)
-            if (!(pLeaf->flags & 1))
+    // Restore detached parts as well, before dropping our reference to them.
+    std::erase_if(hiddenByUs, [&leaves](const Mesh& apMesh) { return std::find(leaves.begin(), leaves.end(), apMesh.get()) == leaves.end(); });
+    // Every frame: a rebuilt 3D brings new, visible meshes.
+    for (auto* pLeaf : leaves)
+        if (!(pLeaf->flags & 1))
+        {
+            pLeaf->flags |= 1;
+            if (std::none_of(hiddenByUs.begin(), hiddenByUs.end(), [pLeaf](const Mesh& apMesh) { return apMesh.get() == pLeaf; }))
             {
-                pLeaf->flags |= 1;
-                hiddenByUs.push_back(pLeaf);
+                pLeaf->IncRef();
+                hiddenByUs.emplace_back(pLeaf, [](NiAVObject* apMesh) {
+                    apMesh->flags &= ~1u;
+                    apMesh->DecRef();
+                });
             }
-    }
-    else
-    {
-        for (auto* pMesh : hiddenByUs)
-            pMesh->flags &= ~1u;
-        s_hiddenMeshes.erase(apActor->formID);
-    }
+        }
 }
 
 bool KeyPressed(int aKey) noexcept
@@ -152,11 +222,28 @@ namespace CreatorTogether
 void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcept
 {
     s_holding.store(aHolding);
+    if (!aCreatorOpen)
+    {
+        s_done.store(false);
+        s_releasing.store(false);
+        s_heldMenu.store(nullptr);
+        s_participating.store(false);
+    }
+    else if (aHolding)
+        s_participating.store(true);
     // No longer holding (the party broke up, a player disconnected, the session moved on) with Done
     // held: close the creator, or this player is stuck in it.
     if (!aHolding && s_done.load())
         Release();
     std::lock_guard lock(s_lock);
+    // Only the client update reads the registry; the main-thread mailbox uses this identity snapshot.
+    s_remoteActors.clear();
+    auto remoteActors = aWorld.view<FormIdComponent, RemoteComponent, PlayerComponent>();
+    for (const auto entity : remoteActors)
+        s_remoteActors.emplace(remoteActors.get<FormIdComponent>(entity).Id, remoteActors.get<RemoteComponent>(entity).Id);
+    std::erase_if(s_remoteReady, [](const auto& aEntry) { return !s_remoteActors.contains(aEntry.first); });
+    if (!aHolding && !aCreatorOpen)
+        s_remoteReady.clear();
     const bool active = aHolding && aCreatorOpen;
     if (!active)
     {
@@ -166,7 +253,7 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             s_view = SIZE_MAX;
             s_hintShown = false;
             World::Get().GetOverlayService().SetCreatorView(false, 1, 1, false);
-            s_bannerPlayer = s_bannerCount = s_bannerReady = -1;
+            s_bannerPlayer = s_bannerCount = s_bannerReady = s_bannerLocalReady = -1;
         }
         s_active = false;
         return;
@@ -187,6 +274,7 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             players.emplace_back(view.get<PlayerComponent>(entity).Id, formId);
     }
     std::sort(players.begin(), players.end());
+    const auto viewedFormId = s_view < s_players.size() ? s_players[s_view] : 0x14;
     s_players.clear();
     size_t self = 0;
     for (const auto& [playerId, formId] : players)
@@ -195,8 +283,8 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             self = s_players.size();
         s_players.push_back(formId);
     }
-    if (s_view >= s_players.size())
-        s_view = self;
+    const auto selected = std::find(s_players.begin(), s_players.end(), viewedFormId);
+    s_view = selected == s_players.end() ? self : static_cast<size_t>(selected - s_players.begin());
 
 
     // [ and ] cycle whose character stands on the spot.
@@ -220,35 +308,19 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
         s_logAfterSwitch = true;
     }
 
-    auto* pPlayer = PlayerCharacter::Get();
-
-    // Diagnostic: what the switch did to the 3D (one line after each switch).
-    if (s_logAfterSwitch && pPlayer && pPlayer->GetNiNode())
-    {
-        s_logAfterSwitch = false;
-        for (size_t i = 0; i < s_players.size(); ++i)
-        {
-            auto* pActor = s_players[i] == 0x14 ? static_cast<Actor*>(pPlayer) : Cast<Actor>(TESForm::GetById(s_players[i]));
-            auto* pRoot = pActor ? pActor->GetNiNode() : nullptr;
-            if (pRoot)
-                spdlog::info("Character creator together: {:X} root world scale {:.4f}, hidden meshes {}, world ({:.0f}, {:.0f}, {:.0f}) player at ({:.0f}, {:.0f}, {:.0f})",
-                    pActor->formID, pRoot->world.scale, s_hiddenMeshes.contains(pActor->formID) ? s_hiddenMeshes[pActor->formID].size() : 0, pRoot->world.translate.x, pRoot->world.translate.y, pRoot->world.translate.z,
-                    pPlayer->position.x, pPlayer->position.y, pPlayer->position.z);
-            else if (pActor)
-                spdlog::info("Character creator together: {:X} has no 3D", pActor->formID);
-        }
-    }
-
     // The banner: whose character this is, and whether that player is ready.
     const bool ready = s_players[s_view] == 0x14 ? s_done.load() : s_remoteReady[s_players[s_view]];
     const int player = static_cast<int>(s_view) + 1;
     const int playerCount = static_cast<int>(count);
-    if (player != s_bannerPlayer || playerCount != s_bannerCount || static_cast<int>(ready) != s_bannerReady)
+    const bool localReady = s_done.load();
+    if (player != s_bannerPlayer || playerCount != s_bannerCount || static_cast<int>(ready) != s_bannerReady ||
+        static_cast<int>(localReady) != s_bannerLocalReady)
     {
         s_bannerPlayer = player;
         s_bannerCount = playerCount;
         s_bannerReady = static_cast<int>(ready);
-        World::Get().GetOverlayService().SetCreatorView(true, player, playerCount, ready);
+        s_bannerLocalReady = static_cast<int>(localReady);
+        World::Get().GetOverlayService().SetCreatorView(true, player, playerCount, ready, localReady);
     }
 }
 
@@ -258,59 +330,217 @@ void SetRemoteReady(const uint32_t aFormId, const bool aReady) noexcept
     s_remoteReady[aFormId] = aReady;
 }
 
+void QueueAppearance(const uint32_t aFormId, const NotifyPlayerAppearance& acAppearance) noexcept
+{
+    std::lock_guard lock(s_lock);
+    s_remoteActors[aFormId] = acAppearance.ServerId;
+    s_pendingAppearances[aFormId] = acAppearance;
+}
+
 bool IsDone() noexcept
 {
     return s_done.load();
 }
 
-void Release() noexcept
+std::mutex& AppearanceMutex() noexcept
 {
+    return s_appearanceLock;
+}
+
+void Release(const bool aForce) noexcept
+{
+    if (aForce)
+    {
+        if (!s_participating.load())
+            return;
+        s_forceReleaseRequested.store(true);
+    }
     s_releaseRequested.store(true);
 }
 
 void OnMainFrame() noexcept
 {
+    if (!entt::locator<World>::has_value())
+        return;
+    std::unordered_map<uint32_t, NotifyPlayerAppearance> pending;
+    std::unordered_map<uint32_t, uint32_t> remoteActors;
     {
         std::lock_guard lock(s_lock);
-        auto* pPlayer = PlayerCharacter::Get();
-        if (!s_active)
+        pending.swap(s_pendingAppearances);
+        remoteActors = s_remoteActors;
+    }
+    auto& world = World::Get();
+    std::erase_if(s_appliedAppearances, [&remoteActors](const auto& aEntry) {
+        const auto actor = remoteActors.find(aEntry.first);
+        return actor == remoteActors.end() || actor->second != aEntry.second.ServerId;
+    });
+    for (const auto& [formId, appearance] : pending)
+    {
+        std::lock_guard appearanceLock(s_appearanceLock);
+        const auto actor = remoteActors.find(formId);
+        auto* pActor = actor != remoteActors.end() && actor->second == appearance.ServerId ? Cast<Actor>(TESForm::GetById(formId)) : nullptr;
+        auto* pNpc = pActor ? Cast<TESNPC>(pActor->baseForm) : nullptr;
+        if (!pNpc || formId == 0x14 || !pActor->GetExtension() || !pActor->GetExtension()->IsRemotePlayer() || pActor->IsDeleted())
+            continue;
+        // A native rebuild removes parts before queuing work. Defer while physics owns this body.
+        if (!pActor->GetNiNode() || !pActor->currentProcess || !pActor->currentProcess->middleProcess ||
+            !pActor->currentProcess->unk8 ||
+            ((pActor->actorState.flags1 >> 21) & 0x7F) != 0)
         {
-            // Not in the creator (any more): show everyone this feature hid (SetHidden erases the
-            // entry, so collect the ids first).
-            std::vector<uint32_t> hidden;
-            for (const auto& [formId, meshes] : s_hiddenMeshes)
-                hidden.push_back(formId);
-            for (const auto formId : hidden)
-                SetHidden(formId == 0x14 ? static_cast<Actor*>(pPlayer) : Cast<Actor>(TESForm::GetById(formId)), false);
+            std::lock_guard lock(s_lock);
+            s_pendingAppearances.try_emplace(formId, appearance);
+            continue;
+        }
+        const auto previous = s_appliedAppearances.find(formId);
+        if (previous != s_appliedAppearances.end() && previous->second.ServerId == appearance.ServerId &&
+            previous->second.AppearanceBuffer == appearance.AppearanceBuffer &&
+            previous->second.ChangeFlags == appearance.ChangeFlags && previous->second.FaceTints == appearance.FaceTints)
+            continue;
+
+        SetHidden(pActor, false);
+        const auto oldSex = pNpc->actorData.actorBaseFlags & 1;
+        auto* pOldRace = pActor->race;
+        pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags);
+        const bool newSkeleton = pOldRace != pNpc->raceForm.race || oldSex != (pNpc->actorData.actorBaseFlags & 1);
+        if (pOldRace != pNpc->raceForm.race)
+        {
+            auto* pNewRace = pNpc->raceForm.race;
+            // TESNPC::SwitchRace returns early if Deserialize already set the new race. Let
+            // Actor::SwitchRace run the full transition, then restore the received head parts.
+            pNpc->raceForm.race = pOldRace;
+            using TSwitchRace = void(Actor*, TESRace*, bool);
+            POINTER_SKYRIMSE(TSwitchRace, s_switchRace, 37925);
+            s_switchRace.Get()(pActor, pNewRace, false);
+            pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags);
+        }
+        // Keep the same runtime FaceGen invariant as TESNPC::Create after every native load.
+        pNpc->originalRace = nullptr;
+        if (newSkeleton)
+        {
+            // AIProcess::Update3DModel_Impl (ID 39395) uses 0x20 to replace the skeleton too.
+            using TSet3DFlags = void(AIProcess*, uint8_t);
+            POINTER_SKYRIMSE(TSet3DFlags, s_set3DFlags, 39907);
+            s_set3DFlags.Get()(pActor->currentProcess, 0x20);
+        }
+        // QueueReset3D's inventory queue deliberately excludes player replicas. This is the
+        // appearance-specific main-thread path, matching RaceSex's DoReset3D(true), ID 40255.
+        using TReset3D = void(Actor*, bool);
+        POINTER_SKYRIMSE(TReset3D, s_reset3D, 40255);
+        s_reset3D.Get()(pActor, true);
+        world.GetRunner().Queue([formId, serverId = appearance.ServerId, tints = appearance.FaceTints]() {
+            auto& world = World::Get();
+            auto actors = world.view<FormIdComponent, RemoteComponent, PlayerComponent>();
+            for (const auto entity : actors)
+                if (actors.get<FormIdComponent>(entity).Id == formId && actors.get<RemoteComponent>(entity).Id == serverId)
+                {
+                    FaceGenSystem::Setup(world, entity, tints);
+                    break;
+                }
+        });
+        s_appliedAppearances[formId] = appearance;
+        spdlog::info("Player {:X}: {} look applied on main thread, rebuild requested (skeleton {}, race {:X}, head {})",
+            formId, appearance.InCreator ? "live creator" : "final", newSkeleton,
+            pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0,
+            pActor->GetFaceGenNiNode() != nullptr);
+    }
+
+    auto* pMenu = GetCreatorMenu();
+    const bool edit = pMenu && GameInFocus() && KeyPressed(VK_BACK);
+    if (edit && !s_editKey && s_holding.load() && !s_releaseRequested.load() &&
+        !s_releasing.load() && s_done.exchange(false))
+    {
+        s_heldMenu.store(nullptr);
+        std::lock_guard lock(s_lock);
+        const auto self = std::find(s_players.begin(), s_players.end(), 0x14);
+        if (self != s_players.end())
+            s_view = static_cast<size_t>(self - s_players.begin());
+        s_logAfterSwitch = true;
+        spdlog::info("Character creator: editing again, readiness withdrawn");
+    }
+    s_editKey = edit;
+    SetPanelsHidden(pMenu, s_holding.load() && s_done.load() && !s_releasing.load());
+
+    std::vector<uint32_t> players;
+    size_t view;
+    bool active;
+    bool logAfterSwitch;
+    {
+        std::lock_guard lock(s_lock);
+        players = s_players;
+        view = s_view;
+        active = s_active;
+        logAfterSwitch = s_logAfterSwitch;
+        s_logAfterSwitch = false;
+    }
+    {
+        auto* pPlayer = PlayerCharacter::Get();
+        if (!active || !pMenu)
+        {
             s_hiddenMeshes.clear();
         }
-        else if (s_view < s_players.size())
+        else if (view < players.size())
         {
+            std::erase_if(s_hiddenMeshes, [&players](const auto& aEntry) {
+                return std::find(players.begin(), players.end(), aEntry.first) == players.end();
+            });
+            static auto previousFrame = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            const float delta = std::clamp(std::chrono::duration<float>(now - previousFrame).count(), 0.f, 0.1f);
+            previousFrame = now;
             // Only the viewed character is visible; it stands on this player's spot, its 3D moved at once
             // (the world is paused while the creator is open, so nothing else would move it).
-            for (size_t i = 0; i < s_players.size(); ++i)
+            for (size_t i = 0; i < players.size(); ++i)
             {
-                const bool viewed = s_view == i;
-                if (s_players[i] == 0x14)
+                const bool viewed = view == i;
+                if (players[i] == 0x14)
                 {
                     SetHidden(pPlayer, !viewed);
                     continue;
                 }
-                auto* pRemote = Cast<Actor>(TESForm::GetById(s_players[i]));
-                SetHidden(pRemote, !viewed);
+                auto* pRemote = Cast<Actor>(TESForm::GetById(players[i]));
+                if (viewed)
+                    SetHidden(pRemote, false);
                 if (viewed && pRemote && pPlayer)
                 {
                     pRemote->position = pPlayer->position;
                     pRemote->SetRotation(pRemote->rotation.x, pRemote->rotation.y, pPlayer->rotation.z);
                     pRemote->Update3DPosition(true);
-                    // Its scene graph advanced each frame as the menu does for this player's (NiAVObject::Update).
+                    // RaceSex::ProcessMessage advances the player's animation through slot 7D
+                    // before NiAVObject::Update (ID 52345, VA 140968010). Do the same for the preview.
+                    using TUpdateAnimation = void (*)(Actor*, float);
+                    auto** pTable = *reinterpret_cast<void***>(pRemote);
+                    reinterpret_cast<TUpdateAnimation>(pTable[0x7D])(pRemote, delta);
+                    // Advance its scene graph as the menu does for this player's (NiAVObject::Update).
                     if (auto* pRoot = pRemote->GetNiNode())
                     {
                         using TNiUpdate = void(NiAVObject*, void*);
                         POINTER_SKYRIMSE(TNiUpdate, s_niUpdate, 70251);
-                        uint8_t updateData[16]{};
-                        s_niUpdate.Get()(pRoot, updateData);
+                        // A root app-cull rejects the entire subtree (ID 70267). Mesh restoration
+                        // alone cannot undo a root hidden earlier by cutscene follow.
+                        pRoot->flags &= ~1u;
+                        struct { float time; uint32_t flags; } updateData{delta, 0};
+                        s_niUpdate.Get()(pRoot, &updateData);
                     }
+                }
+                SetHidden(pRemote, !viewed);
+            }
+            if (logAfterSwitch && pPlayer)
+            {
+                for (const auto formId : players)
+                {
+                    auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                    auto* pRoot = pActor ? pActor->GetNiNode() : nullptr;
+                    if (!pRoot)
+                    {
+                        spdlog::info("Character creator together: {:X} has no 3D after switch", formId);
+                        continue;
+                    }
+                    spdlog::info("Character creator together: {:X} after switch, viewed {}, root hidden {}, fade {:.3f}, head {}, root world scale {:.4f}, hidden meshes {}, world ({:.0f}, {:.0f}, {:.0f}) player at ({:.0f}, {:.0f}, {:.0f})",
+                        formId, formId == players[view], (pRoot->flags & 1) != 0, pRoot->fadeAmount,
+                        pActor->GetFaceGenNiNode() != nullptr, pRoot->world.scale,
+                        s_hiddenMeshes.contains(formId) ? s_hiddenMeshes[formId].size() : 0,
+                        pRoot->world.translate.x, pRoot->world.translate.y, pRoot->world.translate.z,
+                        pPlayer->position.x, pPlayer->position.y, pPlayer->position.z);
                 }
             }
         }
@@ -318,12 +548,15 @@ void OnMainFrame() noexcept
 
     if (!s_releaseRequested.exchange(false))
         return;
-    if (!s_done.exchange(false))
+    const bool forced = s_forceReleaseRequested.exchange(false);
+    if (!pMenu || (!s_done.load() && !forced) || s_releasing.exchange(true))
         return;
-    s_releasing.store(true);
+    if (!s_done.exchange(true))
+        spdlog::info("Character creator: server released the party before readiness withdrawal arrived");
+    SetPanelsHidden(pMenu, false);
     // The menu's own close (fade, camera, then it queues its hide), or the hide itself if Done was
     // only held at the hide.
-    if (auto* pMenu = s_heldMenu.exchange(nullptr); pMenu && s_realBeginClosing)
+    if (auto* pHeldMenu = s_heldMenu.exchange(nullptr); s_realBeginClosing && (forced || pHeldMenu == pMenu))
         s_realBeginClosing(pMenu);
     else
     {
@@ -334,8 +567,7 @@ void OnMainFrame() noexcept
             s_realAddMessage(*s_uiMessageQueue.Get(), &name, UIMessage::kHide, nullptr);
         }
     }
-    s_releasing.store(false);
-    spdlog::info("Character creator: every player is done, closed together");
+    spdlog::info("Character creator: party release requested, closing together");
 }
 
 bool GetDisplay(const uint32_t aFormId, NiPoint3& arPosition, float& arHeading) noexcept
@@ -359,4 +591,7 @@ static TiltedPhoques::Initializer s_creatorTogetherHooks(
         POINTER_SKYRIMSE(TBeginClosing, s_beginClosing, 52388);
         s_realBeginClosing = s_beginClosing.Get();
         TP_HOOK(&s_realBeginClosing, HookBeginClosing);
+        POINTER_SKYRIMSE(TProcessCreatorMessage, s_processCreatorMessage, 52345);
+        s_realProcessCreatorMessage = s_processCreatorMessage.Get();
+        TP_HOOK(&s_realProcessCreatorMessage, HookProcessCreatorMessage);
     });

@@ -26,6 +26,7 @@
 #include <Services/PapyrusService.h>
 #include <Services/PartyService.h>
 #include <Services/ObjectService.h>
+#include <Services/CorpseRagdollService.h>
 #include <Services/TransportService.h>
 
 #include <Forms/ActorValueInfo.h>
@@ -987,6 +988,24 @@ bool Actor::IsDragon() const noexcept
 
 // Set around our death sync's KillImpl call (see HookKillImpl).
 thread_local bool t_syncKill = false;
+thread_local bool t_syncDecapitate = false;
+
+NiNode* Actor::GetDetachedLimbNode(uint32_t aLimb) noexcept
+{
+    using TGetLimb = NiNode*(AIProcess*, uint32_t);
+    POINTER_SKYRIMSE(TGetLimb, getLimb, 39974);
+    return currentProcess && aLimb == 1 ? getLimb.Get()(currentProcess, aLimb) : nullptr;
+}
+
+void Actor::ApplyRemoteDecapitation() noexcept
+{
+    using TDecapitate = void(Actor*);
+    POINTER_SKYRIMSE(TDecapitate, decapitate, 37639);
+    const bool previous = t_syncDecapitate;
+    t_syncDecapitate = true;
+    decapitate.Get()(this);
+    t_syncDecapitate = previous;
+}
 
 void Actor::Kill() noexcept
 {
@@ -1150,6 +1169,38 @@ static TDamageActor* RealDamageActor = nullptr;
 TP_THIS_FUNCTION(TKillImpl, void, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant);
 static TKillImpl* RealKillImpl = nullptr;
 std::atomic<uint64_t> s_blockedRemoteKills{0};
+
+// 37639 (140697C50) queues dismemberment; 37640 (140697D10) creates the clone later.
+// Authorize that queued completion by actor, since it need not run under the caller's TLS guard.
+using TDecapitate = void(Actor*);
+using TCreateHead = void(Actor*, bool);
+TDecapitate* RealDecapitate{};
+TCreateHead* RealCreateHead{};
+
+void HookDecapitate(Actor* apActor)
+{
+    const auto* extension = apActor->GetExtension();
+    if (World::Get().GetTransport().IsConnected() && extension && extension->IsRemote() && !t_syncDecapitate)
+    {
+        spdlog::info("Dismember {:X}: suppressed local Decapitate; waiting for owner", apActor->formID);
+        return;
+    }
+    if (!extension || !extension->IsRemote())
+        CorpseRagdollService::RecordDismember(apActor, false);
+    RealDecapitate(apActor);
+}
+
+void HookCreateHead(Actor* apActor, bool aArg)
+{
+    const auto* extension = apActor->GetExtension();
+    if (World::Get().GetTransport().IsConnected() && extension && extension->IsRemote() &&
+        !CorpseRagdollService::IsDismemberAuthorized(apActor->formID))
+        return;
+    auto* before = apActor->GetDetachedLimbNode(1);
+    RealCreateHead(apActor, aArg);
+    if (apActor->GetDetachedLimbNode(1) != before)
+        CorpseRagdollService::RecordDismember(apActor, true);
+}
 
 void TP_MAKE_THISCALL(HookKillImpl, Actor, Actor* apAttacker, float aDamage, bool aSendEvent, bool aRagdollInstant)
 {
@@ -1647,6 +1698,8 @@ static TiltedPhoques::Initializer s_actorHooks(
         POINTER_SKYRIMSE(TUnequipObject, s_unequipObject, 37975);
         POINTER_SKYRIMSE(TSpeakSoundFunction, s_speakSoundFunction, 37542);
         POINTER_SKYRIMSE(TAddDeathItems, addDeathItems, 37198);
+        POINTER_SKYRIMSE(TDecapitate, decapitate, 37639);
+        POINTER_SKYRIMSE(TCreateHead, createHead, 37640);
         POINTER_SKYRIMSE(TIsFleeing, isFleeing, 37577);
         POINTER_SKYRIMSE(TNativeExtraDataAdd, s_nativeExtraDataAdd, 12315);
 
@@ -1681,6 +1734,8 @@ static TiltedPhoques::Initializer s_actorHooks(
         RealUnequipObject = s_unequipObject.Get();
         RealSpeakSoundFunction = s_speakSoundFunction.Get();
         RealAddDeathItems = addDeathItems.Get();
+        RealDecapitate = decapitate.Get();
+        RealCreateHead = createHead.Get();
         RealIsFleeing = isFleeing.Get();
 
         TP_HOOK(&RealActorProcess, HookActorProcess);
@@ -1707,5 +1762,7 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealUnequipObject, HookUnequipObject);
         TP_HOOK(&RealSpeakSoundFunction, HookSpeakSoundFunction);
         TP_HOOK(&RealAddDeathItems, HookAddDeathItems);
+        TP_HOOK(&RealDecapitate, HookDecapitate);
+        TP_HOOK(&RealCreateHead, HookCreateHead);
         TP_HOOK(&RealIsFleeing, HookIsFleeing);
     });

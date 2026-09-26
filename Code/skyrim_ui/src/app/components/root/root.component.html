@@ -3,6 +3,7 @@
     <span class="creator-view-player">PLAYER {{ creator.player }}/{{ creator.count }}</span>
     <span class="creator-view-state" [class.ready]="creator.ready">{{ creator.ready ? 'READY' : 'EDITING' }}</span>
     <span *ngIf="creator.count > 1" class="creator-view-hint">[ &nbsp;/&nbsp; ] to view the other players</span>
+    <span *ngIf="creator.localReady" class="creator-view-hint">Backspace: edit again</span>
   </div>
 </div>
 

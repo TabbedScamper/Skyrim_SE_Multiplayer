@@ -228,6 +228,15 @@ void PlayerService::OnPartyLeftEvent(const PartyLeftEvent& acEvent) noexcept
 
 void PlayerService::RunRespawnUpdates() noexcept
 {
+    if (m_world.GetReviveService().Update(m_isDeathSystemEnabled))
+    {
+        if (m_respawnTimerStarted)
+            FadeOutGame(false, true, 0.5f, true, 0.f);
+        m_respawnTimerStarted = false;
+        m_knockdownStart = false;
+        return;
+    }
+
     if (!m_isDeathSystemEnabled)
         return;
 

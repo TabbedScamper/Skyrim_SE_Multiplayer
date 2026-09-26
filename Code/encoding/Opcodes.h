@@ -65,6 +65,11 @@ enum ClientOpcode : unsigned char
     kPlayerAppearanceRequest,
     kLeaderControlRequest,
     kRequestScriptedActorState,
+    kRequestQuestAliasFills,
+    kDismemberRequest,
+    kRequestPartyUnstuck,
+    kDoorVoteRequest,
+    kReviveRequest,
     kClientOpcodeMax
 };
 
@@ -132,5 +137,10 @@ enum ServerOpcode : unsigned char
     kNotifyPlayerAppearance,
     kNotifyLeaderControl,
     kNotifyScriptedActorState,
+    kNotifyQuestAliasFills,
+    kNotifyDismember,
+    kNotifyPartyUnstuck,
+    kNotifyDoorVote,
+    kNotifyRevive,
     kServerOpcodeMax
 };

@@ -2,6 +2,7 @@
 
 #include <TiltedCore/Stl.hpp>
 #include <Messages/Message.h>
+#include <Messages/NotifyPartyUnstuck.h>
 #include <Messages/NotifyScriptedActorState.h>
 #include <MetaMessage.h>
 
@@ -14,6 +15,7 @@
 #include <Messages/NotifyFactionsChanges.h>
 #include <Messages/NotifyRemoveCharacter.h>
 #include <Messages/NotifyQuestUpdate.h>
+#include <Messages/NotifyQuestAliasFills.h>
 #include <Messages/NotifyPlayerList.h>
 #include <Messages/NotifyPartyInfo.h>
 #include <Messages/NotifyPartyInvite.h>
@@ -64,8 +66,11 @@
 #include <Messages/NotifySceneTimeline.h>
 #include <Messages/NotifyCheckpointSave.h>
 #include <Messages/NotifyCorpseRagdoll.h>
+#include <Messages/NotifyDismember.h>
 #include <Messages/NotifyPlayerAppearance.h>
 #include <Messages/NotifyLeaderControl.h>
+#include <Messages/NotifyDoorVote.h>
+#include <Messages/NotifyRevive.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -75,7 +80,7 @@ struct ServerMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<
+        auto s_visitor = CreateMessageVisitor<NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
             NotifyScriptedActorState, AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate, NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite,
             NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
             NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,
