@@ -20,9 +20,71 @@
 #include <Messages/NotifyDoorVote.h>
 #include <Messages/NotifyLeaderControl.h>
 #include <cmath>
+#include <atomic>
+
+// Research handoff for docs/REFERENCE_RESEARCH.md (outside this task's edit allowlist):
+// CommonLibSSE-NG src/RE/P/PlayerCharacter.cpp maps ActivatePickRef to AE ID 40548.
+// https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/src/RE/P/PlayerCharacter.cpp
+// TiltedEvolution's TESObjectREFR.cpp supplies the existing ActivateRef detour/replay.
+// https://github.com/tiltedphoques/TiltedEvolution/blob/master/Code/client/Games/Skyrim/TESObjectREFR.cpp
+// Adopt its native activation ABI; reject player-argument-only detection, since scripts use it too.
+// 1.7.104 corpus: ActivateHandler::ProcessButton 42420 / 0x1407B2660 calls
+// ActivatePickRef 40548 / 0x140751580, whose CALL at +0x10D targets
+// ActivateRef 19796 / 0x1402F11B0. The old +0x112 return site IS correct.
+// Papyrus Activate 56139 / 0x140A446E0 is a separate caller with the same arguments.
+// ActivateChoiceMenuCallback 40926 / 0x140769000 calls ActivateRef at +0x6E only
+// for the player's default Activate choice; perk alternatives never use that CALL.
+// Helgen's exterior entrances use AutoLoadDoor01 (FNAM 2), not manual activation.
+// CommonLib include/RE/T/TESObjectDOOR.h names flag value 0x2 kAutomatic.
+// https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/include/RE/T/TESObjectDOOR.h
+// Clone3D 17934 / 0x1402848F0 attaches BSPlayerDistanceCheckController;
+// its update 40201 / 0x140738120 calls the door callback only on distance crossings.
+// Callback 17933 / 0x1402846B0 starts a fade on entering band 1. AutoDoorFadeCallback
+// 17967 / 0x140285CF0 queues player+0x7E8, consumed by player update
+// 40447 / 0x140745200 at CALL +0x74C (return +0x751), NOT 40548+0x112.
+// Intercept the distance callback before the fade, not the later ActivateRef call
+// which would leave a voting player looking at a black screen.
+// MQ101 aliases 98/99 are the linked interior doors of BOTH exterior entrances;
+// objective 50 aliases 124/125 are markers, not doors. Use the running-alias rule,
+// never quest/form IDs in policy. Checked Skyrim.esm and QF_MQ101_0003372B.psc.
 
 namespace
 {
+using TAutomaticDoor = void(void*, uint32_t, bool);
+TAutomaticDoor* s_automaticDoor{};
+
+void OnAutomaticDoor(void* aObject3D, uint32_t aDistanceBand, bool aEntering)
+{
+    // This controller measures the local player, not NPCs or Papyrus activators.
+    // Band 0 is the approach label; band 1 starts travel. Preserve leaving/label callbacks.
+    if (DoorVotePolicy::IsAutomaticEntry(aDistanceBand, aEntering))
+    {
+        using TFindReference = TESObjectREFR*(void*);
+        POINTER_SKYRIMSE(TFindReference, findReference, 19750);
+        auto* door = findReference.Get()(aObject3D);
+        if (World::Get().GetDoorVoteService().TryHold(door, PlayerCharacter::Get(), 0, nullptr, 1, 0, nullptr, true))
+            return;
+    }
+    s_automaticDoor(aObject3D, aDistanceBand, aEntering);
+}
+
+void ReportSkip(TESObjectREFR* aDoor, DoorVotePolicy::Skip aReason, const void* aCaller) noexcept
+{
+    static constexpr const char* reasons[] = {"none", "missing reference", "not a door", "not a load door",
+        "not the local player", "not player input", "offline", "not in a party", "fewer than two members",
+        "locked", "free door", "already loading", "missing source cell", "missing destination", "too far away",
+        "unmapped door", "unmapped source cell", "unmapped destination", "unmapped worldspace", "send failed"};
+    static_assert(std::size(reasons) == static_cast<size_t>(DoorVotePolicy::Skip::Count));
+    // Per reason, so NPC/script traffic cannot hide an input or transport failure.
+    static std::array<std::atomic<uint64_t>, std::size(reasons)> next{};
+    auto& deadline = next[static_cast<size_t>(aReason)];
+    const auto now = GetTickCount64();
+    auto previous = deadline.load(std::memory_order_relaxed);
+    if (now >= previous && deadline.compare_exchange_strong(previous, now + 5000, std::memory_order_relaxed))
+        spdlog::info("Door vote: skip {:X} ({}) caller={:X}", aDoor ? aDoor->formID : 0,
+            reasons[static_cast<size_t>(aReason)], reinterpret_cast<uintptr_t>(aCaller));
+}
+
 // CommonLib's ExtraTeleport/DoorTeleportData and BGSLocation prefixes. Only read here.
 struct TeleportData
 {
@@ -167,7 +229,10 @@ bool DoorVoteService::IsVoteDoor(TESObjectREFR* aDoor) noexcept
                         continue;
                     auto* ref = quest->GetAliasedRef(alias->aliasID);
                     if (ref && (ref == aDoor || ref == destination))
+                    {
+                        spdlog::info("Door vote: quest {:X} alias {} matches {:X}", quest->formID, alias->aliasID, ref->formID);
                         return report(true, "running quest reference alias");
+                    }
                 }
             }
             if (!quest->IsActive())
@@ -200,37 +265,49 @@ bool DoorVoteService::IsVoteDoor(TESObjectREFR* aDoor) noexcept
 }
 
 bool DoorVoteService::TryHold(TESObjectREFR* aDoor, TESObjectREFR* aActivator, uint8_t aUnk1,
-    TESBoundObject* aObject, int32_t aCount, char aDefaultProcessing, const void* aCaller) noexcept
+    TESBoundObject* aObject, int32_t aCount, char aDefaultProcessing, const void* aCaller, bool aAtAutomaticDoor) noexcept
 {
-    // 1.7.104: ID 40548 +0x10D calls ActivateRef; its return address is +0x112.
-    // Papyrus passes the same player and flags, so arguments cannot identify player input.
+    using DoorVotePolicy::Skip;
+    const auto skip = [aDoor, aCaller](Skip reason, bool held = false)
+    {
+        ReportSkip(aDoor, reason, aCaller);
+        return held;
+    };
     using TPick = void();
     POINTER_SKYRIMSE(TPick, pick, 40548);
-    if (reinterpret_cast<uintptr_t>(aCaller) != reinterpret_cast<uintptr_t>(pick.Get()) + 0x112 ||
-        aActivator != PlayerCharacter::Get() || !m_transport.IsOnline() ||
-        !m_world.GetPartyService().IsInParty() || m_world.GetPartyService().GetPartyMembers().size() < 2 ||
-        !aDoor || !aDoor->baseForm || aDoor->baseForm->formType != FormType::Door ||
-        !aDoor->extraData.Contains(ExtraDataType::Teleport))
-        return false;
+    POINTER_SKYRIMSE(TPick, choice, 40926);
+    const auto& party = m_world.GetPartyService();
+    const bool input = aAtAutomaticDoor || DoorVotePolicy::IsInputCall(reinterpret_cast<uintptr_t>(aCaller),
+        reinterpret_cast<uintptr_t>(pick.Get()), reinterpret_cast<uintptr_t>(choice.Get()));
+    const auto reason = DoorVotePolicy::Decide(aDoor != nullptr,
+        aDoor && aDoor->baseForm && aDoor->baseForm->formType == FormType::Door,
+        aDoor && aDoor->extraData.Contains(ExtraDataType::Teleport),
+        aActivator && aActivator == PlayerCharacter::Get(), input, m_transport.IsOnline(),
+        party.IsInParty(), party.GetPartyMembers().size());
+    if (reason != Skip::None)
+        return skip(reason);
     if (const auto* lock = aDoor->GetLock(); lock && lock->IsLocked())
-        return false;
+        return skip(Skip::Locked);
     if (!IsVoteDoor(aDoor))
-        return false;
+        return skip(Skip::FreeDoor);
     if (m_loading)
-        return true;
+        return skip(Skip::Loading, true);
     auto* destination = DestinationDoor(aDoor);
     auto* cell = aDoor->GetParentCellEx();
     auto* targetCell = destination ? destination->GetParentCellEx() : nullptr;
     DoorVoteRequest request;
     auto& mods = m_world.GetModSystem();
-    if (!cell || !targetCell || !NearDoor(aDoor) ||
-        !mods.GetServerModId(aDoor->formID, request.Door) ||
-        !mods.GetServerModId(cell->formID, request.Cell) ||
-        !mods.GetServerModId(targetCell->formID, request.Destination) ||
-        (cell->worldspace && !mods.GetServerModId(cell->worldspace->formID, request.WorldSpace)))
+    const auto unavailable = !cell ? Skip::MissingCell : !targetCell ? Skip::MissingDestination :
+        !NearDoor(aDoor) ? Skip::TooFar :
+        !mods.GetServerModId(aDoor->formID, request.Door) ? Skip::UnmappedDoor :
+        !mods.GetServerModId(cell->formID, request.Cell) ? Skip::UnmappedCell :
+        !mods.GetServerModId(targetCell->formID, request.Destination) ? Skip::UnmappedDestination :
+        (cell->worldspace && !mods.GetServerModId(cell->worldspace->formID, request.WorldSpace)) ?
+        Skip::UnmappedWorldSpace : Skip::None;
+    if (unavailable != Skip::None)
     {
         ShowNotice("Door vote unavailable: the destination is not ready.");
-        return true;
+        return skip(unavailable, true);
     }
     request.Epoch = m_world.GetPartyService().GetStartEpoch();
     request.VoteId = m_state.Door == request.Door ? m_state.VoteId : 0;
@@ -251,7 +328,10 @@ bool DoorVoteService::TryHold(TESObjectREFR* aDoor, TESObjectREFR* aActivator, u
     {
         Reset();
         ShowNotice("Door vote unavailable: connection interrupted.");
+        return skip(Skip::SendFailed, true);
     }
+    spdlog::info("Door vote: held {:X} for {} ({} members, {})", aDoor->formID,
+        request.Name, party.GetPartyMembers().size(), aAtAutomaticDoor ? "automatic approach" : "player Activate");
     return true;
 }
 
@@ -270,10 +350,17 @@ void DoorVoteService::OnNotify(const NotifyDoorVote& aMessage) noexcept
         aMessage.VoteId == 0 || aMessage.VoteId < m_lastVoteId)
         return;
     m_lastVoteId = aMessage.VoteId;
-    if (!aMessage.Notice.empty())
+    if (aMessage.Action == DoorVoteAction::State && !aMessage.Name.empty())
+    {
+        const auto prompt = fmt::format("Enter {}? (vote) {}/{} ready. Approach or activate the entrance to agree.",
+            aMessage.Name, aMessage.ReadyCount, aMessage.TotalCount);
+        ShowNotice(prompt.c_str());
+    }
+    else if (!aMessage.Notice.empty())
         ShowNotice(aMessage.Notice.c_str());
     if (aMessage.Action == DoorVoteAction::Cancel || aMessage.Action == DoorVoteAction::Release)
     {
+        spdlog::info("Door vote: {} vote {}", aMessage.Action == DoorVoteAction::Cancel ? "cancelled" : "released", aMessage.VoteId);
         m_lastVoteId = aMessage.VoteId + 1;
         if (m_state.VoteId == aMessage.VoteId)
         {
@@ -285,11 +372,21 @@ void DoorVoteService::OnNotify(const NotifyDoorVote& aMessage) noexcept
         }
         return;
     }
+    const bool lostReadyVoter = DoorVotePolicy::LostReadyVoter(m_state.VoteId == aMessage.VoteId,
+        m_state.ReadyCount, aMessage.ReadyCount, aMessage.Ready, m_loading);
     m_state = aMessage;
     m_deadline = GetTickCount64() + (aMessage.Action == DoorVoteAction::Go ? 305000 : 125000);
     if (aMessage.Action == DoorVoteAction::State)
     {
         m_state.Tick = 0;
+        if (lostReadyVoter && !m_withdrawSent)
+        {
+            // The server may observe departure first and remove that player's readiness.
+            // A still-ready participant can cancel even if the departed player's Failed is stale.
+            m_withdrawSent = true;
+            SendAction(DoorVoteAction::Failed);
+            spdlog::info("Door vote: cancel requested for vote {} (a voter left)", m_state.VoteId);
+        }
     }
     if (aMessage.Action == DoorVoteAction::Go)
         spdlog::info("Door vote: go at tick {} (vote {})", aMessage.Tick, aMessage.VoteId);
@@ -361,7 +458,12 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
                 return;
             }
             if (!m_withdrawSent)
-                SendAction(DoorVoteAction::Withdraw);
+            {
+                // Failed cancels the party's pending traversal for any ready voter, not only
+                // the initiator. Keep the local hold until the cancellation is acknowledged.
+                spdlog::info("Door vote: cancel requested for vote {} (left door, locked or destination changed)", m_state.VoteId);
+                SendAction(DoorVoteAction::Failed);
+            }
             m_withdrawSent = true;
             return;
         }
@@ -412,3 +514,15 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
         m_nextLoadedSend = GetTickCount64() + 500;
     }
 }
+
+static TiltedPhoques::Initializer s_doorVoteInput([]()
+{
+    POINTER_SKYRIMSE(TAutomaticDoor, automaticDoor, 17933);
+    s_automaticDoor = automaticDoor.Get();
+    if (s_automaticDoor)
+        TP_HOOK_IMMEDIATE(&s_automaticDoor, OnAutomaticDoor);
+    if (!s_automaticDoor || s_automaticDoor == automaticDoor.Get())
+        spdlog::error("Door vote: automatic-door hook unavailable (17933)");
+    else
+        spdlog::info("Door vote: automatic-door hook installed (17933, before fade)");
+});

@@ -1,6 +1,9 @@
 #include <Services/InventoryService.h>
+#include <Services/ActorValueService.h>
+#include <Services/CorpseRagdollService.h>
 #include <Services/Generic/QuestItemService.h>
 #include <Services/Generic/SharedDropService.h>
+#include <Services/Generic/NakedNpcGuard.h>
 
 #include <Messages/RequestObjectInventoryChanges.h>
 #include <Messages/NotifyObjectInventoryChanges.h>
@@ -44,7 +47,7 @@ InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher,
 namespace
 {
 // Inventory and equipment changes for a remote actor that is dying or dead are held briefly, and a
-// removal cancelled by an equip or add of the same item is dropped: at a death the owner's engine
+// removal cancelled by an equip of the same item is dropped: at a death the owner's engine
 // removes and re-equips clothing, and applying that one message at a time drew the falling intro
 // prisoner naked. Real changes (looting) still apply after the hold.
 constexpr uint64_t kDeathChangeHoldMs = 1500;
@@ -64,7 +67,9 @@ bool s_replayingHeld{};
 
 bool DyingOrDead(Actor* apActor) noexcept
 {
-    return apActor && (((apActor->actorState.flags1 >> 21) & 0xF) != 0 || apActor->IsDead());
+    // The owner's death/ragdoll can arrive before the local native death transition.
+    return apActor && (((apActor->actorState.flags1 >> 21) & 0xF) != 0 || apActor->IsDead() ||
+        ActorValueService::IsDeathPending(apActor->formID) || CorpseRagdollService::IsFollowingOwner(apActor->formID));
 }
 
 Actor* RemoteActorFor(World& aWorld, uint32_t aServerId, uint32_t aEpoch) noexcept
@@ -82,7 +87,7 @@ Actor* RemoteActorFor(World& aWorld, uint32_t aServerId, uint32_t aEpoch) noexce
 
 void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
-    // Held death-time changes: drop removals cancelled by an equip or add of the same item for the
+    // Held death-time changes: drop removals cancelled by an equip of the same item for the
     // same actor, then apply the rest once due.
     if (!s_heldInventory.empty() || !s_heldEquipment.empty())
     {
@@ -95,7 +100,8 @@ void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
             {
                 for (auto equip = s_heldEquipment.begin(); equip != s_heldEquipment.end(); ++equip)
                 {
-                    if (equip->Message.ServerId == removal->Message.ServerId && !equip->Message.Unequip &&
+                    if (equip->Message.ServerId == removal->Message.ServerId &&
+                        equip->Message.OwnershipEpoch == removal->Message.OwnershipEpoch && !equip->Message.Unequip &&
                         equip->Message.ItemId == item.BaseId)
                     {
                         spdlog::info("Death-time change for server {:X}: item {:X} removed and re-equipped; left as is",
@@ -148,6 +154,7 @@ void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
         s_replayingHeld = false;
     }
     RunWeaponStateUpdates();
+    m_world.GetNakedNpcGuard().Update();
 }
 
 void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEvent) noexcept
@@ -253,19 +260,24 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
 
     m_transport.Send(request);
 
-    spdlog::info("Sending equipment request, item: {:X}, count: {}, target object: {:X}", acEvent.ItemId, acEvent.Count, acEvent.ActorId);
+    spdlog::info("Sending equipment request, item: {:X}, count: {}, target object: {:X}, unequip: {}",
+        acEvent.ItemId, acEvent.Count, acEvent.ActorId, acEvent.Unequip);
 }
 
 void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& acMessage) noexcept
 {
-    if (m_world.ctx().at<QuestItemService>().HandleInventoryNotify(acMessage))
-        return;
     if (!s_replayingHeld && acMessage.OwnershipEpoch != 0 &&
         DyingOrDead(RemoteActorFor(m_world, acMessage.ServerId, acMessage.OwnershipEpoch)))
     {
         s_heldInventory.push_back({GetTickCount64() + kDeathChangeHoldMs, acMessage});
+        spdlog::info("Death-time inventory held for server {:X}: item {:X}, count {}, quest {}",
+            acMessage.ServerId, acMessage.Item.BaseId.BaseId, acMessage.Item.Count, acMessage.Item.IsQuestItem);
         return;
     }
+    // Quest notifications also mutate the actor's inventory. Let the death hold run
+    // first; surviving messages still use the quest service when replayed.
+    if (m_world.ctx().at<QuestItemService>().HandleInventoryNotify(acMessage))
+        return;
     if (acMessage.OwnershipEpoch != 0)
     {
         Actor* pActor = nullptr;
@@ -320,6 +332,8 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
     if (!s_replayingHeld && DyingOrDead(RemoteActorFor(m_world, acMessage.ServerId, acMessage.OwnershipEpoch)))
     {
         s_heldEquipment.push_back({GetTickCount64() + kDeathChangeHoldMs, acMessage});
+        spdlog::info("Death-time equipment held for server {:X}: item {:X}, unequip {}",
+            acMessage.ServerId, acMessage.ItemId.BaseId, acMessage.Unequip);
         return;
     }
     auto view = m_world.view<RemoteComponent, FormIdComponent>(entt::exclude<LocalComponent>);
@@ -384,29 +398,24 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
     }
     else
     {
-        // Unequip all armor first, since the game won't auto unequip armor
-        Inventory wornArmor{};
+        // Do not detach an unchanged outfit, even if the local death state has
+        // not caught up with the owner yet.
         if (pItem->formType == FormType::Armor)
         {
-            wornArmor = pActor->GetWornArmor();
-            for (const auto& armor : wornArmor.Entries)
+            for (const auto& armor : pActor->GetWornArmor().Entries)
             {
-                uint32_t armorId = modSystem.GetGameId(armor.BaseId);
-                TESForm* pArmor = TESForm::GetById(armorId);
-                if (pArmor)
-                    pEquipManager->UnEquip(pActor, pArmor, nullptr, 1, pEquipSlot, false, true, false, false, nullptr);
+                if (armor.BaseId == acMessage.ItemId)
+                {
+                    spdlog::info("Inventory equip for actor {:X}: armor {:X} already worn; left as is", pActor->formID, itemId);
+                    return;
+                }
             }
         }
 
+        // Native equip (38894 -> 38929 -> 38001 -> 38004 / 0x1406B3650)
+        // removes conflicting biped slots under ScopedEquipOverride. Unequipping
+        // and restoring every armor piece here detaches unrelated corpse gear.
         pEquipManager->Equip(pActor, pItem, nullptr, acMessage.Count, pEquipSlot, false, true, false, false);
-
-        for (const auto& armor : wornArmor.Entries)
-        {
-            uint32_t armorId = modSystem.GetGameId(armor.BaseId);
-            TESForm* pArmor = TESForm::GetById(armorId);
-            if (pArmor)
-                pEquipManager->Equip(pActor, pArmor, nullptr, 1, pEquipSlot, false, true, false, false);
-        }
     }
 }
 

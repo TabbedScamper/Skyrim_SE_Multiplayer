@@ -7,7 +7,7 @@
 
   <div class="columns">
     <!-- Left: who is here -->
-    <section class="card party">
+    <section class="card party" data-nav-column>
       <h2 class="separator"><span>Party</span></h2>
       <div *ngFor="let invite of steam.invites" class="invite" role="alert">
         <span class="avatar" [class.empty]="!avatars[invite.friendId]">
@@ -86,7 +86,7 @@
     </section>
 
     <!-- Right: what we are playing -->
-    <section class="card campaign" *ngIf="steam.lobbyId || inGame">
+    <section class="card campaign" data-nav-column *ngIf="steam.lobbyId || inGame">
       <h2 class="separator"><span>Campaign</span></h2>
 
       <p *ngIf="inGame" class="muted">Campaign selection, ready status and host changes are available before starting a session, from the title menu.</p>
@@ -109,12 +109,16 @@
 
       <h3 class="separator"><span>Rules</span></h3>
       <div class="setting-row">
-        <label for="coopDifficulty">Difficulty</label>
-        <select id="coopDifficulty" [(ngModel)]="gameplay.difficulty" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="settingsLocked()">
-          <option [ngValue]="0">Novice</option><option [ngValue]="1">Apprentice</option>
-          <option [ngValue]="2">Adept</option><option [ngValue]="3">Expert</option>
-          <option [ngValue]="4">Master</option><option [ngValue]="5">Legendary</option>
-        </select>
+        <label id="coopDifficultyLabel">Difficulty</label>
+        <app-dropdown id="coopDifficulty" aria-labelledby="coopDifficultyLabel" [noTranslate]="true"
+          [(ngModel)]="gameplay.difficulty" (ngModelChange)="queueGameplayOptionsSave()" [disabled]="settingsLocked()">
+          <app-dropdown-option [value]="0" text="Novice"></app-dropdown-option>
+          <app-dropdown-option [value]="1" text="Apprentice"></app-dropdown-option>
+          <app-dropdown-option [value]="2" text="Adept"></app-dropdown-option>
+          <app-dropdown-option [value]="3" text="Expert"></app-dropdown-option>
+          <app-dropdown-option [value]="4" text="Master"></app-dropdown-option>
+          <app-dropdown-option [value]="5" text="Legendary"></app-dropdown-option>
+        </app-dropdown>
       </div>
       <label class="switch-row" [class.locked]="settingsLocked()">
         <span>Friendly fire<small>Players can damage each other.</small></span>

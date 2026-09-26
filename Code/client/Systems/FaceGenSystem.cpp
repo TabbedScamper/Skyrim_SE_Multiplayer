@@ -4,6 +4,7 @@
 #include <Services/CreatorTogether.h>
 
 #include <Games/References.h>
+#include <PlayerCharacter.h>
 
 #include <Forms/BGSHeadPart.h>
 #include <Forms/TESNPC.h>
@@ -61,6 +62,8 @@ using TCreateTints = void(__fastcall)(const GameArray<TintMask*>& acTints, NiRen
 void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFaceGenComponent) noexcept
 {
     std::lock_guard appearanceLock(CreatorTogether::AppearanceMutex());
+    if (!apActor || apActor == PlayerCharacter::Get() || apActor->formID == 0x14)
+        return;
     POINTER_SKYRIMSE(NiRTTI, NiMaskedShaderRTTI, 414675);
     POINTER_SKYRIMSE(TCreateTexture, CreateTexture, 70717);
     POINTER_SKYRIMSE(TCreateResourceView, CreateResourceView, 77299);
@@ -97,13 +100,38 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
         }
 
         BSMaskedShaderMaterial* pMaterial = static_cast<BSMaskedShaderMaterial*>(pLightingShader->material);
-        // Generated belongs to this head's material. A queued 3D rebuild may replace it after
-        // the previous head was tinted, so do not let the component suppress the new texture.
-        if (!pMaterial || (aFaceGenComponent.Generated && pMaterial->renderedTexture))
+        // The property RTTI is shared by all lighting materials. Only feature 4
+        // is BSLightingShaderMaterialFacegen, with a tint texture at +0xA0.
+        if (!pMaterial)
         {
             pShaderProperty->DecRef();
             return;
         }
+        const auto getFeature = reinterpret_cast<uint32_t (*)(void*)>((*reinterpret_cast<void***>(pMaterial))[6]);
+        if (getFeature(pMaterial) != 4)
+        {
+            pShaderProperty->DecRef();
+            return;
+        }
+        // Generated belongs to this head's material. A queued 3D rebuild may replace it after
+        // the previous head was tinted, so do not let the component suppress the new texture.
+        if (aFaceGenComponent.Generated && pMaterial->renderedTexture)
+        {
+            pShaderProperty->DecRef();
+            return;
+        }
+
+        auto* pLocalPlayer = PlayerCharacter::Get();
+        auto* pLocalHead = pLocalPlayer ? GetHeadTriBasedGeom(pLocalPlayer, 1) : nullptr;
+        auto* pLocalShader = pLocalHead ? niptr_cast<BSShaderProperty>(pLocalHead->effect) : nullptr;
+        // A shared property would need a geometry clone, not just a material clone.
+        if (pLocalShader == pShaderProperty)
+        {
+            spdlog::error("Rejected FaceGen tint for actor {:X}: shader property belongs to the local player", apActor->formID);
+            pShaderProperty->DecRef();
+            return;
+        }
+        const bool sharedWithLocalPlayer = pLocalShader && pLocalShader->material == pMaterial;
 
         BSFixedString name("");
         auto pTexture = CreateTexture(name);
@@ -155,8 +183,28 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
 
         Memory::Free(tints.data);
 
-        pMaterial->renderedTexture = pTexture;
+        // FaceGen materials can be interned across heads. Their CRC/equality do
+        // not include the generated tint texture (IDs 106788 / 106714,
+        // VAs 141526A40 / 141523970). CommonLib BSShaderProperty::SetMaterial
+        // documents the unique argument; native manager ID 107719 honors it.
+        // SetMaterial(unique=true), ID 105544, clones through the native manager
+        // and releases the old material correctly. Do not write through the old
+        // pointer: that changes every head using it, including the local player.
+        using TSetMaterial = void(BSShaderProperty*, void*, bool);
+        POINTER_SKYRIMSE(TSetMaterial, SetMaterial, 105544);
+        SetMaterial.Get()(pLightingShader, pMaterial, true);
+        auto* pPrivateMaterial = static_cast<BSMaskedShaderMaterial*>(pLightingShader->material);
+        if (!pPrivateMaterial || pPrivateMaterial == pMaterial)
+        {
+            pTexture->DecRef();
+            pShaderProperty->DecRef();
+            return;
+        }
+        pPrivateMaterial->renderedTexture = pTexture;
         pTexture->DecRef();
+
+        if (sharedWithLocalPlayer)
+            spdlog::info("Player {:X}: detached FaceGen material shared with the local player", apActor->formID);
 
         aFaceGenComponent.Generated = true;
     }

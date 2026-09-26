@@ -27,6 +27,7 @@
 #include <Forms/TESWorldSpace.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/GameTestService.h>
+#include <Services/CorpseRagdollService.h>
 #include <Services/TransportService.h>
 #include <atomic>
 #include <chrono>
@@ -34,6 +35,7 @@
 #include <limits>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 extern thread_local const char* g_animErrorCode;
 
@@ -61,73 +63,164 @@ struct GraphUpdateData
 static_assert(sizeof(GraphUpdateData) == 0x30);
 static_assert(offsetof(GraphUpdateData, Visible) == 0x2C);
 
-struct PoseRequest
+// Research handoff for docs/REFERENCE_RESEARCH.md (outside this task's write scope):
+// PLANCK src/main.cpp::BShkbAnimationGraph_PreGenerate_Hook uses forceUpdate for
+// active actors. Adopt that policy, not its VR cull-state offsets. CommonLib's
+// BSAnimationUpdateData supplies the layout; the 1.7.104 corpus supplies semantics:
+// 38054/1406B6300 fills visibility, 32899/140553FC0 gates the manager, and
+// 63587/140BCEDB0 gates behavior update + its callback + generation on +2A.
+// ForceUpdate bypasses both that gate and 63575/140BCC2C0 bone reduction.
+// Preserve host action/callback processing as well as behavior evaluation.
+struct AnimationInterest
 {
     const Actor* ActorPtr{};
-    NiPoint3 EyePosition{};
-    uint64_t RequestedAt{};
-    bool Evaluating{};
-    bool Evaluated{};
+    float DistanceSquared{};
+    uint64_t LastForcedTick{};
+    uint64_t SelectedTick{};
 };
-std::mutex s_poseRequestLock;
-std::unordered_map<uint32_t, PoseRequest> s_poseRequests;
+constexpr size_t kInterestActorsPerFrame = 64;
+constexpr size_t kInterestCapacity = 256;
+constexpr float kInterestRadius = 4096.f;
+std::mutex s_interestLock;
+std::unordered_map<uint32_t, AnimationInterest> s_animationInterest;
+uint64_t s_interestPublishedAt{}, s_interestFrame{};
+uint64_t s_interestFrames{}, s_interestActors{}, s_interestUs{}, s_interestMaxActors{}, s_interestMaxUs{};
+uint64_t s_frameActors{}, s_frameUs{}, s_interestDeferred{}, s_interestOverflow{};
 std::atomic<uint64_t> s_fallbackGraphUpdates{}, s_interestGraphUpdates{}, s_posePackets{};
 std::atomic<uint64_t> s_remoteAnimationTasks{}, s_fallbackGraphUs{};
 
-// Selection runs on the network update thread. Native graph evaluation consumes
-// these one-shot requests on its own thread, then the next snapshot reads the copy.
-bool PreparePoseCapture(World& aWorld, Actor* apActor, bool aSelected)
+// Publish all nearby owned actors independently of this packet's pose selection.
+// Only the serialization thread visits ECS. Native workers use pointer-checked,
+// expiring entries and never dereference pointers taken from the registry.
+void PublishAnimationInterest(World& aWorld, uint64_t aBatchTick)
 {
-    const auto now = GetTickCount64();
-    bool capture = false;
-    {
-        std::lock_guard lock(s_poseRequestLock);
-        for (auto it = s_poseRequests.begin(); it != s_poseRequests.end();)
-            it = now - it->second.RequestedAt > 250 ? s_poseRequests.erase(it) : std::next(it);
-        const auto it = s_poseRequests.find(apActor->formID);
-        if (it != s_poseRequests.end() && it->second.ActorPtr == apActor && it->second.Evaluated)
-        {
-            capture = true;
-            s_poseRequests.erase(it);
-        }
-    }
-    // The player and physics-owned skeletons already have their own native update paths.
-    if (apActor->formID == 0x14 || ((apActor->actorState.flags1 >> 21) & 0x7F) != 0)
-        return aSelected;
-    if (!aSelected || !apActor->parentCell)
-        return capture;
-
-    NiPoint3 eye{};
-    float nearest = (std::numeric_limits<float>::max)();
-    const auto consider = [&](Actor* apPlayer) {
-        if (!apPlayer || !apPlayer->parentCell || !apPlayer->GetNiNode())
-            return;
-        const auto* cell = apActor->parentCell;
-        if (cell != apPlayer->parentCell &&
-            (!cell->worldspace || cell->worldspace != apPlayer->parentCell->worldspace))
-            return;
-        const auto d = apActor->position - apPlayer->position;
-        const float distance = d.x * d.x + d.y * d.y + d.z * d.z;
-        if (distance < nearest)
-        {
-            nearest = distance;
-            eye = apPlayer->position;
-        }
-    };
-    consider(PlayerCharacter::Get());
+    static uint64_t lastBatchTick = ~uint64_t{};
+    if (lastBatchTick == aBatchTick)
+        return;
+    lastBatchTick = aBatchTick;
+    std::vector<Actor*> observers;
     auto players = aWorld.view<FormIdComponent, PlayerComponent>();
     for (auto entity : players)
-        consider(Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id)));
-    if (nearest < (std::numeric_limits<float>::max)())
     {
-        std::lock_guard lock(s_poseRequestLock);
-        // Do not replace an unconsumed request on a slow native frame.
-        // Allow a completed batch and its replacement to coexist while actors are
-        // serialized in arbitrary order. Both capture and new selection are capped.
-        if (s_poseRequests.size() < 64 && !s_poseRequests.contains(apActor->formID))
-            s_poseRequests[apActor->formID] = {apActor, eye, now, false, false};
+        auto* actor = Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id));
+        if (actor && actor->formID != 0x14 && actor->GetExtension()->IsRemote() &&
+            actor->parentCell && actor->GetNiNode())
+            observers.push_back(actor);
     }
-    return capture;
+    std::vector<std::pair<uint32_t, AnimationInterest>> candidates;
+    auto owned = aWorld.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
+    for (auto entity : owned)
+    {
+        auto* actor = Cast<Actor>(TESForm::GetById(owned.get<FormIdComponent>(entity).Id));
+        if (!actor || actor->formID == 0x14 || actor->GetExtension()->IsRemote() ||
+            !actor->parentCell || !actor->currentProcess || !actor->GetNiNode() ||
+            actor->IsDeleted() || actor->IsDisabled() || ((actor->actorState.flags1 >> 21) & 0x7F) != 0)
+            continue;
+        float nearest = (std::numeric_limits<float>::max)();
+        for (const auto* observer : observers)
+        {
+            const auto* cell = actor->parentCell;
+            if (cell != observer->parentCell &&
+                (!cell->worldspace || cell->worldspace != observer->parentCell->worldspace))
+                continue;
+            const auto d = actor->position - observer->position;
+            nearest = (std::min)(nearest, d.x * d.x + d.y * d.y + d.z * d.z);
+        }
+        if (nearest <= kInterestRadius * kInterestRadius)
+            candidates.push_back({actor->formID, {actor, nearest}});
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        return a.second.DistanceSquared == b.second.DistanceSquared ? a.first < b.first :
+            a.second.DistanceSquared < b.second.DistanceSquared;
+    });
+    std::lock_guard lock(s_interestLock);
+    s_interestOverflow = candidates.size() > kInterestCapacity ? candidates.size() - kInterestCapacity : 0;
+    if (candidates.size() > kInterestCapacity)
+        candidates.resize(kInterestCapacity);
+    std::unordered_map<uint32_t, AnimationInterest> next;
+    for (auto& [id, interest] : candidates)
+    {
+        const auto it = s_animationInterest.find(id);
+        if (it != s_animationInterest.end() && it->second.ActorPtr == interest.ActorPtr)
+        {
+            interest.LastForcedTick = it->second.LastForcedTick;
+            interest.SelectedTick = it->second.SelectedTick;
+        }
+        next.emplace(id, interest);
+    }
+    s_animationInterest.swap(next);
+    s_interestPublishedAt = GetTickCount64();
+}
+
+bool ClaimAnimationInterest(Actor* apActor)
+{
+    std::lock_guard lock(s_interestLock);
+    const auto it = s_animationInterest.find(apActor->formID);
+    if (it == s_animationInterest.end() || it->second.ActorPtr != apActor ||
+        GetTickCount64() - s_interestPublishedAt > 250)
+        return false;
+    // SetCurrentTick is published once per main frame, unlike wall-clock buckets.
+    const auto frame = PoseCopyAuthority::GetCurrentTick();
+    if (!frame)
+        return false;
+    if (s_interestFrame != frame)
+    {
+        if (s_interestFrame)
+        {
+            ++s_interestFrames;
+            s_interestActors += s_frameActors;
+            s_interestUs += s_frameUs;
+            s_interestMaxActors = (std::max)(s_interestMaxActors, s_frameActors);
+            s_interestMaxUs = (std::max)(s_interestMaxUs, s_frameUs);
+        }
+        s_interestFrame = frame;
+        s_frameActors = s_frameUs = 0;
+        std::vector<std::pair<uint32_t, AnimationInterest*>> order;
+        for (auto& [id, interest] : s_animationInterest)
+            order.push_back({id, &interest});
+        // Oldest scheduled first avoids native task order starving a remote player.
+        // Rotate even actors with no native task so they cannot hold every slot.
+        std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+            if (a.second->SelectedTick != b.second->SelectedTick)
+                return a.second->SelectedTick < b.second->SelectedTick;
+            return a.second->DistanceSquared == b.second->DistanceSquared ? a.first < b.first :
+                a.second->DistanceSquared < b.second->DistanceSquared;
+        });
+        for (size_t i = 0; i < order.size() && i < kInterestActorsPerFrame; ++i)
+            order[i].second->SelectedTick = frame;
+    }
+    auto& interest = it->second;
+    if (interest.LastForcedTick == frame)
+        return false;
+    if (interest.SelectedTick != frame || s_frameActors >= kInterestActorsPerFrame)
+    {
+        ++s_interestDeferred;
+        return false;
+    }
+    interest.LastForcedTick = frame;
+    ++s_frameActors;
+    return true;
+}
+
+TP_THIS_FUNCTION(TFillActorUpdateData, void, Actor, GraphUpdateData*);
+TFillActorUpdateData* s_realFillActorUpdateData{};
+thread_local const GraphUpdateData* t_interestUpdateData{};
+
+void TP_MAKE_THISCALL(HookFillActorUpdateData, Actor, GraphUpdateData* apData)
+{
+    TiltedPhoques::ThisCall(s_realFillActorUpdateData, apThis, apData);
+    t_interestUpdateData = nullptr;
+    if (apThis->GetExtension()->IsRemote() || ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
+        !apThis->currentProcess || !apThis->parentCell || apThis->IsDeleted() || apThis->IsDisabled() ||
+        !(apData->Delta > 0.f) || !std::isfinite(apData->Delta) || !ClaimAnimationInterest(apThis))
+        return;
+    // The registry proves World exists. Disable overrides promptly on disconnect;
+    // without a new serialization pass entries also expire after 250 ms.
+    if (!World::Get().GetTransport().IsConnected())
+        return;
+    apData->Visible = true;
+    apData->ForceUpdate = true;
+    t_interestUpdateData = apData;
 }
 
 TP_THIS_FUNCTION(TUpdateGraphManager, void, BSAnimationGraphManager, const GraphUpdateData*);
@@ -135,42 +228,19 @@ TUpdateGraphManager* s_realUpdateGraphManager{};
 
 void TP_MAKE_THISCALL(HookUpdateGraphManager, BSAnimationGraphManager, const GraphUpdateData* apData)
 {
-    auto* actor = apData ? Cast<Actor>(apData->Reference) : nullptr;
-    PoseRequest request{};
-    if (actor && !actor->GetExtension()->IsRemote() &&
-        ((actor->actorState.flags1 >> 21) & 0x7F) == 0)
-    {
-        std::lock_guard lock(s_poseRequestLock);
-        const auto it = s_poseRequests.find(actor->formID);
-        if (it != s_poseRequests.end() && it->second.ActorPtr == actor &&
-            !it->second.Evaluating && !it->second.Evaluated &&
-            GetTickCount64() - it->second.RequestedAt <= 250)
-        {
-            request = it->second;
-            it->second.Evaluating = true;
-        }
-    }
-    // A request proves World has been initialized; do not access it during early
-    // native animation startup when the request registry is still empty.
-    if (!request.ActorPtr || !World::Get().GetTransport().IsConnected())
+    const bool interested = apData && t_interestUpdateData == apData;
+    t_interestUpdateData = nullptr;
+    if (!interested)
         return TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, apData);
-
-    auto data = *apData;
-    // Remote camera frusta are not transmitted. Conservatively include the selected
-    // actor once from its nearest player's position, retaining native distance/bone
-    // LOD (63575/0x140BCC2C0, 63587/0x140BCEDB0); never set ForceUpdate
-    // or force a full skeleton.
-    data.EyePosition = &request.EyePosition;
-    data.Visible = true;
-    TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, &data);
-    s_interestGraphUpdates.fetch_add(1, std::memory_order_relaxed);
+    const auto started = std::chrono::steady_clock::now();
+    TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, apData);
+    const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count());
     {
-        std::lock_guard lock(s_poseRequestLock);
-        const auto it = s_poseRequests.find(actor->formID);
-        if (it != s_poseRequests.end() && it->second.ActorPtr == actor &&
-            it->second.RequestedAt == request.RequestedAt)
-            it->second.Evaluated = true;
+        std::lock_guard lock(s_interestLock);
+        s_frameUs += elapsed;
     }
+    s_interestGraphUpdates.fetch_add(1, std::memory_order_relaxed);
 }
 
 TP_THIS_FUNCTION(TActorUpdateAnimation, void, Actor, float);
@@ -183,7 +253,22 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
     if (!apThis->GetExtension()->IsRemote() ||
         !World::Get().GetTransport().IsConnected() ||
         ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
-        !PoseCopyAuthority::NeedsLocalGraph(apThis->formID))
+        CorpseRagdollService::IsFollowingOwner(apThis->formID))
+        return false;
+
+    const auto* player = PlayerCharacter::Get();
+    bool nearby = false;
+    if (player && player->parentCell && apThis->parentCell && !apThis->IsDead())
+    {
+        const auto* cell = apThis->parentCell;
+        const auto d = apThis->position - player->position;
+        nearby = (cell == player->parentCell ||
+            (cell->worldspace && cell->worldspace == player->parentCell->worldspace)) &&
+            d.x * d.x + d.y * d.y + d.z * d.z <= kInterestRadius * kInterestRadius;
+    }
+    // Fresh pose samples must not suspend the graph between packets. The final
+    // bone-copy hook still interpolates the owner samples over the local result.
+    if (!nearby && !PoseCopyAuthority::NeedsLocalGraph(apThis->formID))
         return false;
 
     // Replace one native animation opportunity, never add a tick in the movement
@@ -207,11 +292,13 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
     using TFillUpdateData = void (*)(Actor*, GraphUpdateData*);
     auto** table = *reinterpret_cast<void***>(apThis);
     reinterpret_cast<TFillUpdateData>(table[0x79])(apThis, &data);
-    // Keep the native visibility and distance policy, but no actor post-update
-    // functors (one includes fall damage), forced full-rate evaluation, or AI work.
+    // No local simulation callbacks (one includes fall damage). Nearby proxies
+    // evaluate every native opportunity; far proxies retain native graph LOD.
     data.Callback = nullptr;
     data.UpdateFunctor = nullptr;
-    data.ForceUpdate = false;
+    data.ForceUpdate = nearby;
+    if (nearby)
+        data.Visible = true;
     BSAnimationGraphManager* manager{};
     if (apThis->animationGraphHolder.GetBSAnimationGraph(&manager) && manager)
     {
@@ -254,7 +341,7 @@ TiltedPhoques::Initializer s_distantAnimationInitializer([]() {
     // which syncs the graph then directly calls 20123/0x1402FDEB0. It never
     // dispatches Actor slot 0x7D. Keep 37361 for the alternate serial path;
     // 20123 replaces the queued evaluation in place, preserving the native task
-    // barrier, delta, actor selection, visibility and 63587/63575 LOD policy.
+    // barrier and delta. The per-actor 38054 override runs before the 32899 gate.
     // PLANCK's src/main.cpp PlayerCharacter_UpdateAnimation_Hook is player-only:
     // https://github.com/adamhynek/activeragdoll/blob/master/src/main.cpp
     // Adopt the native-phase replacement pattern, not its VR offsets or a
@@ -262,12 +349,15 @@ TiltedPhoques::Initializer s_distantAnimationInitializer([]() {
     POINTER_SKYRIMSE(TActorUpdateAnimation, actorUpdate, 37361);
     POINTER_SKYRIMSE(TQueuedAnimationUpdate, queuedUpdate, 20123);
     POINTER_SKYRIMSE(TUpdateGraphManager, graphUpdate, 63358);
+    POINTER_SKYRIMSE(TFillActorUpdateData, fillUpdateData, 38054);
     s_realActorUpdateAnimation = actorUpdate.Get();
     s_realQueuedAnimationUpdate = queuedUpdate.Get();
     s_realUpdateGraphManager = graphUpdate.Get();
+    s_realFillActorUpdateData = fillUpdateData.Get();
     TP_HOOK(&s_realActorUpdateAnimation, HookActorUpdateAnimation);
     TP_HOOK(&s_realQueuedAnimationUpdate, HookQueuedAnimationUpdate);
     TP_HOOK(&s_realUpdateGraphManager, HookUpdateGraphManager);
+    TP_HOOK(&s_realFillActorUpdateData, HookFillActorUpdateData);
 });
 
 bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
@@ -507,8 +597,9 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
 
     if (!GameTestService::IsDiagnosticCaptureArmed())
         animationComponent.LastSentVisualBones = {};
-    // A delayed native batch can complete several requests together. Bound actual
-    // captures as well as selection; reserve one of the 33 slots for the local player.
+    PublishAnimationInterest(aWorld, aMovementSnapshot.Tick);
+    // Pose bandwidth is independent of native graph interest. Read only completed
+    // bone-copy samples and reserve one of the 33 packet slots for the local player.
     static uint64_t captureBatchTick{};
     static uint32_t captureBatchActors{};
     if (captureBatchTick != aMovementSnapshot.Tick)
@@ -516,8 +607,7 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
         captureBatchTick = aMovementSnapshot.Tick;
         captureBatchActors = 0;
     }
-    const bool captureReady = PreparePoseCapture(aWorld, pActor, aCapturePose);
-    if (captureReady && (pActor->formID == 0x14 || captureBatchActors < 32))
+    if (aCapturePose && (pActor->formID == 0x14 || captureBatchActors < 32))
     {
         if (pActor->formID != 0x14)
             ++captureBatchActors;
@@ -545,12 +635,27 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
     if (const auto reportNow = GetTickCount64(); reportNow >= nextGraphReportMs)
     {
         nextGraphReportMs = reportNow + 5000;
-        spdlog::info("Distant animation: graphOnlyCalls={} interestCalls={} posesQueued={} remoteAnimationTasks={} graphOnlyUs={} (cumulative, native LOD retained)",
+        spdlog::info("Distant animation: graphOnlyCalls={} interestCalls={} posesQueued={} remoteAnimationTasks={} graphOnlyUs={} (cumulative, far native LOD retained)",
             s_fallbackGraphUpdates.load(std::memory_order_relaxed),
             s_interestGraphUpdates.load(std::memory_order_relaxed),
             s_posePackets.load(std::memory_order_relaxed),
             s_remoteAnimationTasks.load(std::memory_order_relaxed),
             s_fallbackGraphUs.load(std::memory_order_relaxed));
+        uint64_t frames, actors, us, maxActors, maxUs, deferred, overflow, registered;
+        {
+            std::lock_guard lock(s_interestLock);
+            frames = std::exchange(s_interestFrames, 0);
+            actors = std::exchange(s_interestActors, 0);
+            us = std::exchange(s_interestUs, 0);
+            maxActors = std::exchange(s_interestMaxActors, 0);
+            maxUs = std::exchange(s_interestMaxUs, 0);
+            deferred = std::exchange(s_interestDeferred, 0);
+            overflow = s_interestOverflow;
+            registered = s_animationInterest.size();
+        }
+        spdlog::info("Animation interest: registered={} frames={} forcedActorsPerFrame={:.2f} graphUsPerFrame={:.2f} maxActors={} maxGraphUs={} deferred={} overflow={} budget={} radius={} (interval, graph call time excludes async finalize)",
+            registered, frames, frames ? double(actors) / frames : 0.0, frames ? double(us) / frames : 0.0,
+            maxActors, maxUs, deferred, overflow, kInterestActorsPerFrame, kInterestRadius);
     }
 
     if (const auto pCell = pActor->parentCell)

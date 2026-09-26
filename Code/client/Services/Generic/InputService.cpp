@@ -47,6 +47,18 @@ void InputService::NotifyControllerInput() noexcept
 // Vanilla Skyrim never calls ClipCursor (exe corpus: no callers), so without
 // the confinement the real pointer leaves a windowed/borderless game and
 // clicks land on other applications.
+// Focus research (docs/REFERENCE_RESEARCH.md is outside this task's edit scope):
+// SSEDisplayTweaks/SSETweaks/window.cpp:93-131,220-228,406-414 releases on
+// deactivation and runs after vanilla. Adopt those two rules, but gate resize
+// recapture on focus as well. Source:
+// https://github.com/SlavicPotato/SSEDisplayTweaks/blob/master/SSETweaks/window.cpp
+// Native WndProc VA 14065f270 (ID 36649) shows on WA_INACTIVE but hides on
+// client WM_NCHITTEST. MenuCursor VA 14117a5e0 (ID 82541) caches ShowCursor.
+// Mouse init VA 140e13080 (ID 68801) uses foreground cooperative level 5/6;
+// keyboard init VA 140e126f0 (ID 68781) uses 0x15 before our existing patch.
+// Foreground DirectInput automatically unacquires on deactivation. Reject new
+// cooperative-level patches: suspend our DInputHook raw registration instead,
+// then let native GetDeviceState VA 140cfaee0 (ID 68677) reacquire on return.
 // ---------------------------------------------------------------------------
 namespace
 {
@@ -57,36 +69,43 @@ struct MenuCursorCounter
 };
 static_assert(offsetof(MenuCursorCounter, ShowCursorCount) == 0x2C);
 
-bool s_shellOwnsPointer = false;           // Win key/Snap UI: shell keeps the pointer until focus or a click returns
+std::atomic_bool s_shellOwnsPointer{false}; // Also read by the game input poll.
+std::atomic_bool s_windowDeactivated{false};
+uint32_t s_focusMessageDepth = 0;
 std::optional<bool> s_appliedGameOwnership; // last visibility state applied
+std::optional<int> s_savedCursorCount;
+HCURSOR s_savedCursor = nullptr;
+std::optional<bool> s_savedOverlayCursor;
+bool s_savedOverlayActive = false;
+std::optional<bool> s_overlayFocused;
 uint64_t s_nextClipCheckMs = 0;
 
-// Leaves the display counter at exactly 0 (visible) or -1 (hidden), however
-// far it had drifted, and mirrors it into Skyrim's MenuCursor cache
-// (ID 403551, +0x2C). Skyrim only calls ShowCursor when that cache disagrees
-// with the state it wants, so a stale cache leaves the pointer stuck.
-void SetSystemCursorVisible(bool aVisible) noexcept
+// ShowCursor has no count getter. This balanced pair leaves it unchanged.
+int GetSystemCursorCount() noexcept
 {
-    int count = ShowCursor(aVisible ? TRUE : FALSE);
-    if (aVisible)
-    {
-        while (count < 0)
-            count = ShowCursor(TRUE);
-        while (count > 0)
-            count = ShowCursor(FALSE);
-    }
-    else
-    {
-        while (count >= 0)
-            count = ShowCursor(FALSE);
-        while (count < -1)
-            count = ShowCursor(TRUE);
-    }
+    ShowCursor(FALSE);
+    return ShowCursor(TRUE);
+}
 
+void SetSystemCursorCount(int aTarget) noexcept
+{
+    int count = GetSystemCursorCount();
+    while (count < aTarget)
+        count = ShowCursor(TRUE);
+    while (count > aTarget)
+        count = ShowCursor(FALSE);
+
+    // MenuCursor::ShowSystemCursor (VA 14117a5e0, ID 82541) uses this cache.
     static VersionDbPtr<uint8_t> s_menuCursorSingleton(403551);
     auto** ppMenuCursor = reinterpret_cast<MenuCursorCounter**>(s_menuCursorSingleton.Get());
     if (ppMenuCursor && *ppMenuCursor)
         (*ppMenuCursor)->ShowCursorCount = count;
+}
+
+void SetSystemCursorVisible(bool aVisible) noexcept
+{
+    const int count = GetSystemCursorCount();
+    SetSystemCursorCount(aVisible ? std::max(0, count) : std::min(-1, count));
 }
 
 void ClipToClientArea(HWND aWindow) noexcept
@@ -107,24 +126,92 @@ void ClipToClientArea(HWND aWindow) noexcept
 
 bool GameOwnsPointer(HWND aWindow) noexcept
 {
-    return !s_shellOwnsPointer && GetForegroundWindow() == aWindow && !IsIconic(aWindow);
+    return !s_shellOwnsPointer && !s_windowDeactivated && s_focusMessageDepth == 0 &&
+        GetForegroundWindow() == aWindow && GetFocus() == aWindow && !IsIconic(aWindow);
+}
+
+void UpdateOverlayFocus(bool aOwned) noexcept
+{
+    const bool active = s_pOverlay && s_pOverlay->GetActive();
+    const bool focused = aOwned && active;
+    auto& input = TiltedPhoques::DInputHook::Get();
+    if (input.IsEnabled() != focused)
+        input.SetEnabled(focused);
+
+    const auto app = s_pOverlay ? s_pOverlay->GetOverlayApp() : nullptr;
+    const auto client = app ? app->GetClient() : nullptr;
+    const auto browser = client ? client->GetBrowser() : nullptr;
+    if (browser && s_overlayFocused != focused)
+    {
+        browser->GetHost()->SetFocus(focused);
+        if (!focused)
+            browser->GetHost()->SendCaptureLostEvent();
+        s_overlayFocused = focused;
+    }
 }
 
 void UpdateCursorOwnership(HWND aWindow) noexcept
 {
     const bool owned = GameOwnsPointer(aWindow);
-    if (owned)
-        ClipToClientArea(aWindow);
-    else if (s_appliedGameOwnership.value_or(true))
-        ClipCursor(nullptr);
-
-    if (s_appliedGameOwnership == owned)
-        return;
+    const bool changed = s_appliedGameOwnership != owned;
+    if (!owned && changed)
+    {
+        // Save before vanilla handles WM_ACTIVATE, which changes ShowCursor.
+        if (s_appliedGameOwnership.value_or(false))
+        {
+            s_savedCursorCount = GetSystemCursorCount();
+            s_savedCursor = GetCursor();
+        }
+        s_savedOverlayActive = s_pOverlay && s_pOverlay->GetActive();
+        const auto app = s_pOverlay ? s_pOverlay->GetOverlayApp() : nullptr;
+        if (const auto client = app ? app->GetClient() : nullptr)
+        {
+            if (const auto renderer = client->GetOverlayRenderHandler())
+            {
+                s_savedOverlayCursor = renderer->IsCursorVisible();
+                renderer->SetCursorVisible(false);
+            }
+        }
+        s_overlayMouseButtonModifiers = 0;
+        s_overlayMouseInitialized = false;
+        // SetEnabled(false) removes our raw registration and unacquires even
+        // when the overlay was already closed. Native polling reacquires later.
+        TiltedPhoques::DInputHook::Get().SetEnabled(false);
+        if (GetCapture() == aWindow)
+            ReleaseCapture();
+    }
     s_appliedGameOwnership = owned;
-    if (!owned)
-        ReleaseCapture();
-    SetSystemCursorVisible(!owned);
-    spdlog::debug("Windows pointer {}", owned ? "confined to game" : "released to desktop");
+    UpdateOverlayFocus(owned);
+    if (owned)
+    {
+        ClipToClientArea(aWindow);
+        if (changed)
+        {
+            if (s_savedCursorCount)
+            {
+                SetSystemCursorCount(*s_savedCursorCount);
+                SetCursor(s_savedCursor);
+                s_savedCursorCount.reset();
+            }
+            else
+                SetSystemCursorVisible(false);
+            const auto app = s_pOverlay ? s_pOverlay->GetOverlayApp() : nullptr;
+            if (const auto client = app ? app->GetClient() : nullptr)
+                if (const auto renderer = client->GetOverlayRenderHandler(); renderer && s_savedOverlayCursor)
+                    renderer->SetCursorVisible(s_savedOverlayActive == s_pOverlay->GetActive() && *s_savedOverlayCursor);
+            s_savedOverlayCursor.reset();
+        }
+    }
+    else
+    {
+        // Reassert after vanilla's focus/hit-test handling, without recapturing
+        // on a stale foreground HWND or a queued resize/raw-input message.
+        ClipCursor(nullptr);
+        SetSystemCursorVisible(true);
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    }
+    if (changed)
+        spdlog::info("Windows pointer {}", owned ? "confined to game" : "released to desktop");
 }
 
 void HandPointerToShell(HWND aWindow) noexcept
@@ -177,7 +264,7 @@ static TiltedPhoques::Initializer s_backgroundMouse([]() {
 
 bool InputService::IsPointerHandedToShell() noexcept
 {
-    return s_shellOwnsPointer;
+    return s_shellOwnsPointer || s_windowDeactivated;
 }
 
 void InputService::RequestCursorUpdate() noexcept
@@ -194,13 +281,16 @@ void InputService::AfterGameWndProc(HWND hwnd, UINT uMsg) noexcept
     case WM_ACTIVATEAPP:
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
+        if (s_focusMessageDepth != 0)
+            --s_focusMessageDepth;
+        if (s_focusMessageDepth == 0)
+            UpdateCursorOwnership(hwnd);
+        break;
     case WM_SIZE:
     case WM_MOVE:
     case WM_WINDOWPOSCHANGED:
     case WM_DISPLAYCHANGE:
-        // Skyrim's own handler may have toggled ShowCursor; reassert and
-        // resync its cache.
-        s_appliedGameOwnership.reset();
+        // Run after native focus handling, preserving the pre-handoff count.
         UpdateCursorOwnership(hwnd);
         break;
     default: break;
@@ -371,7 +461,6 @@ bool IsDisableKey(int aKey) noexcept
 
 void SetUIActive(OverlayService& aOverlay, auto apRenderer, bool aActive)
 {
-    TiltedPhoques::DInputHook::Get().SetEnabled(aActive);
     aOverlay.SetActive(aActive);
 
     // Ensures the UI receives the current shell state if the initial event was sent too early.
@@ -581,15 +670,51 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         return 1;
     }
 
-    // Coming back to the game (Alt-Tab, taskbar, click) ends a shell handoff.
-    if ((uMsg == WM_ACTIVATE && LOWORD(wParam) != WA_INACTIVE) || uMsg == WM_SETFOCUS ||
-        (uMsg == WM_ACTIVATEAPP && wParam != FALSE) || uMsg == WM_LBUTTONDOWN)
+    // Native WM_ACTIVATE can send nested WM_SETFOCUS. Restore only after the
+    // outer handler has finished changing the cursor and its cached count.
+    if (uMsg == WM_ACTIVATE || uMsg == WM_ACTIVATEAPP || uMsg == WM_SETFOCUS || uMsg == WM_KILLFOCUS)
+        ++s_focusMessageDepth;
+
+    // Deactivation is authoritative even before GetForegroundWindow changes.
+    if ((uMsg == WM_ACTIVATE && (LOWORD(wParam) == WA_INACTIVE || HIWORD(wParam))) ||
+        (uMsg == WM_ACTIVATEAPP && wParam == FALSE) || uMsg == WM_KILLFOCUS ||
+        (uMsg == WM_SIZE && wParam == SIZE_MINIMIZED) || uMsg == WM_DESTROY)
+    {
+        s_windowDeactivated = true;
+        UpdateCursorOwnership(hwnd);
+    }
+    else if ((uMsg == WM_ACTIVATE && LOWORD(wParam) != WA_INACTIVE) ||
+        uMsg == WM_SETFOCUS || (uMsg == WM_ACTIVATEAPP && wParam != FALSE))
+    {
+        s_windowDeactivated = false;
+        if (GetForegroundWindow() == hwnd &&
+            !(GetAsyncKeyState(VK_LWIN) & 0x8000) && !(GetAsyncKeyState(VK_RWIN) & 0x8000))
+            s_shellOwnsPointer = false;
+    }
+    else if (uMsg == WM_LBUTTONDOWN && GetForegroundWindow() == hwnd && GetFocus() == hwnd)
+    {
         s_shellOwnsPointer = false;
+        s_windowDeactivated = false;
+        UpdateCursorOwnership(hwnd);
+    }
 
     // Windows-key shell UI (Start, Win+Z Snap layouts) needs a free pointer
     // even though Skyrim keeps focus.
     if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && (wParam == VK_LWIN || wParam == VK_RWIN))
         HandPointerToShell(hwnd);
+
+    RAWINPUT input{};
+    if (uMsg == WM_INPUT)
+    {
+        UINT size = sizeof(input);
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) == UINT(-1))
+            return 0;
+        // Check before binding capture or clipping maintenance. The escape key
+        // must never become a binding or get forwarded to the browser.
+        if (input.header.dwType == RIM_TYPEKEYBOARD && (input.data.keyboard.Flags & RI_KEY_BREAK) == 0 &&
+            (input.data.keyboard.VKey == VK_LWIN || input.data.keyboard.VKey == VK_RWIN))
+            HandPointerToShell(hwnd);
+    }
 
     // Skyrim's own WndProc (FUN_14065f270) answers WM_NCHITTEST and hides the
     // pointer whenever it is over the client area, which is sent on every mouse
@@ -600,14 +725,14 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         const LRESULT hit = DefWindowProcW(hwnd, uMsg, wParam, lParam);
         if (hit != HTNOWHERE)
         {
-            SetSystemCursorVisible(true);
+            UpdateCursorOwnership(hwnd);
             return hit;
         }
     }
 
     if (uMsg == WM_SETCURSOR)
     {
-        // The foreground HWND, not a remembered focus message, decides.
+        // Both foreground ownership and the deactivation latch must agree.
         UpdateCursorOwnership(hwnd);
         if (LOWORD(lParam) == HTCLIENT)
         {
@@ -615,10 +740,6 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             return TRUE;
         }
     }
-
-    // Focus and click transitions are also finalized in AfterGameWndProc.
-    if (uMsg == WM_LBUTTONDOWN || uMsg == WM_ACTIVATE || uMsg == WM_ACTIVATEAPP)
-        UpdateCursorOwnership(hwnd);
 
     // Windows drops ClipCursor on some shell events without messaging us;
     // re-check cheaply while input is flowing.
@@ -631,6 +752,11 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             UpdateCursorOwnership(hwnd);
         }
     }
+
+    // Let the native WndProc receive focus and raw-input cleanup messages, but
+    // never inject shell input into CEF, ImGui, or an armed binding capture.
+    if (!GameOwnsPointer(hwnd) || !s_pOverlay)
+        return 0;
 
     const auto pApp = s_pOverlay->GetOverlayApp();
     if (!pApp)
@@ -684,11 +810,6 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
     if (uMsg == WM_INPUT)
     {
-        RAWINPUT input;
-        UINT size = sizeof(RAWINPUT);
-
-        GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER));
-
         if (active)
         {
             auto& imgui = World::Get().ctx().at<ImguiService>();
@@ -715,10 +836,6 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         if (input.header.dwType == RIM_TYPEKEYBOARD)
         {
             const auto keyboard = input.data.keyboard;
-
-            if ((keyboard.Flags & RI_KEY_BREAK) == 0 &&
-                (keyboard.VKey == VK_LWIN || keyboard.VKey == VK_RWIN))
-                HandPointerToShell(hwnd);
 
             ProcessKeyboard(keyboard.VKey, keyboard.MakeCode, keyboard.Flags & RI_KEY_BREAK ? KEYEVENT_KEYUP : KEYEVENT_KEYDOWN, keyboard.Flags & RI_KEY_E0, keyboard.Flags & RI_KEY_E1);
         }
@@ -791,15 +908,6 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             virtualKey = wch;
         }
         ProcessKeyboard(virtualKey, scancode, KEYEVENT_CHAR, false, false);
-    }
-    // If the player tabs out/in with UI visible, this WndProc doesn't run during mouse or keyboard events.
-    // When player tabs in, force the UI state
-    else if (uMsg == WM_SETFOCUS && s_pOverlay->GetActive())
-    {
-        TiltedPhoques::DInputHook::Get().SetEnabled(true);
-        s_pOverlay->SetActive(true);
-        pRenderer->SetCursorVisible(!IsNativeCursorMenuOpen());
-        UpdateCursorOwnership(hwnd);
     }
     else if (uMsg == WM_INPUTLANGCHANGE)
     {

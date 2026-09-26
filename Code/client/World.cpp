@@ -35,8 +35,10 @@
 #include <Services/Generic/BusyLockService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Services/TriggerGate.h>
+#include <Services/Generic/UnstuckReset.h>
 #include <Services/Generic/HeadTrackService.h>
 #include <Services/Generic/DialogueListenService.h>
+#include <Services/Generic/NakedNpcGuard.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -172,12 +174,15 @@ World::World()
     ctx().emplace<BusyLockService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SharedDropService>(*this, m_dispatcher, m_transport);
     ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
+    ctx().emplace<UnstuckReset>(*this, m_dispatcher);
     ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
+    ctx().at<UnstuckReset>().ConnectUpdate(m_dispatcher);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SceneTurnsService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CorpseRagdollService>(*this, m_dispatcher, m_transport);
     ctx().emplace<ActorValueService>(*this, m_dispatcher, m_transport);
     ctx().emplace<InventoryService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<NakedNpcGuard>(*this, m_dispatcher);
     ctx().emplace<MagicService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CommandService>(*this, m_transport, m_dispatcher);
     ctx().emplace<PlayerService>(*this, m_dispatcher, m_transport);
@@ -302,6 +307,16 @@ DialogueListenService& World::GetDialogueListenService() noexcept
 ModSystem& World::GetModSystem() noexcept
 {
     return m_modSystem;
+}
+
+UnstuckReset& World::GetUnstuckReset() noexcept
+{
+    return ctx().at<UnstuckReset>();
+}
+
+NakedNpcGuard& World::GetNakedNpcGuard() noexcept
+{
+    return ctx().at<NakedNpcGuard>();
 }
 
 uint64_t World::GetTick() const noexcept

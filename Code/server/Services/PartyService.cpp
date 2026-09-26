@@ -1,5 +1,7 @@
 #include <Messages/LeaderControlRequest.h>
 #include <Messages/NotifyLeaderControl.h>
+#include <Messages/RequestPlayerControlState.h>
+#include <Messages/NotifyPlayerControlState.h>
 #include <Messages/RequestScriptedCamera.h>
 #include <Messages/NotifyScriptedCamera.h>
 #include <Services/PartyService.h>
@@ -38,6 +40,46 @@
 
 namespace
 {
+struct PlayerControlRelay
+{
+    PlayerControlRelay(PartyService& aParty, entt::dispatcher& aDispatcher)
+        : Party(aParty)
+        , Connection(aDispatcher.sink<PacketEvent<RequestPlayerControlState>>().connect<&PlayerControlRelay::OnRequest>(this))
+        , LeaveConnection(aDispatcher.sink<PlayerLeaveEvent>().connect<&PlayerControlRelay::OnLeave>(this))
+    {
+    }
+
+    void OnLeave(const PlayerLeaveEvent& acEvent) { Last.erase(acEvent.pPlayer->GetId()); }
+
+    void OnRequest(const PacketEvent<RequestPlayerControlState>& acPacket)
+    {
+        auto* pPlayer = acPacket.pPlayer;
+        if (!pPlayer || !Party.IsPlayerLeader(pPlayer))
+            return;
+        const auto* pParty = Party.GetPlayerParty(pPlayer);
+        const auto& state = acPacket.Packet.State;
+        if (!pParty || pParty->SessionState < 2 || state.Epoch != pParty->StartEpoch ||
+            !state.IsValid() || (state.Free && pParty->SessionState < 3))
+            return;
+        auto& last = Last[pPlayer->GetId()];
+        if (last.first == state.Epoch && state.Sequence <= last.second)
+            return;
+        last = {state.Epoch, state.Sequence};
+        NotifyPlayerControlState notify;
+        notify.LeaderId = pPlayer->GetId();
+        notify.State = state;
+        for (auto* pMember : pParty->Members)
+        {
+            if (pMember && pMember != pPlayer)
+                pMember->Send(notify);
+        }
+    }
+
+    PartyService& Party;
+    std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> Last;
+    entt::scoped_connection Connection, LeaveConnection;
+};
+
 struct ScriptedCameraRelay
 {
     ScriptedCameraRelay(PartyService& aParty, entt::dispatcher& aDispatcher)
@@ -100,7 +142,7 @@ struct PartyUnstuckRelay
             return;
         auto* pParty = Party.GetPlayerParty(pPlayer);
         const auto& move = acPacket.Packet.Move;
-        if (!pParty || move.Epoch != pParty->StartEpoch || !move.IsValid())
+        if (!pParty || move.Epoch != pParty->StartEpoch || !move.IsValid() || !acPacket.Packet.State.IsValid(move))
             return;
         const auto now = std::chrono::steady_clock::now();
         auto& last = Last[pPlayer->GetId()];
@@ -109,6 +151,7 @@ struct PartyUnstuckRelay
         last = {move.Epoch, move.Sequence, now + std::chrono::milliseconds(1500)};
         NotifyPartyUnstuck notify;
         notify.Move = move;
+        notify.State = acPacket.Packet.State;
         notify.LeaderId = pPlayer->GetId();
         for (auto* pMember : pParty->Members)
         {
@@ -158,6 +201,8 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     s_unstuckRelay = std::make_unique<PartyUnstuckRelay>(*this, aDispatcher);
     static std::unique_ptr<ScriptedCameraRelay> s_cameraRelay;
     s_cameraRelay = std::make_unique<ScriptedCameraRelay>(*this, aDispatcher);
+    static std::unique_ptr<PlayerControlRelay> s_controlRelay;
+    s_controlRelay = std::make_unique<PlayerControlRelay>(*this, aDispatcher);
 }
 
 const PartyService::Party* PartyService::GetById(uint32_t aId) const noexcept

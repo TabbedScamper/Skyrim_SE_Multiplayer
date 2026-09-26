@@ -26,6 +26,8 @@ struct SceneTurnsService;
 struct HeadTrackService;
 struct DialogueListenService;
 struct StealthService;
+struct NakedNpcGuard;
+struct UnstuckReset;
 
 struct World : entt::registry
 {
@@ -58,6 +60,8 @@ struct World : entt::registry
     SceneTurnsService& GetSceneTurnsService() noexcept;
     HeadTrackService& GetHeadTrackService() noexcept;
     DialogueListenService& GetDialogueListenService() noexcept;
+    NakedNpcGuard& GetNakedNpcGuard() noexcept;
+    UnstuckReset& GetUnstuckReset() noexcept;
     ReviveService& GetReviveService() noexcept { return ctx().at<ReviveService>(); }
 
     auto& GetDispatcher() noexcept { return m_dispatcher; }

@@ -5,7 +5,7 @@
   [class.is-open]="isOpen"
   [class.disabled]="isDisabled"
 >
-  <div class="box" (click)="toggle($event)">
+  <div class="box" (click)="toggle()">
     <ng-container>
       <div class="dropdown-selected">
         <span>{{
@@ -17,12 +17,16 @@
     </ng-container>
   </div>
 
-  <ul class="dropdown-options" *ngIf="options">
+  <ul class="dropdown-options" [id]="'list-' + dropdownCounter" role="listbox" *ngIf="isOpen">
     <li
       *ngFor="let option of options; let i = index"
       [id]="'li-' + dropdownCounter + '-' + i"
-      (click)="optionSelect(option.value, i, $event)"
+      role="option"
+      [attr.aria-selected]="selected === i"
+      (mousedown)="$event.preventDefault()"
+      (click)="optionSelect(option.value, i)"
       [class.selected]="selected === i"
+      [class.highlighted]="highlighted === i"
     >
       {{
         noTranslate

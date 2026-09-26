@@ -295,7 +295,6 @@ void OverlayClient::SetUIVisible(bool aVisible) noexcept
     if (!pRenderer)
         return;
 
-    TiltedPhoques::DInputHook::Get().SetEnabled(aVisible);
     World::Get().GetOverlayService().SetActive(aVisible);
     pRenderer->SetCursorVisible(false);
 }

@@ -94,11 +94,16 @@ struct TESNPC : TESActorBase
     // Marks the body weight/height trailer Serialize appends after the native NPC save.
     static constexpr char kBodyTrailerTag[4] = {'T', 'P', 'B', 'W'};
     void Serialize(String* apSaveBuffer) const noexcept;
-    void Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept;
+    bool Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept;
     void Initialize() noexcept;
 };
 
 static_assert(offsetof(TESNPC, npcClass) == 0x1C0);
+static_assert(sizeof(TESNPC::FaceMorphs) == 0x5C);
+static_assert(offsetof(TESNPC, headData) == 0x1C8);
 static_assert(offsetof(TESNPC, faceNPC) == 0x1F0);
+static_assert(offsetof(TESNPC, headparts) == 0x238);
 static_assert(offsetof(TESNPC, color) == 0x246);
 static_assert(offsetof(TESNPC, relationships) == 0x250);
+static_assert(offsetof(TESNPC, faceMorphs) == 0x258);
+static_assert(offsetof(TESNPC, unk160) == 0x260); // CommonLib TESNPC::tintLayers

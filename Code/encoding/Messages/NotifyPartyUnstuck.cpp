@@ -6,6 +6,7 @@ void NotifyPartyUnstuck::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) co
     Move.Serialize(aWriter);
     aWriter.WriteBits(LeaderId, 32);
     aWriter.WriteBits(Slot, 32);
+    State.Serialize(aWriter);
 }
 
 void NotifyPartyUnstuck::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -21,5 +22,5 @@ void NotifyPartyUnstuck::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) 
     if (!aReader.ReadBits(value, 32))
         return;
     Slot = static_cast<uint32_t>(value);
-    m_valid = true;
+    m_valid = State.Deserialize(aReader) && State.IsValid(Move);
 }

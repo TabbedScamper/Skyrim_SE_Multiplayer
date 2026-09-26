@@ -79,7 +79,7 @@ std::atomic<bool> s_hostDrivenPlaybackEnabled{true};
 std::atomic<bool> s_mainFramePlaybackEnabled{true};
 // The host's snapshot of those bodies is read there too: read on the update job, a cart's root and
 // its wheels could come from two different physics steps, which played back as the cart jittering.
-std::atomic<bool> s_mainFrameCaptureEnabled{false};
+std::atomic<bool> s_mainFrameCaptureEnabled{true};
 
 // Host sample probe: how well each sample's tick matches the motion it carries (the speed implied
 // by position and tick against the body's own velocity). Timestamp noise plays back as jitter.
@@ -1045,6 +1045,7 @@ struct StepTarget
 {
     void* World{};
     void* Body{};
+    uint32_t FormId{};
     float Position[3]{};  // Havok units, where the body must be after the step
     float Velocity[3]{};  // Havok units per second
     // Dynamic follow: steer a simulated body to this pose instead of placing it.
@@ -1206,8 +1207,9 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
                 if (const auto now = std::chrono::steady_clock::now(); now >= probe.NextLog)
                 {
                     if (probe.Steps > 1)
-                        spdlog::info("Follow body {}: {} steps, {} teleports, {} keyframed placements, largest gap {:.1f} u",
-                            fmt::ptr(target.Body), probe.Steps, probe.Teleports, probe.KeyframedPlacements, probe.MaxErrorUnits);
+                        spdlog::info("Follow body {}: {} steps, {} teleports, {} keyframed placements, largest gap {:.1f} u (ref {:X})",
+                            fmt::ptr(target.Body), probe.Steps, probe.Teleports, probe.KeyframedPlacements, probe.MaxErrorUnits,
+                            target.FormId);
                     probe = FollowProbe{};
                     probe.NextLog = now + std::chrono::seconds(5);
                 }
@@ -2403,11 +2405,11 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
     {
         const bool mainFrame = s_mainFramePlaybackEnabled.load(std::memory_order_relaxed);
         m_applyOnMainFrame.store(mainFrame, std::memory_order_relaxed);
-        m_captureOnMainFrame.store(false, std::memory_order_relaxed);
+        // Owned drops are sampled with playback, before native physics starts. Capturing on
+        // the VM job also took m_remotePhysicsLock while the main frame needed it for carts.
+        m_captureOnMainFrame.store(true, std::memory_order_relaxed);
         if (!mainFrame)
             ApplyRemotePhysics();
-        // A follower still owns the physics of its own dropped items.
-        CaptureHostPhysics(true);
         return;
     }
     // The leader can be the follower of a drop owned by another party member.
@@ -2934,8 +2936,9 @@ void ObjectService::OnMainFrame() noexcept
         std::lock_guard lock(pService->m_remotePhysicsLock);
         ProbeHostRender();
     }
-    if (pService->m_captureOnMainFrame.load(std::memory_order_relaxed) &&
-        s_mainFrameCaptureEnabled.load(std::memory_order_relaxed))
+    // OnUpdate selects the leader's capture mode; followers always capture their owned
+    // drops here. SharedDropService queues those sends for its normal update-thread drain.
+    if (pService->m_captureOnMainFrame.load(std::memory_order_relaxed))
     {
         pService->CaptureHostPhysics(false);
     }
@@ -3130,10 +3133,12 @@ void ObjectService::ApplyRemotePhysics() noexcept
     for (auto it = m_remoteReferencePoses.begin(); it != m_remoteReferencePoses.end();)
     {
         auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(it->first));
-        const bool shared = m_world.GetSharedDropService().IsShared(it->first);
+        // Only admitted drop packets create this entry. Ordinary host-driven bodies must
+        // not acquire the shared-drop mutex on every playback frame.
+        const auto generation = s_sharedDropPoseGenerations.find(it->first);
+        const bool shared = generation != s_sharedDropPoseGenerations.end();
         if (!pReference || Cast<Actor>(pReference) || !pReference->loadedState ||
-            (s_sharedDropPoseGenerations.contains(it->first) && (!shared ||
-                s_sharedDropPoseGenerations[it->first] != m_world.GetSharedDropService().PhysicsGeneration(it->first))) ||
+            (shared && generation->second != m_world.GetSharedDropService().PhysicsGeneration(it->first)) ||
             (shared ? m_world.GetSharedDropService().IsOwner(it->first) : m_world.GetPartyService().IsLeader()) ||
             it->second.AuthorityEpoch != m_world.GetPartyService().GetStartEpoch())
         {
@@ -3220,7 +3225,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 DynamicBody body{};
                 if (GetDynamicBody(pReference, body, true) && body.HavokBody && body.State.world)
                 {
-                    StepTarget target{body.State.world, body.HavokBody};
+                    StepTarget target{body.State.world, body.HavokBody, it->first};
                     target.Dynamic = true;
                     const glm::vec3 position = pA->BodyPosition + (pB->BodyPosition - pA->BodyPosition) * t;
                     const glm::quat qa{pA->BodyRotation.w, pA->BodyRotation.x, pA->BodyRotation.y, pA->BodyRotation.z};
@@ -3709,7 +3714,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         SetDynamicBodyPosition(body, rootTarget);
                         if (s_bodyVelocityEnabled.load(std::memory_order_relaxed) && body.HavokBody && body.State.world)
                         {
-                            StepTarget target{body.State.world, body.HavokBody};
+                            StepTarget target{body.State.world, body.HavokBody, it->first};
                             for (int k = 0; k < 3; ++k)
                             {
                                 target.Position[k] = rootTarget[k] / kHavokToGameUnits;

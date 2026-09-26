@@ -50,8 +50,24 @@ void TESNPC::Serialize(String* apSaveBuffer) const noexcept
     apSaveBuffer->append(reinterpret_cast<const char*>(&bodyHeight), sizeof(bodyHeight));
 }
 
-void TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
+bool TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
 {
+    // Network appearance must never load into the local player or its face template.
+    // Checking the actor's ref ID alone does not protect a replica using the same base.
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pLocalNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+    for (int depth = 0; pLocalNpc && depth < 16; ++depth)
+    {
+        if (this == pLocalNpc)
+        {
+            spdlog::error("Rejected network appearance for local player NPC {:X}", formID);
+            return false;
+        }
+        if (pLocalNpc->faceNPC == pLocalNpc)
+            break;
+        pLocalNpc = pLocalNpc->faceNPC;
+    }
+
     ScopedSaveLoadOverride saveLoadOverride;
 
     constexpr size_t cTrailerSize = sizeof(kBodyTrailerTag) + sizeof(float) * 2;
@@ -81,6 +97,7 @@ void TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
     Load(&loadBuffer);
 
     loadBuffer.buffer = nullptr;
+    return true;
 }
 
 void TESNPC::Initialize() noexcept
@@ -152,6 +169,11 @@ TESNPC* TESNPC::Create(const String& acBuffer, const uint32_t aChangeFlags) noex
     auto pNpc = IFormFactory::Create<TESNPC>();
 
     pNpc->Initialize();
+    // Keep the factory's ownership: HeadData/headparts/tintLayers start null.
+    // LoadGame (ID 24778, VA 1403C7B10) allocates HeadData and headparts per NPC,
+    // and replaces the immutable FaceData sentinel with private storage before writes.
+    // Received tints belong to FaceGenComponent. Never CopyFrom the player:
+    // the native copy also installs a faceNPC template link (ID 24665).
     pNpc->Deserialize(acBuffer, aChangeFlags);
 
     // This forces facegen for some reason

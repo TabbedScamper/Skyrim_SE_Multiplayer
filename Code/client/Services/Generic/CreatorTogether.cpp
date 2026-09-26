@@ -34,6 +34,8 @@ std::atomic<bool> s_forceReleaseRequested{};
 std::atomic<bool> s_participating{};
 std::atomic<bool> s_done{};
 std::atomic<bool> s_releasing{};
+// This player is looking at another player's character: its own customization panels are hidden.
+std::atomic<bool> s_viewingOther{};
 
 // RaceSexMenu's begin-closing (ID 52388, VA 14096b7d0; called by ChangeName after Done and the name):
 // Scaleform FadeOut, camera saved, menu byte +0x1a0 = 1 (closing), after which the menu's per-frame
@@ -117,7 +119,7 @@ TProcessCreatorMessage* s_realProcessCreatorMessage{};
 UI_MESSAGE_RESULTS HookProcessCreatorMessage(IMenu* apMenu, UIMessage& aMessage)
 {
     // SetVisible suppresses drawing, not keyboard/controller events to the focused movie.
-    if (s_holding.load() && s_done.load() && !s_releasing.load() &&
+    if (!s_releasing.load() && ((s_holding.load() && s_done.load()) || s_viewingOther.load()) &&
         (aMessage.eType == UIMessage::kScaleformEvent || aMessage.eType == UIMessage::kUserEvent))
         return UI_MESSAGE_RESULTS::kHandled;
     return s_realProcessCreatorMessage(apMenu, aMessage);
@@ -461,6 +463,11 @@ void OnMainFrame() noexcept
         auto* pNpc = pActor ? Cast<TESNPC>(pActor->baseForm) : nullptr;
         if (!pNpc || formId == 0x14 || !pActor->GetExtension() || !pActor->GetExtension()->IsRemotePlayer() || pActor->IsDeleted())
             continue;
+        if (!pNpc->IsTemporary() || pNpc->faceNPC)
+        {
+            spdlog::error("Rejected player appearance for actor {:X}: NPC {:X} is not an independent replica", formId, pNpc->formID);
+            continue;
+        }
         // A native rebuild removes parts before queuing work. Defer while physics owns this body.
         if (!pActor->GetNiNode() || !pActor->currentProcess || !pActor->currentProcess->middleProcess ||
             !pActor->currentProcess->unk8 ||
@@ -479,7 +486,8 @@ void OnMainFrame() noexcept
         SetHidden(pActor, false);
         const auto oldSex = pNpc->actorData.actorBaseFlags & 1;
         auto* pOldRace = pActor->race;
-        pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags);
+        if (!pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags))
+            continue;
         const bool newSkeleton = pOldRace != pNpc->raceForm.race || oldSex != (pNpc->actorData.actorBaseFlags & 1);
         if (pOldRace != pNpc->raceForm.race)
         {
@@ -490,7 +498,8 @@ void OnMainFrame() noexcept
             using TSwitchRace = void(Actor*, TESRace*, bool);
             POINTER_SKYRIMSE(TSwitchRace, s_switchRace, 37925);
             s_switchRace.Get()(pActor, pNewRace, false);
-            pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags);
+            if (!pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags))
+                continue;
         }
         // Keep the same runtime FaceGen invariant as TESNPC::Create after every native load.
         pNpc->originalRace = nullptr;
@@ -517,10 +526,10 @@ void OnMainFrame() noexcept
                 }
         });
         s_appliedAppearances[formId] = appearance;
-        spdlog::info("Player {:X}: {} look applied on main thread, rebuild requested (skeleton {}, race {:X}, head {})",
+        spdlog::info("Player {:X}: {} look applied on main thread, rebuild requested (skeleton {}, race {:X}, head {}, NPC {:X})",
             formId, appearance.InCreator ? "live creator" : "final", newSkeleton,
             pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0,
-            pActor->GetFaceGenNiNode() != nullptr);
+            pActor->GetFaceGenNiNode() != nullptr, pNpc->formID);
     }
 
     auto* pMenu = GetCreatorMenu();
@@ -553,7 +562,12 @@ void OnMainFrame() noexcept
         s_logAfterSwitch = true;
         spdlog::info("Character creator: editing again, readiness withdrawn");
     }
-    SetPanelsHidden(pMenu, s_holding.load() && s_done.load() && !s_releasing.load());
+    {
+        std::lock_guard lock(s_lock);
+        s_viewingOther.store(s_active && s_view < s_players.size() && s_players[s_view] != 0x14);
+    }
+    // Hidden once Done, and while looking at another player's character (back when viewing its own again).
+    SetPanelsHidden(pMenu, !s_releasing.load() && ((s_holding.load() && s_done.load()) || s_viewingOther.load()));
 
     std::vector<uint32_t> players;
     size_t view;

@@ -395,8 +395,8 @@ private:
     // m_remoteReferencePoses is filled on the VM job thread and played back on the main thread.
     mutable std::recursive_mutex m_remotePhysicsLock;
     std::atomic<bool> m_applyOnMainFrame{};
-    // Host: the physics snapshot is read on the main thread (a consistent frame) and sent from
-    // the update thread.
+    // Owner snapshots default to the main frame; followers sample only their owned drops.
+    // Both legacy physics packets and shared-drop moves are sent from the update thread.
     void CaptureHostPhysics(bool aSendNow) noexcept;
     std::atomic<bool> m_captureOnMainFrame{};
     std::vector<PhysicsReferencesMoveRequest> m_pendingPhysicsRequests;

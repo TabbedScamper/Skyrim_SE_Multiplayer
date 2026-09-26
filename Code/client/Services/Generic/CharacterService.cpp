@@ -1192,13 +1192,14 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     std::optional<entt::entity> entity;
 
     // Custom forms
-    if (acMessage.FormId == GameId{})
+    // A player always needs a private NPC base, even if a peer supplied a BaseId.
+    if (acMessage.IsPlayer || acMessage.FormId == GameId{})
     {
         TESNPC* pNpc = nullptr;
 
         entity = m_world.create();
 
-        if (acMessage.BaseId != GameId{})
+        if (!acMessage.IsPlayer && acMessage.BaseId != GameId{})
         {
             // Prefer the owner's resolved leveled pick over the lossy template base
             if (acMessage.LeveledNpcPickId != GameId{})
@@ -1213,7 +1214,11 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
                 return;
             }
 
-            pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
+            if (!pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags))
+            {
+                m_world.destroy(*entity);
+                return;
+            }
         }
         else
         {
@@ -1817,7 +1822,8 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
         return;
     auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(*entityIt).Id));
     auto* pNpc = pActor ? Cast<TESNPC>(pActor->baseForm) : nullptr;
-    if (!pNpc || !pActor->GetExtension() || !pActor->GetExtension()->IsPlayer())
+    if (!pNpc || pActor == PlayerCharacter::Get() || pActor->formID == 0x14 ||
+        !pActor->GetExtension() || !pActor->GetExtension()->IsRemotePlayer())
         return;
 
     {
@@ -2790,11 +2796,11 @@ Actor* CharacterService::CreateCharacterForEntity(entt::entity aEntity) const no
     Actor* pActor = nullptr;
 
     // Custom forms
-    if (acMessage.FormId == GameId{})
+    if (acMessage.IsPlayer || acMessage.FormId == GameId{})
     {
         TESNPC* pNpc = nullptr;
 
-        if (acMessage.BaseId != GameId{})
+        if (!acMessage.IsPlayer && acMessage.BaseId != GameId{})
         {
             // Prefer the owner's resolved leveled pick over the lossy template base
             if (acMessage.LeveledNpcPickId != GameId{})
@@ -2809,7 +2815,8 @@ Actor* CharacterService::CreateCharacterForEntity(entt::entity aEntity) const no
                 return nullptr;
             }
 
-            pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags);
+            if (!pNpc->Deserialize(acMessage.AppearanceBuffer, acMessage.ChangeFlags))
+                return nullptr;
         }
         else
         {
@@ -3031,11 +3038,11 @@ void CharacterService::RunLocalUpdates() const noexcept
 
     auto animatedLocalView = m_world.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
 
-    // Keep the nearby 20 Hz budget, then service overdue distance tiers fairly. The
-    // old four-slot rotation spent slots on actors already in the nearby set and
-    // included actors in unrelated interiors. Interest includes every party player.
-    constexpr size_t cNearPoseActors = 24;
-    constexpr size_t cTierPoseActors = 8;
+    // Spend pose bandwidth around receivers, never around the host camera. All
+    // close candidates rotate through the same 32 slots: at a 50 ms send cadence
+    // this supports 64 actors within 2048 units at 10 Hz, or 32 at 20 Hz. These
+    // are scheduling targets; stalls and larger crowds can reduce delivered rate.
+    constexpr size_t cPoseActors = 32;
     static std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> lastPoseAttempt;
     Set<entt::entity> selectedPoseActors;
     {
@@ -3049,15 +3056,14 @@ void CharacterService::RunLocalUpdates() const noexcept
         std::vector<Candidate> distances;
         auto* pLocalPlayer = PlayerCharacter::Get();
         std::vector<Actor*> playerActors;
-        if (pLocalPlayer && pLocalPlayer->parentCell)
-            playerActors.push_back(pLocalPlayer);
         auto players = m_world.view<FormIdComponent, PlayerComponent>();
         for (auto player : players)
         {
             const auto formId = players.get<FormIdComponent>(player).Id;
             if (formId == 0x14)
                 continue;
-            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)); pActor && IsLoadedActor(pActor))
+            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                pActor && pActor->GetExtension()->IsRemote() && IsLoadedActor(pActor))
                 playerActors.push_back(pActor);
         }
         for (auto entity : animatedLocalView)
@@ -3078,36 +3084,34 @@ void CharacterService::RunLocalUpdates() const noexcept
             if (nearest < (std::numeric_limits<float>::max)())
                 distances.push_back({nearest, entity, pActor->formID});
         }
-        std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) {
-            return a.Distance == b.Distance ? a.FormId < b.FormId : a.Distance < b.Distance;
-        });
-        size_t nearby = 0;
-        while (nearby < distances.size() && nearby < cNearPoseActors &&
-            distances[nearby].Distance <= 4096.f * 4096.f)
+        // Unused close slots service 10/5/1 Hz distance tiers. Near actors have
+        // priority over overdue distant actors, with oldest-first service within
+        // each tier so an unlucky ECS iteration order cannot starve an NPC.
+        for (auto& candidate : distances)
         {
-            selectedPoseActors.insert(distances[nearby].Entity);
-            lastPoseAttempt[distances[nearby].FormId] = now;
-            ++nearby;
-        }
-        // 10 Hz to 16384 units, 5 Hz to 32768, 1 Hz beyond. These are target
-        // rates within eight slots per snapshot, not promises under crowd overload.
-        for (size_t i = nearby; i < distances.size(); ++i)
-        {
-            auto& candidate = distances[i];
-            const double interval = candidate.Distance <= 16384.f * 16384.f ? 100.0 :
+            const double interval = candidate.Distance <= 2048.f * 2048.f ? 50.0 :
+                candidate.Distance <= 16384.f * 16384.f ? 100.0 :
                 candidate.Distance <= 32768.f * 32768.f ? 200.0 : 1000.0;
             const auto it = lastPoseAttempt.try_emplace(candidate.FormId, now - 1s).first;
             candidate.Overdue = std::chrono::duration<double, std::milli>(now - it->second).count() / interval;
         }
-        std::sort(distances.begin() + nearby, distances.end(), [](const auto& a, const auto& b) {
-            return a.Overdue == b.Overdue ? a.FormId < b.FormId : a.Overdue > b.Overdue;
+        std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) {
+            const bool aNear = a.Distance <= 2048.f * 2048.f;
+            const bool bNear = b.Distance <= 2048.f * 2048.f;
+            if (aNear != bNear)
+                return aNear;
+            if (a.Overdue != b.Overdue)
+                return a.Overdue > b.Overdue;
+            return a.Distance == b.Distance ? a.FormId < b.FormId : a.Distance < b.Distance;
         });
-        for (size_t i = nearby; i < distances.size() && i < nearby + cTierPoseActors; ++i)
+        for (const auto& candidate : distances)
         {
-            if (distances[i].Overdue < 1.0)
+            if (selectedPoseActors.size() >= cPoseActors)
                 break;
-            selectedPoseActors.insert(distances[i].Entity);
-            lastPoseAttempt[distances[i].FormId] = now;
+            if (candidate.Overdue < 1.0)
+                continue;
+            selectedPoseActors.insert(candidate.Entity);
+            lastPoseAttempt[candidate.FormId] = now;
         }
         // Never retain scheduling state for actors that unloaded or changed authority.
         Set<uint32_t> live;
@@ -3128,7 +3132,7 @@ void CharacterService::RunLocalUpdates() const noexcept
         if (IsLeaderNativeActor(pActor) && !IsLoadedActor(pActor))
             continue;
 
-        // Bound selection to 24 nearby actors, this player, and eight distance-tier slots.
+        // Bound selection to 32 actors near remote players, plus this player.
         // Selection is an attempt, not proof of a fresh capture: culled actors send movement
         // and actions while the other PC animates their missing pose locally.
         const bool capturePose = selectedPoseActors.contains(entity) || formIdComponent.Id == 0x14;

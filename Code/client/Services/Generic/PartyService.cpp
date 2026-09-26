@@ -1,9 +1,14 @@
 #include <Services/CutsceneFollow.h>
+#include <Services/Generic/UnstuckReset.h>
 #include <Services/CreatorTogether.h>
 #include <Messages/LeaderControlRequest.h>
 #include <Messages/NotifyLeaderControl.h>
+#include <Messages/RequestPlayerControlState.h>
+#include <Messages/NotifyPlayerControlState.h>
 #include <Services/PlayerCollision.h>
 #include <Services/PartyService.h>
+#include <Services/DoorVoteService.h>
+#include <Forms/TESObjectCELL.h>
 
 #include <Services/TransportService.h>
 #include <Services/SteamLobbyService.h>
@@ -42,6 +47,251 @@
 #include <Games/Skyrim/AI/Movement/PlayerControls.h>
 #include <Games/Skyrim/PlayerCharacter.h>
 #include <Forms/TESQuest.h>
+#include <AI/AIProcess.h>
+
+namespace
+{
+// Research: CommonLibSSE-NG src/RE/C/ControlMap.cpp and Actor's GetCurrentScene
+// contract (https://github.com/alandtse/CommonLibSSE-NG). Use native accessors;
+// older CommonLib layouts place the masks eight bytes too early on 1.7.104.
+void ReadControlState(BSInputEnableManager* apMap, uint32_t& aLive, uint32_t& aStored)
+{
+    // ControlMap::GetControlsState, ID 68548, VA 140CEFB80.
+    using TGet = void(BSInputEnableManager*, uint32_t&, uint32_t&);
+    POINTER_SKYRIMSE(TGet, get, 68548);
+    get.Get()(apMap, aLive, aStored);
+}
+
+bool PlayerSequenceEnded(PlayerCharacter* apPlayer)
+{
+    if (!apPlayer || !apPlayer->parentCell || !apPlayer->GetNiNode())
+        return false;
+    const auto flags = apPlayer->actorState.flags1;
+    const auto life = (flags >> 21) & 0xF;
+    // A leftover restraint (life state 6) is repairable only after the native scene,
+    // package, furniture transition and AI ownership have all finished.
+    if ((life != 0 && life != 6) || ((flags >> 14) & 0xF) || ((flags >> 25) & 7) ||
+        (apPlayer->currentProcess && apPlayer->currentProcess->package))
+        return false;
+    // PlayerCharacter::SetAIDriven, ID 40586, VA 1407559F0.
+    if ((*(reinterpret_cast<const uint8_t*>(apPlayer) + 0xBEA) & 8) != 0)
+        return false;
+    // Actor::GetCurrentScene, slot 0x4A, ID 37247, VA 140674B70.
+    // This tests this actor's scene, not background scenes waiting for player movement.
+    using TScene = BGSScene*(Actor*);
+    POINTER_SKYRIMSE(TScene, getScene, 37247);
+    const auto* pScene = getScene.Get()(apPlayer);
+    return !pScene || !pScene->isPlaying;
+}
+
+bool CapturePlayerControlState(PlayerControlState& aState)
+{
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pControls = PlayerControls::GetInstance();
+    auto* pMap = BSInputEnableManager::Get();
+    if (!pPlayer || !pMap || !pControls || !pControls->pMovementHandler ||
+        !pControls->pLookHandler || !pControls->togglePOVHandler)
+        return false;
+    uint32_t live{}, stored{};
+    ReadControlState(pMap, live, stored);
+    aState.Controls = live & PlayerControlState::kChannels;
+    aState.Handlers = (pControls->pMovementHandler->isEnabled ? 1 : 0) |
+        (pControls->pLookHandler->isEnabled ? 2 : 0) | (pControls->togglePOVHandler->isEnabled ? 4 : 0);
+    aState.PovScript = pControls->Data.povScriptMode;
+    aState.Restrained = ((pPlayer->actorState.flags1 >> 21) & 0xF) == 6;
+    aState.Free = !aState.Restrained && !pControls->bBlockPlayerInput &&
+        (aState.Controls & 3) == 3 && (aState.Handlers & 3) == 3 &&
+        stored == 0x80000000u && PlayerSequenceEnded(pPlayer);
+    return true;
+}
+
+struct PlayerControlSync
+{
+    // F8 is explicit host authority. Match both locked and unlocked policies now,
+    // even while a local scene owns saved controls. Do not import the host's UI
+    // contexts or change the local dead/bleedout life states.
+    bool ForceApply(const PartyUnstuckState& acState, uint32_t& aBefore, uint32_t& aAfter)
+    {
+        auto* player = PlayerCharacter::Get();
+        auto* controls = PlayerControls::GetInstance();
+        auto* map = BSInputEnableManager::Get();
+        if (!player || !map || !controls || !controls->pMovementHandler ||
+            !controls->pLookHandler || !controls->togglePOVHandler)
+            return false;
+        const auto life = (player->actorState.flags1 >> 21) & 0xF;
+        if (life != 0 && life != 6)
+            return false;
+        uint32_t live{}, stored{};
+        ReadControlState(map, live, stored);
+        aBefore = live & PlayerControlState::kChannels;
+        using TRestrain = void(Actor*, bool);
+        POINTER_SKYRIMSE(TRestrain, restrain, 37488);
+        if ((life == 6) != acState.Controls.Restrained)
+            restrain.Get()(player, acState.Controls.Restrained);
+        // 68545 / 140CEFAA0 updates saved masks only when one exists. Apply all
+        // channels, not just the live delta, so furniture exit cannot restore a
+        // stale saved lock when live controls already happen to match the host.
+        map->EnableOtherEvent(PlayerControlState::kChannels & ~acState.Controls.Controls, false, true);
+        map->EnableOtherEvent(acState.Controls.Controls, true, true);
+        controls->pMovementHandler->isEnabled = (acState.Controls.Handlers & 1) != 0;
+        controls->pLookHandler->isEnabled = (acState.Controls.Handlers & 2) != 0;
+        controls->togglePOVHandler->isEnabled = (acState.Controls.Handlers & 4) != 0;
+        controls->Data.povScriptMode = acState.Controls.PovScript;
+        controls->SetBlockPlayerInput(acState.InputBlocked);
+        ReadControlState(map, live, stored);
+        aAfter = live & PlayerControlState::kChannels;
+        Ready = false;
+        SettledSince = 0;
+        // The reset sequence has a separate ordering domain. Never insert it
+        // into State; the next ordinary heartbeat resumes the normal policy.
+        NextApplyMs = GetTickCount64() + 1000;
+        return aAfter == acState.Controls.Controls;
+    }
+
+    PlayerControlSync(PartyService& aParty, World& aWorld, entt::dispatcher& aDispatcher)
+        : Party(aParty), GameWorld(aWorld)
+        , Connection(aDispatcher.sink<NotifyPlayerControlState>().connect<&PlayerControlSync::OnState>(this))
+        , Disconnect(aDispatcher.sink<DisconnectedEvent>().connect<&PlayerControlSync::OnDisconnect>(this))
+    {
+    }
+
+    void OnDisconnect(const DisconnectedEvent&) { Reset(); }
+
+    void Reset()
+    {
+        State = {};
+        Sent = {};
+        ReceivedMs = NextSendMs = NextApplyMs = SettledSince = 0;
+        Leader = 0;
+        Ready = false;
+    }
+
+    void OnState(const NotifyPlayerControlState& acMessage)
+    {
+        const auto& state = acMessage.State;
+        if (!Party.IsInParty() || Party.IsLeader() || Party.GetSessionState() < 2 ||
+            acMessage.LeaderId != Party.GetLeaderPlayerId() || state.Epoch != Party.GetStartEpoch() ||
+            !state.IsValid())
+            return;
+        if (Leader == acMessage.LeaderId && State.Epoch == state.Epoch && State.Sequence >= state.Sequence)
+            return;
+        if (Leader != acMessage.LeaderId || State.Epoch != state.Epoch || !state.Free)
+            SettledSince = 0;
+        State = state;
+        Leader = acMessage.LeaderId;
+        ReceivedMs = GetTickCount64();
+        Ready = false;
+    }
+
+    bool HasRelease() const
+    {
+        return Party.IsInParty() && !Party.IsLeader() && Party.GetSessionState() >= 3 &&
+            State.Free && State.Epoch == Party.GetStartEpoch() && Leader == Party.GetLeaderPlayerId() &&
+            GetTickCount64() - ReceivedMs < 3500;
+    }
+
+    void Update()
+    {
+        if (!Party.IsInParty() || !Party.GetStartEpoch() || Party.GetSessionState() < 2)
+        {
+            Reset();
+            return;
+        }
+        const auto now = GetTickCount64();
+        if (Party.IsLeader())
+        {
+            RequestPlayerControlState request;
+            auto& state = request.State;
+            state.Epoch = Party.GetStartEpoch();
+            if (!CapturePlayerControlState(state))
+                return;
+            state.Free = state.Free && Party.GetSessionState() >= 3;
+            // Compare policy without the wire sequence; send every change and a 1 s heartbeat.
+            if (state == Sent && now < NextSendMs)
+                return;
+            Sent = state;
+            state.Sequence = ++Sequence;
+            NextSendMs = now + 1000;
+            GameWorld.GetTransport().Send(request);
+            return;
+        }
+        auto* pPlayer = PlayerCharacter::Get();
+        auto* pControls = PlayerControls::GetInstance();
+        const auto* pUI = UI::Get();
+        if (!HasRelease() || CutsceneFollow::IsActive() || !PlayerSequenceEnded(pPlayer) ||
+            !pControls || pControls->bBlockPlayerInput || !pUI || pUI->numPausesGame ||
+            pUI->numItemMenus || pUI->modal || pUI->GetMenuOpen(BSFixedString("Loading Menu")) ||
+            pUI->GetMenuOpen(BSFixedString("RaceSex Menu")) || pUI->GetMenuOpen(BSFixedString("Main Menu")) ||
+            pUI->GetMenuOpen(BSFixedString("Dialogue Menu")) || GameWorld.GetOverlayService().GetActive())
+        {
+            Ready = false;
+            SettledSince = 0;
+            return;
+        }
+        if (!SettledSince)
+            SettledSince = now;
+        if (now - SettledSince < 500 || now < NextApplyMs)
+            return;
+        NextApplyMs = now + 250;
+        Ready = false;
+        auto* pMap = BSInputEnableManager::Get();
+        if (!pMap || !pControls->pMovementHandler || !pControls->pLookHandler || !pControls->togglePOVHandler)
+            return;
+        uint32_t live{}, stored{};
+        ReadControlState(pMap, live, stored);
+        if (stored != 0x80000000u)
+            return; // A local engine state owns a saved mask; do not overwrite its recovery.
+        const auto before = live & PlayerControlState::kChannels;
+        const uint32_t enable = State.Controls & ~before;
+        const uint32_t disable = before & ~State.Controls;
+        // ID 68545, VA 140CEFAA0: use ToggleControls so handlers receive UserEventEnabled.
+        if (disable)
+            pMap->EnableOtherEvent(disable, false, false);
+        if (enable)
+            pMap->EnableOtherEvent(enable, true, false);
+        const auto handlers = (pControls->pMovementHandler->isEnabled ? 1 : 0) |
+            (pControls->pLookHandler->isEnabled ? 2 : 0) | (pControls->togglePOVHandler->isEnabled ? 4 : 0);
+        const bool restrained = ((pPlayer->actorState.flags1 >> 21) & 0xF) == 6;
+        if (restrained && !State.Restrained)
+        {
+            // Actor::SetRestrained(false), ID 37488, VA 140687B40. Goes through
+            // SetLifeState, including its native exit side effects; never write life bits.
+            using TRestrain = void(Actor*, bool);
+            POINTER_SKYRIMSE(TRestrain, restrain, 37488);
+            restrain.Get()(pPlayer, false);
+        }
+        if (enable || disable || handlers != State.Handlers || restrained ||
+            pControls->Data.povScriptMode != State.PovScript)
+            spdlog::info("Follower control release: epoch={} sequence={} controls={:03X}->{:03X} handlers={}->{} restrained={}->{}",
+                State.Epoch, State.Sequence, before, State.Controls, handlers, State.Handlers, restrained, State.Restrained);
+        pControls->pMovementHandler->isEnabled = (State.Handlers & 1) != 0;
+        pControls->pLookHandler->isEnabled = (State.Handlers & 2) != 0;
+        pControls->togglePOVHandler->isEnabled = (State.Handlers & 4) != 0;
+        pControls->Data.povScriptMode = State.PovScript;
+        Ready = true;
+    }
+
+    PartyService& Party;
+    World& GameWorld;
+    PlayerControlState State{}, Sent{};
+    uint64_t Sequence{}, ReceivedMs{}, NextSendMs{}, NextApplyMs{}, SettledSince{};
+    uint32_t Leader{};
+    bool Ready{};
+    entt::scoped_connection Connection, Disconnect;
+};
+
+std::unique_ptr<PlayerControlSync> s_playerControlSync;
+}
+
+bool UnstuckControls::Capture(PlayerControlState& aState) noexcept
+{
+    return CapturePlayerControlState(aState);
+}
+
+bool UnstuckControls::Apply(const PartyUnstuckState& acState, uint32_t& aBefore, uint32_t& aAfter) noexcept
+{
+    return s_playerControlSync && s_playerControlSync->ForceApply(acState, aBefore, aAfter);
+}
 
 PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransportService) noexcept
     : m_world(aWorld)
@@ -57,6 +307,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, Transpo
     m_partyInviteConnection = aDispatcher.sink<NotifyPartyInvite>().connect<&PartyService::OnPartyInvite>(this);
     m_partyJoinedConnection = aDispatcher.sink<NotifyPartyJoined>().connect<&PartyService::OnPartyJoined>(this);
     m_partyLeftConnection = aDispatcher.sink<NotifyPartyLeft>().connect<&PartyService::OnPartyLeft>(this);
+    s_playerControlSync = std::make_unique<PlayerControlSync>(*this, aWorld, aDispatcher);
 }
 
 void PartyService::CreateParty() const noexcept
@@ -308,7 +559,27 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     // the character creator, which CreatorTogether handles).
     {
         const bool leaderFree = m_isLeader ? m_leaderFreeSent == 1 : m_leaderFree;
-        const bool cutscene = m_inParty && m_sessionState >= 2 && m_startEpoch != 0 && !leaderFree && !creatorOpen;
+        bool canFollow = !m_world.GetDoorVoteService().HasPendingVote();
+        if (canFollow && !m_isLeader && m_inParty && !leaderFree)
+        {
+            // A scene starting beyond a load door must not pull a follower across its boundary.
+            auto* player = PlayerCharacter::Get();
+            auto* cell = player ? player->GetParentCellEx() : nullptr;
+            canFollow = false;
+            auto view = m_world.view<FormIdComponent, PlayerComponent>();
+            for (auto entity : view)
+            {
+                if (view.get<PlayerComponent>(entity).Id != m_leaderPlayerId)
+                    continue;
+                auto* leader = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                auto* leaderCell = leader ? leader->GetParentCellEx() : nullptr;
+                canFollow = DoorVotePolicy::CanFollow(false, reinterpret_cast<uintptr_t>(cell),
+                    reinterpret_cast<uintptr_t>(leaderCell), reinterpret_cast<uintptr_t>(cell ? cell->worldspace : nullptr),
+                    reinterpret_cast<uintptr_t>(leaderCell ? leaderCell->worldspace : nullptr));
+                break;
+            }
+        }
+        const bool cutscene = m_inParty && m_sessionState >= 2 && m_startEpoch != 0 && !leaderFree && !creatorOpen && canFollow;
         CutsceneFollow::Update(m_world, cutscene, m_isLeader, m_leaderPlayerId);
     }
 
@@ -316,7 +587,8 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     // every change and every 5 s. Players pass through each other until it is.
     if (m_inParty && m_isLeader && m_sessionState >= 2)
     {
-        const bool free = m_sessionState >= 3 && PlayerCollision::LocalHasFreeControl();
+        PlayerControlState state;
+        const bool free = m_sessionState >= 3 && CapturePlayerControlState(state) && state.Free;
         const auto nowMs = GetTickCount64();
         if (static_cast<int>(free) != m_leaderFreeSent || nowMs >= m_nextLeaderFreeSendMs)
         {
@@ -329,6 +601,8 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
             m_transport.Send(request);
         }
     }
+
+    s_playerControlSync->Update();
 
     // Character creator together: a player who finished waits, held in place (it can still look
     // around at the others, shown in front of it), until every player finished.
@@ -610,7 +884,9 @@ void PartyService::OnNotifyLeaderControl(const NotifyLeaderControl& acMessage) n
     // pulled the follower off the chopping block, and its stand-up (IdleFurnitureExit) never played. The
     // leader resends free control every 5 s, so the gather happens once this player is free too.
     const uint32_t sitSleepState = (pPlayer->actorState.flags1 >> 14) & 0xF;
-    if (!PlayerCollision::LocalHasFreeControl() || sitSleepState != 0)
+    PlayerControlState localState;
+    if (!PlayerCollision::LocalHasFreeControl() || !CapturePlayerControlState(localState) || !localState.Free ||
+        !s_playerControlSync->HasRelease() || !s_playerControlSync->Ready)
     {
         spdlog::info("Leader has free control; this player is still in its own scene (sit state {}), gathered later", sitSleepState);
         return;
@@ -627,6 +903,21 @@ void PartyService::OnNotifyLeaderControl(const NotifyLeaderControl& acMessage) n
     }
     if (!pLeader || !pLeader->parentCell)
         return;
+    auto* cell = pPlayer->GetParentCellEx();
+    auto* leaderCell = pLeader->GetParentCellEx();
+    const bool pendingVote = m_world.GetDoorVoteService().HasPendingVote();
+    if (!DoorVotePolicy::CanFollow(pendingVote, reinterpret_cast<uintptr_t>(cell),
+        reinterpret_cast<uintptr_t>(leaderCell), reinterpret_cast<uintptr_t>(cell ? cell->worldspace : nullptr),
+        reinterpret_cast<uintptr_t>(leaderCell ? leaderCell->worldspace : nullptr)))
+    {
+        // Retire a delayed gather once a vote starts or the leader crosses a load boundary.
+        // Cancellation must not resurrect it and undo walking away. F8 remains explicit recovery.
+        if (cell && leaderCell)
+            m_gatheredAroundLeader = true;
+        spdlog::info("Door vote: automatic gather skipped ({}), source {:X}, leader {:X}",
+            pendingVote ? "vote pending" : "different load area", cell ? cell->formID : 0, leaderCell ? leaderCell->formID : 0);
+        return;
+    }
     uint32_t slot = 0;
     for (const auto memberId : m_partyMembers)
     {

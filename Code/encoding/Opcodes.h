@@ -76,6 +76,7 @@ enum ClientOpcode : unsigned char
     kBusyLockRequest,
     kRequestDialogueListen,
     kRequestSharedDrop,
+    kRequestPlayerControlState,
     kClientOpcodeMax
 };
 
@@ -154,5 +155,6 @@ enum ServerOpcode : unsigned char
     kNotifyBusyLock,
     kNotifyDialogueListen,
     kNotifySharedDrop,
+    kNotifyPlayerControlState,
     kServerOpcodeMax
 };

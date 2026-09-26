@@ -19,6 +19,7 @@
 #include <Events/MountEvent.h>
 #include <Events/DialogueEvent.h>
 #include <Games/Misc/MenuTopicManager.h>
+#include <Games/Skyrim/LipSyncHooks.h>
 #include <Events/HitEvent.h>
 #include <Events/RemoveSpellEvent.h>
 
@@ -1515,13 +1516,15 @@ void TP_MAKE_THISCALL(HookUnequipObject, Actor, void* apUnk1, TESBoundObject* ap
     TiltedPhoques::ThisCall(RealUnequipObject, apThis, apUnk1, apObject, aUnk2, apUnk3);
 }
 
-TP_THIS_FUNCTION(TSpeakSoundFunction, bool, Actor, const char* apName, uint32_t* a3, uint32_t a4, uint32_t a5, uint32_t a6, uint64_t a7, uint64_t a8, uint64_t a9, bool a10, uint64_t a11, bool a12, bool a13, bool a14);
+// 37542 / 14068D490 returns a float in XMM0 (14068DD81), not success in AL.
+// Its scene caller stores that value at highProcess+2F8 (14071EED8).
+TP_THIS_FUNCTION(TSpeakSoundFunction, float, Actor, const char* apName, uint32_t* a3, uint32_t a4, uint32_t a5, uint32_t a6, uint64_t a7, uint64_t a8, uint64_t a9, bool a10, uint64_t a11, bool a12, bool a13, bool a14);
 TP_THIS_FUNCTION(TSetSoundVolume, bool, void, float);
 static TSpeakSoundFunction* RealSpeakSoundFunction = nullptr;
 static std::atomic<uint32_t> s_nativeVoiceProbeCount{0};
 static std::atomic<uint32_t> s_mutedRemoteVoiceProbeCount{0};
 
-bool TP_MAKE_THISCALL(HookSpeakSoundFunction, Actor, const char* apName, uint32_t* a3, uint32_t a4, uint32_t a5, uint32_t a6, uint64_t a7, uint64_t a8, uint64_t a9, bool a10, uint64_t a11, bool a12, bool a13, bool a14)
+float TP_MAKE_THISCALL(HookSpeakSoundFunction, Actor, const char* apName, uint32_t* a3, uint32_t a4, uint32_t a5, uint32_t a6, uint64_t a7, uint64_t a8, uint64_t a9, bool a10, uint64_t a11, bool a12, bool a13, bool a14)
 {
     spdlog::debug("a3: {:X}, a4: {}, a5: {}, a6: {}, a7: {}, a8: {:X}, a9: {:X}, a10: {}, a11: {:X}, a12: {}, a13: {}, a14: {}", (uint64_t)a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
 
@@ -1530,24 +1533,22 @@ bool TP_MAKE_THISCALL(HookSpeakSoundFunction, Actor, const char* apName, uint32_
             apThis->formID, apThis->GetExtension()->IsLocal() ? "local" : "remote",
             MenuTopicManager::IsPlayerDialogueSpeaker(apThis), apName ? apName : "");
 
-    const bool result = TiltedPhoques::ThisCall(RealSpeakSoundFunction, apThis, apName, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+    const uint32_t previousSoundId = a3 ? a3[0] : 0xFFFFFFFFu;
+    const float result = TiltedPhoques::ThisCall(RealSpeakSoundFunction, apThis, apName, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
 
     // Skyrim can invoke this function twice for one line: the first call
-    // reports success but leaves the handle invalid. Publish only the call
-    // that actually acquired a playable sound, or followers replay it twice.
-    const bool soundStarted = result && a3 && a3[0] != 0xFFFFFFFFu;
-    if (soundStarted && (apThis->GetExtension()->IsLocal() ||
+    // queues lip loading without acquiring a sound. The float is a duration,
+    // not success; detect a NEW handle, including callers reusing scene slot 0.
+    const bool soundStarted = a3 && a3[0] != 0xFFFFFFFFu && a3[0] != previousSoundId;
+    if (soundStarted && apName && (apThis->GetExtension()->IsLocal() ||
         MenuTopicManager::IsPlayerDialogueSpeaker(apThis)))
         World::Get().GetRunner().Trigger(DialogueEvent(apThis->formID, apName));
 
     // Preserve Skyrim's native voice handle and duration for scene waits, but
     // never audibly present a remote NPC's independently timed local line.
-    // The owner-originated replay calls RealSpeakSoundFunction directly, so
-    // it is not muted by this hook.
-    auto& world = World::Get();
-    const bool remotePartyNpc = world.GetTransport().IsConnected() &&
-        world.GetPartyService().IsInParty() && apThis->GetExtension()->IsRemote() &&
-        !apThis->GetExtension()->IsPlayer() && !MenuTopicManager::IsPlayerDialogueSpeaker(apThis);
+    // LipSyncHooks also gates the final phonemes and owns a separate replay
+    // handle/resource; native scene cleanup cannot replace that replay's .lip.
+    const bool remotePartyNpc = LipSyncHooks::IsRemoteSpeaker(apThis);
     if (remotePartyNpc && s_mutedRemoteVoiceProbeCount.load(std::memory_order_relaxed) < 96)
         spdlog::info("Native remote voice handle actor {:X} result={} soundId={} file={}",
             apThis->formID, result, a3 ? a3[0] : 0xFFFFFFFFu, apName ? apName : "");
@@ -1578,6 +1579,11 @@ void TP_MAKE_THISCALL(HookKnockExplosion, AIProcess, Actor* apActor,
 
 void Actor::SpeakSound(const char* pFile)
 {
+    if (LipSyncHooks::IsRemoteSpeaker(this))
+    {
+        LipSyncHooks::Replay(this, pFile);
+        return;
+    }
     uint32_t handle[3]{};
     handle[0] = -1;
     TiltedPhoques::ThisCall(RealSpeakSoundFunction, this, pFile, handle, 0, 0x32, 0, 0, 0, 0, 0, 0, 0, 1, 1);

@@ -55,6 +55,13 @@ namespace
 {
 using TXInputGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 
+bool OverlayWindowHasFocus() noexcept
+{
+    const auto* window = BSGraphics::GetMainWindow();
+    return window && window->hWnd && !InputService::IsPointerHandedToShell() &&
+        GetForegroundWindow() == window->hWnd && !IsIconic(window->hWnd);
+}
+
 void InjectControllerKey(OverlayApp* apOverlay, uint16_t aKey, uint32_t aModifiers = 0)
 {
     const auto scanCode = static_cast<uint16_t>(MapVirtualKeyW(aKey, MAPVK_VK_TO_VSC));
@@ -333,7 +340,8 @@ void OverlayService::Render() noexcept
     static bool s_titleBaselineScheduled = false;
     static std::chrono::steady_clock::time_point s_mainMenuDumpAt{};
 
-    PollControllerNavigation(m_pOverlay.get(), m_active);
+    const bool focused = OverlayWindowHasFocus();
+    PollControllerNavigation(m_pOverlay.get(), m_active && focused);
 
     const auto dumpMainMenuState = [this]() {
         uint32_t overlayWidth = 0;
@@ -348,7 +356,7 @@ void OverlayService::Render() noexcept
 
     auto* pUI = UI::Get();
     const bool titleScreen = pUI && pUI->GetMenuOpen(BSFixedString("Main Menu"));
-    if (titleScreen)
+    if (titleScreen && focused)
         PollMainMenuOptions(pUI->FindMenuByName(BSFixedString("Main Menu")));
     SetMainMenuOverlayActive(m_active && titleScreen);
     if (titleScreen && !s_titleBaselineScheduled)
@@ -365,7 +373,7 @@ void OverlayService::Render() noexcept
     }
 
     const bool f11Down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
-    if (f11Down && !m_f11WasDown)
+    if (focused && f11Down && !m_f11WasDown)
     {
         m_world.GetGameSettingsService().ToggleWindowMode();
         // Window mode switching is asynchronous. Capture the stable result,
@@ -376,7 +384,7 @@ void OverlayService::Render() noexcept
     m_f11WasDown = f11Down;
 
     const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-    if (f9Down && !s_f9WasDown)
+    if (focused && f9Down && !s_f9WasDown)
         dumpMainMenuState();
     s_f9WasDown = f9Down;
 
@@ -388,7 +396,7 @@ void OverlayService::Render() noexcept
     }
 
     const bool f10Down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    if (f10Down && !s_f10WasDown)
+    if (focused && f10Down && !s_f10WasDown)
     {
         if (s_debugPromptOpen && m_pOverlay)
         {
@@ -406,7 +414,7 @@ void OverlayService::Render() noexcept
     s_f10WasDown = f10Down;
 
     const bool escapeDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    if (escapeDown && !m_escapeWasDown && m_active)
+    if (focused && escapeDown && !m_escapeWasDown && m_active)
     {
         if (s_debugPromptOpen && m_pOverlay)
         {
@@ -438,9 +446,10 @@ void OverlayService::Render() noexcept
     else if (!inGame && m_inGame)
         SetInGame(false);
 
-    PollPauseMenuOptions();
+    if (focused)
+        PollPauseMenuOptions();
     m_pOverlay->GetClient()->Render();
-    if (m_active)
+    if (m_active && focused)
         RenderNativeCursorOnTop();
 }
 
@@ -475,7 +484,7 @@ void OverlayService::SetActive(bool aActive) noexcept
     m_active = aActive;
     SetMainMenuOverlayActive(m_active && m_titleScreen);
 
-    TiltedPhoques::DInputHook::Get().SetEnabled(m_active);
+    // InputService applies capture on the window thread, only while focused.
     if (m_pOverlay && m_pOverlay->GetClient())
     {
         if (auto pRenderer = m_pOverlay->GetClient()->GetOverlayRenderHandler())
@@ -596,7 +605,7 @@ void OverlayService::ShowDebugPrompt(const std::string& acMessage, bool aNoteOnl
 
 bool OverlayService::InjectTestControllerButton(const std::string& acButton) noexcept
 {
-    if (!m_pOverlay || !m_active)
+    if (!m_pOverlay || !m_active || !OverlayWindowHasFocus())
         return false;
 
     uint16_t key = 0;

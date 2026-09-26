@@ -686,7 +686,7 @@ void GameSettingsService::OnMainLoop() noexcept
                             const int y = origin.y;
                             SetWindowLongPtrW(pWindow->hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
                             SetWindowPos(pWindow->hWnd, HWND_TOP, x, y, outerWidth, outerHeight,
-                                SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                                SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOZORDER);
                             pRenderer->WindowSizeChanged(0);
                         }
                     }
@@ -900,7 +900,7 @@ void GameSettingsService::ApplyDisplay(const GameSettingsSnapshot& acSettings) n
     {
         SetWindowLongPtrW(pWindow->hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
         SetWindowPos(pWindow->hWnd, HWND_TOP, bounds.left, bounds.top, bounds.right - bounds.left,
-            bounds.bottom - bounds.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            bounds.bottom - bounds.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOZORDER);
         renderWidth = static_cast<uint32_t>(bounds.right - bounds.left);
         renderHeight = static_cast<uint32_t>(bounds.bottom - bounds.top);
     }
@@ -914,7 +914,8 @@ void GameSettingsService::ApplyDisplay(const GameSettingsSnapshot& acSettings) n
         const int x = origin.x;
         const int y = origin.y;
         SetWindowLongPtrW(pWindow->hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-        SetWindowPos(pWindow->hWnd, HWND_TOP, x, y, outerWidth, outerHeight, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        SetWindowPos(pWindow->hWnd, HWND_TOP, x, y, outerWidth, outerHeight,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
     if (haveSwapDesc)

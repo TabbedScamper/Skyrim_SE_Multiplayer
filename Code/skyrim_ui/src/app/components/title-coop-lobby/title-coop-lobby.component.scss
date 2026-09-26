@@ -46,11 +46,12 @@ header {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   overflow-y: auto;
 }
 
 .card {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -261,11 +262,10 @@ header {
   border-image: $-separator 3;
 }
 
-.setting-row select {
+.setting-row app-dropdown {
   min-width: 11rem;
   color: white;
   background: #0c0c0c;
-  border: 1px solid rgba(255, 255, 255, 0.35);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -355,12 +355,12 @@ details summary {
 
 button,
 input:not([type='checkbox']),
-select {
+app-dropdown {
   min-height: 2.8rem;
 }
 
 input:focus-visible,
-select:focus-visible,
+app-dropdown:focus-visible,
 summary:focus-visible {
   outline: 1px solid rgba(255, 255, 255, 0.4);
   outline-offset: 3px;
@@ -381,7 +381,7 @@ button:focus-visible {
 
   button,
   input:not([type='checkbox']),
-  select {
+  app-dropdown {
     min-height: 2.3rem;
   }
 }

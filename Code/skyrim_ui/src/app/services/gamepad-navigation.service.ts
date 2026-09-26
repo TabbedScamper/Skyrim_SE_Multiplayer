@@ -44,7 +44,8 @@ export class GamepadNavigationService {
   /** Where focus was when a dialog opened; it returns there when the dialog closes. */
   private beforeModal?: { modal: HTMLElement; focus: HTMLElement };
   /** Where the focused control was, so focus can land next to it if it disappears or is disabled. */
-  private lastFocus?: { scope: HTMLElement; x: number; y: number };
+  private lastFocus?: { scope: HTMLElement; column: Element | null; x: number; y: number };
+  private heldDirection?: { direction: string; scope: HTMLElement | null; started: number; moved: number };
   private scheduled = false;
   private modelRequested = false;
 
@@ -69,7 +70,7 @@ export class GamepadNavigationService {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['aria-expanded', 'open', 'disabled', 'aria-selected'],
+        attributeFilter: ['aria-expanded', 'open', 'disabled', 'aria-disabled', 'aria-selected'],
       });
     });
   }
@@ -77,6 +78,24 @@ export class GamepadNavigationService {
   // ---- input ----
 
   private onAction(action: string, repeat: boolean): void {
+    const scope = this.scope();
+    if (['up', 'down', 'left', 'right'].includes(action)) {
+      // The native bridge can emit both axes in one poll. It supplies no release
+      // or raw axes, so only accept one step per burst and repeats of that step.
+      const now = performance.now();
+      const held = this.heldDirection;
+      if (repeat) {
+        if (!held || held.scope !== scope || held.direction !== action ||
+            now - held.started < 350 || now - held.moved < 90) return;
+        held.moved = now;
+      } else {
+        if (held?.scope === scope && now - held.moved < 90) return;
+        this.heldDirection = { direction: action, scope, started: now, moved: now };
+      }
+    } else {
+      if (repeat) return;
+      this.heldDirection = undefined;
+    }
     const wasActive = this.active$.value;
     this.setActive(true);
     if (!this.modelRequested) {
@@ -84,7 +103,6 @@ export class GamepadNavigationService {
       this.client.requestControlBindings();
     }
 
-    const scope = this.scope();
     if (!scope) {
       this.legacyKey(action);
       return;
@@ -145,7 +163,7 @@ export class GamepadNavigationService {
       this.setActive(true);
       const current = this.current(scope);
       if (!current) this.focus(this.defaultTarget(scope), false);
-      else this.move(scope, current, direction);
+      else this.direction(scope, current, direction, event.repeat);
     });
   }
 
@@ -281,7 +299,12 @@ export class GamepadNavigationService {
     // The tab list is a column of its own: moves never wander into another tab from the content
     // (left off the edge goes back to the active one, below) or out of the list into the content.
     const onTab = tabs.includes(current);
-    const items = this.focusables(scope).filter(e => e !== current && (tabs.length < 2 || tabs.includes(e) === onTab));
+    const column = current.closest('[data-nav-column]');
+    const vertical = direction === 'up' || direction === 'down';
+    const items = this.focusables(scope).filter(e => e !== current &&
+      (tabs.length < 2 || tabs.includes(e) === onTab) &&
+      // Up/down stay in the party or campaign column. Footer actions remain reachable.
+      (!vertical || !column || !e.closest('[data-nav-column]') || e.closest('[data-nav-column]') === column));
     // Inside a scrolling section, its own controls (even ones scrolled out of view) come
     // before anything outside it, such as the footer buttons under the panel.
     const content = current.closest('[data-nav-content]');
@@ -371,12 +394,25 @@ export class GamepadNavigationService {
       withSound = false; // the tab plays its own focus sound
     }
     target.focus({ preventScroll: true });
-    target.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    this.reveal(target);
     if (withSound) this.sound.play(sound);
     this.schedule();
   }
 
   // ---- queries ----
+
+  /** Scroll only vertically, immediately, so the next spatial step sees settled geometry. */
+  private reveal(target: HTMLElement): void {
+    for (let parent = target.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+      if (!/(auto|scroll)/.test(getComputedStyle(parent).overflowY) || parent.scrollHeight <= parent.clientHeight) continue;
+      const box = parent.getBoundingClientRect();
+      const rect = target.getBoundingClientRect();
+      const top = box.top + parent.clientTop;
+      const bottom = top + parent.clientHeight;
+      if (rect.top < top) parent.scrollTop -= top - rect.top;
+      else if (rect.bottom > bottom) parent.scrollTop += rect.bottom - bottom;
+    }
+  }
 
   scope(): HTMLElement | null {
     const scopes = Array.from(document.querySelectorAll<HTMLElement>('[data-nav-scope]')).filter(e => this.visible(e));
@@ -385,7 +421,8 @@ export class GamepadNavigationService {
 
   private current(scope: HTMLElement): HTMLElement | null {
     const active = document.activeElement as HTMLElement | null;
-    return active && active !== document.body && scope.contains(active) && this.visible(active) ? active : null;
+    return active && active !== document.body && scope.contains(active) && this.visible(active) &&
+      !active.matches(':disabled, [aria-disabled="true"], app-dropdown.disabled') ? active : null;
   }
 
   private focusables(root: HTMLElement): HTMLElement[] {
@@ -473,8 +510,10 @@ export class GamepadNavigationService {
     // The focused control went away (disabled after use, row removed): the nearest control
     // to where it was. A menu that just opened: its default.
     if (scope && !current && this.lastFocus?.scope === scope) {
-      const { x, y } = this.lastFocus;
-      const nearest = this.focusables(scope)
+      const { x, y, column } = this.lastFocus;
+      const items = this.focusables(scope);
+      const inColumn = column ? items.filter(e => column.contains(e)) : [];
+      const nearest = (inColumn.length ? inColumn : items)
         .map(e => ({ e, r: e.getBoundingClientRect() }))
         .sort((a, b) => Math.hypot(a.r.left + a.r.width / 2 - x, a.r.top + a.r.height / 2 - y) -
           Math.hypot(b.r.left + b.r.width / 2 - x, b.r.top + b.r.height / 2 - y))[0]?.e;
@@ -493,7 +532,7 @@ export class GamepadNavigationService {
 
     if (scope && current) {
       const r = current.getBoundingClientRect();
-      this.lastFocus = { scope, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      this.lastFocus = { scope, column: current.closest('[data-nav-column]'), x: r.left + r.width / 2, y: r.top + r.height / 2 };
     }
     const row = current?.closest('.row, .binding, .option, .member, .friend, .friend-row, .invite, label') ?? current ?? undefined;
     if (row !== this.rowElement) {

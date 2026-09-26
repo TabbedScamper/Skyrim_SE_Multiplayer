@@ -2,6 +2,58 @@
 
 #include <Messages/DoorVoteData.h>
 #include <array>
+#include <cstddef>
+#include <cstdint>
+
+// Kept independent of engine objects so the input and follow policy can be tested offline.
+namespace DoorVotePolicy
+{
+enum class Skip
+{
+    None, MissingReference, NotDoor, NotLoadDoor, NotPlayer, NotPlayerInput,
+    Offline, NoParty, TooFewMembers, Locked, FreeDoor, Loading, MissingCell,
+    MissingDestination, TooFar, UnmappedDoor, UnmappedCell, UnmappedDestination,
+    UnmappedWorldSpace, SendFailed, Count
+};
+
+constexpr Skip Decide(bool aReference, bool aDoor, bool aTeleport, bool aPlayer,
+    bool aInputCall, bool aOnline, bool aInParty, size_t aMembers) noexcept
+{
+    if (!aReference) return Skip::MissingReference;
+    if (!aDoor) return Skip::NotDoor;
+    if (!aTeleport) return Skip::NotLoadDoor;
+    if (!aPlayer) return Skip::NotPlayer;
+    if (!aInputCall) return Skip::NotPlayerInput;
+    if (!aOnline) return Skip::Offline;
+    if (!aInParty) return Skip::NoParty;
+    if (aMembers < 2) return Skip::TooFewMembers;
+    return Skip::None;
+}
+
+constexpr bool IsInputCall(uintptr_t aCaller, uintptr_t aPick, uintptr_t aChoice = 0) noexcept
+{
+    return (aPick != 0 && aCaller == aPick + 0x112) ||
+        (aChoice != 0 && aCaller == aChoice + 0x73);
+}
+
+constexpr bool IsAutomaticEntry(uint32_t aDistanceBand, bool aEntering) noexcept
+{
+    return aDistanceBand == 1 && aEntering;
+}
+
+constexpr bool LostReadyVoter(bool aSameVote, uint32_t aPreviousReady, uint32_t aReady,
+    bool aLocalReady, bool aLoading) noexcept
+{
+    return aSameVote && aLocalReady && !aLoading && aReady < aPreviousReady;
+}
+
+constexpr bool CanFollow(bool aPendingVote, uintptr_t aCell, uintptr_t aLeaderCell,
+    uintptr_t aWorldSpace, uintptr_t aLeaderWorldSpace) noexcept
+{
+    return !aPendingVote && aCell && aLeaderCell &&
+        (aCell == aLeaderCell || (aWorldSpace && aWorldSpace == aLeaderWorldSpace));
+}
+} // namespace DoorVotePolicy
 
 struct World;
 struct TransportService;
@@ -19,8 +71,10 @@ struct DoorVoteService
     ~DoorVoteService();
 
     bool TryHold(TESObjectREFR* aDoor, TESObjectREFR* aActivator, uint8_t aUnk1,
-        TESBoundObject* aObject, int32_t aCount, char aDefaultProcessing, const void* aCaller) noexcept;
+        TESBoundObject* aObject, int32_t aCount, char aDefaultProcessing, const void* aCaller,
+        bool aAtAutomaticDoor = false) noexcept;
     bool IsVoteDoor(TESObjectREFR* aDoor) noexcept;
+    bool HasPendingVote() const noexcept { return m_deadline != 0 || m_state.VoteId != 0; }
 
 private:
     void InitKeywords() noexcept;
