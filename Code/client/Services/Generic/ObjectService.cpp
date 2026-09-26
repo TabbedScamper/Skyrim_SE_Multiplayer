@@ -3132,6 +3132,25 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     target.Rotation[2] = rotation.z;
                     target.Rotation[3] = rotation.w;
                     s_stepTargetsBuilding.push_back(target);
+                    // Keyframed here (parked on arrival): a keyframed body follows its scene node, so
+                    // placing only the body left the cart where this PC's scene parked it (21 units off
+                    // the host's, for the whole stop). Put the reference at the host's pose too.
+                    if (body.State.motionType == 4)
+                    {
+                        const auto lerpAngle = [](float a, float b, float s)
+                        { return a + std::remainder(b - a, static_cast<float>(TiltedPhoques::Pi * 2)) * s; };
+                        const NiPoint3 refPosition{pA->Position.x + (pB->Position.x - pA->Position.x) * t,
+                            pA->Position.y + (pB->Position.y - pA->Position.y) * t, pA->Position.z + (pB->Position.z - pA->Position.z) * t};
+                        const glm::vec3 moved{refPosition.x - pReference->position.x, refPosition.y - pReference->position.y,
+                            refPosition.z - pReference->position.z};
+                        if (glm::length(moved) > 0.05f)
+                        {
+                            pReference->position = refPosition;
+                            pReference->SetRotation(lerpAngle(pA->Rotation.x, pB->Rotation.x, t), lerpAngle(pA->Rotation.y, pB->Rotation.y, t),
+                                lerpAngle(pA->Rotation.z, pB->Rotation.z, t));
+                            pReference->Update3DPosition(true);
+                        }
+                    }
                 }
                 ++it;
                 continue;
