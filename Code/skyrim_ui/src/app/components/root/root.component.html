@@ -1,3 +1,4 @@
+<app-dialogue-listen></app-dialogue-listen>
 <div *ngIf="(creatorView$ | async) as creator" class="creator-view-banner-host">
   <div *ngIf="creator.visible" class="creator-view-banner">
     <span class="creator-view-player">PLAYER {{ creator.player }}/{{ creator.count }}</span>
@@ -40,6 +41,10 @@
 </ng-container>
 
 <ng-container *ngIf="inGame$ | async">
+  <div *ngIf="(pauseMenuAvailable$ | async) && !(active$ | async)" class="pause-menu-shortcuts">
+    <span><kbd>F6</kbd> Co-op</span>
+    <span><kbd>F7</kbd> Mod options</span>
+  </div>
   <ng-container *ngIf="!(menuOpen$ | async)">
     <app-debug></app-debug>
 
@@ -52,6 +57,7 @@
 
   <app-notifications [@notifications]="!(active$ | async)"></app-notifications>
   <div
+    [hidden]="pausePanelOpen"
     [@controls]="active$ | async"
     class="app-root-controls"
     [class.background-element]="view$ | async"
@@ -146,10 +152,11 @@
         <app-server-list (done)="closeView()"></app-server-list>
       </app-popup>
       <app-popup *ngSwitchCase="RootView.SETTINGS" data-popup="settings">
-        <app-settings
-          (done)="closeView()"
-          (settingsUpdated)="updateGroupPosition()"
-        ></app-settings>
+        <app-settings (done)="closeView()"></app-settings>
+      </app-popup>
+      <app-popup *ngSwitchCase="RootView.COOP_LOBBY" data-popup="coopLobby">
+        <app-title-coop-lobby [inGame]="true" (done)="closeView()"
+          (settingsRequested)="setView(RootView.SETTINGS)"></app-title-coop-lobby>
       </app-popup>
       <app-popup
         *ngSwitchCase="RootView.PLAYER_MANAGER"

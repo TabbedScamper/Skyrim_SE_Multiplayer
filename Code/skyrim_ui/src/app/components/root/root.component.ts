@@ -45,6 +45,8 @@ export class RootComponent implements OnInit {
   inGame$ = this.client.inGameStateChange.asObservable();
   titleScreen$ = this.client.titleScreenStateChange.asObservable();
   active$ = this.client.activationStateChange.asObservable();
+  pauseMenuAvailable$ = this.client.pauseMenuAvailable.asObservable();
+  public pausePanelOpen = false;
   connectionInProgress$ = this.client.isConnectionInProgressChange.asObservable();
   revealingInProgress$ = false;
   public debugPromptText: string | null = null;
@@ -82,6 +84,12 @@ export class RootComponent implements OnInit {
     this.client.titleLobbyRequested
       .pipe(takeUntil(this.destroy$))
       .subscribe(() => this.setView(View.COOP_LOBBY));
+    this.client.pausePanelRequested
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(panel => {
+        this.pausePanelOpen = true;
+        this.setView(panel === 'coop' ? View.COOP_LOBBY : View.SETTINGS);
+      });
     this.client.debugPrompt
       .pipe(takeUntil(this.destroy$))
       .subscribe(payload => {
@@ -123,9 +131,12 @@ export class RootComponent implements OnInit {
           state &&
           !this.uiRepository.isViewOpen()
         ) {
-          setTimeout(() => this.chatComp.focus(), 100);
+          setTimeout(() => {
+            if (!this.uiRepository.isViewOpen()) this.chatComp?.focus();
+          }, 100);
         }
         if (!state) {
+          this.pausePanelOpen = false;
           this.closeView();
         }
       });
@@ -154,7 +165,8 @@ export class RootComponent implements OnInit {
 
   public closeView() {
     this.uiRepository.openView(null);
-    if (this.client.titleScreenStateChange.getValue()) {
+    if (this.client.titleScreenStateChange.getValue() || this.pausePanelOpen) {
+      this.pausePanelOpen = false;
       this.client.deactivate();
     }
   }

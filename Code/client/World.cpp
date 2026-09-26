@@ -12,6 +12,7 @@
 #include <Services/DiscordService.h>
 #include <Services/ObjectService.h>
 #include <Services/QuestService.h>
+#include <Services/Generic/QuestItemService.h>
 #include <Services/ActorValueService.h>
 #include <Services/InventoryService.h>
 #include <Services/MagicService.h>
@@ -20,6 +21,7 @@
 #include <Services/StringCacheService.h>
 #include <Services/PlayerService.h>
 #include <Services/CombatService.h>
+#include <Services/Generic/StealthService.h>
 #include <Services/WeatherService.h>
 #include <Services/MapService.h>
 #include <Services/SteamLobbyService.h>
@@ -27,9 +29,13 @@
 #include <Services/GameTestService.h>
 #include <Services/CameraService.h>
 #include <Services/SceneTimelineService.h>
+#include <Services/Generic/SceneTurnsService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/DoorVoteService.h>
+#include <Services/Generic/BusyLockService.h>
 #include <Services/TriggerGate.h>
+#include <Services/Generic/HeadTrackService.h>
+#include <Services/Generic/DialogueListenService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -147,6 +153,7 @@ World::World()
     , m_lastFrameTime{std::chrono::high_resolution_clock::now()}
 {
     ctx().emplace<ImguiService>();
+    ctx().emplace<HeadTrackService>(*this, m_dispatcher);
     ctx().emplace<DiscoveryService>(*this, m_dispatcher);
     ctx().emplace<OverlayService>(*this, m_transport, m_dispatcher);
     ctx().emplace<InputService>(ctx().at<OverlayService>());
@@ -157,11 +164,15 @@ World::World()
     ctx().emplace<ObjectService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CalendarService>(*this, m_dispatcher, m_transport);
     ctx().emplace<QuestService>(*this, m_dispatcher);
+    ctx().emplace<QuestItemService>(*this, m_dispatcher, m_transport);
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<DialogueListenService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<BusyLockService>(*this, m_dispatcher, m_transport);
     ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
     ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<SceneTurnsService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CorpseRagdollService>(*this, m_dispatcher, m_transport);
     ctx().emplace<ActorValueService>(*this, m_dispatcher, m_transport);
     ctx().emplace<InventoryService>(*this, m_dispatcher, m_transport);
@@ -171,6 +182,7 @@ World::World()
     ctx().emplace<ReviveService>(*this, m_dispatcher, m_transport);
     ctx().emplace<StringCacheService>(m_dispatcher);
     ctx().emplace<CombatService>(*this, m_transport, m_dispatcher);
+    ctx().emplace<StealthService>(*this, m_dispatcher, m_transport);
     ctx().emplace<WeatherService>(*this, m_transport, m_dispatcher);
     ctx().emplace<MapService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SteamLobbyService>(*this, m_dispatcher);
@@ -258,6 +270,26 @@ QuestService& World::GetQuestService() noexcept
 DoorVoteService& World::GetDoorVoteService() noexcept
 {
     return ctx().at<DoorVoteService>();
+}
+
+BusyLockService& World::GetBusyLockService() noexcept
+{
+    return ctx().at<BusyLockService>();
+}
+
+SceneTurnsService& World::GetSceneTurnsService() noexcept
+{
+    return ctx().at<SceneTurnsService>();
+}
+
+HeadTrackService& World::GetHeadTrackService() noexcept
+{
+    return ctx().at<HeadTrackService>();
+}
+
+DialogueListenService& World::GetDialogueListenService() noexcept
+{
+    return ctx().at<DialogueListenService>();
 }
 
 ModSystem& World::GetModSystem() noexcept

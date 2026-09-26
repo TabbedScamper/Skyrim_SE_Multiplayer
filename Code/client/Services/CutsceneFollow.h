@@ -12,6 +12,8 @@ struct World;
 // the leader by PartyService).
 namespace CutsceneFollow
 {
+// Safe to read from animation worker threads.
+bool IsActive() noexcept;
 // Per frame, from PartyService. aActive: in a party session and the leader has no free control.
 void Update(World& aWorld, bool aActive, bool aIsLeader, uint32_t aLeaderPlayerId) noexcept;
 } // namespace CutsceneFollow

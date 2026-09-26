@@ -4,6 +4,7 @@
 #include <Services/CharacterService.h>
 #include <Services/ObjectService.h>
 #include <Services/QuestService.h>
+#include <Services/QuestItemService.h>
 #include <Services/ServerListService.h>
 #include <Services/ActorValueService.h>
 #include <Services/AdminService.h>
@@ -20,6 +21,8 @@
 #include <Services/CameraService.h>
 #include <Services/SceneTimelineService.h>
 #include <Services/DoorVoteService.h>
+#include <Services/DialogueListenService.h>
+#include <Services/BusyLockService.h>
 #include <Services/ReviveService.h>
 
 #include <CampaignLedger.h>
@@ -51,8 +54,11 @@ World::World()
     auto& modsComponent = ctx().emplace<ModsComponent>(sCampaignModManifestPath.value());
     ctx().emplace<ServerListService>(*this, m_dispatcher);
     ctx().emplace<QuestService>(*this, m_dispatcher);
+    ctx().emplace<QuestItemService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher);
+    ctx().emplace<DialogueListenService>(*this, m_dispatcher);
+    ctx().emplace<BusyLockService>(*this, m_dispatcher);
     ctx().emplace<ReviveService>(*this, m_dispatcher);
     ctx().emplace<CameraService>(*this, m_dispatcher);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher);

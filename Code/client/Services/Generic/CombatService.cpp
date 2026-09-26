@@ -15,6 +15,8 @@
 #include <Forms/TESObjectWEAP.h>
 #include <Forms/TESAmmo.h>
 #include <Games/ActorExtension.h>
+#include <Combat/PlayerCombat.h>
+#include <PlayerCharacter.h>
 
 CombatService::CombatService(World& aWorld, TransportService& aTransport, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -199,52 +201,54 @@ void CombatService::OnHitEvent(const HitEvent& acEvent) const noexcept
 #endif
 }
 
-void CombatService::RunTargetUpdates(const float acDelta) const noexcept
+void CombatService::RunTargetUpdates(const float) const noexcept
 {
-#if 0
-    static std::chrono::steady_clock::time_point lastSendTimePoint;
-    constexpr auto cDelayBetweenUpdates = 200ms;
-
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastSendTimePoint < cDelayBetweenUpdates)
+    const auto& party = m_world.GetPartyService();
+    if (!m_transport.IsConnected() || !party.IsInParty() || !party.IsLeader() ||
+        !party.GetStartEpoch() || party.GetSessionState() < 2)
         return;
+    static uint64_t nextUpdate{};
+    const auto now = GetTickCount64();
+    if (now < nextUpdate)
+        return;
+    nextUpdate = now + 200;
 
-    lastSendTimePoint = now;
-
-    const auto view = m_world.view<FormIdComponent, CombatComponent>();
-
-    Vector<entt::entity> toRemove{};
-
-    for (const auto entity : view)
+    using IsHostile = bool(Actor*, Actor*);
+    POINTER_SKYRIMSE(IsHostile, isHostile, 37537);
+    POINTER_SKYRIMSE(IsHostile, isCombatTarget, 38571);
+    POINTER_SKYRIMSE(IsHostile, canAttack, 37532);
+    const auto observers = PlayerCombat::Observers();
+    const auto players = m_world.view<RemoteComponent, FormIdComponent, PlayerComponent>();
+    for (const auto entity : players)
     {
-        auto& combatComponent = view.get<CombatComponent>(entity);
-        combatComponent.Timer = combatComponent.Timer - acDelta;
-
-        if (combatComponent.Timer <= 0.f)
-        {
-            toRemove.push_back(entity);
+        auto* target = Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id));
+        if (!target || !target->GetExtension()->IsRemotePlayer() || !target->currentProcess ||
+            target->IsDead() || target->IsDisabled() || !PlayerCombat::HasSnapshot(target))
             continue;
-        }
-
-        auto* pTarget = Cast<Actor>(TESForm::GetById(combatComponent.TargetFormId));
-        if (!pTarget)
+        for (auto* actor : observers)
         {
-            spdlog::warn(__FUNCTION__ ": combat target not found, form id {:X}", combatComponent.TargetFormId);
-            toRemove.push_back(entity);
-            continue;
-        }
-
-        const auto& formIdComponent = view.get<FormIdComponent>(entity);
-        auto* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
-        if (!pActor)
-        {
-            spdlog::error(__FUNCTION__ ": actor not found, form id {:X}", formIdComponent.Id);
-            toRemove.push_back(entity);
-            continue;
+            if (isCombatTarget(actor, target) || !canAttack(actor, target))
+                continue;
+            bool partyOpponent = isCombatTarget(actor, PlayerCharacter::Get());
+            if (!partyOpponent)
+            {
+                for (const auto other : players)
+                {
+                    auto* ally = Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(other).Id));
+                    if (ally && ally->GetExtension()->IsRemotePlayer() && PlayerCombat::HasSnapshot(ally) && isCombatTarget(actor, ally))
+                    {
+                        partyOpponent = true;
+                        break;
+                    }
+                }
+            }
+            if ((partyOpponent || isHostile(actor, target)) && PlayerCombat::DetectionLevel(actor, target) > 0)
+            {
+                // Native StartCombat adds an opponent to the group. The standard selector still
+                // scores detection, distance, reachability and attacker count; no target lock.
+                actor->StartCombat(target);
+                spdlog::debug("Player combat candidate npc={:X} player={:X}", actor->formID, target->formID);
+            }
         }
     }
-
-    for (const auto entity : toRemove)
-        m_world.remove<CombatComponent>(entity);
-#endif
 }

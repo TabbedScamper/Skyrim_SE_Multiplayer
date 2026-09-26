@@ -3,16 +3,22 @@
 #include <World.h>
 #include <Services/PartyService.h>
 #include <Services/TransportService.h>
+#include <Services/CutsceneFollow.h>
+#include <Services/OverlayService.h>
 
 #include <Events/UpdateEvent.h>
 #include <Events/DisconnectedEvent.h>
 
 #include <Messages/CameraStateRequest.h>
 #include <Messages/NotifyCameraState.h>
+#include <Messages/RequestScriptedCamera.h>
+#include <Messages/NotifyScriptedCamera.h>
 
 #include <Games/Skyrim/Camera/PlayerCamera.h>
 #include <Games/Skyrim/Camera/TESCameraState.h>
 #include <Games/Skyrim/PlayerCharacter.h>
+#include <Games/Skyrim/AI/Movement/PlayerControls.h>
+#include <Games/Skyrim/Forms/TESIdleForm.h>
 #include <Games/Skyrim/Misc/BSFixedString.h>
 #include <Games/Skyrim/Interface/UI.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
@@ -27,18 +33,19 @@
 namespace
 {
 constexpr uint64_t kPublishIntervalMs = 33;
-// The 2026-09-22 two-PC intro test showed direct root/world camera writes
-// flipping the follower view. Keep the authority stream and diagnostics, but
-// do not mutate the native camera until its state/local-space contract is
-// validated independently of cart physics.
+constexpr uint64_t kScriptedTimeoutMs = 1000;
+std::atomic<uint8_t> s_walkingCamera{};
+std::atomic<uint32_t> s_walkingStartIdle{};
+std::atomic<uint32_t> s_walkingEndIdle{};
+// Legacy transform probe: the 2026-09-22 two-PC intro test showed direct root/world camera
+// writes flipping the follower view. Scripted authority below instead uses native GetRotation
+// and camera policy; it does not enable this matrix-copy experiment.
 // The full host rotation made the follower view flip in the paired intro.
 // SmoothCam's source-backed native path first establishes position only;
 // trial that independently before touching the camera orientation again.
 constexpr bool kEnableCameraRotationWrites = false;
-// TESCamera::SetState AE ID 33026 is source-backed but has not yet been
-// exercised on runtime 1.7.104. Keep native state mutation disabled until the
-// explicit probe passes; transform/FOV authority remains active when states
-// already agree.
+// Keep state changes disabled in the old position probe. The separate scripted path limits
+// transitions to states with source-inspected Begin/End contracts and logs their outcomes.
 constexpr bool kEnableNativeStateTransitionProbe = false;
 
 bool IsFiniteTransform(const NiTransform& acTransform) noexcept
@@ -82,8 +89,293 @@ CameraService::CameraService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     , m_updateConnection(aDispatcher.sink<UpdateEvent>().connect<&CameraService::OnUpdate>(this))
     , m_disconnectedConnection(aDispatcher.sink<DisconnectedEvent>().connect<&CameraService::OnDisconnected>(this))
     , m_cameraStateConnection(aDispatcher.sink<NotifyCameraState>().connect<&CameraService::OnCameraState>(this))
+    , m_scriptedCameraConnection(aDispatcher.sink<NotifyScriptedCamera>().connect<&CameraService::OnScriptedCamera>(this))
 {
     s_instance = this;
+}
+
+void CameraService::NoteWalkingCameraIdle(const uint32_t aFormId, const bool aStart) noexcept
+{
+    (aStart ? s_walkingStartIdle : s_walkingEndIdle).store(aFormId, std::memory_order_relaxed);
+    s_walkingCamera.store(aStart ? 2 : 1, std::memory_order_release);
+}
+
+bool CameraService::HasScriptedCamera() const noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    return m_transport.IsConnected() && party.IsInParty() && !party.IsLeader() &&
+        party.GetSessionState() >= 2 && CutsceneFollow::IsActive() && m_scripted.Active &&
+        m_scripted.Epoch == party.GetStartEpoch() && m_scriptedLeader == party.GetLeaderPlayerId() &&
+        GetTickCount64() - m_scriptedReceivedMs < kScriptedTimeoutMs && !IsPresentationBlocked() &&
+        !m_world.GetOverlayService().GetActive();
+}
+
+void CameraService::ApplyScriptedControls(const ScriptedCameraState& acState) noexcept
+{
+    auto* pMap = BSInputEnableManager::Get();
+    auto* pControls = PlayerControls::GetInstance();
+    if (!pMap || !pControls || !pControls->pLookHandler || !pControls->togglePOVHandler)
+        return;
+    // ControlMap::ToggleControls, ID 68545, VA 140CEFAA0: +120 is live,
+    // +124 is a saved native snapshot. Never change the saved snapshot.
+    const uint32_t current = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pMap) + 0x120) &
+        ScriptedCameraState::kCameraControls;
+    const bool look = pControls->pLookHandler->isEnabled;
+    const bool pov = pControls->togglePOVHandler->isEnabled;
+    const bool script = pControls->Data.povScriptMode;
+    if (!m_scriptedControlsHeld)
+    {
+        m_savedCameraControls = current;
+        m_savedLookHandler = look;
+        m_savedPovHandler = pov;
+        m_savedPovScript = script;
+    }
+    else
+    {
+        // Remember local script changes made while the policy is held, for disconnect/timeout.
+        const uint32_t changed = current ^ m_appliedCameraControls;
+        m_savedCameraControls = (m_savedCameraControls & ~changed) | (current & changed);
+        if (look != m_appliedLookHandler) m_savedLookHandler = look;
+        if (pov != m_appliedPovHandler) m_savedPovHandler = pov;
+        if (script != m_appliedPovScript) m_savedPovScript = script;
+    }
+    m_scriptedControlsHeld = true;
+    m_scriptedReleasePending = true;
+    const uint32_t desired = acState.Controls;
+    if (const auto disable = current & ~desired)
+        pMap->EnableOtherEvent(disable, false, false);
+    if (const auto enable = desired & ~current)
+        pMap->EnableOtherEvent(enable, true, false);
+    pControls->pLookHandler->isEnabled = acState.FreeLook;
+    pControls->togglePOVHandler->isEnabled = acState.FreePov;
+    pControls->Data.povScriptMode = !acState.FreePov;
+    if (!acState.FreeLook)
+    {
+        pControls->Data.LookInputVec = {};
+        pControls->Data.PrevLookVec = {};
+    }
+    m_appliedCameraControls = desired;
+    m_appliedLookHandler = acState.FreeLook;
+    m_appliedPovHandler = acState.FreePov;
+    m_appliedPovScript = !acState.FreePov;
+}
+
+void CameraService::ApplyWalkingCamera(const ScriptedCameraState& acState) noexcept
+{
+    m_walkingCameraHeld |= s_walkingCamera.load(std::memory_order_acquire) == 2;
+    if (acState.WalkingEnd)
+        m_walkingEndForm = m_world.GetModSystem().GetGameId(acState.WalkingEnd);
+    if (!acState.Walking || acState.Walking == s_walkingCamera.load(std::memory_order_acquire) ||
+        GetTickCount64() < m_nextWalkingRetryMs)
+        return;
+    const auto id = acState.Walking == 2 ? acState.WalkingStart : acState.WalkingEnd;
+    auto* pIdle = Cast<TESIdleForm>(TESForm::GetById(m_world.GetModSystem().GetGameId(id)));
+    auto* pPlayer = PlayerCharacter::Get();
+    if (!pIdle || !pPlayer)
+        return;
+    m_nextWalkingRetryMs = GetTickCount64() + 500;
+    const bool played = pPlayer->PlayIdle(pIdle);
+    if (played)
+    {
+        NoteWalkingCameraIdle(pIdle->formID, acState.Walking == 2);
+        m_walkingCameraHeld |= acState.Walking == 2;
+        m_nextWalkingRetryMs = 0;
+    }
+    spdlog::info("Scripted camera: walking={} idle={:08X} played={}", acState.Walking, pIdle->formID, played);
+}
+
+void CameraService::ReleaseScriptedCamera() noexcept
+{
+    if (m_scriptedControlsHeld)
+    {
+        auto* pMap = BSInputEnableManager::Get();
+        auto* pControls = PlayerControls::GetInstance();
+        if (pMap)
+        {
+            const uint32_t current = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pMap) + 0x120);
+            const uint32_t owned = ~(current ^ m_appliedCameraControls) & ScriptedCameraState::kCameraControls;
+            if (const auto disable = owned & ~m_savedCameraControls & current)
+                pMap->EnableOtherEvent(disable, false, false);
+            if (const auto enable = owned & m_savedCameraControls & ~current)
+                pMap->EnableOtherEvent(enable, true, false);
+        }
+        if (pControls)
+        {
+            if (pControls->pLookHandler && pControls->pLookHandler->isEnabled == m_appliedLookHandler)
+                pControls->pLookHandler->isEnabled = m_savedLookHandler;
+            if (pControls->togglePOVHandler && pControls->togglePOVHandler->isEnabled == m_appliedPovHandler)
+                pControls->togglePOVHandler->isEnabled = m_savedPovHandler;
+            if (pControls->Data.povScriptMode == m_appliedPovScript)
+                pControls->Data.povScriptMode = m_savedPovScript;
+        }
+        m_scriptedControlsHeld = false;
+        spdlog::info("Scripted camera: local camera controls released");
+    }
+    if (m_walkingCameraHeld && s_walkingCamera.load(std::memory_order_acquire) == 2)
+    {
+        if (GetTickCount64() < m_nextWalkingRetryMs)
+            return;
+        m_nextWalkingRetryMs = GetTickCount64() + 500;
+        const auto endForm = m_walkingEndForm ? m_walkingEndForm : s_walkingEndIdle.load(std::memory_order_relaxed);
+        auto* pIdle = Cast<TESIdleForm>(TESForm::GetById(endForm));
+        auto* pPlayer = PlayerCharacter::Get();
+        if (!pPlayer || !pPlayer->GetNiNode())
+            return;
+        // A disconnect can precede the first observed end idle. In that case use the same
+        // graph event by name, without a vanilla form ID or a quest-specific fallback.
+        static BSFixedString endEvent("IdleWalkingCameraEnd");
+        if (!(pIdle ? pPlayer->PlayIdle(pIdle) : pPlayer->SendAnimationEvent(&endEvent)))
+            return;
+        s_walkingCamera.store(1, std::memory_order_release);
+        m_nextWalkingRetryMs = 0;
+    }
+    m_walkingCameraHeld = false;
+    m_walkingEndForm = 0;
+}
+
+void CameraService::OnScriptedCamera(const NotifyScriptedCamera& acMessage) noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    const auto& state = acMessage.State;
+    if (!m_transport.IsConnected() || !party.IsInParty() || party.IsLeader() || party.GetSessionState() < 2 ||
+        acMessage.LeaderId != party.GetLeaderPlayerId() || state.Epoch != party.GetStartEpoch() || !state.IsValid())
+        return;
+    if (m_scriptedLeader == acMessage.LeaderId && m_scripted.Epoch == state.Epoch && state.Sequence <= m_scripted.Sequence)
+        return;
+    m_scripted = state;
+    m_scriptedLeader = acMessage.LeaderId;
+    m_scriptedReceivedMs = GetTickCount64();
+}
+
+void CameraService::UpdateScriptedCamera() noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    const auto now = GetTickCount64();
+    if (m_scriptedEpoch != party.GetStartEpoch())
+    {
+        ReleaseScriptedCamera();
+        m_scripted = {};
+        m_scriptedEpoch = party.GetStartEpoch();
+        m_scriptedNextSendMs = 0;
+        m_scriptedReleasePending = false;
+        s_walkingCamera.store(0, std::memory_order_release);
+    }
+    auto* pCamera = PlayerCamera::Get();
+    auto* pPlayer = PlayerCharacter::Get();
+    if (party.IsLeader())
+    {
+        ReleaseScriptedCamera();
+        if (IsPresentationBlocked() || m_world.GetOverlayService().GetActive())
+            return;
+        const bool active = CutsceneFollow::IsActive();
+        if (!party.GetStartEpoch() || party.GetSessionState() < 2 || !pCamera || !pCamera->state ||
+            pCamera->state->id >= 13 || !pCamera->cameraNode || !pPlayer || !pPlayer->parentCell || !pPlayer->GetNiNode() ||
+            (active == m_scriptedWasActive && now < m_scriptedNextSendMs))
+            return;
+        auto* pMap = BSInputEnableManager::Get();
+        auto* pControls = PlayerControls::GetInstance();
+        if (!pMap || !pControls || !pControls->pLookHandler || !pControls->togglePOVHandler)
+            return;
+        RequestScriptedCamera request;
+        auto& state = request.State;
+        state.Epoch = party.GetStartEpoch();
+        state.Sequence = ++m_scriptedSequence;
+        state.Active = active;
+        state.StateId = static_cast<uint8_t>(pCamera->state->id);
+        state.Controls = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pMap) + 0x120) &
+            ScriptedCameraState::kCameraControls;
+        state.FreeLook = (state.Controls & 2) && pControls->pLookHandler->isEnabled && !pControls->bBlockPlayerInput;
+        state.FreePov = (state.Controls & 0x20) && pControls->togglePOVHandler->isEnabled &&
+            !pControls->Data.povScriptMode && !pControls->Data.povBeastMode && !pControls->bBlockPlayerInput;
+        state.Pitch = pPlayer->rotation.x;
+        state.Heading = pPlayer->rotation.z;
+        state.Walking = s_walkingCamera.load(std::memory_order_acquire);
+        m_world.GetModSystem().GetServerModId(s_walkingStartIdle.load(std::memory_order_relaxed), state.WalkingStart);
+        m_world.GetModSystem().GetServerModId(s_walkingEndIdle.load(std::memory_order_relaxed), state.WalkingEnd);
+        // Same quaternion contract consumed by native state Update, before camera shake and node transforms.
+        (*reinterpret_cast<CameraRotationFn**>(pCamera->state))[4](pCamera->state, state.Rotation.data());
+        if (!state.IsValid())
+            return;
+        const uint8_t policy = state.Controls | (state.FreeLook ? 4 : 0) | (state.FreePov ? 8 : 0) | (active ? 0x80 : 0);
+        if (state.StateId != m_scriptedLogState || policy != m_scriptedLogPolicy)
+        {
+            spdlog::info("Scripted camera host: active={} state={} controls={:02X} freeLook={} freePov={} walking={}",
+                active, state.StateId, state.Controls, state.FreeLook, state.FreePov, state.Walking);
+            m_scriptedLogState = state.StateId;
+            m_scriptedLogPolicy = policy;
+        }
+        m_transport.Send(request);
+        m_scriptedWasActive = active;
+        m_scriptedNextSendMs = now + (active ? kPublishIntervalMs : 1000);
+        return;
+    }
+    if (!HasScriptedCamera() || !pCamera || !pCamera->state || !pPlayer)
+    {
+        // A final host release carries the current policy, avoiding restoration of old cutscene locks.
+        if (m_scriptedReleasePending && !m_scripted.Active && m_scripted.Epoch == party.GetStartEpoch() &&
+            m_scriptedLeader == party.GetLeaderPlayerId() && now - m_scriptedReceivedMs < kScriptedTimeoutMs &&
+            !IsPresentationBlocked() && !m_world.GetOverlayService().GetActive())
+        {
+            ApplyScriptedControls(m_scripted);
+            m_savedCameraControls = m_appliedCameraControls;
+            m_savedLookHandler = m_appliedLookHandler;
+            m_savedPovHandler = m_appliedPovHandler;
+            m_savedPovScript = m_appliedPovScript;
+            m_scriptedReleasePending = false;
+        }
+        ReleaseScriptedCamera();
+        return;
+    }
+    ApplyScriptedControls(m_scripted);
+    ApplyWalkingCamera(m_scripted);
+    const auto localState = pCamera->state->id;
+    if (localState != m_scripted.StateId)
+    {
+        // These native states bind their own local camera objects in Begin. Transitional/menu,
+        // mount and VATS states require additional local engine context; let Skyrim create those.
+        if (m_scripted.StateId == 0)
+            pCamera->ForceFirstPerson();
+        else if (m_scripted.StateId == 9)
+            pCamera->ForceThirdPerson();
+        else if (m_scripted.StateId == 5 || m_scripted.StateId == 8)
+        {
+            if (auto* pTarget = pCamera->GetStateById(m_scripted.StateId))
+                pCamera->SetState(pTarget);
+        }
+    }
+    if (!m_scripted.FreeLook)
+        pPlayer->SetRotation(m_scripted.Pitch, pPlayer->rotation.y, m_scripted.Heading);
+    const uint8_t policy = m_scripted.Controls | (m_scripted.FreeLook ? 4 : 0) | (m_scripted.FreePov ? 8 : 0);
+    if (m_scripted.StateId != m_scriptedLogState || policy != m_scriptedLogPolicy ||
+        pCamera->state->id != m_scriptedLogLocalState)
+    {
+        spdlog::info("Scripted camera follower: local={} host={} controls={:02X} freeLook={} freePov={} walking={}",
+            pCamera->state->id, m_scripted.StateId, m_scripted.Controls, m_scripted.FreeLook, m_scripted.FreePov, m_scripted.Walking);
+        m_scriptedLogState = m_scripted.StateId;
+        m_scriptedLogPolicy = policy;
+        m_scriptedLogLocalState = static_cast<uint8_t>(pCamera->state->id);
+    }
+}
+
+void CameraService::HookCameraRotation(TESCameraState* apState, float* apRotation) noexcept
+{
+    auto* pService = s_instance;
+    if (!pService || !apState || !apRotation)
+        return;
+    auto* pVtable = *reinterpret_cast<void***>(apState);
+    for (size_t i = 0; i < pService->m_hookCount; ++i)
+    {
+        if (pService->m_hookedVtables[i] == pVtable)
+        {
+            if (pService->m_originalRotations[i])
+                pService->m_originalRotations[i](apState, apRotation);
+            break;
+        }
+    }
+    auto* pCamera = PlayerCamera::Get();
+    if (pCamera && apState->camera == pCamera && pCamera->state == apState &&
+        apState->id == pService->m_scripted.StateId && !pService->m_scripted.FreeLook && pService->HasScriptedCamera())
+        std::copy(pService->m_scripted.Rotation.begin(), pService->m_scripted.Rotation.end(), apRotation);
 }
 
 CameraService::Diagnostic CameraService::GetDiagnostic() const noexcept
@@ -130,7 +422,7 @@ bool CameraService::IsPresentationBlocked() const noexcept
 {
     const auto* pUI = UI::Get();
     return !pUI || pUI->GetMenuOpen(BSFixedString("Loading Menu")) ||
-        pUI->GetMenuOpen(BSFixedString("RaceSex Menu"));
+        pUI->GetMenuOpen(BSFixedString("RaceSex Menu")) || pUI->GetMenuOpen(BSFixedString("Main Menu"));
 }
 
 bool CameraService::Capture(CameraStateSnapshot& aSnapshot) const noexcept
@@ -250,6 +542,19 @@ void CameraService::HookCameraUpdate(TESCameraState* apState, void* apNextState)
     auto* pService = s_instance;
     if (!pService || !apState)
         return;
+
+    // Papyrus can change controls/states after UpdateEvent. Reconcile immediately before the
+    // native evaluation as well. TESCamera::Update (33025, 140558E70) reads currentState again
+    // after this callback, so evaluate the new state's original Update after a transition.
+    auto* pCamera = PlayerCamera::Get();
+    if (pCamera && pCamera->state == apState && pService->m_transport.IsConnected() &&
+        pService->m_world.GetPartyService().IsInParty() && !pService->m_world.GetPartyService().IsLeader())
+    {
+        pService->UpdateScriptedCamera();
+        apState = pCamera->state;
+        if (!apState)
+            return;
+    }
 
     auto* pVtable = *reinterpret_cast<void***>(apState);
     CameraUpdateFn pOriginal = nullptr;
@@ -471,6 +776,7 @@ void CameraService::InstallStateUpdateHooks() noexcept
             continue;
         m_hookedVtables[m_hookCount] = pVtable;
         m_originalUpdates[m_hookCount] = pOriginal;
+        m_originalRotations[m_hookCount] = TiltedPhoques::HookVTable(pState, 4, &CameraService::HookCameraRotation);
         ++m_hookCount;
     }
 }
@@ -485,6 +791,8 @@ void CameraService::OnUpdate(const UpdateEvent&) noexcept
         Clear();
         return;
     }
+
+    UpdateScriptedCamera();
 
     if (party.IsLeader())
     {
@@ -530,6 +838,17 @@ void CameraService::OnCameraState(const NotifyCameraState& acMessage) noexcept
 
 void CameraService::Clear() noexcept
 {
+    ReleaseScriptedCamera();
+    m_scripted = {};
+    m_scriptedReceivedMs = 0;
+    m_scriptedNextSendMs = 0;
+    m_scriptedEpoch = 0;
+    m_scriptedLeader = 0;
+    m_scriptedWasActive = false;
+    m_scriptedReleasePending = false;
+    m_scriptedLogState = 0xFF;
+    m_scriptedLogPolicy = 0xFF;
+    m_scriptedLogLocalState = 0xFF;
     SetPositionProbeEnabled(false);
     m_snapshot = {};
     m_lastReceivedTick = 0;

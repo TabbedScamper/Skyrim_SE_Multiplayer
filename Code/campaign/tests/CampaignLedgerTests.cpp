@@ -156,3 +156,112 @@ TEST_CASE("Concurrent campaign commits retain one gapless order", "[campaign][co
         REQUIRE(entries[i].Revision == i + 1);
     REQUIRE(ledger.GetMetadata().Revision == threadCount * commitsPerThread);
 }
+
+TEST_CASE("Quest item acquisition and hand-in survive reopening", "[campaign][quest-items]")
+{
+    TemporaryDatabase database;
+    Campaign::QuestItem item{1, 0x39647, 1, 0x39645, 11, 0, 0, 1, true, true, 0};
+    uint64_t acquired{};
+    {
+        Campaign::Ledger ledger(database.Path);
+        auto result = ledger.SetQuestItem("pickup-1", item, 0);
+        acquired = result.Entry.Revision;
+        REQUIRE(result.Inserted);
+        REQUIRE_FALSE(ledger.SetQuestItem("pickup-1", item, 0).Inserted);
+        REQUIRE(ledger.ReadQuestItems().size() == 1);
+    }
+    {
+        Campaign::Ledger ledger(database.Path);
+        auto loaded = ledger.ReadQuestItems().front();
+        REQUIRE(loaded.Active);
+        REQUIRE(loaded.Revision == acquired);
+        loaded.Active = false;
+        auto released = ledger.SetQuestItem("hand-in-1", loaded, acquired);
+        REQUIRE(released.Entry.Revision > acquired);
+        REQUIRE_FALSE(ledger.SetQuestItem("hand-in-1", loaded, acquired).Inserted);
+        REQUIRE_THROWS(ledger.SetQuestItem("stale-save-pickup", item, 0));
+    }
+    Campaign::Ledger ledger(database.Path);
+    const auto records = ledger.ReadQuestItems();
+    REQUIRE(records.size() == 1);
+    REQUIRE_FALSE(records.front().Active);
+    REQUIRE(ledger.GetMetadata().Revision == 2);
+    REQUIRE(ledger.ReadAfter(0).back().Kind == "quest_item");
+}
+
+TEST_CASE("Quest item compare-and-set rejects stale and contradictory writes atomically", "[campaign][quest-items]")
+{
+    TemporaryDatabase database;
+    Campaign::Ledger ledger(database.Path);
+    Campaign::QuestItem item{1, 100, 1, 200, 0, 1, 300, 1, true, true, 0};
+    const auto result = ledger.SetQuestItem("pickup", item, 0);
+    auto changed = item;
+    changed.Count = 2;
+    REQUIRE_THROWS(ledger.SetQuestItem("pickup", changed, 0));
+    REQUIRE_THROWS(ledger.SetQuestItem("stale", changed, 0));
+    changed.Count = 0;
+    REQUIRE_THROWS(ledger.SetQuestItem("bad-count", changed, result.Entry.Revision));
+    REQUIRE(ledger.ReadQuestItems().front().Count == 1);
+    REQUIRE(ledger.ReadAfter(0).size() == 1);
+    REQUIRE(ledger.GetMetadata().Revision == result.Entry.Revision);
+    changed = item;
+    changed.AliasId = 1;
+    changed.Active = false;
+    REQUIRE_THROWS(ledger.SetQuestItem("unknown-hand-in", changed, 0));
+}
+
+TEST_CASE("Five simultaneous discoveries create one durable entitlement", "[campaign][quest-items][concurrency]")
+{
+    TemporaryDatabase database;
+    Campaign::Ledger ledger(database.Path);
+    Campaign::QuestItem item{1, 100, 1, 200, 7, 1, 300, 1, true, true, 0};
+    std::atomic_uint successes{};
+    std::vector<std::thread> players;
+    for (unsigned i = 0; i < 5; ++i)
+        players.emplace_back([&, i]
+        {
+            try
+            {
+                if (ledger.SetQuestItem("player-" + std::to_string(i), item, 0).Inserted)
+                    ++successes;
+            }
+            catch (const std::runtime_error&) {}
+        });
+    for (auto& player : players)
+        player.join();
+    REQUIRE(successes == 1);
+    REQUIRE(ledger.ReadQuestItems().size() == 1);
+    REQUIRE(ledger.ReadQuestItems().front().Count == 1);
+    REQUIRE(ledger.GetMetadata().Revision == 1);
+}
+
+TEST_CASE("Campaign databases and different aliases retain separate quest item state", "[campaign][quest-items]")
+{
+    TemporaryDatabase first, second;
+    Campaign::Ledger one(first.Path), two(second.Path);
+    Campaign::QuestItem item{1, 100, 1, 200, 0, 1, 300, 1, false, true, 0};
+    static_cast<void>(one.SetQuestItem("first", item, 0));
+    item.AliasId = 1;
+    static_cast<void>(one.SetQuestItem("second", item, 0));
+    REQUIRE(one.ReadQuestItems().size() == 2);
+    REQUIRE(two.ReadQuestItems().empty());
+    REQUIRE(one.GetMetadata().CampaignId != two.GetMetadata().CampaignId);
+}
+
+TEST_CASE("A new quest instance does not overwrite the previous hand-in", "[campaign][quest-items]")
+{
+    TemporaryDatabase database;
+    Campaign::Ledger ledger(database.Path);
+    Campaign::QuestItem item{1, 100, 1, 200, 0, 0, 0, 1, true, true, 0};
+    auto pickup = ledger.SetQuestItem("first-pickup", item, 0);
+    item.Active = false;
+    static_cast<void>(ledger.SetQuestItem("first-hand-in", item, pickup.Entry.Revision));
+    item.Active = true;
+    item.QuestInstance = 1;
+    static_cast<void>(ledger.SetQuestItem("second-pickup", item, 0));
+    const auto records = ledger.ReadQuestItems();
+    REQUIRE(records.size() == 2);
+    REQUIRE_FALSE(records[0].Active);
+    REQUIRE(records[1].Active);
+    REQUIRE(records[1].QuestInstance == 1);
+}

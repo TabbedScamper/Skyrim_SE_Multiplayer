@@ -23,6 +23,8 @@ constexpr size_t kMaxBones = EvaluatedPoseSnapshot::MaxBones;
 constexpr size_t kRingSize = 12;
 // A captured pose older than this is not sent (the actor is no longer being animated here).
 constexpr uint64_t kCaptureFreshMs = 250;
+// An unbracketed living pose must not freeze a distant actor between low-rate packets.
+constexpr uint64_t kLivingHoldMs = 75;
 constexpr uint64_t kLivingBlendMs = 150;
 
 enum class Role : uint8_t
@@ -361,7 +363,8 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 const auto& newest = sample(pose.RingCount - 1);
                 // Hold the owner pose through sample gaps rather than dropping back to the local
                 // graph: alternating owner and local poses read as NPCs jittering to catch up.
-                if (tick >= newest.Tick && (tick - newest.Tick <= kCaptureFreshMs || pendingRagdoll))
+                if (tick >= newest.Tick && (tick - newest.Tick <=
+                    (livingFallback ? kLivingHoldMs : kCaptureFreshMs) || pendingRagdoll))
                 {
                     const uint32_t driven = (std::min)(count, newest.Count);
                     if (driven < count)
@@ -546,6 +549,32 @@ uint64_t GetPresentationTick() noexcept
 uint64_t GetCurrentTick() noexcept
 {
     return s_currentTick.load(std::memory_order_relaxed);
+}
+
+bool NeedsLocalGraph(const uint32_t aFormId) noexcept
+{
+    if (RagdollPending(aFormId) || RagdollSimulating(aFormId))
+        return false;
+    if (!s_enabled.load(std::memory_order_relaxed))
+        return true;
+    const auto tick = static_cast<uint64_t>(GetPresentationTimeMs());
+    std::lock_guard guard(s_lock);
+    const auto it = s_poses.find(aFormId);
+    if (it == s_poses.end() || !it->second.RingCount)
+        return true;
+    const auto& pose = it->second;
+    const auto sample = [&](uint32_t i) -> const Sample& {
+        return pose.Ring[(pose.RingNext + kRingSize - pose.RingCount + i) % kRingSize];
+    };
+    for (uint32_t i = 1; i < pose.RingCount; ++i)
+    {
+        const auto& a = sample(i - 1);
+        const auto& b = sample(i);
+        if (a.Tick <= tick && tick <= b.Tick && b.Tick - a.Tick <= kCaptureFreshMs)
+            return false;
+    }
+    const auto& newest = sample(pose.RingCount - 1);
+    return tick < newest.Tick || tick - newest.Tick > kLivingHoldMs;
 }
 
 bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept

@@ -73,6 +73,35 @@
   opacity: 30%;
 }
 
+// Contextual System-tab prompts. The native Journal keeps input until a
+// shortcut opens a panel; these labels never intercept its Settings row.
+.pause-menu-shortcuts {
+  position: absolute;
+  left: 50%;
+  bottom: 8vh;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 2rem;
+  color: #eee;
+  font-size: max(16px, 1.1rem);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-shadow: 0 1px 3px #000;
+  pointer-events: none;
+
+  kbd {
+    font: inherit;
+    padding: 0.1rem 0.35rem;
+    margin-right: 0.4rem;
+    border: 1px solid #aaa;
+    background: rgba(0, 0, 0, 0.8);
+  }
+}
+
+.app-root-controls[hidden] {
+  display: none;
+}
+
 ::ng-deep {
   .app-root-popups {
     > app-popup > app-window {

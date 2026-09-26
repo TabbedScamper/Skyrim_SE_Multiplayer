@@ -5,7 +5,7 @@ using TiltedPhoques::Serialization;
 
 bool Movement::operator==(const Movement& acRhs) const noexcept
 {
-    return CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId && Position == acRhs.Position && Rotation == acRhs.Rotation && Variables == acRhs.Variables && Direction == acRhs.Direction;
+    return CellId == acRhs.CellId && WorldSpaceId == acRhs.WorldSpaceId && Position == acRhs.Position && Rotation == acRhs.Rotation && Variables == acRhs.Variables && Direction == acRhs.Direction && HasLookDirection == acRhs.HasLookDirection && (!HasLookDirection || LookDirection == acRhs.LookDirection);
 }
 
 bool Movement::operator!=(const Movement& acRhs) const noexcept
@@ -21,6 +21,9 @@ void Movement::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
     Rotation.Serialize(aWriter);
     Variables.GenerateDiff(AnimationVariables{}, aWriter);
     aWriter.WriteBits(*reinterpret_cast<const uint32_t*>(&Direction), 32);
+    aWriter.WriteBits(HasLookDirection, 1);
+    if (HasLookDirection)
+        aWriter.WriteBits(LookDirection, 32);
 }
 
 void Movement::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -36,4 +39,12 @@ void Movement::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
     aReader.ReadBits(tmp, 32);
     uint32_t tmp32 = tmp & 0xFFFFFFFF;
     Direction = *reinterpret_cast<float*>(&tmp32);
+    aReader.ReadBits(tmp, 1);
+    HasLookDirection = tmp != 0;
+    LookDirection = 0;
+    if (HasLookDirection)
+    {
+        aReader.ReadBits(tmp, 32);
+        LookDirection = static_cast<uint32_t>(tmp);
+    }
 }

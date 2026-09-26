@@ -70,6 +70,11 @@ enum ClientOpcode : unsigned char
     kRequestPartyUnstuck,
     kDoorVoteRequest,
     kReviveRequest,
+    kRequestScriptedCamera,
+    kRequestQuestItems,
+    kRequestPlayerCombatState,
+    kBusyLockRequest,
+    kRequestDialogueListen,
     kClientOpcodeMax
 };
 
@@ -142,5 +147,10 @@ enum ServerOpcode : unsigned char
     kNotifyPartyUnstuck,
     kNotifyDoorVote,
     kNotifyRevive,
+    kNotifyScriptedCamera,
+    kNotifyQuestItems,
+    kNotifyPlayerCombatState,
+    kNotifyBusyLock,
+    kNotifyDialogueListen,
     kServerOpcodeMax
 };

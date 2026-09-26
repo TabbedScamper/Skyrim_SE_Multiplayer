@@ -395,6 +395,93 @@ void WriteLayoutSnapshot(const char* acTag)
 }
 } // namespace
 
+void PollPauseMenuOptions() noexcept
+{
+    // Research: https://github.com/schlangster/skyui/blob/master/src/PauseMenu/SystemPage.as
+    // and the installed 1.7.104
+    // quest_journal.swf (Quest_Journal/SystemPage). CategoryList dispatches
+    // fixed cases in onCategoryButtonPress; appending a row does not install
+    // a callback. Use contextual shortcuts without replacing that handler.
+    // JournalMenu::ProcessMessage, VA 0x1409ABE30 / ID 53315, owns Show/Hide
+    // and RestoreSavedSettings. Keep its movie and pause ownership intact.
+    // JournalMenu::Accept, VA 0x1409AC4D0 / ID 53318, registers CloseMenu and
+    // RememberCurrentTabIndex, not an arbitrary category callback. GFxMovie
+    // GetVariable slot 0x11 is documented by CommonLibSSE-NG:
+    // https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/include/RE/G/GFxMovie.h
+    static bool s_f6WasDown = false;
+    static bool s_f7WasDown = false;
+    static bool s_hintVisible = false;
+    static void* s_originMovie = nullptr;
+
+    const bool f6Down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+    const bool f7Down = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+    const bool coopPressed = f6Down && !s_f6WasDown;
+    const bool optionsPressed = f7Down && !s_f7WasDown;
+    s_f6WasDown = f6Down;
+    s_f7WasDown = f7Down;
+
+    auto& overlay = World::Get().GetOverlayService();
+    auto* pApp = overlay.GetOverlayApp();
+    auto* pUI = UI::Get();
+    auto* pMenu = pUI && pUI->GetMenuOpen("Journal Menu") ? pUI->FindMenuByName("Journal Menu") : nullptr;
+    auto* pMovie = pMenu ? pMenu->uiMovie : nullptr;
+    if (!pApp)
+        return;
+
+    if (s_originMovie && (!overlay.GetActive() || pMovie != s_originMovie))
+    {
+        if (overlay.GetActive())
+            overlay.SetActive(false);
+        spdlog::info("Pause menu: closed co-op/options panel; journal retained={}", pMovie == s_originMovie);
+        s_originMovie = nullptr;
+    }
+
+    DWORD foregroundProcess = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
+    bool available = pMovie && overlay.GetInGame() && !overlay.GetTitleScreen() &&
+        foregroundProcess == GetCurrentProcessId() && !pUI->GetMenuOpen("Console") &&
+        !pUI->GetMenuOpen("MessageBoxMenu") && !pUI->GetMenuOpen("Loading Menu") &&
+        !pUI->GetMenuOpen("RaceSex Menu");
+    if (available)
+    {
+        auto* pVtable = *reinterpret_cast<uintptr_t**>(pMovie);
+        const auto getVariable = reinterpret_cast<TGetVariable*>(pVtable[0x11]);
+        const auto numberIs = [&](const char* acPath, double aExpected) {
+            ScaleformValue value{};
+            return getVariable(pMovie, &value, acPath) && value.Type == 3 && value.Value.Number == aExpected;
+        };
+        const auto falseBoolean = [&](const char* acPath) {
+            ScaleformValue value{};
+            return getVariable(pMovie, &value, acPath) && value.Type == 2 &&
+                *reinterpret_cast<const uint8_t*>(&value.Value) == 0;
+        };
+        // Only the top-level System tab, never remapping, saving or a dialog.
+        available = numberIs("_root.QuestJournalFader.Menu_mc.iCurrentTab", 2.0) &&
+            numberIs("_root.QuestJournalFader.Menu_mc.SystemFader.Page_mc.iCurrentState", 0.0) &&
+            falseBoolean("_root.QuestJournalFader.Menu_mc.SystemFader.Page_mc.bMenuClosing") &&
+            falseBoolean("_root.QuestJournalFader.Menu_mc.SystemFader.Page_mc.bSavingSettings");
+    }
+
+    const bool showHint = available && !overlay.GetActive();
+    if (showHint != s_hintVisible)
+    {
+        s_hintVisible = showHint;
+        auto arguments = CefListValue::Create();
+        arguments->SetBool(0, showHint);
+        pApp->ExecuteAsync("pauseMenuAvailable", arguments);
+    }
+    if (!showHint || (!coopPressed && !optionsPressed))
+        return;
+
+    // No HostSession, campaign selection, menu Hide/Show or pause-counter
+    // writes here. Offline pauses remain native; connected menus stay live
+    // through the existing UI_AddToActiveQueue_Hook policy.
+    s_originMovie = pMovie;
+    overlay.SetActive(true);
+    pApp->ExecuteAsync(coopPressed ? "showPauseCoop" : "showPauseOptions");
+    spdlog::info("Pause menu: opened {} panel; native pauses={}", coopPressed ? "co-op" : "options", pUI->numPausesGame);
+}
+
 void PollMainMenuOptions(IMenu* apMainMenu) noexcept
 {
     if (!apMainMenu || !apMainMenu->uiMovie)

@@ -1,0 +1,16 @@
+<section *ngIf="visible" class="conversation" aria-label="Listening to a party conversation">
+  <div class="topics-panel">
+    <div class="heading">Listening to player {{ speaker }}</div>
+    <ul aria-label="Speaker's dialogue options">
+      <li *ngFor="let topic of topics" [class.said]="topic.said"
+          [class.highlighted]="topic.index === highlighted"
+          [class.chosen]="flashing && topic.index === chosen">
+        <span class="marker">{{ topic.index === highlighted ? '›' : '' }}</span>
+        <span>{{ topic.text }}</span>
+      </li>
+    </ul>
+    <div class="chosen-line" *ngIf="flashing && chosenText">{{ chosenText }}</div>
+    <div class="hint">Tab / B: stop listening</div>
+  </div>
+  <div class="subtitle" *ngIf="subtitle" aria-live="polite">{{ subtitle }}</div>
+</section>

@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/OverlayService.h>
+#include <Messages/DialogueListenState.h>
 
 #include <OverlayApp.hpp>
 
@@ -437,6 +438,7 @@ void OverlayService::Render() noexcept
     else if (!inGame && m_inGame)
         SetInGame(false);
 
+    PollPauseMenuOptions();
     m_pOverlay->GetClient()->Render();
     if (m_active)
         RenderNativeCursorOnTop();
@@ -550,6 +552,33 @@ void OverlayService::SetCreatorView(const bool aVisible, const int aPlayer, cons
     pArguments->SetBool(4, aLocalReady);
     pArguments->SetBool(5, aGamepad);
     m_pOverlay->ExecuteAsync("creatorView", pArguments);
+}
+
+void OverlayService::PushDialogueListen(const DialogueListenState* aState, uint32_t aSpeaker)
+{
+    if (!m_pOverlay) return;
+    auto arguments = CefListValue::Create();
+    arguments->SetBool(0, aState && aState->Active);
+    arguments->SetInt(1, static_cast<int>(aSpeaker));
+    auto topics = CefListValue::Create();
+    if (aState)
+        for (size_t i = 0; i < aState->Topics.size(); ++i)
+        {
+            auto row = CefListValue::Create();
+            row->SetInt(0, static_cast<int>(aState->Topics[i].Index));
+            row->SetString(1, aState->Topics[i].Text.c_str());
+            row->SetBool(2, aState->Topics[i].Said);
+            topics->SetList(i, row);
+        }
+    arguments->SetList(2, topics);
+    arguments->SetInt(3, aState ? static_cast<int>(aState->Highlighted) : -1);
+    arguments->SetInt(4, aState ? static_cast<int>(aState->Chosen) : -1);
+    arguments->SetString(5, aState ? std::to_string(aState->ChoiceSerial) : "0");
+    arguments->SetString(6, aState ? aState->ChosenText.c_str() : "");
+    arguments->SetString(7, aState ? aState->Subtitle.c_str() : "");
+    arguments->SetInt(8, aState ? static_cast<int>(aState->DurationMs) : 0);
+    arguments->SetString(9, aState ? std::to_string(aState->LineSerial) : "0");
+    m_pOverlay->ExecuteAsync("dialogueListen", arguments);
 }
 
 void OverlayService::ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly)

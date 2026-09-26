@@ -1,4 +1,5 @@
 #pragma once
+#include <Messages/NotifyBusyLock.h>
 
 #include <TiltedCore/Stl.hpp>
 #include <Messages/Message.h>
@@ -71,6 +72,13 @@
 #include <Messages/NotifyLeaderControl.h>
 #include <Messages/NotifyDoorVote.h>
 #include <Messages/NotifyRevive.h>
+#include <Messages/NotifyScriptedCamera.h>
+
+#include <Messages/NotifyQuestItems.h>
+
+#include <Messages/NotifyPlayerCombatState.h>
+
+#include <Messages/NotifyDialogueListen.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -80,7 +88,7 @@ struct ServerMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<NotifyDialogueListen, NotifyBusyLock, NotifyPlayerCombatState, NotifyQuestItems, NotifyScriptedCamera, NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
             NotifyScriptedActorState, AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate, NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite,
             NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
             NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,

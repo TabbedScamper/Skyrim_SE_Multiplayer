@@ -3,6 +3,7 @@
 struct IMenu;
 
 void PollMainMenuOptions(IMenu* apMainMenu) noexcept;
+void PollPauseMenuOptions() noexcept;
 void SetMainMenuOverlayActive(bool aActive) noexcept;
 void SetMainMenuMouseState(float aX, float aY) noexcept;
 void RenderNativeCursorOnTop() noexcept;

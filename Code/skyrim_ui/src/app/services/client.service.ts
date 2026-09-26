@@ -29,6 +29,8 @@ export class ClientService implements OnDestroy {
   public titleScreenStateChange = new BehaviorSubject(false);
   public titleOptionsRequested = new Subject<void>();
   public titleLobbyRequested = new Subject<void>();
+  public pauseMenuAvailable = new BehaviorSubject(false);
+  public pausePanelRequested = new Subject<'coop' | 'settings'>();
   public coopLobbyStateChange = new ReplaySubject<CoopLobbyState>(1);
   public coopGameplaySettingsChange = new ReplaySubject<{ difficulty: number; pvpEnabled: boolean; deathSystemEnabled: boolean; greetingsEnabled: boolean }>(1);
   public steamLobbyStateChange = new ReplaySubject<SteamLobbyState>(1);
@@ -159,6 +161,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('exitTitleScreen', () => this.zone.run(() => this.titleScreenStateChange.next(false)));
     skyrimtogether.on('showTitleOptions', () => this.zone.run(() => this.titleOptionsRequested.next()));
     skyrimtogether.on('showTitleLobby', () => this.zone.run(() => this.titleLobbyRequested.next()));
+    skyrimtogether.on('pauseMenuAvailable', available => this.zone.run(() => this.pauseMenuAvailable.next(available)));
+    skyrimtogether.on('showPauseCoop', () => this.zone.run(() => this.pausePanelRequested.next('coop')));
+    skyrimtogether.on('showPauseOptions', () => this.zone.run(() => this.pausePanelRequested.next('settings')));
     skyrimtogether.on('coopLobbyState', (playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected) =>
       this.zone.run(() => this.coopLobbyStateChange.next({ playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected })));
     skyrimtogether.on('coopGameplaySettings', (difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled) =>
@@ -250,6 +255,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('exitTitleScreen');
     skyrimtogether.off('showTitleOptions');
     skyrimtogether.off('showTitleLobby');
+    skyrimtogether.off('pauseMenuAvailable');
+    skyrimtogether.off('showPauseCoop');
+    skyrimtogether.off('showPauseOptions');
     skyrimtogether.off('coopLobbyState');
     skyrimtogether.off('coopGameplaySettings');
     skyrimtogether.off('steamLobbyState');

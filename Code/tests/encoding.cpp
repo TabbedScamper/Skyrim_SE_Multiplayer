@@ -28,6 +28,84 @@
 
 using namespace TiltedPhoques;
 
+TEST_CASE("Player camera look survives movement encoding", "[encoding.movement]")
+{
+    // Include both pitch poles, yaw wrap endpoints, and every bit set. Packed
+    // integers must survive exactly, without a second float quantization.
+    for (const uint32_t packed : {0u, 0xFFFFFFFFu, 0x80000000u, 0x8000FFFFu, 0x1234ABCDu})
+    {
+        Movement sent;
+        sent.HasLookDirection = true;
+        sent.LookDirection = packed;
+        Movement npc;
+        Movement received;
+        Movement receivedNpc;
+        receivedNpc.HasLookDirection = true;
+        receivedNpc.LookDirection = 0xFFFFFFFFu;
+        Buffer buffer(4096);
+        Buffer::Writer writer(&buffer);
+        sent.Serialize(writer);
+        npc.Serialize(writer);
+        writer.WriteBits(0xBEEF, 16);
+
+        Buffer::Reader reader(&buffer);
+        received.Deserialize(reader);
+        receivedNpc.Deserialize(reader);
+        uint64_t sentinel{};
+        reader.ReadBits(sentinel, 16);
+        REQUIRE(received.HasLookDirection);
+        REQUIRE(received.LookDirection == packed);
+        REQUIRE(received == sent);
+        REQUIRE_FALSE(receivedNpc.HasLookDirection);
+        REQUIRE(receivedNpc.LookDirection == 0);
+        REQUIRE(receivedNpc == npc);
+        REQUIRE(sentinel == 0xBEEF);
+
+        received.LookDirection ^= 1u;
+        REQUIRE(received != sent);
+        received = sent;
+        received.HasLookDirection = false;
+        REQUIRE(received != sent);
+    }
+}
+
+TEST_CASE("Both movement message formats preserve independent player look directions", "[encoding.movement]")
+{
+    ClientReferencesMoveRequest sent;
+    sent.Tick = 12345;
+    for (uint32_t player = 1; player <= 5; ++player)
+    {
+        auto& movement = sent.Updates[player].UpdatedMovement;
+        movement.HasLookDirection = player != 3; // native dialogue/disabled look
+        movement.LookDirection = movement.HasLookDirection ? player * 0x12345678u : 0u;
+    }
+    sent.Updates[42].UpdatedMovement.Direction = 0.25f; // NPC without camera look
+    Buffer clientBuffer(8192);
+    Buffer::Writer clientWriter(&clientBuffer);
+    sent.Serialize(clientWriter);
+    Buffer::Reader clientReader(&clientBuffer);
+    uint64_t opcode{};
+    clientReader.ReadBits(opcode, 8);
+    ClientReferencesMoveRequest received;
+    received.DeserializeRaw(clientReader);
+    REQUIRE(received.Updates.size() == sent.Updates.size());
+
+    ServerReferencesMoveRequest relayed;
+    relayed.Tick = received.Tick;
+    relayed.Updates = received.Updates;
+    Buffer serverBuffer(8192);
+    Buffer::Writer serverWriter(&serverBuffer);
+    relayed.Serialize(serverWriter);
+    Buffer::Reader serverReader(&serverBuffer);
+    serverReader.ReadBits(opcode, 8);
+    ServerReferencesMoveRequest presented;
+    presented.DeserializeRaw(serverReader);
+    REQUIRE(presented.Tick == sent.Tick);
+    REQUIRE(presented.Updates.size() == sent.Updates.size());
+    for (const auto& [id, update] : sent.Updates)
+        REQUIRE(presented.Updates.at(id).UpdatedMovement == update.UpdatedMovement);
+}
+
 TEST_CASE("Every server setting participates in equality", "[encoding.settings]")
 {
     ServerSettings source{};

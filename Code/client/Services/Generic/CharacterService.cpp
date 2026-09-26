@@ -1,4 +1,5 @@
 #include <Services/CreatorTogether.h>
+#include <limits>
 #include <Services/SmoothClock.h>
 #include <Services/CorpseRagdollService.h>
 #include "Forms/TESObjectCELL.h"
@@ -7,6 +8,7 @@
 #include <Services/PartyService.h>
 
 #include <Services/CharacterService.h>
+#include <Services/Generic/HeadTrackService.h>
 #include <Services/QuestService.h>
 #include <Services/TransportService.h>
 
@@ -3029,25 +3031,26 @@ void CharacterService::RunLocalUpdates() const noexcept
 
     auto animatedLocalView = m_world.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
 
-    size_t actorCount = 0;
-    for (auto entity : animatedLocalView)
-        ++actorCount;
-    static size_t nextPoseActor = 0;
-    const size_t firstPoseActor = actorCount ? nextPoseActor % actorCount : 0;
-    size_t actorIndex = 0;
-
-    // The actors nearest a player get a full pose every snapshot (20 Hz); the rest share the
-    // remaining slots round-robin. Sparse samples (one per 100-150 ms) made nearby NPCs on the
-    // other PC jitter as they caught up between poses.
+    // Keep the nearby 20 Hz budget, then service overdue distance tiers fairly. The
+    // old four-slot rotation spent slots on actors already in the nearby set and
+    // included actors in unrelated interiors. Interest includes every party player.
     constexpr size_t cNearPoseActors = 24;
-    constexpr size_t cRotatingPoseActors = 4;
-    Set<entt::entity> nearPoseActors;
+    constexpr size_t cTierPoseActors = 8;
+    static std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> lastPoseAttempt;
+    Set<entt::entity> selectedPoseActors;
     {
-        std::vector<std::pair<float, entt::entity>> distances;
+        struct Candidate
+        {
+            float Distance;
+            entt::entity Entity;
+            uint32_t FormId;
+            double Overdue{};
+        };
+        std::vector<Candidate> distances;
         auto* pLocalPlayer = PlayerCharacter::Get();
-        std::vector<NiPoint3> playerPositions;
-        if (pLocalPlayer)
-            playerPositions.push_back(pLocalPlayer->position);
+        std::vector<Actor*> playerActors;
+        if (pLocalPlayer && pLocalPlayer->parentCell)
+            playerActors.push_back(pLocalPlayer);
         auto players = m_world.view<FormIdComponent, PlayerComponent>();
         for (auto player : players)
         {
@@ -3055,25 +3058,63 @@ void CharacterService::RunLocalUpdates() const noexcept
             if (formId == 0x14)
                 continue;
             if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)); pActor && IsLoadedActor(pActor))
-                playerPositions.push_back(pActor->position);
+                playerActors.push_back(pActor);
         }
         for (auto entity : animatedLocalView)
         {
             auto* pActor = Cast<Actor>(TESForm::GetById(animatedLocalView.get<FormIdComponent>(entity).Id));
-            if (!pActor || !IsLoadedActor(pActor) || playerPositions.empty() || pActor == pLocalPlayer)
+            if (!pActor || !IsLoadedActor(pActor) || !pActor->parentCell || pActor == pLocalPlayer)
                 continue;
-            const auto firstDistance = pActor->position - playerPositions.front();
-            float nearest = firstDistance.x * firstDistance.x + firstDistance.y * firstDistance.y + firstDistance.z * firstDistance.z;
-            for (const auto& playerPosition : playerPositions)
+            float nearest = (std::numeric_limits<float>::max)();
+            for (const auto* playerActor : playerActors)
             {
-                const auto d = pActor->position - playerPosition;
+                const auto* cell = pActor->parentCell;
+                if (!playerActor->parentCell || (cell != playerActor->parentCell &&
+                    (!cell->worldspace || cell->worldspace != playerActor->parentCell->worldspace)))
+                    continue;
+                const auto d = pActor->position - playerActor->position;
                 nearest = (std::min)(nearest, d.x * d.x + d.y * d.y + d.z * d.z);
             }
-            distances.emplace_back(nearest, entity);
+            if (nearest < (std::numeric_limits<float>::max)())
+                distances.push_back({nearest, entity, pActor->formID});
         }
-        std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (size_t i = 0; i < distances.size() && i < cNearPoseActors; ++i)
-            nearPoseActors.insert(distances[i].second);
+        std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) {
+            return a.Distance == b.Distance ? a.FormId < b.FormId : a.Distance < b.Distance;
+        });
+        size_t nearby = 0;
+        while (nearby < distances.size() && nearby < cNearPoseActors &&
+            distances[nearby].Distance <= 4096.f * 4096.f)
+        {
+            selectedPoseActors.insert(distances[nearby].Entity);
+            lastPoseAttempt[distances[nearby].FormId] = now;
+            ++nearby;
+        }
+        // 10 Hz to 16384 units, 5 Hz to 32768, 1 Hz beyond. These are target
+        // rates within eight slots per snapshot, not promises under crowd overload.
+        for (size_t i = nearby; i < distances.size(); ++i)
+        {
+            auto& candidate = distances[i];
+            const double interval = candidate.Distance <= 16384.f * 16384.f ? 100.0 :
+                candidate.Distance <= 32768.f * 32768.f ? 200.0 : 1000.0;
+            const auto it = lastPoseAttempt.try_emplace(candidate.FormId, now - 1s).first;
+            candidate.Overdue = std::chrono::duration<double, std::milli>(now - it->second).count() / interval;
+        }
+        std::sort(distances.begin() + nearby, distances.end(), [](const auto& a, const auto& b) {
+            return a.Overdue == b.Overdue ? a.FormId < b.FormId : a.Overdue > b.Overdue;
+        });
+        for (size_t i = nearby; i < distances.size() && i < nearby + cTierPoseActors; ++i)
+        {
+            if (distances[i].Overdue < 1.0)
+                break;
+            selectedPoseActors.insert(distances[i].Entity);
+            lastPoseAttempt[distances[i].FormId] = now;
+        }
+        // Never retain scheduling state for actors that unloaded or changed authority.
+        Set<uint32_t> live;
+        for (const auto& candidate : distances)
+            live.insert(candidate.FormId);
+        for (auto it = lastPoseAttempt.begin(); it != lastPoseAttempt.end();)
+            it = live.contains(it->first) ? std::next(it) : lastPoseAttempt.erase(it);
     }
     uint64_t selectedSerializeUs = 0;
     uint32_t selectedActors = 0;
@@ -3083,26 +3124,28 @@ void CharacterService::RunLocalUpdates() const noexcept
         auto& localComponent = animatedLocalView.get<LocalComponent>(entity);
         auto& animationComponent = animatedLocalView.get<LocalAnimationComponent>(entity);
         auto& formIdComponent = animatedLocalView.get<FormIdComponent>(entity);
-        const auto poseIndex = actorIndex++;
         auto* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
         if (IsLeaderNativeActor(pActor) && !IsLoadedActor(pActor))
             continue;
 
-        // Bound selection to 24 actors near any player, this player, and four rotating slots.
+        // Bound selection to 24 nearby actors, this player, and eight distance-tier slots.
         // Selection is an attempt, not proof of a fresh capture: culled actors send movement
         // and actions while the other PC animates their missing pose locally.
-        const bool nearActor = nearPoseActors.contains(entity);
-        const bool capturePose = actorCount && (nearActor ||
-            (formIdComponent.Id == 0x14) ||
-            ((poseIndex + actorCount - firstPoseActor) % actorCount) < cRotatingPoseActors);
+        const bool capturePose = selectedPoseActors.contains(entity) || formIdComponent.Id == 0x14;
         const auto serializeStarted = capturePose ?
             std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         AnimationSystem::Serialize(m_world, message, localComponent,
             animationComponent, formIdComponent, capturePose);
+        if (formIdComponent.Id == 0x14)
+        {
+            const auto update = message.Updates.find(localComponent.Id);
+            if (update != message.Updates.end())
+                HeadTrackService::FillLocalMovement(update.value().UpdatedMovement);
+        }
         if (capturePose)
         {
-            // This selected call includes pose capture and ordinary movement
-            // serialization; it is a cheap upper bound for pose production.
+            // Measures selected serialization/request work. Delayed captures may
+            // occur in other calls; native graph work is outside this timer.
             const auto elapsedUs = static_cast<uint32_t>((std::min)(
                 int64_t{UINT32_MAX}, std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::steady_clock::now() - serializeStarted).count()));
@@ -3115,7 +3158,6 @@ void CharacterService::RunLocalUpdates() const noexcept
         }
     }
 
-    nextPoseActor += cRotatingPoseActors;
     m_localPoseBatches.fetch_add(1, std::memory_order_relaxed);
     m_localPoseActors.fetch_add(selectedActors, std::memory_order_relaxed);
     m_localPoseTotalUs.fetch_add(selectedSerializeUs, std::memory_order_relaxed);

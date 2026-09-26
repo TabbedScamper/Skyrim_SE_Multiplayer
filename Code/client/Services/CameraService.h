@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Structs/CameraStateSnapshot.h>
+#include <Messages/ScriptedCameraState.h>
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -10,6 +11,7 @@ struct TransportService;
 struct UpdateEvent;
 struct DisconnectedEvent;
 struct NotifyCameraState;
+struct NotifyScriptedCamera;
 struct TESCameraState;
 
 /**
@@ -67,11 +69,18 @@ public:
     [[nodiscard]] NativeUpdateTrace GetNativeUpdateTrace() const noexcept;
     void SetPositionProbeEnabled(bool aEnabled) noexcept;
     [[nodiscard]] bool IsPositionProbeEnabled() const noexcept;
+    static void NoteWalkingCameraIdle(uint32_t aFormId, bool aStart) noexcept;
 
 private:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
     void OnDisconnected(const DisconnectedEvent&) noexcept;
     void OnCameraState(const NotifyCameraState& acMessage) noexcept;
+    void OnScriptedCamera(const NotifyScriptedCamera& acMessage) noexcept;
+    void UpdateScriptedCamera() noexcept;
+    void ApplyScriptedControls(const ScriptedCameraState& acState) noexcept;
+    void ReleaseScriptedCamera() noexcept;
+    void ApplyWalkingCamera(const ScriptedCameraState& acState) noexcept;
+    bool HasScriptedCamera() const noexcept;
 
     [[nodiscard]] bool IsPresentationBlocked() const noexcept;
     [[nodiscard]] bool Capture(CameraStateSnapshot& aSnapshot) const noexcept;
@@ -81,6 +90,8 @@ private:
     void Clear() noexcept;
 
     using CameraUpdateFn = void (*)(TESCameraState*, void*);
+    using CameraRotationFn = void (*)(TESCameraState*, float*);
+    static void HookCameraRotation(TESCameraState* apState, float* apRotation) noexcept;
     static void HookCameraUpdate(TESCameraState* apState, void* apNextState) noexcept;
     static CameraService* s_instance;
 
@@ -103,9 +114,35 @@ private:
     size_t m_nativeTraceCount{};
     std::array<void*, 13> m_hookedVtables{};
     std::array<CameraUpdateFn, 13> m_originalUpdates{};
+    std::array<CameraRotationFn, 13> m_originalRotations{};
     size_t m_hookCount{};
+
+    ScriptedCameraState m_scripted{};
+    uint64_t m_scriptedReceivedMs{};
+    uint64_t m_scriptedSequence{};
+    uint64_t m_scriptedNextSendMs{};
+    uint64_t m_scriptedEpoch{};
+    uint32_t m_scriptedLeader{};
+    bool m_scriptedWasActive{};
+    bool m_scriptedControlsHeld{};
+    bool m_scriptedReleasePending{};
+    uint32_t m_savedCameraControls{};
+    uint32_t m_appliedCameraControls{};
+    bool m_savedLookHandler{};
+    bool m_savedPovHandler{};
+    bool m_savedPovScript{};
+    bool m_appliedLookHandler{};
+    bool m_appliedPovHandler{};
+    bool m_appliedPovScript{};
+    uint32_t m_walkingEndForm{};
+    bool m_walkingCameraHeld{};
+    uint64_t m_nextWalkingRetryMs{};
+    uint8_t m_scriptedLogState{0xFF};
+    uint8_t m_scriptedLogPolicy{0xFF};
+    uint8_t m_scriptedLogLocalState{0xFF};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_disconnectedConnection;
     entt::scoped_connection m_cameraStateConnection;
+    entt::scoped_connection m_scriptedCameraConnection;
 };

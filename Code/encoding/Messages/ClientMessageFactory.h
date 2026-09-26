@@ -1,4 +1,5 @@
 #pragma once
+#include <Messages/BusyLockRequest.h>
 
 #include <Messages/Message.h>
 #include <Messages/RequestPartyUnstuck.h>
@@ -72,6 +73,13 @@
 #include <Messages/LeaderControlRequest.h>
 #include <Messages/DoorVoteRequest.h>
 #include <Messages/ReviveRequest.h>
+#include <Messages/RequestScriptedCamera.h>
+
+#include <Messages/RequestQuestItems.h>
+
+#include <Messages/RequestPlayerCombatState.h>
+
+#include <Messages/RequestDialogueListen.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -81,7 +89,7 @@ struct ClientMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
             RequestScriptedActorState, AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
             RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,

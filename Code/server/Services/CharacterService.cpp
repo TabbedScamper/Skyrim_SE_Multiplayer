@@ -834,6 +834,8 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         movementComponent.Rotation = glm::vec3(movement.Rotation.x, 0.f, movement.Rotation.y);
         movementComponent.Variables = movement.Variables;
         movementComponent.Direction = movement.Direction;
+        movementComponent.HasLookDirection = movement.HasLookDirection;
+        movementComponent.LookDirection = movement.LookDirection;
         const auto requestedTargetId = update.CombatTargetServerId;
         if (requestedTargetId == 0 || requestedTargetId == 0xFFFFFFFFu)
             movementComponent.CombatTargetServerId = requestedTargetId;
@@ -1596,6 +1598,8 @@ void CharacterService::ProcessMovementChanges() const noexcept
             movement.Rotation.y = movementComponent.Rotation.z;
 
             movement.Direction = movementComponent.Direction;
+            movement.HasLookDirection = movementComponent.HasLookDirection;
+            movement.LookDirection = movementComponent.LookDirection;
             movement.Variables = movementComponent.Variables;
             update.CombatTargetServerId = movementComponent.CombatTargetServerId;
 

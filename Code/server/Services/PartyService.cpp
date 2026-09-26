@@ -1,5 +1,7 @@
 #include <Messages/LeaderControlRequest.h>
 #include <Messages/NotifyLeaderControl.h>
+#include <Messages/RequestScriptedCamera.h>
+#include <Messages/NotifyScriptedCamera.h>
 #include <Services/PartyService.h>
 #include <Components.h>
 #include <GameServer.h>
@@ -36,6 +38,46 @@
 
 namespace
 {
+struct ScriptedCameraRelay
+{
+    ScriptedCameraRelay(PartyService& aParty, entt::dispatcher& aDispatcher)
+        : Party(aParty)
+        , Connection(aDispatcher.sink<PacketEvent<RequestScriptedCamera>>().connect<&ScriptedCameraRelay::OnRequest>(this))
+        , LeaveConnection(aDispatcher.sink<PlayerLeaveEvent>().connect<&ScriptedCameraRelay::OnLeave>(this))
+    {
+    }
+
+    void OnLeave(const PlayerLeaveEvent& acEvent) { Last.erase(acEvent.pPlayer->GetId()); }
+
+    void OnRequest(const PacketEvent<RequestScriptedCamera>& acPacket)
+    {
+        auto* pPlayer = acPacket.pPlayer;
+        if (!pPlayer || !Party.IsPlayerLeader(pPlayer))
+            return;
+        const auto* pParty = Party.GetPlayerParty(pPlayer);
+        const auto& state = acPacket.Packet.State;
+        if (!pParty || pParty->SessionState < 2 || state.Epoch != pParty->StartEpoch || !state.IsValid())
+            return;
+        auto& last = Last[pPlayer->GetId()];
+        if (last.first == state.Epoch && state.Sequence <= last.second)
+            return;
+        last = {state.Epoch, state.Sequence};
+        NotifyScriptedCamera notify;
+        notify.LeaderId = pPlayer->GetId();
+        notify.State = state;
+        for (auto* pMember : pParty->Members)
+        {
+            if (pMember && pMember != pPlayer)
+                pMember->Send(notify);
+        }
+    }
+
+    PartyService& Party;
+    std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> Last;
+    entt::scoped_connection Connection;
+    entt::scoped_connection LeaveConnection;
+};
+
 struct PartyUnstuckRelay
 {
     PartyUnstuckRelay(PartyService& aParty, entt::dispatcher& aDispatcher)
@@ -114,6 +156,8 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     // context is still constructing this service) killed the server on startup.
     static std::unique_ptr<PartyUnstuckRelay> s_unstuckRelay;
     s_unstuckRelay = std::make_unique<PartyUnstuckRelay>(*this, aDispatcher);
+    static std::unique_ptr<ScriptedCameraRelay> s_cameraRelay;
+    s_cameraRelay = std::make_unique<ScriptedCameraRelay>(*this, aDispatcher);
 }
 
 const PartyService::Party* PartyService::GetById(uint32_t aId) const noexcept

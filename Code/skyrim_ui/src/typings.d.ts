@@ -6,6 +6,11 @@ interface NodeModule {
 
 /** Skyim: Together type definitions */
 declare namespace SkyrimTogetherTypes {
+  type DialogueListenCallback = (
+    visible: boolean, speaker: number, topics: Array<[number, string, boolean]>,
+    highlighted: number, chosen: number, choiceSerial: string, chosenText: string,
+    subtitle: string, durationMs: number, lineSerial: string,
+  ) => void;
   /** Client initialization callback */
   type InitCallback = () => void;
 
@@ -119,6 +124,7 @@ declare const skyrimtogether: SkyrimTogether;
 /** Global Skyrim: Together object type. */
 interface SkyrimTogether {
   /** Add listener to when the UI is first initialized. */
+  on(event: 'dialogueListen', callback: SkyrimTogetherTypes.DialogueListenCallback): void;
   on(event: 'init', callback: SkyrimTogetherTypes.InitCallback): void;
 
   on(event: 'debugPrompt', callback: SkyrimTogetherTypes.DebugPromptCallback): void;
@@ -144,6 +150,8 @@ interface SkyrimTogether {
   on(event: 'enterTitleScreen', callback: SkyrimTogetherTypes.TitleScreenCallback): void;
   on(event: 'exitTitleScreen', callback: SkyrimTogetherTypes.TitleScreenCallback): void;
   on(event: 'showTitleOptions', callback: SkyrimTogetherTypes.VoidCallback): void;
+  on(event: 'pauseMenuAvailable', callback: (available: boolean) => void): void;
+  on(event: 'showPauseCoop' | 'showPauseOptions', callback: SkyrimTogetherTypes.VoidCallback): void;
 
   /** Add listener to when the player open/close a game menu. */
   on(
@@ -263,6 +271,7 @@ interface SkyrimTogether {
   on(event: 'creatorView', callback: (visible: boolean, player: number, count: number, ready: boolean, localReady: boolean, gamepad: boolean) => void): void;
 
   /** Remove listener from when the application is first initialized. */
+  off(event: 'dialogueListen', callback?: SkyrimTogetherTypes.DialogueListenCallback): void;
   off(event: 'init', callback?: SkyrimTogetherTypes.InitCallback): void;
 
   /** Remove listener from when the UI is activated. */
@@ -285,6 +294,8 @@ interface SkyrimTogether {
   off(event: 'enterTitleScreen', callback?: SkyrimTogetherTypes.TitleScreenCallback): void;
   off(event: 'exitTitleScreen', callback?: SkyrimTogetherTypes.TitleScreenCallback): void;
   off(event: 'showTitleOptions', callback?: SkyrimTogetherTypes.VoidCallback): void;
+  off(event: 'pauseMenuAvailable', callback?: (available: boolean) => void): void;
+  off(event: 'showPauseCoop' | 'showPauseOptions', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'showTitleLobby', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'steamLobbyState', callback?: SkyrimTogetherTypes.SteamLobbyStateCallback): void;
   off(event: 'steamAvatar', callback?: (steamId: string, dataUrl: string) => void): void;

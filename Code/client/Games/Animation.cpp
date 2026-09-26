@@ -14,6 +14,8 @@
 
 #include <World.h>
 #include <Services/PartyService.h>
+#include <Services/CutsceneFollow.h>
+#include <Services/CameraService.h>
 #include <atomic>
 
 TP_THIS_FUNCTION(TPerformAction, uint8_t, ActorMediator, TESActionData* apAction);
@@ -30,16 +32,16 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
     if (!pExtension->IsRemote() || g_forceAnimation)
     {
         const char* pEventName = apAction->eventName.AsAscii();
+        const bool walkingStart = pEventName && strcmp(pEventName, "IdleWalkingCameraStart") == 0;
+        const bool walkingEnd = pEventName && strcmp(pEventName, "IdleWalkingCameraEnd") == 0;
         if (!g_forceAnimation && pActor->formID == 0x14 && pEventName &&
             strstr(pEventName, "WalkingCamera") != nullptr)
         {
-            // A follower never starts the scripted walking camera on its own player. Its copy of
-            // MQ101 can run the fragment that starts it (MQ101QuestScript.CameraBobStart ->
-            // IdleWalkingCameraStart) but not reliably the one that ends it, and the first-person
-            // graph then stays in "MT WalkingCamera": the camera bobs while standing still
-            // (measured 1.07 units of camera travel in 2.5 s, bIsInMT 0, PitchOffset animating).
+            // During cutscene follow this player actually walks with the host. Its camera graph
+            // must run too. Keep suppressing stray starts after control has returned.
             const auto& party = World::Get().GetPartyService();
-            if (party.IsInParty() && !party.IsLeader() && strstr(pEventName, "WalkingCameraStart") != nullptr)
+            if (party.IsInParty() && !party.IsLeader() && !CutsceneFollow::IsActive() &&
+                strstr(pEventName, "WalkingCameraStart") != nullptr)
             {
                 static std::atomic<uint64_t> s_nextSuppressionLogMs{};
                 const auto now = GetTickCount64();
@@ -67,6 +69,14 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
         pActor->SaveAnimationVariables(action.Variables);
 
         const auto res = TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
+
+        if (res && pActor->formID == 0x14 && apAction->idleForm)
+        {
+            if (walkingStart)
+                CameraService::NoteWalkingCameraIdle(apAction->idleForm->formID, true);
+            else if (walkingEnd)
+                CameraService::NoteWalkingCameraIdle(apAction->idleForm->formID, false);
+        }
 
         // spdlog::debug("Action event name: {}, target name: {}", apAction->eventName.AsAscii(), apAction->targetEventName.AsAscii());
 

@@ -42,6 +42,20 @@ struct Checkpoint
     int64_t CreatedAtMs{};
 };
 
+// Plugin IDs refer to the campaign's pinned mod manifest, never a client's load order.
+// Retired rows are retained so an old save cannot resurrect a handed-in item.
+struct QuestItem
+{
+    uint32_t ModId{}, BaseId{}, QuestModId{}, QuestBaseId{}, AliasId{};
+    uint32_t ReferenceModId{}, ReferenceBaseId{};
+    uint32_t Count{1};
+    bool QuestObject{};
+    bool Active{true};
+    uint64_t Revision{};
+    uint32_t QuestInstance{};
+    bool operator==(const QuestItem&) const = default;
+};
+
 /**
  * Durable, server-authoritative ordering for shared campaign mutations.
  *
@@ -66,10 +80,14 @@ public:
     [[nodiscard]] uint64_t CreateCheckpoint(const std::string& acSnapshot);
     [[nodiscard]] Checkpoint GetLatestCheckpoint() const;
     [[nodiscard]] uint64_t AdvanceAuthorityEpoch(const std::string& acTransactionId, const std::string& acReason);
+    [[nodiscard]] std::vector<QuestItem> ReadQuestItems() const;
+    // Compare-and-set and journal insertion share one SQLite transaction.
+    [[nodiscard]] CommitResult SetQuestItem(const std::string& acTransactionId, const QuestItem& acItem, uint64_t aExpectedRevision);
 
 private:
     void Initialize();
     void Execute(const char* acSql) const;
+    CommitResult CommitLocked(const std::string& acTransactionId, const std::string& acKind, const std::string& acPayload);
 
     sqlite3* m_pDatabase{};
     mutable std::mutex m_mutex;

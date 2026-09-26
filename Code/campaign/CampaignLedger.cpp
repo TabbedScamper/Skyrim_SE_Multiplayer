@@ -235,6 +235,15 @@ void Ledger::Initialize()
             "revision INTEGER PRIMARY KEY CHECK(revision >= 0),"
             "snapshot BLOB NOT NULL,"
             "created_at_ms INTEGER NOT NULL)");
+    Execute("CREATE TABLE IF NOT EXISTS quest_items ("
+            "mod_id INTEGER NOT NULL,base_id INTEGER NOT NULL,quest_mod_id INTEGER NOT NULL,"
+            "quest_base_id INTEGER NOT NULL,alias_id INTEGER NOT NULL,"
+            "reference_mod_id INTEGER NOT NULL,reference_base_id INTEGER NOT NULL,"
+            "count INTEGER NOT NULL CHECK(count BETWEEN 1 AND 65535),"
+            "quest_object INTEGER NOT NULL CHECK(quest_object IN (0,1)),"
+            "active INTEGER NOT NULL CHECK(active IN (0,1)),"
+            "revision INTEGER NOT NULL REFERENCES journal(revision),quest_instance INTEGER NOT NULL,"
+            "PRIMARY KEY(mod_id,base_id,quest_mod_id,quest_base_id,alias_id,quest_instance))");
 
     {
         Statement query(m_pDatabase, "SELECT COUNT(*) FROM campaign_meta");
@@ -289,6 +298,13 @@ CommitResult Ledger::Commit(const std::string& acTransactionId, const std::strin
 
     std::scoped_lock lock(m_mutex);
     Transaction transaction(m_pDatabase);
+    auto result = CommitLocked(acTransactionId, acKind, acPayload);
+    transaction.Commit();
+    return result;
+}
+
+CommitResult Ledger::CommitLocked(const std::string& acTransactionId, const std::string& acKind, const std::string& acPayload)
+{
 
     {
         Statement existing(m_pDatabase,
@@ -300,7 +316,6 @@ CommitResult Ledger::Commit(const std::string& acTransactionId, const std::strin
             auto entry = ReadJournalEntry(existing.Get());
             if (entry.Kind != acKind || entry.Payload != acPayload)
                 throw std::runtime_error("Campaign transaction id was reused for different data");
-            transaction.Commit();
             return {std::move(entry), false};
         }
         Check(result, m_pDatabase);
@@ -347,8 +362,94 @@ CommitResult Ledger::Commit(const std::string& acTransactionId, const std::strin
             throw std::runtime_error("Campaign revision changed during commit");
     }
 
-    transaction.Commit();
     return {std::move(entry), true};
+}
+
+std::vector<QuestItem> Ledger::ReadQuestItems() const
+{
+    std::scoped_lock lock(m_mutex);
+    Statement query(m_pDatabase, "SELECT mod_id,base_id,quest_mod_id,quest_base_id,alias_id,"
+        "reference_mod_id,reference_base_id,count,quest_object,active,revision,quest_instance FROM quest_items "
+        "ORDER BY mod_id,base_id,quest_mod_id,quest_base_id,alias_id,quest_instance");
+    std::vector<QuestItem> items;
+    for (int result; (result = sqlite3_step(query.Get())) != SQLITE_DONE;)
+    {
+        Check(result, m_pDatabase);
+        QuestItem item;
+        item.ModId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 0));
+        item.BaseId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 1));
+        item.QuestModId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 2));
+        item.QuestBaseId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 3));
+        item.AliasId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 4));
+        item.ReferenceModId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 5));
+        item.ReferenceBaseId = static_cast<uint32_t>(ReadUnsigned(query.Get(), 6));
+        item.Count = static_cast<uint32_t>(ReadUnsigned(query.Get(), 7));
+        item.QuestObject = ReadUnsigned(query.Get(), 8) != 0;
+        item.Active = ReadUnsigned(query.Get(), 9) != 0;
+        item.Revision = ReadUnsigned(query.Get(), 10);
+        item.QuestInstance = static_cast<uint32_t>(ReadUnsigned(query.Get(), 11));
+        items.push_back(item);
+    }
+    return items;
+}
+
+CommitResult Ledger::SetQuestItem(const std::string& acTransactionId, const QuestItem& acItem, uint64_t aExpectedRevision)
+{
+    if (acTransactionId.empty() || !acItem.BaseId || !acItem.QuestBaseId ||
+        acItem.ModId == UINT32_MAX || acItem.QuestModId == UINT32_MAX ||
+        acItem.ReferenceModId == UINT32_MAX || (!acItem.ReferenceBaseId && acItem.ReferenceModId) ||
+        !acItem.Count || acItem.Count > 65535)
+        throw std::invalid_argument("Invalid campaign quest item");
+
+    std::ostringstream payload;
+    payload << acItem.ModId << ':' << acItem.BaseId << ':' << acItem.QuestModId << ':' << acItem.QuestBaseId
+        << ':' << acItem.AliasId << ':' << acItem.ReferenceModId << ':' << acItem.ReferenceBaseId
+        << ':' << acItem.Count << ':' << acItem.QuestObject << ':' << acItem.Active << ':' << aExpectedRevision
+        << ':' << acItem.QuestInstance;
+    std::scoped_lock lock(m_mutex);
+    Transaction transaction(m_pDatabase);
+    // Check idempotency before the CAS: a successful retry has an old expected revision.
+    Statement duplicate(m_pDatabase, "SELECT revision,authority_epoch,transaction_id,kind,payload,committed_at_ms "
+        "FROM journal WHERE transaction_id=?");
+    BindText(m_pDatabase, duplicate.Get(), 1, acTransactionId);
+    const int duplicateResult = sqlite3_step(duplicate.Get());
+    Check(duplicateResult, m_pDatabase);
+    if (duplicateResult == SQLITE_ROW)
+    {
+        auto entry = ReadJournalEntry(duplicate.Get());
+        if (entry.Kind != "quest_item" || entry.Payload != payload.str())
+            throw std::runtime_error("Quest item transaction id was reused for different data");
+        transaction.Commit();
+        return {std::move(entry), false};
+    }
+    Statement current(m_pDatabase, "SELECT revision FROM quest_items WHERE "
+        "mod_id=? AND base_id=? AND quest_mod_id=? AND quest_base_id=? AND alias_id=? AND quest_instance=?");
+    const uint32_t key[]{acItem.ModId, acItem.BaseId, acItem.QuestModId, acItem.QuestBaseId, acItem.AliasId};
+    for (int i = 0; i < 5; ++i)
+        Check(sqlite3_bind_int64(current.Get(), i + 1, key[i]), m_pDatabase);
+    Check(sqlite3_bind_int64(current.Get(), 6, acItem.QuestInstance), m_pDatabase);
+    const int currentResult = sqlite3_step(current.Get());
+    Check(currentResult, m_pDatabase);
+    const auto revision = currentResult == SQLITE_ROW ? ReadUnsigned(current.Get(), 0) : 0;
+    if (revision != aExpectedRevision || (!revision && !acItem.Active))
+        throw std::runtime_error("Stale quest item revision");
+    auto commit = CommitLocked(acTransactionId, "quest_item", payload.str());
+    Statement upsert(m_pDatabase, "INSERT INTO quest_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(mod_id,base_id,quest_mod_id,quest_base_id,alias_id,quest_instance) DO UPDATE SET "
+        "reference_mod_id=excluded.reference_mod_id,reference_base_id=excluded.reference_base_id,"
+        "count=excluded.count,quest_object=excluded.quest_object,active=excluded.active,revision=excluded.revision");
+    for (int i = 0; i < 5; ++i)
+        Check(sqlite3_bind_int64(upsert.Get(), i + 1, key[i]), m_pDatabase);
+    Check(sqlite3_bind_int64(upsert.Get(), 6, acItem.ReferenceModId), m_pDatabase);
+    Check(sqlite3_bind_int64(upsert.Get(), 7, acItem.ReferenceBaseId), m_pDatabase);
+    Check(sqlite3_bind_int64(upsert.Get(), 8, acItem.Count), m_pDatabase);
+    Check(sqlite3_bind_int(upsert.Get(), 9, acItem.QuestObject), m_pDatabase);
+    Check(sqlite3_bind_int(upsert.Get(), 10, acItem.Active), m_pDatabase);
+    Check(sqlite3_bind_int64(upsert.Get(), 11, ToSqlInteger(commit.Entry.Revision)), m_pDatabase);
+    Check(sqlite3_bind_int64(upsert.Get(), 12, acItem.QuestInstance), m_pDatabase);
+    Check(sqlite3_step(upsert.Get()), m_pDatabase);
+    transaction.Commit();
+    return commit;
 }
 
 std::vector<JournalEntry> Ledger::ReadAfter(uint64_t aRevision, size_t aLimit) const

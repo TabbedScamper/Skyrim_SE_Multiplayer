@@ -1,4 +1,4 @@
-import { Component, EventEmitter, HostBinding, HostListener, OnDestroy, OnInit, Output } from '@angular/core';
+import { Component, EventEmitter, HostBinding, HostListener, Input, OnDestroy, OnInit, Output } from '@angular/core';
 import { Subject, takeUntil } from 'rxjs';
 import { CoopLobbyState } from '../../models/coop-lobby-state';
 import { SteamFriend, SteamInvite, SteamLobbyState } from '../../models/steam-lobby-state';
@@ -13,6 +13,9 @@ import { SettingService } from '../../services/setting.service';
 })
 export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   @Output() public done = new EventEmitter<void>();
+  @Output() public settingsRequested = new EventEmitter<void>();
+  @Input() public inGame = false;
+  public confirmingLeave = false;
 
   public steam: SteamLobbyState = { lobbyId: '', ownerId: '', memberIds: [], memberNames: [], friendIds: [], friendNames: [], open: false, passwordProtected: false, waitingForPassword: false, isHost: false, friends: [], offlineFriends: 0, invites: [] };
   public avatars: Record<string, string> = {};
@@ -91,11 +94,13 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public host(): void {
+    if (this.sessionStarted) return;
     this.sound.play(Sound.Ok);
     this.client.hostSteamSession();
   }
 
   public joinFriend(steamId: string): void {
+    if (this.sessionStarted) return;
     this.sound.play(Sound.Ok);
     this.client.joinSteamFriend(steamId);
   }
@@ -129,6 +134,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   answerInvite(invite: SteamInvite, accept: boolean): void {
+    if (accept && this.sessionStarted) return;
     this.sound.play(accept ? Sound.Ok : Sound.Cancel);
     this.client.answerSteamInvite(invite.lobby, accept);
   }
@@ -157,15 +163,18 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public queueGameplayOptionsSave(): void {
-    if (!this.isLeader()) return;
+    if (this.settingsLocked()) return;
     if (this.gameplayOptionsTimer !== undefined) window.clearTimeout(this.gameplayOptionsTimer);
     this.gameplayOptionsTimer = window.setTimeout(() => {
       this.gameplayOptionsTimer = undefined;
+      // Recheck after debounce: loading/creation or leadership can change.
+      if (this.settingsLocked()) return;
       this.client.setCoopGameplaySettings(this.gameplay.difficulty, this.gameplay.pvpEnabled);
     }, 200);
   }
 
   public connectWithPassword(): void {
+    if (this.sessionStarted) return;
     if (!this.joinPassword) {
       this.sound.play(Sound.Fail);
       return;
@@ -174,6 +183,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public connectLan(): void {
+    if (this.sessionStarted) return;
     const match = this.lanAddress.trim().match(/^([^:]+)(?::(\d+))?$/);
     if (!match) {
       this.sound.play(Sound.Fail);
@@ -183,18 +193,19 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public toggleReady(): void {
+    if (this.sessionStarted || !this.connected) return;
     this.ready = !this.ready;
     this.client.setPartyReady(this.ready);
   }
 
   public chooseCampaign(mode: number): void {
-    if (!this.isLeader()) return;
+    if (this.sessionStarted || !this.isLeader()) return;
     this.campaignMode = mode;
     this.client.selectSharedCampaign(mode, this.checkpointId.trim());
   }
 
   public promote(playerId: number): void {
-    if (!this.isLeader() || playerId === this.lobby.leaderId) return;
+    if (this.sessionStarted || !this.isLeader() || playerId === this.lobby.leaderId) return;
     this.sound.play(Sound.Ok);
     this.client.changePartyLeader(playerId);
   }
@@ -213,6 +224,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public start(): void {
+    if (!this.canStart()) return;
     this.client.startTogether(this.campaignMode, this.checkpointId.trim());
   }
 
@@ -221,7 +233,7 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public canStart(): boolean {
-    return this.isLeader() && this.lobby.playerIds.length >= 2 &&
+    return !this.sessionStarted && this.connected && this.scan.complete && this.isLeader() && this.lobby.playerIds.length >= 2 &&
       this.lobby.readyPlayerIds.length === this.lobby.playerIds.length && this.campaignMode > 0 && this.lobby.sessionState === 0;
   }
 
@@ -231,7 +243,27 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   }
 
   public settingsLocked(): boolean {
-    return !this.isLeader() || this.lobby.sessionState === 1 || this.lobby.sessionState === 2;
+    // Server PartyService::OnPartyGameplaySettings accepts the host's live
+    // difficulty/PvP changes in gameplay (3), but not loading/creation (1/2).
+    return !this.connected || !this.isLeader() ||
+      (this.lobby.sessionState !== 0 && this.lobby.sessionState !== 3) ||
+      (this.inGame && this.lobby.sessionState !== 3);
+  }
+
+  public get sessionStarted(): boolean {
+    return this.inGame || this.lobby.sessionState !== 0;
+  }
+
+  public leave(): void {
+    if (!this.confirmingLeave) {
+      this.confirmingLeave = true;
+      return;
+    }
+    // OnDisconnected owns leaving Steam and stopping the host's server.
+    // Clearing the lobby first would make that cleanup return early.
+    if (this.connected) this.client.disconnect();
+    else this.client.leaveSteamSession();
+    this.close();
   }
 
   /** Why the host cannot start yet, in the order the host should fix it. */

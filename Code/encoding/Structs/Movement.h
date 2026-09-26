@@ -25,4 +25,8 @@ struct Movement
     Rotator2_NetQuantize Rotation{};
     AnimationVariables Variables{};
     float Direction{};
+    // Optional player camera look: yaw in low 16 bits [0, 2*pi], pitch in
+    // high 16 bits [-pi/2, pi/2]. NPC updates carry only the presence bit.
+    bool HasLookDirection{};
+    uint32_t LookDirection{};
 };

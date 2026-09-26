@@ -8,10 +8,11 @@
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/PlayerCollision.h>
+#include <atomic>
 
 namespace
 {
-bool s_active{};
+std::atomic<bool> s_active{};
 bool s_movementDisabledByUs{};
 std::unordered_map<uint32_t, bool> s_hiddenByUs; // form id -> hidden by this mode
 
@@ -49,6 +50,11 @@ void Restore() noexcept
 
 namespace CutsceneFollow
 {
+bool IsActive() noexcept
+{
+    return s_active.load(std::memory_order_acquire);
+}
+
 void Update(World& aWorld, const bool aActive, const bool aIsLeader, const uint32_t aLeaderPlayerId) noexcept
 {
     if (!aActive)
@@ -98,9 +104,7 @@ void Update(World& aWorld, const bool aActive, const bool aIsLeader, const uint3
         pControls->pMovementHandler->isEnabled = false;
         s_movementDisabledByUs = true;
     }
-    // Only the position: the camera turns with the heading, so taking the leader's heading (even only
-    // while the leader walked, as on the scripted walk to the block) left the follower able to look
-    // only up and down. The follower looks around freely, as in the single-player intro.
+    // CameraService owns heading only when the host's look is locked. Free look remains local.
     pPlayer->ForcePosition(pLeader->position);
 }
 } // namespace CutsceneFollow

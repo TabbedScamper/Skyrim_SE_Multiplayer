@@ -1,4 +1,5 @@
 #include <Services/InventoryService.h>
+#include <Services/Generic/QuestItemService.h>
 
 #include <Messages/RequestObjectInventoryChanges.h>
 #include <Messages/NotifyObjectInventoryChanges.h>
@@ -251,6 +252,8 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
 
 void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& acMessage) noexcept
 {
+    if (m_world.ctx().at<QuestItemService>().HandleInventoryNotify(acMessage))
+        return;
     if (!s_replayingHeld && acMessage.OwnershipEpoch != 0 &&
         DyingOrDead(RemoteActorFor(m_world, acMessage.ServerId, acMessage.OwnershipEpoch)))
     {

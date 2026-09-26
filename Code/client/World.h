@@ -18,7 +18,13 @@
 #include <Structs/ServerSettings.h>
 
 class QuestService;
+struct QuestItemService;
 struct DoorVoteService;
+struct BusyLockService;
+struct SceneTurnsService;
+struct HeadTrackService;
+struct DialogueListenService;
+struct StealthService;
 
 struct World : entt::registry
 {
@@ -46,6 +52,10 @@ struct World : entt::registry
     GameTestService& GetGameTestService() noexcept { return ctx().at<GameTestService>(); }
     QuestService& GetQuestService() noexcept;
     DoorVoteService& GetDoorVoteService() noexcept;
+    BusyLockService& GetBusyLockService() noexcept;
+    SceneTurnsService& GetSceneTurnsService() noexcept;
+    HeadTrackService& GetHeadTrackService() noexcept;
+    DialogueListenService& GetDialogueListenService() noexcept;
     ReviveService& GetReviveService() noexcept { return ctx().at<ReviveService>(); }
 
     auto& GetDispatcher() noexcept { return m_dispatcher; }

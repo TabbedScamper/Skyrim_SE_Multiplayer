@@ -29,6 +29,7 @@ struct NotifyPlayerHealthUpdate;
 enum ChatMessageTypes;
 struct PartyJoinedEvent;
 struct PartyLeftEvent;
+struct DialogueListenState;
 
 using TiltedPhoques::OverlayApp;
 
@@ -49,6 +50,7 @@ struct OverlayService
     void Reload() noexcept;
 
     void Initialize() noexcept;
+    void PushDialogueListen(const DialogueListenState* aState, uint32_t aSpeaker);
 
     void SetActive(bool aActive) noexcept;
     [[nodiscard]] bool GetActive() const noexcept;

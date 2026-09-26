@@ -142,6 +142,22 @@ void TP_MAKE_THISCALL(HookNativeSetTarget, CombatController, Actor* apTarget)
             }
         }
     }
+    // Every mirrored NPC consumes the presented owner target, including a target that
+    // resolves to this PC's real player. Host-owned NPC selectors remain native.
+    if (apThis && World::Get().GetTransport().IsConnected())
+    {
+        auto* attacker = Cast<Actor>(TESObjectREFR::GetByHandle(apThis->attackerHandle));
+        if (attacker && attacker->GetExtension()->IsRemote() && !attacker->GetExtension()->IsPlayer())
+        {
+            const auto presented = attacker->GetExtension()->PresentedCombatTargetFormId.load(std::memory_order_acquire);
+            if (presented != UINT32_MAX)
+            {
+                auto* target = presented ? Cast<Actor>(TESForm::GetById(presented)) : nullptr;
+                if (!presented || target)
+                    apTarget = target;
+            }
+        }
+    }
     TiltedPhoques::ThisCall(RealNativeSetTarget, apThis, apTarget);
     if (selected && apThis)
     {

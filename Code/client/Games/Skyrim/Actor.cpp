@@ -12,6 +12,7 @@
 #include <ExtraData/ExtraLeveledCreature.h>
 #include <Games/Memory.h>
 #include <Combat/CombatController.h>
+#include <Combat/PlayerCombat.h>
 
 #include <Events/HealthChangeEvent.h>
 #include <Events/InventoryChangeEvent.h>
@@ -1269,6 +1270,42 @@ bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bo
     }
 }
 
+bool TP_MAKE_THISCALL(HookAuthorityDamageActor, Actor, float aDamage, Actor* apHitter, bool aKillMove)
+{
+    auto& world = World::Get();
+    const auto& party = world.GetPartyService();
+    if (apHitter && world.GetTransport().IsConnected() && party.IsInParty() &&
+        party.GetStartEpoch() && party.GetSessionState() >= 2)
+    {
+        const auto* victim = apThis->GetExtension();
+        const auto* attacker = apHitter->GetExtension();
+        if (party.IsLeader() && victim->IsRemotePlayer() && attacker->IsLocal() && !attacker->IsPlayer())
+        {
+            world.GetRunner().Trigger(PlayerCombat::Impact{apHitter->formID, apThis->formID, aDamage, aKillMove, false, party.GetStartEpoch()});
+            // The owner applies the native damage call with player difficulty scaling and publishes health.
+            return false;
+        }
+        if (!party.IsLeader() && victim->IsLocalPlayer() && attacker->IsRemote() && !attacker->IsPlayer())
+            return false;
+        if (!party.IsLeader() && attacker->IsLocalPlayer() && victim->IsRemote() && !victim->IsPlayer())
+            world.GetRunner().Trigger(PlayerCombat::Impact{apHitter->formID, apThis->formID, aDamage, aKillMove, true, party.GetStartEpoch()});
+    }
+    return HookDamageActor(apThis, aDamage, apHitter, aKillMove);
+}
+
+void PlayerCombat::ApplyDamage(Actor* apVictim, Actor* apAttacker, float aDamage, bool aKillMove)
+{
+    if (!apVictim || !apVictim->GetExtension()->IsLocalPlayer() || apVictim->IsDead())
+        return;
+    // Observe the native result so difficulty, killmove scaling, invulnerability and
+    // essential/bleedout clamps are applied once, by the player's own engine.
+    const float before = apVictim->GetActorValue(ActorValueInfo::kHealth);
+    TiltedPhoques::ThisCall(RealDamageActor, apVictim, aDamage, apAttacker, aKillMove);
+    const float delta = apVictim->GetActorValue(ActorValueInfo::kHealth) - before;
+    if (delta != 0.f)
+        World::Get().GetRunner().Trigger(HealthChangeEvent(apVictim->formID, delta));
+}
+
 TP_THIS_FUNCTION(TApplyActorEffect, void, ActiveEffect, Actor* apTarget, float aEffectValue, unsigned int unk1);
 static TApplyActorEffect* RealApplyActorEffect = nullptr;
 
@@ -1750,7 +1787,7 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealCharacterConstructor2, HookCharacterConstructor2);
         TP_HOOK(&RealForceState, HookForceState);
         TP_HOOK(&RealSpawnActorInWorld, HookSpawnActorInWorld);
-        TP_HOOK(&RealDamageActor, HookDamageActor);
+        TP_HOOK(&RealDamageActor, HookAuthorityDamageActor);
         TP_HOOK(&RealApplyActorEffect, HookApplyActorEffect);
         TP_HOOK(&RealRegenAttributes, HookRegenAttributes);
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);

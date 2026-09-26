@@ -8,6 +8,7 @@
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
 #include <Games/Skyrim/NetImmerse/NiAVObject.h>
+#include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Combat/CombatController.h>
 #include <Utils.h>
 
@@ -26,11 +27,205 @@
 #include <Forms/TESWorldSpace.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/GameTestService.h>
+#include <Services/TransportService.h>
+#include <atomic>
+#include <cmath>
+#include <limits>
+#include <mutex>
+#include <unordered_map>
 
 extern thread_local const char* g_animErrorCode;
 
 namespace
 {
+// CommonLibSSE-NG BSAnimationUpdateData; native construction is ID 20119
+// (0x1402FD930), filled by Actor slot 0x79, ID 38054 (0x1406B6300).
+// https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/include/RE/B/BSAnimationUpdateData.h
+struct GraphUpdateData
+{
+    float Delta{};
+    uint32_t Padding{};
+    void* Callback{};
+    TESObjectREFR* Reference{};
+    const NiPoint3* EyePosition{};
+    void* UpdateFunctor{};
+    uint16_t MinimumBones{};
+    bool ForceUpdate{};
+    bool UseDistance{true};
+    bool Visible{true};
+    bool Unk2D{};
+    bool Unk2E{true};
+    bool Unk2F{};
+};
+static_assert(sizeof(GraphUpdateData) == 0x30);
+static_assert(offsetof(GraphUpdateData, Visible) == 0x2C);
+
+struct PoseRequest
+{
+    const Actor* ActorPtr{};
+    NiPoint3 EyePosition{};
+    uint64_t RequestedAt{};
+    bool Evaluating{};
+    bool Evaluated{};
+};
+std::mutex s_poseRequestLock;
+std::unordered_map<uint32_t, PoseRequest> s_poseRequests;
+std::atomic<uint64_t> s_fallbackGraphUpdates{}, s_interestGraphUpdates{}, s_posePackets{};
+
+// Selection runs on the network update thread. Native graph evaluation consumes
+// these one-shot requests on its own thread, then the next snapshot reads the copy.
+bool PreparePoseCapture(World& aWorld, Actor* apActor, bool aSelected)
+{
+    const auto now = GetTickCount64();
+    bool capture = false;
+    {
+        std::lock_guard lock(s_poseRequestLock);
+        for (auto it = s_poseRequests.begin(); it != s_poseRequests.end();)
+            it = now - it->second.RequestedAt > 250 ? s_poseRequests.erase(it) : std::next(it);
+        const auto it = s_poseRequests.find(apActor->formID);
+        if (it != s_poseRequests.end() && it->second.ActorPtr == apActor && it->second.Evaluated)
+        {
+            capture = true;
+            s_poseRequests.erase(it);
+        }
+    }
+    // The player and physics-owned skeletons already have their own native update paths.
+    if (apActor->formID == 0x14 || ((apActor->actorState.flags1 >> 21) & 0x7F) != 0)
+        return aSelected;
+    if (!aSelected || !apActor->parentCell)
+        return capture;
+
+    NiPoint3 eye{};
+    float nearest = (std::numeric_limits<float>::max)();
+    const auto consider = [&](Actor* apPlayer) {
+        if (!apPlayer || !apPlayer->parentCell || !apPlayer->GetNiNode())
+            return;
+        const auto* cell = apActor->parentCell;
+        if (cell != apPlayer->parentCell &&
+            (!cell->worldspace || cell->worldspace != apPlayer->parentCell->worldspace))
+            return;
+        const auto d = apActor->position - apPlayer->position;
+        const float distance = d.x * d.x + d.y * d.y + d.z * d.z;
+        if (distance < nearest)
+        {
+            nearest = distance;
+            eye = apPlayer->position;
+        }
+    };
+    consider(PlayerCharacter::Get());
+    auto players = aWorld.view<FormIdComponent, PlayerComponent>();
+    for (auto entity : players)
+        consider(Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id)));
+    if (nearest < (std::numeric_limits<float>::max)())
+    {
+        std::lock_guard lock(s_poseRequestLock);
+        // Do not replace an unconsumed request on a slow native frame.
+        // Allow a completed batch and its replacement to coexist while actors are
+        // serialized in arbitrary order. Both capture and new selection are capped.
+        if (s_poseRequests.size() < 64 && !s_poseRequests.contains(apActor->formID))
+            s_poseRequests[apActor->formID] = {apActor, eye, now, false, false};
+    }
+    return capture;
+}
+
+TP_THIS_FUNCTION(TUpdateGraphManager, void, BSAnimationGraphManager, const GraphUpdateData*);
+TUpdateGraphManager* s_realUpdateGraphManager{};
+
+void TP_MAKE_THISCALL(HookUpdateGraphManager, BSAnimationGraphManager, const GraphUpdateData* apData)
+{
+    auto* actor = apData ? Cast<Actor>(apData->Reference) : nullptr;
+    PoseRequest request{};
+    if (actor && !actor->GetExtension()->IsRemote() &&
+        ((actor->actorState.flags1 >> 21) & 0x7F) == 0)
+    {
+        std::lock_guard lock(s_poseRequestLock);
+        const auto it = s_poseRequests.find(actor->formID);
+        if (it != s_poseRequests.end() && it->second.ActorPtr == actor &&
+            !it->second.Evaluating && !it->second.Evaluated &&
+            GetTickCount64() - it->second.RequestedAt <= 250)
+        {
+            request = it->second;
+            it->second.Evaluating = true;
+        }
+    }
+    // A request proves World has been initialized; do not access it during early
+    // native animation startup when the request registry is still empty.
+    if (!request.ActorPtr || !World::Get().GetTransport().IsConnected())
+        return TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, apData);
+
+    auto data = *apData;
+    // Remote camera frusta are not transmitted. Conservatively include the selected
+    // actor once from its nearest player's position, retaining native distance/bone
+    // LOD (63575/0x140BCC2C0, 63587/0x140BCEDB0); never set ForceUpdate
+    // or force a full skeleton.
+    data.EyePosition = &request.EyePosition;
+    data.Visible = true;
+    TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, &data);
+    s_interestGraphUpdates.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard lock(s_poseRequestLock);
+        const auto it = s_poseRequests.find(actor->formID);
+        if (it != s_poseRequests.end() && it->second.ActorPtr == actor &&
+            it->second.RequestedAt == request.RequestedAt)
+            it->second.Evaluated = true;
+    }
+}
+
+TP_THIS_FUNCTION(TActorUpdateAnimation, void, Actor, float);
+TActorUpdateAnimation* s_realActorUpdateAnimation{};
+
+void TP_MAKE_THISCALL(HookActorUpdateAnimation, Actor, float aDelta)
+{
+    if (!apThis->GetExtension()->IsRemote() ||
+        !World::Get().GetTransport().IsConnected() ||
+        ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
+        !PoseCopyAuthority::NeedsLocalGraph(apThis->formID))
+        return TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+
+    // ID 37356 is root motion, not graph evaluation. Replace this scheduled graph
+    // opportunity (ID 37361, slot 0x7D) rather than adding a second tick in ActorProcess
+    // or evaluating Havok from AnimationSystem::Update's network thread.
+    auto* root = apThis->GetNiNode();
+    if (!(aDelta > 0.f) || !std::isfinite(aDelta) || !root || !root->parent ||
+        !apThis->currentProcess || !apThis->parentCell ||
+        apThis->IsDeleted() || apThis->IsDisabled())
+        return;
+    // Preserve the graph's world transform/scale synchronization before evaluating
+    // (ID 37364, 0x14067DA60). This updates hkbCharacter, not actor movement.
+    TP_THIS_FUNCTION(TSyncGraphTransform, bool, Actor);
+    POINTER_SKYRIMSE(TSyncGraphTransform, syncGraphTransform, 37364);
+    TiltedPhoques::ThisCall(syncGraphTransform, apThis);
+    GraphUpdateData data{};
+    data.Delta = aDelta;
+    using TFillUpdateData = void (*)(Actor*, GraphUpdateData*);
+    auto** table = *reinterpret_cast<void***>(apThis);
+    reinterpret_cast<TFillUpdateData>(table[0x79])(apThis, &data);
+    // Keep the native visibility and distance policy, but no actor post-update
+    // functors (one includes fall damage), forced full-rate evaluation, or AI work.
+    data.Callback = nullptr;
+    data.UpdateFunctor = nullptr;
+    data.ForceUpdate = false;
+    BSAnimationGraphManager* manager{};
+    if (apThis->animationGraphHolder.GetBSAnimationGraph(&manager) && manager)
+    {
+        // ID 32899 (0x140553FC0) gates ID 63358 (0x140BC0680) on
+        // ShouldAnimGraphUpdate. A remote proxy need not have that locally
+        // simulated flag; ID 63358 still applies LOD.
+        TiltedPhoques::ThisCall(s_realUpdateGraphManager, manager, &data);
+        manager->Release();
+        s_fallbackGraphUpdates.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+TiltedPhoques::Initializer s_distantAnimationInitializer([]() {
+    POINTER_SKYRIMSE(TActorUpdateAnimation, actorUpdate, 37361);
+    POINTER_SKYRIMSE(TUpdateGraphManager, graphUpdate, 63358);
+    s_realActorUpdateAnimation = actorUpdate.Get();
+    s_realUpdateGraphManager = graphUpdate.Get();
+    TP_HOOK(&s_realActorUpdateAnimation, HookActorUpdateAnimation);
+    TP_HOOK(&s_realUpdateGraphManager, HookUpdateGraphManager);
+});
+
 bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
     VisualBoneSnapshot& arVisualBones) noexcept
 {
@@ -268,8 +463,20 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
 
     if (!GameTestService::IsDiagnosticCaptureArmed())
         animationComponent.LastSentVisualBones = {};
-    if (aCapturePose)
+    // A delayed native batch can complete several requests together. Bound actual
+    // captures as well as selection; reserve one of the 33 slots for the local player.
+    static uint64_t captureBatchTick{};
+    static uint32_t captureBatchActors{};
+    if (captureBatchTick != aMovementSnapshot.Tick)
     {
+        captureBatchTick = aMovementSnapshot.Tick;
+        captureBatchActors = 0;
+    }
+    const bool captureReady = PreparePoseCapture(aWorld, pActor, aCapturePose);
+    if (captureReady && (pActor->formID == 0x14 || captureBatchActors < 32))
+    {
+        if (pActor->formID != 0x14)
+            ++captureBatchActors;
         CaptureEvaluatedPose(pActor, update.EvaluatedPose, update.VisualBones);
         if (!update.EvaluatedPose.Bones.empty())
         {
@@ -277,6 +484,7 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
             if (!update.EvaluatedPose.SourceTick)
                 update.EvaluatedPose.SourceTick = aMovementSnapshot.Tick;
             animationComponent.LastSentPose = update.EvaluatedPose;
+            s_posePackets.fetch_add(1, std::memory_order_relaxed);
         }
         // Render-bone snapshots were a second full copy of the skeleton per pose; bone playback
         // (PoseCopyAuthority) uses the evaluated pose, so keep them local for diagnostics only.
@@ -288,6 +496,15 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
         }
         else
             animationComponent.LastSentVisualBones = {};
+    }
+    static uint64_t nextGraphReportMs{};
+    if (const auto reportNow = GetTickCount64(); reportNow >= nextGraphReportMs)
+    {
+        nextGraphReportMs = reportNow + 5000;
+        spdlog::info("Distant animation: graphOnlyCalls={} interestCalls={} posesQueued={} (cumulative, native LOD retained)",
+            s_fallbackGraphUpdates.load(std::memory_order_relaxed),
+            s_interestGraphUpdates.load(std::memory_order_relaxed),
+            s_posePackets.load(std::memory_order_relaxed));
     }
 
     if (const auto pCell = pActor->parentCell)

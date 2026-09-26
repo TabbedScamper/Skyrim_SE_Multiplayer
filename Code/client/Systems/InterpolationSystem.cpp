@@ -13,6 +13,7 @@
 #include <Services/CharacterService.h>
 #include <Services/CreatorTogether.h>
 #include <Services/PlayerCollision.h>
+#include <Services/Generic/HeadTrackService.h>
 
 namespace
 {
@@ -29,6 +30,7 @@ void QueueUnseat(const uint32_t aFormId) noexcept
 
 void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aTick) noexcept
 {
+    World::Get().GetHeadTrackService().UpdateRemote(apActor, aTick);
     auto& movements = aInterpolationComponent.TimePoints;
 
     if (movements.size() < 2)
