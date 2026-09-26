@@ -1221,14 +1221,18 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
                     probe = FollowProbe{};
                     probe.NextLog = now + std::chrono::seconds(5);
                 }
+                bool placed = false;
                 if (glm::length(error) > kFollowTeleport || pBody->motionType == 4)
                 {
                     alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
                     alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
                     s_placeBody.Get()(target.Body, position, quaternion);
+                    placed = true;
                 }
+                // Placed: the gap is closed, so only the host's motion (the old gap's correction on top
+                // flung the body on after a teleport).
                 const glm::vec3 linear = glm::vec3{target.Velocity[0], target.Velocity[1], target.Velocity[2]} +
-                    error / kFollowTimeConstant;
+                    (placed ? glm::vec3{} : error / kFollowTimeConstant);
                 float currentRotation[4];
                 MatrixToQuaternion(pBody->transform, currentRotation);
                 const glm::quat have{currentRotation[3], currentRotation[0], currentRotation[1], currentRotation[2]};
@@ -2217,6 +2221,11 @@ bool ShouldSyncObject(const TESObjectREFR* apObject, const Set<const TESObjectRE
 void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
     RestoreKinematicProbe();
+    // The native step reads these raw bodies; nothing republishes them once playback stops.
+    {
+        std::lock_guard stepLock(s_stepTargetsLock);
+        s_stepTargets.clear();
+    }
     s_preStepExpectedEpoch.store(0, std::memory_order_release);
     s_watchedBodyWrapper.store(nullptr, std::memory_order_release);
     s_watchedHavokBody.store(nullptr, std::memory_order_release);
@@ -2330,6 +2339,13 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         }
     }
 
+    if (m_world.GetPartyService().IsLeader())
+    {
+        // Promoted to leader: no host-driven bodies here any more; the native step must not keep
+        // steering the last published ones.
+        std::lock_guard stepLock(s_stepTargetsLock);
+        s_stepTargets.clear();
+    }
     if (!m_world.GetPartyService().IsLeader())
     {
         const bool mainFrame = s_mainFramePlaybackEnabled.load(std::memory_order_relaxed);

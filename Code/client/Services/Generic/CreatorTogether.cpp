@@ -63,7 +63,7 @@ bool IsRaceSexMenu(const BSFixedString* apName) noexcept
 // Held while the party is still creating: the player's Done closes nothing yet.
 void HookAddMessage(void* apQueue, const BSFixedString* apName, UIMessage::UI_MESSAGE_TYPE aType, void* apData)
 {
-    if (s_holding.load() && !s_releasing.load() && (aType == UIMessage::kHide || aType == UIMessage::kForceHide) &&
+    if (s_holding.load() && !s_releasing.load() && aType == UIMessage::kHide &&
         IsRaceSexMenu(apName))
     {
         if (!s_done.exchange(true))

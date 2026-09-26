@@ -13,7 +13,6 @@ namespace
 {
 bool s_active{};
 bool s_movementDisabledByUs{};
-NiPoint3 s_lastLeaderPosition{};
 std::unordered_map<uint32_t, bool> s_hiddenByUs; // form id -> hidden by this mode
 
 void SetHidden(Actor* apActor, const bool aHidden) noexcept
@@ -99,13 +98,9 @@ void Update(World& aWorld, const bool aActive, const bool aIsLeader, const uint3
         pControls->pMovementHandler->isEnabled = false;
         s_movementDisabledByUs = true;
     }
-    // The leader's heading only while the leader walks (a scripted walk): the camera turns with the
-    // heading, and forcing it every frame left the follower able to look only up and down.
-    const float dx = pLeader->position.x - s_lastLeaderPosition.x, dy = pLeader->position.y - s_lastLeaderPosition.y;
-    const bool leaderWalking = dx * dx + dy * dy > 1.f;
-    s_lastLeaderPosition = pLeader->position;
+    // Only the position: the camera turns with the heading, so taking the leader's heading (even only
+    // while the leader walked, as on the scripted walk to the block) left the follower able to look
+    // only up and down. The follower looks around freely, as in the single-player intro.
     pPlayer->ForcePosition(pLeader->position);
-    if (leaderWalking)
-        pPlayer->SetRotation(pPlayer->rotation.x, pPlayer->rotation.y, pLeader->rotation.z);
 }
 } // namespace CutsceneFollow
