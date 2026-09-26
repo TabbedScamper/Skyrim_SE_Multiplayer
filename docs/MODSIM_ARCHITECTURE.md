@@ -138,11 +138,11 @@ Acceptance for the first usable ModSim release is:
 - a failing run is replayable and reducible to a short event sequence;
 - uncertain engine effects are labeled and exportable to the two-PC harness.
 
-## Muse's role
+## Reviewer B's role
 
-Muse can run as a headless, read-only second reviewer. It can inspect corpus
+Reviewer B can run as a headless, read-only second reviewer. It can inspect corpus
 summaries, generate candidate scenarios, mutate schedules, classify failures,
 and propose minimized repros. Its output must be machine-readable suggestions
-that ModSim validates; Muse is not an oracle and does not approve changes on
-its own. Any code-writing Muse task should use an isolated worktree and still
+that ModSim validates; Reviewer B is not an oracle and does not approve changes on
+its own. Any code-writing Reviewer B task should use an isolated worktree and still
 pass the deterministic runner and normal review.
