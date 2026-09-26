@@ -67,31 +67,43 @@ struct GraphRef
 };
 
 // The active behavior graph's ragdoll rigid bodies (hkpRigidBody*), in ragdoll order.
-bool GetRagdollBodies(Actor* apActor, Vector<RigidBody*>& aBodies) noexcept
+bool GetRagdollBodies(Actor* apActor, Vector<RigidBody*>& aBodies, const char** apReason = nullptr) noexcept
 {
+    const auto fail = [apReason](const char* apWhy)
+    {
+        if (apReason)
+            *apReason = apWhy;
+        return false;
+    };
     aBodies.clear();
     GraphRef ref;
     if (!apActor || !apActor->animationGraphHolder.GetBSAnimationGraph(&ref.pManager) || !ref.pManager)
-        return false;
+        return fail("no animation graph manager");
     BSScopedLock<BSRecursiveLock> lock(ref.pManager->lock);
     const auto count = ref.pManager->animationGraphs.size;
     const auto index = ref.pManager->animationGraphIndex;
     if (!count || count > 32 || index >= count)
-        return false;
+        return fail("no active graph");
     void* pGraph = ref.pManager->animationGraphs.Get(index);
     AnimationGraph graph{};
     RagdollDriver driver{};
     RagdollInstance ragdoll{};
-    if (!ReadNative(pGraph, graph) || !ReadNative(graph.characterInstance.ragdollDriver, driver) ||
-        !ReadNative(driver.ragdoll, ragdoll) || ragdoll.rigidBodies.size <= 0 ||
-        ragdoll.rigidBodies.size > static_cast<int32_t>(CorpseRagdollRequest::kMaxBodies))
-        return false;
+    if (!ReadNative(pGraph, graph))
+        return fail("graph unreadable");
+    if (!ReadNative(graph.characterInstance.ragdollDriver, driver))
+        return fail("no ragdoll driver");
+    if (!ReadNative(driver.ragdoll, ragdoll))
+        return fail("no ragdoll instance");
+    if (ragdoll.rigidBodies.size <= 0 || ragdoll.rigidBodies.size > static_cast<int32_t>(CorpseRagdollRequest::kMaxBodies))
+        return fail("bad ragdoll body count");
     for (int32_t i = 0; i < ragdoll.rigidBodies.size; ++i)
     {
         void* pBody{};
         RigidBody probe{};
-        if (!ReadNative(ragdoll.rigidBodies.data + i, pBody) || !ReadNative(pBody, probe) || !probe.world)
-            return false;
+        if (!ReadNative(ragdoll.rigidBodies.data + i, pBody) || !ReadNative(pBody, probe))
+            return fail("body unreadable");
+        if (!probe.world)
+            return fail("bodies not in the physics world");
         aBodies.push_back(static_cast<RigidBody*>(pBody));
     }
     return true;
@@ -99,9 +111,17 @@ bool GetRagdollBodies(Actor* apActor, Vector<RigidBody*>& aBodies) noexcept
 
 // The ragdoll is simulating: its bodies are in the world and not keyframed to the animation (a
 // death animation keyframes them, or keeps them out of the world, before the ragdoll takes over).
-bool RagdollSimulating(Actor* apActor, Vector<RigidBody*>& aBodies) noexcept
+bool RagdollSimulating(Actor* apActor, Vector<RigidBody*>& aBodies, const char** apReason = nullptr) noexcept
 {
-    return GetRagdollBodies(apActor, aBodies) && !aBodies.empty() && aBodies[0]->motionType != 4;
+    if (!GetRagdollBodies(apActor, aBodies, apReason))
+        return false;
+    if (aBodies.empty() || aBodies[0]->motionType == 4)
+    {
+        if (apReason)
+            *apReason = "bodies keyframed to the animation";
+        return false;
+    }
+    return true;
 }
 
 // hkTransform rotation columns are transform[0..2], [4..6], [8..10].
@@ -408,6 +428,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             if (!ragdoll.Knocked && presentation >= sample(0).Tick && pActor->currentProcess)
             {
                 ragdoll.Knocked = true;
+                ragdoll.KnockedAtMs = aNowMs;
                 // Alive here until now (the owner's death animation came through the pose stream);
                 // a dying owner dies here too, into ragdoll; a knocked-down one is knocked.
                 if (pActor->IsDead() || ragdoll.OwnerDying)
@@ -430,17 +451,29 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             continue;
         }
         Vector<RigidBody*> bodies;
-        if (!RagdollSimulating(pActor, bodies))
+        const char* bodyReason = "ragdoll bodies not found";
+        if (!RagdollSimulating(pActor, bodies, &bodyReason))
         {
             // Dying here (the death sync) but its ragdoll not simulating yet (a death animation,
             // the owner's through the pose stream): knock it now, as the owner's ragdoll started.
             if (!ragdoll.Knocked && pActor->currentProcess)
             {
                 ragdoll.Knocked = true;
+                ragdoll.KnockedAtMs = aNowMs;
                 pActor->KillIntoRagdoll();
                 spdlog::info("Ragdoll {:X}: dying without ragdoll bodies; killed into ragdoll at the owner's sample", pActor->formID);
             }
-            skip("ragdoll bodies not found");
+            // Killed but still not simulating (the local death animation kept the ragdoll keyframed,
+            // or out of the world): knock it again, a few times, so the owner's bodies can be followed.
+            // A run killed Lokir here and never found his bodies, so his fall was local.
+            else if (ragdoll.Knocked && pActor->currentProcess && ragdoll.Reknocks < 5 && aNowMs >= ragdoll.KnockedAtMs + 150)
+            {
+                ++ragdoll.Reknocks;
+                ragdoll.KnockedAtMs = aNowMs;
+                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+                spdlog::info("Ragdoll {:X}: still not simulating ({}); knocked again ({})", pActor->formID, bodyReason, ragdoll.Reknocks);
+            }
+            skip(bodyReason);
             continue;
         }
         if (bodies.size() != newest.Bodies.size())

@@ -57,6 +57,10 @@ private:
         bool Asleep{};
         // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
         bool Knocked{};
+        // When this copy was killed or knocked, and how often it was knocked again because its
+        // ragdoll did not start simulating.
+        uint64_t KnockedAtMs{};
+        uint32_t Reknocks{};
         // The owner is dying (not only knocked down): this copy dies into ragdoll at the first sample.
         bool OwnerDying{true};
         bool LiveLogged{};
