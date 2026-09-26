@@ -109,7 +109,7 @@ void DiagnosticsService::RecordPlayerMessage(const Player& acPlayer, const Strin
             output.flush();
         }
 
-        spdlog::info("Codex player message from {} ({}): {}", acPlayer.GetUsername(), acPlayer.GetId(), acMessage);
+        spdlog::info("Player report from {} ({}): {}", acPlayer.GetUsername(), acPlayer.GetId(), acMessage);
         BroadcastMessage("Report captured from " + acPlayer.GetUsername());
         WriteSnapshot(requestId, "player report: " + acMessage.substr(0, 300));
     }
@@ -207,8 +207,8 @@ void DiagnosticsService::BroadcastMessage(const String& acMessage) const noexcep
 {
     NotifyChatMessageBroadcast message{};
     message.MessageType = ChatMessageType::kSystemMessage;
-    message.PlayerName = "[Codex]";
-    message.ChatMessage = "[Codex] " + acMessage.substr(0, 400);
+    message.PlayerName = "[Report]";
+    message.ChatMessage = "[Report] " + acMessage.substr(0, 400);
     GameServer::Get()->SendToPlayers(message);
 }
 

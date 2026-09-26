@@ -232,7 +232,7 @@ server.registerTool(
   "player_messages",
   {
     description:
-      "Read recent reports entered by either player with !codex in Skyrim Together chat.",
+      "Read recent reports entered by either player with !report in Skyrim Together chat.",
     inputSchema: z.object({
       limit: z.number().int().min(1).max(200).default(50),
     }),
@@ -270,7 +270,7 @@ server.registerTool(
   "send_game_message",
   {
     description:
-      "Queue a visible diagnostic message from Codex to connected players. This cannot run game or server console commands.",
+      "Queue a visible diagnostic message from the diagnostics client to connected players. This cannot run game or server console commands.",
     inputSchema: z.object({ message: z.string().min(1).max(400) }),
     annotations: { readOnlyHint: false },
   },

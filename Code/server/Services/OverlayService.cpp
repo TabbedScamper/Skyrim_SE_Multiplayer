@@ -62,11 +62,11 @@ void sendPlayerMessage(const ChatMessageType acType, const String acContent, Pla
 void OverlayService::HandleChatMessage(const PacketEvent<SendChatMessageRequest>& acMessage) const noexcept
 {
     const auto& chatMessage = acMessage.Packet.ChatMessage;
-    constexpr std::string_view cCodexCommand = "!codex";
-    if (chatMessage.compare(0, cCodexCommand.size(), cCodexCommand) == 0 &&
-        (chatMessage.size() == cCodexCommand.size() || chatMessage[cCodexCommand.size()] == ' '))
+    constexpr std::string_view cReportCommand = "!report";
+    if (chatMessage.compare(0, cReportCommand.size(), cReportCommand) == 0 &&
+        (chatMessage.size() == cReportCommand.size() || chatMessage[cReportCommand.size()] == ' '))
     {
-        auto report = chatMessage.substr(cCodexCommand.size());
+        auto report = chatMessage.substr(cReportCommand.size());
         if (!report.empty() && report.front() == ' ')
             report.erase(0, 1);
         if (report.empty())

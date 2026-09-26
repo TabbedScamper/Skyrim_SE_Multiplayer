@@ -1,6 +1,6 @@
 # Skyrim Together live diagnostics
 
-This bridge gives Codex a read-only view of Skyrim Together logs and
+This bridge gives the diagnostics client a read-only view of Skyrim Together logs and
 authoritative server snapshots, plus two deliberately narrow write operations:
 visible in-game messages and timestamped bug markers. It does not expose the
 server console or arbitrary command execution.
@@ -12,25 +12,25 @@ server console or arbitrary command execution.
 3. When a problem occurs, open Skyrim Together chat and enter:
 
    ```text
-   !codex follower died and the bandits respawned
+   !report follower died and the bandits respawned
    ```
 
-4. The server replies with a `[Codex]` confirmation and records the message,
+4. The server replies with a `[Report]` confirmation and records the message,
    players, party leadership, quest stages, loaded actors, death state,
    ownership, cells, and positions in `runtime/diagnostics/telemetry.jsonl`.
-5. Ask Codex to inspect the latest player report or capture another snapshot.
+5. Ask the diagnostics client to inspect the latest player report or capture another snapshot.
 
 The MCP records events continuously, but it cannot independently wake or start
-a Codex conversation. Keep a Codex session open while live iteration is needed.
+a diagnostics conversation. Keep a diagnostics session open while live iteration is needed.
 
 ## MCP tools
 
 - `session_status`, `recent_events`, and `recent_errors` inspect bridge health
   and logs.
-- `player_messages` reads reports sent with `!codex`.
+- `player_messages` reads reports sent with `!report`.
 - `capture_snapshot` and `latest_snapshot` inspect authoritative server state.
 - `mark_bug` and `list_bug_markers` correlate a report with telemetry.
-- `send_game_message` sends a visible `[Codex]` chat message to both players.
+- `send_game_message` sends a visible `[Report]` chat message to both players.
 - `client_status` checks the local native bridge and its protocol version.
 - `client_game_snapshot` reads player, control, camera, menu, party, watched
   quest, and recent quest-event state sampled on Skyrim's game thread.
@@ -74,5 +74,5 @@ npm install
 npm test
 ```
 
-Codex must be restarted after adding the STDIO MCP so its tool inventory is
+the diagnostics client must be restarted after adding the STDIO MCP so its tool inventory is
 refreshed.
