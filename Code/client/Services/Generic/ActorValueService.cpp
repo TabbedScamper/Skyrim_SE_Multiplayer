@@ -47,6 +47,15 @@ struct PendingDeath
     uint64_t DueMs{};
 };
 std::vector<PendingDeath> s_pendingDeaths;
+
+void QueueDeath(const uint32_t aFormId, const uint64_t aDueMs) noexcept
+{
+    // One pending death per actor.
+    for (const auto& pending : s_pendingDeaths)
+        if (pending.FormId == aFormId)
+            return;
+    s_pendingDeaths.push_back({aFormId, aDueMs});
+}
 } // namespace
 
 void ActorValueService::CreateActorValuesComponent(const entt::entity aEntity, Actor* apActor) noexcept
@@ -334,7 +343,7 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
                 // The owner's ragdoll stream kills this copy when its ragdoll starts (CorpseRagdollService); this
             // is the fallback for a death without one.
             const uint64_t delay = 5000;
-                s_pendingDeaths.push_back({pActor->formID, GetTickCount64() + delay});
+                QueueDeath(pActor->formID, GetTickCount64() + delay);
             }
             else
                 pActor->Kill();
@@ -448,9 +457,17 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
             // The owner's ragdoll stream kills this copy when its ragdoll starts (CorpseRagdollService); this
             // is the fallback for a death without one.
             const uint64_t delay = 5000;
-            s_pendingDeaths.push_back({pActor->formID, GetTickCount64() + delay});
+            QueueDeath(pActor->formID, GetTickCount64() + delay);
             return;
         }
         pActor->Respawn();
     }
+    // Alive at the owner: a death still queued here (the fallback) must not kill it later.
+    if (!acMessage.IsDead)
+        std::erase_if(s_pendingDeaths, [formId = pActor->formID](const PendingDeath& acPending) { return acPending.FormId == formId; });
+}
+
+bool ActorValueService::IsDeathPending(const uint32_t aFormId) noexcept
+{
+    return std::any_of(s_pendingDeaths.begin(), s_pendingDeaths.end(), [aFormId](const PendingDeath& acPending) { return acPending.FormId == aFormId; });
 }

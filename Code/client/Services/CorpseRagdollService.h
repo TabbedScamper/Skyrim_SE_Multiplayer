@@ -61,8 +61,9 @@ private:
         // ragdoll did not start simulating.
         uint64_t KnockedAtMs{};
         uint32_t Reknocks{};
-        // The owner is dying (not only knocked down): this copy dies into ragdoll at the first sample.
-        bool OwnerDying{true};
+        // The owner is dying (it reported the death), not only knocked down: set when this copy is
+        // killed or knocked at the first sample.
+        bool OwnerDying{};
         bool LiveLogged{};
         uint64_t NextCheckMs{};
         uint32_t Applications{};

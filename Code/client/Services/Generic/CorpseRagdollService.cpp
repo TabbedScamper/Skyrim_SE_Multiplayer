@@ -8,6 +8,7 @@
 #include <Components.h>
 
 #include <Games/Skyrim/Actor.h>
+#include <Services/ActorValueService.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
@@ -296,6 +297,7 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
         if (acMessage.Tick > newest.Tick + 2000 && !(pGapActor && pGapActor->IsDead()))
         {
             ragdoll.Knocked = false;
+            ragdoll.Reknocks = 0;
             ragdoll.LiveLogged = false;
         }
     }
@@ -429,6 +431,9 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
             {
                 ragdoll.Knocked = true;
                 ragdoll.KnockedAtMs = aNowMs;
+                // Dying at the owner (it reported the death) or only knocked down: a knockdown killed
+                // into ragdoll here stayed dead on this PC only.
+                ragdoll.OwnerDying = ActorValueService::IsDeathPending(pActor->formID);
                 // Alive here until now (the owner's death animation came through the pose stream);
                 // a dying owner dies here too, into ragdoll; a knocked-down one is knocked.
                 if (pActor->IsDead() || ragdoll.OwnerDying)
@@ -437,6 +442,14 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
                     pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
                 spdlog::info("Ragdoll {:X}: this copy {} at the owner's first sample (tick {}, presentation {})", pActor->formID,
                     ragdoll.OwnerDying ? "died into ragdoll" : "was knocked into ragdoll", sample(0).Tick, presentation);
+            }
+            else if (ragdoll.Knocked && pActor->currentProcess && ragdoll.Reknocks < 5 && aNowMs >= ragdoll.KnockedAtMs + 150)
+            {
+                // Killed or knocked, but the engine did not start the ragdoll (KillImpl has early exits).
+                ++ragdoll.Reknocks;
+                ragdoll.KnockedAtMs = aNowMs;
+                pActor->currentProcess->KnockExplosion(pActor, &pActor->position, 0.f);
+                spdlog::info("Ragdoll {:X}: not ragdolling after the transition; knocked again ({})", pActor->formID, ragdoll.Reknocks);
             }
             else
                 skip(ragdoll.Knocked ? "knocked but not ragdolling" : presentation < sample(0).Tick ? "waiting for the first sample" :
@@ -456,7 +469,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs) noexcept
         {
             // Dying here (the death sync) but its ragdoll not simulating yet (a death animation,
             // the owner's through the pose stream): knock it now, as the owner's ragdoll started.
-            if (!ragdoll.Knocked && pActor->currentProcess)
+            if (!ragdoll.Knocked && pActor->currentProcess && (pActor->IsDead() || ActorValueService::IsDeathPending(pActor->formID)))
             {
                 ragdoll.Knocked = true;
                 ragdoll.KnockedAtMs = aNowMs;

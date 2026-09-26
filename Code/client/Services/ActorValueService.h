@@ -34,6 +34,10 @@ struct Actor;
 struct ActorValueService
 {
 public:
+    // The owner reported this remote actor dead and its death is queued here (the fallback when no
+    // ragdoll stream kills it first).
+    [[nodiscard]] static bool IsDeathPending(uint32_t aFormId) noexcept;
+
     ActorValueService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept;
     ~ActorValueService() noexcept = default;
 
