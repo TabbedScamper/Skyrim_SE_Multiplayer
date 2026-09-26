@@ -16,6 +16,8 @@ void Update(World& aWorld) noexcept;
 void SetMirroringScript(bool aMirroring) noexcept;
 // The leader's free control (NotifyLeaderControl); players pass through each other until it has it.
 void SetLeaderFreeControl(bool aFree) noexcept;
+// The leader has free control (the leader reads its own).
+bool LeaderHasFreeControl() noexcept;
 // This player is not held by a script or cutscene (not AI driven, movement enabled).
 bool LocalHasFreeControl() noexcept;
 // This player's own character passes through everything (cutscene follow drives it into the

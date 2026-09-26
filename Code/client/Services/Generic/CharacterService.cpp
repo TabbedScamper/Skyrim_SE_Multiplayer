@@ -3045,13 +3045,31 @@ void CharacterService::RunLocalUpdates() const noexcept
     {
         std::vector<std::pair<float, entt::entity>> distances;
         auto* pLocalPlayer = PlayerCharacter::Get();
+        std::vector<NiPoint3> playerPositions;
+        if (pLocalPlayer)
+            playerPositions.push_back(pLocalPlayer->position);
+        auto players = m_world.view<FormIdComponent, PlayerComponent>();
+        for (auto player : players)
+        {
+            const auto formId = players.get<FormIdComponent>(player).Id;
+            if (formId == 0x14)
+                continue;
+            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)); pActor && IsLoadedActor(pActor))
+                playerPositions.push_back(pActor->position);
+        }
         for (auto entity : animatedLocalView)
         {
             auto* pActor = Cast<Actor>(TESForm::GetById(animatedLocalView.get<FormIdComponent>(entity).Id));
-            if (!pActor || !pLocalPlayer || pActor == pLocalPlayer)
+            if (!pActor || !IsLoadedActor(pActor) || playerPositions.empty() || pActor == pLocalPlayer)
                 continue;
-            const auto d = pActor->position - pLocalPlayer->position;
-            distances.emplace_back(d.x * d.x + d.y * d.y + d.z * d.z, entity);
+            const auto firstDistance = pActor->position - playerPositions.front();
+            float nearest = firstDistance.x * firstDistance.x + firstDistance.y * firstDistance.y + firstDistance.z * firstDistance.z;
+            for (const auto& playerPosition : playerPositions)
+            {
+                const auto d = pActor->position - playerPosition;
+                nearest = (std::min)(nearest, d.x * d.x + d.y * d.y + d.z * d.z);
+            }
+            distances.emplace_back(nearest, entity);
         }
         std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         for (size_t i = 0; i < distances.size() && i < cNearPoseActors; ++i)
@@ -3065,19 +3083,18 @@ void CharacterService::RunLocalUpdates() const noexcept
         auto& localComponent = animatedLocalView.get<LocalComponent>(entity);
         auto& animationComponent = animatedLocalView.get<LocalAnimationComponent>(entity);
         auto& formIdComponent = animatedLocalView.get<FormIdComponent>(entity);
+        const auto poseIndex = actorIndex++;
         auto* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
         if (IsLeaderNativeActor(pActor) && !IsLoadedActor(pActor))
             continue;
 
-        // Bounded pose cadence trial: at most four full poses per 50 ms
-        // movement snapshot. The client transport buffer is 64 KiB, so do
-        // not include an unbounded number of full 99-bone actor poses here.
-        // A production stream still needs priority, compression, and a
-        // post-animation capture seam before enabling visual writes by default.
+        // Bound selection to 24 actors near any player, this player, and four rotating slots.
+        // Selection is an attempt, not proof of a fresh capture: culled actors send movement
+        // and actions while the other PC animates their missing pose locally.
         const bool nearActor = nearPoseActors.contains(entity);
         const bool capturePose = actorCount && (nearActor ||
             (formIdComponent.Id == 0x14) ||
-            ((actorIndex + actorCount - firstPoseActor) % actorCount) < cRotatingPoseActors);
+            ((poseIndex + actorCount - firstPoseActor) % actorCount) < cRotatingPoseActors);
         const auto serializeStarted = capturePose ?
             std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         AnimationSystem::Serialize(m_world, message, localComponent,
@@ -3096,7 +3113,6 @@ void CharacterService::RunLocalUpdates() const noexcept
                 !m_localPoseMaxActorUs.compare_exchange_weak(previousMax, elapsedUs,
                     std::memory_order_relaxed)) {}
         }
-        ++actorIndex;
     }
 
     nextPoseActor += cRotatingPoseActors;

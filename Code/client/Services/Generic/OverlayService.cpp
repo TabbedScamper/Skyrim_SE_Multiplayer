@@ -538,7 +538,7 @@ void OverlayService::SendSystemMessage(const std::string& acMessage)
     m_pOverlay->ExecuteAsync("message", pArguments);
 }
 
-void OverlayService::SetCreatorView(const bool aVisible, const int aPlayer, const int aPlayerCount, const bool aReady, const bool aLocalReady)
+void OverlayService::SetCreatorView(const bool aVisible, const int aPlayer, const int aPlayerCount, const bool aReady, const bool aLocalReady, const bool aGamepad)
 {
     if (!m_pOverlay)
         return;
@@ -548,6 +548,7 @@ void OverlayService::SetCreatorView(const bool aVisible, const int aPlayer, cons
     pArguments->SetInt(2, aPlayerCount);
     pArguments->SetBool(3, aReady);
     pArguments->SetBool(4, aLocalReady);
+    pArguments->SetBool(5, aGamepad);
     m_pOverlay->ExecuteAsync("creatorView", pArguments);
 }
 

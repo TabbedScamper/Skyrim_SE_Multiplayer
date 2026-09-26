@@ -26,6 +26,15 @@ namespace
 {
 using namespace ActorPoseDiagnosticViews;
 
+// Round-6 source research (the task's edit list excludes docs/REFERENCE_RESEARCH.md):
+// https://github.com/adamhynek/higgs/blob/master/src/physics.cpp
+// Adopt native hard-keyframe COM/angular contact velocities and world locking.
+// https://github.com/adamhynek/activeragdoll/blob/master/src/main.cpp
+// Its controller/blending is useful for physical animation, but rejected here as the
+// position authority: the follower must match every streamed body, including at rest.
+// Exact-runtime corpus: 61410 / 140B5B0B0 is the step wrapper; 60898 / 140B4CEF0
+// places a body's transform and updates the broadphase; 60908 / 140B4D3F0 changes
+// motion type (may queue under critical operations); 60850 / 140B4B0C0 requests sleep.
 // Havok world units to game units (matches ObjectService).
 constexpr float kHavokToGameUnits = 70.f;
 std::atomic<CorpseRagdollService*> s_ragdollService{};
@@ -211,54 +220,6 @@ void SetMotion(RigidBody* apBody, uint8_t aMotion) noexcept
         setMotion.Get()(apBody, aMotion, 1, 0);
 }
 
-// The exact keyframe backend called by hkaRagdollRigidBodyController::driveToPose
-// (64100 / 140BF0FE0 -> 65268 / 140C452C0). With world-space streamed rigid-body
-// transforms, each body is a root. This avoids remapping animation bones and rigidBodyT
-// offsets a second time. The native backend handles the COM offset and angular drive.
-// Source comparison: adamhynek/activeragdoll src/main.cpp, CalculateApplyKeyframeDataEx.
-struct ControllerBodies
-{
-    int32_t Count{};
-    uint32_t Padding{};
-    RigidBody** Bodies{};
-    int16_t* Parents{};
-    int32_t* PaletteIndices{};
-    float* Weights{};
-};
-static_assert(sizeof(ControllerBodies) == 0x28);
-
-void DriveBodies(Vector<RigidBody*>& aBodies, const QsTransform* apTargets, void* apHistory, float aDelta, bool aReset) noexcept
-{
-    std::array<int16_t, CorpseRagdollRequest::kMaxBodies> parents{};
-    parents.fill(-1);
-    ControllerBodies bodies{static_cast<int32_t>(aBodies.size()), 0, aBodies.data(), parents.data()};
-    struct alignas(16) KeyFrameData
-    {
-        QsTransform World{{0, 0, 0, 0}, {0, 0, 0, 1}, {1, 1, 1, 1}};
-        const QsTransform* Pose{};
-        void* History{};
-    } data;
-    static_assert(offsetof(KeyFrameData, Pose) == 0x30);
-    data.Pose = apTargets;
-    // The map's allocator does not promise extended alignment. Native SIMD work stays on
-    // an aligned stack buffer; the persistent history is plain storage.
-    alignas(16) float history[CorpseRagdollRequest::kMaxBodies * 16]{};
-    const auto historyBytes = aBodies.size() * 0x40;
-    std::memcpy(history, apHistory, historyBytes);
-    data.History = history;
-    // hierarchy, damping, acceleration, velocity, position, max linear/angular,
-    // snap gain, max snap linear/angular velocity, max snap linear/angular distance.
-    const float control[12]{0.f, 1.f, 0.f, 1.f, 1.f, 1000.f, 1000.f, 0.f, 0.f, 0.f, 0.f, 0.f};
-    using TInitialize = void(ControllerBodies*, void*);
-    using TDrive = void(float, KeyFrameData*, ControllerBodies*, const float*, float*);
-    POINTER_SKYRIMSE(TInitialize, initialize, 65267);
-    POINTER_SKYRIMSE(TDrive, drive, 65268);
-    if (aReset)
-        initialize.Get()(&bodies, history);
-    drive.Get()(aDelta, &data, &bodies, control, nullptr);
-    std::memcpy(apHistory, history, historyBytes);
-}
-
 // The ragdoll is simulating: its bodies are in the world and not keyframed to the animation (a
 // death animation keyframes them, or keeps them out of the world, before the ragdoll takes over).
 bool RagdollSimulating(Actor* apActor, Vector<RigidBody*>& aBodies, const char** apReason = nullptr) noexcept
@@ -313,13 +274,16 @@ void SleepBody(RigidBody* apBody) noexcept
 }
 
 // Caller holds the bhkWorld write lock, including velocity clearing and deactivation.
-void SetBodyPose(RigidBody* apBody, const QsTransform& acPose) noexcept
+void SetBodyPose(RigidBody* apBody, const QsTransform& acPose, bool aClearVelocity = true) noexcept
 {
     using TSetPose = void(void*, const float*, const float*);
     POINTER_SKYRIMSE(TSetPose, setPose, 60898);
     setPose.Get()(apBody, acPose.translation, acPose.rotation);
-    std::fill(std::begin(apBody->linearVelocity), std::end(apBody->linearVelocity), 0.f);
-    std::fill(std::begin(apBody->angularVelocity), std::end(apBody->angularVelocity), 0.f);
+    if (aClearVelocity)
+    {
+        std::fill(std::begin(apBody->linearVelocity), std::end(apBody->linearVelocity), 0.f);
+        std::fill(std::begin(apBody->angularVelocity), std::end(apBody->angularVelocity), 0.f);
+    }
 }
 
 bool Moving(const Vector<RigidBody*>& acBodies) noexcept
@@ -335,6 +299,245 @@ bool Moving(const Vector<RigidBody*>& acBodies) noexcept
     return false;
 }
 } // namespace
+
+struct CorpseRagdollService::StepBinding
+{
+    Vector<RigidBody*> Bodies;
+    Vector<uint32_t> Ids;
+    void* World{};
+    void* Driver{};
+    uint32_t FormId{};
+    uint32_t Limb{};
+    std::atomic<bool> Active{true};
+    // Only touched by this world's serial physics steps.
+    bool Logged{};
+    bool Asleep{};
+    uint64_t NextLogMs{};
+    ~StepBinding()
+    {
+        using TReference = void(void*);
+        POINTER_SKYRIMSE(TReference, removeReference, 57011);
+        for (auto* body : Bodies)
+            removeReference.Get()(body);
+        if (Driver)
+            removeReference.Get()(Driver);
+    }
+};
+
+struct CorpseRagdollService::StepFrame
+{
+    struct Stream
+    {
+        std::shared_ptr<StepBinding> Binding;
+        Vector<Sample> Samples; // oldest first, immutable after publication
+        uint64_t EndTick{};
+
+        bool Evaluate(double aTime, size_t aBody, QsTransform& aPose, bool& aSettled, uint64_t& aTick) const noexcept
+        {
+            if (Samples.empty() || aTime < Samples.front().Tick || (EndTick && aTime >= EndTick))
+                return false;
+            size_t index = 0;
+            while (index + 1 < Samples.size() && Samples[index + 1].Tick <= aTime)
+                ++index;
+            const auto& a = Samples[index];
+            // State belongs to the latest PRESENTED sample. A future heartbeat must
+            // not wake a settled body for the presentation delay every five seconds.
+            aSettled = a.Settled;
+            aTick = a.Tick;
+            const auto& b = aSettled || index + 1 == Samples.size() ? a : Samples[index + 1];
+            if (aBody >= a.Bodies.size() || aBody >= b.Bodies.size())
+                return false;
+            const float t = a.Tick == b.Tick ? 0.f : std::clamp(
+                static_cast<float>((aTime - a.Tick) / static_cast<double>(b.Tick - a.Tick)), 0.f, 1.f);
+            const auto& x = a.Bodies[aBody];
+            const auto& y = b.Bodies[aBody];
+            aPose = {};
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float from = a.Origin[axis] + x.Position[axis];
+                const float to = b.Origin[axis] + y.Position[axis];
+                aPose.translation[axis] = (from + (to - from) * t) / kHavokToGameUnits;
+            }
+            float dot = 0.f;
+            for (int axis = 0; axis < 4; ++axis)
+                dot += x.Rotation[axis] * y.Rotation[axis];
+            float norm = 0.f;
+            for (int axis = 0; axis < 4; ++axis)
+            {
+                aPose.rotation[axis] = x.Rotation[axis] + ((dot < 0.f ? -1.f : 1.f) * y.Rotation[axis] - x.Rotation[axis]) * t;
+                norm += aPose.rotation[axis] * aPose.rotation[axis];
+                aPose.scale[axis] = 1.f;
+            }
+            if (!std::isfinite(norm) || norm < 0.0001f)
+                return false;
+            for (float& value : aPose.rotation)
+                value /= std::sqrt(norm);
+            return true;
+        }
+    };
+    Vector<Stream> Streams;
+};
+
+void CorpseRagdollService::OnHavokStep(void* apWorld, float aDeltaTime, bool aAfterStep) noexcept
+{
+    // Keep the same frame/time across the solver. Retained bodies survive unload;
+    // world + uid checks prevent applying an old binding to a replacement object.
+    struct Step
+    {
+        std::shared_ptr<StepFrame> Frame;
+        void* World{};
+        double Time{};
+    };
+    thread_local Vector<Step> steps;
+    auto* service = s_ragdollService.load(std::memory_order_acquire);
+    if (!aAfterStep)
+    {
+        Step step;
+        step.World = apWorld;
+        step.Time = PoseCopyAuthority::GetPresentationTimeMs();
+        if (service && service->m_applyOnMainFrame.load(std::memory_order_relaxed))
+        {
+            std::lock_guard lock(service->m_stepLock);
+            step.Frame = service->m_stepFrame;
+        }
+        steps.push_back(std::move(step));
+    }
+    if (steps.empty() || steps.back().World != apWorld)
+        return;
+    const auto step = steps.back();
+    if (aAfterStep)
+        steps.pop_back();
+    if (!step.Frame || !service || !service->m_applyOnMainFrame.load(std::memory_order_relaxed) ||
+        !std::isfinite(aDeltaTime) || aDeltaTime <= 0.f)
+        return;
+    for (const auto& stream : step.Frame->Streams)
+    {
+        auto& binding = *stream.Binding;
+        if (!binding.Active.load(std::memory_order_acquire) || binding.World != apWorld)
+            continue;
+        bool valid = true;
+        for (size_t i = 0; i < binding.Bodies.size(); ++i)
+            valid &= binding.Bodies[i]->world == apWorld && binding.Bodies[i]->uid == binding.Ids[i];
+        if (!valid)
+            continue;
+        PhysicsLock lock(binding.Bodies);
+        if (!lock.Wrapper || !binding.Active.load(std::memory_order_acquire))
+            continue;
+        for (auto* body : binding.Bodies)
+        {
+            SetMotion(body, 4);
+            valid &= body->motionType == 4;
+        }
+        if (!valid)
+            continue; // world critical operations can queue the motion changes
+        bool settled = false;
+        uint64_t tick{};
+        float worstBefore = 0.f;
+        float worstAfter = 0.f;
+        float worstAngle = 0.f;
+        size_t placed = 0;
+        for (size_t i = 0; i < binding.Bodies.size(); ++i)
+        {
+            QsTransform target{};
+            if (!stream.Evaluate(step.Time, i, target, settled, tick))
+                break;
+            auto* body = binding.Bodies[i];
+            QsTransform start = target;
+            bool previousSettled{};
+            uint64_t previousTick{};
+            if (!aAfterStep && !settled)
+                stream.Evaluate(step.Time - aDeltaTime * 1000.0, i, start, previousSettled, previousTick);
+            float error = 0.f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float delta = target.translation[axis] - body->transform[12 + axis];
+                error += delta * delta;
+            }
+            worstBefore = (std::max)(worstBefore, std::sqrt(error) * kHavokToGameUnits);
+            SetBodyPose(body, aAfterStep || settled ? target : start, !aAfterStep || settled);
+            if (!aAfterStep && !settled)
+            {
+                // HIGGS physics.cpp uses this hard-keyframe utility. 62478 / 140B9A9C0
+                // derives COM-correct contact velocities and shortest-arc angular velocity.
+                // 60898 / 140B4CEF0 remains the position authority, regardless of contacts.
+                using THardKeyframe = void(const float*, const float*, float, void*);
+                POINTER_SKYRIMSE(THardKeyframe, hardKeyframe, 62478);
+                hardKeyframe.Get()(target.translation, target.rotation, 1.f / aDeltaTime, body);
+            }
+            if (settled)
+                SleepBody(body);
+            error = 0.f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float delta = target.translation[axis] - body->transform[12 + axis];
+                error += delta * delta;
+            }
+            worstAfter = (std::max)(worstAfter, std::sqrt(error) * kHavokToGameUnits);
+            float rotation[4];
+            MatrixToQuaternion(body->transform, rotation);
+            float dot = 0.f;
+            for (int axis = 0; axis < 4; ++axis)
+                dot += target.rotation[axis] * rotation[axis];
+            worstAngle = (std::max)(worstAngle, 2.f * std::acos(std::clamp(std::abs(dot), 0.f, 1.f)) * 57.29578f);
+            ++placed;
+        }
+        if (!aAfterStep || placed != binding.Bodies.size())
+            continue;
+        const auto now = NowMs();
+        if (!binding.Logged || now >= binding.NextLogMs)
+        {
+            spdlog::info("Ragdoll {:X} limb {}: physics-step keyframe placed {} bodies at tick {}, pre-gap {:.2f}, residual {:.3f} u/{:.3f} deg (driver {})",
+                binding.FormId, binding.Limb, placed, tick, worstBefore, worstAfter, worstAngle, fmt::ptr(binding.Driver));
+            binding.Logged = true;
+            binding.NextLogMs = now + kResendMs;
+        }
+        if (settled && !binding.Asleep)
+            spdlog::info("Ragdoll {:X} limb {}: exact owner settle at tick {} in physics step", binding.FormId, binding.Limb, tick);
+        binding.Asleep = settled;
+    }
+}
+
+void CorpseRagdollService::PlaceForReadback(void* apDriver) noexcept
+{
+    auto* service = s_ragdollService.load(std::memory_order_acquire);
+    if (!service || !service->m_applyOnMainFrame.load(std::memory_order_relaxed))
+        return;
+    std::shared_ptr<StepFrame> frame;
+    {
+        std::lock_guard lock(service->m_stepLock);
+        frame = service->m_stepFrame;
+    }
+    if (!frame)
+        return;
+    const double presentation = PoseCopyAuthority::GetPresentationTimeMs();
+    for (const auto& stream : frame->Streams)
+    {
+        const auto& binding = *stream.Binding;
+        if (binding.Driver != apDriver || !binding.Active.load(std::memory_order_acquire))
+            continue;
+        bool valid = true;
+        for (size_t i = 0; i < binding.Bodies.size(); ++i)
+            valid &= binding.Bodies[i]->world == binding.World && binding.Bodies[i]->uid == binding.Ids[i] &&
+                binding.Bodies[i]->motionType == 4;
+        if (!valid)
+            return;
+        PhysicsLock lock(binding.Bodies);
+        if (!lock.Wrapper || !binding.Active.load(std::memory_order_acquire))
+            return;
+        for (size_t i = 0; i < binding.Bodies.size(); ++i)
+        {
+            QsTransform target{};
+            bool settled{};
+            uint64_t tick{};
+            if (!stream.Evaluate(presentation, i, target, settled, tick))
+                return;
+            SetBodyPose(binding.Bodies[i], target, settled);
+            if (settled)
+                SleepBody(binding.Bodies[i]);
+        }
+        return;
+    }
+}
 
 CorpseRagdollService::CorpseRagdollService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -524,6 +727,8 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
             ragdoll.EndTick = acMessage.Tick;
         return;
     }
+    if (acMessage.Tick <= ragdoll.EndTick)
+        return;
     if (ragdoll.RingCount)
     {
         const auto& newest = ragdoll.Ring[(ragdoll.RingNext + size - 1) % size];
@@ -532,7 +737,6 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
         if (newest.Bodies.size() != acMessage.Bodies.size() || ragdoll.DismemberTick != acMessage.DismemberTick || ragdoll.EndTick)
         {
             ragdoll.RingCount = 0;
-            ragdoll.LiveLogged = false;
             ragdoll.Knocked = false;
         }
     }
@@ -683,6 +887,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
     const double presentationTime = PoseCopyAuthority::GetPresentationTimeMs();
     const auto presentation = static_cast<uint64_t>(presentationTime);
     Vector<void*> controlledDrivers;
+    auto frame = std::make_shared<StepFrame>();
     for (auto it = m_remote.begin(); it != m_remote.end();)
     {
         const uint32_t serverId = static_cast<uint32_t>(it->first >> 32);
@@ -701,9 +906,13 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             (actor && !actor->GetExtension()->IsRemote()) || !m_transport.IsConnected();
         if (end)
         {
-            Vector<RigidBody*> bodies;
-            if (actor && (limb ? GetHeadBody(actor, bodies) : GetRagdollBodies(actor, bodies)))
+            if (ragdoll.Binding)
+                ragdoll.Binding->Active.store(false, std::memory_order_release);
+            // Release retained bodies even when the actor has left the ECS or lost 3D.
+            // Rediscovering through the actor can instead find a replacement graph.
+            if (ragdoll.Binding)
             {
+                const auto& bodies = ragdoll.Binding->Bodies;
                 PhysicsLock physicsLock(bodies);
                 if (physicsLock.Wrapper)
                     for (size_t i = 0; i < bodies.size() && i < ragdoll.BodyIds.size(); ++i)
@@ -803,7 +1012,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         PhysicsLock physicsLock(bodies);
         if (!physicsLock.Wrapper)
         {
-            skip("physics world unavailable for controller");
+            skip("physics world unavailable for keyframe binding");
             continue;
         }
         bool reset = ragdoll.BodyIds.size() != bodies.size() || ragdoll.PhysicsWorld != bodies.front()->world;
@@ -811,6 +1020,9 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             reset = ragdoll.BodyIds[i] != bodies[i]->uid || ragdoll.BodyPointers[i] != bodies[i];
         if (reset)
         {
+            if (ragdoll.Binding)
+                ragdoll.Binding->Active.store(false, std::memory_order_release);
+            ragdoll.Binding.reset();
             ragdoll.BodyIds.clear();
             ragdoll.BodyPointers.clear();
             ragdoll.MotionTypes.clear();
@@ -821,90 +1033,34 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 ragdoll.BodyPointers.push_back(body);
                 ragdoll.MotionTypes.push_back(body->motionType == 4 ? 1 : body->motionType);
             }
-            ragdoll.LiveLogged = false;
-            ragdoll.Asleep = false;
         }
-        bool keyframed = true;
-        for (auto* body : bodies)
+        if (!ragdoll.Binding)
         {
-            SetMotion(body, 4);
-            keyframed &= body->motionType == 4;
-        }
-        if (!keyframed)
-        {
-            skip("native keyframe motion change queued");
-            continue;
-        }
-
-        const Sample* a = &newest;
-        const Sample* b = &newest;
-        float t = 0.f;
-        for (uint32_t i = 1; i < ragdoll.RingCount; ++i)
-        {
-            if (presentationTime > static_cast<double>(sample(i).Tick))
-                continue;
-            a = &sample(i - 1);
-            b = &sample(i);
-            t = static_cast<float>((presentationTime - static_cast<double>(a->Tick)) / static_cast<double>(b->Tick - a->Tick));
-            break;
-        }
-        // Silence is not a settle signal. Hold the last owner target through a packet gap.
-        const bool settled = newest.Settled && presentation >= newest.Tick;
-        std::array<QsTransform, CorpseRagdollRequest::kMaxBodies> targets{};
-        float worstDrift = 0.f;
-        bool hardPlaced = false;
-        for (size_t i = 0; i < bodies.size(); ++i)
-        {
-            const auto& x = a->Bodies[i];
-            const auto& y = b->Bodies[i];
-            auto& target = targets[i];
-            float distanceSquared = 0.f;
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                const float from = a->Origin[axis] + x.Position[axis];
-                const float to = b->Origin[axis] + y.Position[axis];
-                target.translation[axis] = (from + (to - from) * t) / kHavokToGameUnits;
-                const float error = target.translation[axis] - bodies[i]->transform[12 + axis];
-                distanceSquared += error * error;
-            }
-            const float distance = std::sqrt(distanceSquared);
-            worstDrift = (std::max)(worstDrift, distance * kHavokToGameUnits);
-            float dot = 0.f;
-            for (int k = 0; k < 4; ++k)
-                dot += x.Rotation[k] * y.Rotation[k];
-            float norm = 0.f;
-            const float sign = dot < 0.f ? -1.f : 1.f;
-            for (int k = 0; k < 4; ++k)
-            {
-                target.rotation[k] = x.Rotation[k] + (sign * y.Rotation[k] - x.Rotation[k]) * t;
-                norm += target.rotation[k] * target.rotation[k];
-                target.scale[k] = 1.f;
-            }
-            norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
-            for (float& value : target.rotation)
-                value *= norm;
-            if (settled || distance > 3.f)
-            {
-                SetBodyPose(bodies[i], target);
-                hardPlaced = true;
-            }
-        }
-        if (!settled)
-        {
-            const float delta = ragdoll.LastAppliedMs && aNowMs > ragdoll.LastAppliedMs ?
-                std::clamp(static_cast<float>(aNowMs - ragdoll.LastAppliedMs) / 1000.f, 0.001f, 0.1f) : 1.f / 60.f;
-            DriveBodies(bodies, targets.data(), ragdoll.ControllerState.data(), delta, reset || hardPlaced || ragdoll.Asleep);
-        }
-        else
-        {
+            ragdoll.Binding = std::make_shared<StepBinding>();
+            auto& binding = *ragdoll.Binding;
+            binding.World = bodies.front()->world;
+            binding.FormId = actor->formID;
+            binding.Limb = limb;
+            binding.Driver = driver;
+            // 57010 / 140AA26B0 and 57011 / 140AA2770: native references keep
+            // a removed/reloaded body's memory alive until the step snapshot retires.
+            using TReference = void(void*);
+            POINTER_SKYRIMSE(TReference, addReference, 57010);
+            if (driver)
+                addReference.Get()(driver);
             for (auto* body : bodies)
-                SleepBody(body);
-            if (!ragdoll.Asleep)
-                spdlog::info("Ragdoll {:X} limb {}: exact owner settle at tick {} (drift was {:.2f})",
-                    actor->formID, limb, newest.Tick, worstDrift);
+            {
+                addReference.Get()(body);
+                binding.Bodies.push_back(body);
+                binding.Ids.push_back(body->uid);
+            }
         }
-        ragdoll.LastAppliedMs = aNowMs;
-        ragdoll.Asleep = settled;
+        StepFrame::Stream stream;
+        stream.Binding = ragdoll.Binding;
+        for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
+            stream.Samples.push_back(sample(i));
+        stream.EndTick = ragdoll.EndTick;
+        frame->Streams.push_back(std::move(stream));
         ragdoll.LastSkipReason = nullptr;
         ragdoll.CountMismatchLogged = false;
         if (driver)
@@ -912,12 +1068,12 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             controlledDrivers.push_back(driver);
             PoseCopyAuthority::SetRagdollSimulating(actor->formID, true);
         }
-        if (!ragdoll.LiveLogged)
-        {
-            ragdoll.LiveLogged = true;
-            spdlog::info("Ragdoll {:X} limb {}: native controller bound by order ({} bodies, drift {:.2f}, event {})",
-                actor->formID, limb, bodies.size(), worstDrift, ragdoll.DismemberTick);
-        }
+    }
+    // Never hold m_stepLock while taking a graph/world lock. The physics hook only
+    // copies this pointer, then works on retained native bodies, without the ECS.
+    {
+        std::lock_guard lock(m_stepLock);
+        m_stepFrame.swap(frame);
     }
     PoseCopyAuthority::SetControlledRagdollDrivers(controlledDrivers);
 }

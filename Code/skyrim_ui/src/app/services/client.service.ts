@@ -95,12 +95,13 @@ export class ClientService implements OnDestroy {
   /** Right-stick scroll, in pixels (positive scrolls down). */
   public gamepadScroll = new Subject<number>();
   /** Character creation together: whose character the creator shows, and whether that player is ready. */
-  public creatorView = new BehaviorSubject<{ visible: boolean; player: number; count: number; ready: boolean; localReady: boolean }>({
+  public creatorView = new BehaviorSubject<{ visible: boolean; player: number; count: number; ready: boolean; localReady: boolean; gamepad: boolean }>({
     visible: false,
     player: 1,
     count: 1,
     ready: false,
     localReady: false,
+    gamepad: false,
   });
   public debugPrompt = new Subject<string>();
   public debugPromptCancelled = new Subject<void>();
@@ -225,8 +226,8 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('gamepadInput', (action: string, repeat: boolean) =>
       this.zone.run(() => this.gamepadInput.next({ action, repeat: !!repeat })));
     skyrimtogether.on('gamepadScroll', (amount: number) => this.zone.run(() => this.gamepadScroll.next(amount)));
-    skyrimtogether.on('creatorView', (visible: boolean, player: number, count: number, ready: boolean, localReady: boolean) =>
-      this.zone.run(() => this.creatorView.next({ visible, player, count, ready, localReady: !!localReady })),
+    skyrimtogether.on('creatorView', (visible: boolean, player: number, count: number, ready: boolean, localReady: boolean, gamepad: boolean) =>
+      this.zone.run(() => this.creatorView.next({ visible, player, count, ready, localReady: !!localReady, gamepad: !!gamepad })),
     );
     skyrimtogether.on('debugPrompt', (message: string, noteOnly: boolean) =>
       this.zone.run(() => this.debugPrompt.next(`${noteOnly ? 'report' : 'check'}\n${message}`)));

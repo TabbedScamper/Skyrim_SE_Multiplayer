@@ -73,6 +73,11 @@ void SetLeaderFreeControl(const bool aFree) noexcept
     s_leaderFree = aFree;
 }
 
+bool LeaderHasFreeControl() noexcept
+{
+    return s_leaderFree || (World::Get().GetPartyService().IsLeader() && LocalHasFreeControl());
+}
+
 bool LocalHasFreeControl() noexcept
 {
     return !LocalPlayerScripted();

@@ -6,6 +6,7 @@
 #include <Services/CorpseRagdollService.h>
 #include <Services/CreatorTogether.h>
 #include <Games/Skyrim/Actor.h>
+#include <Systems/InterpolationSystem.h>
 
 extern std::unique_ptr<TiltedOnlineApp> g_appInstance;
 
@@ -45,6 +46,7 @@ short TP_MAKE_THISCALL(HookMainLoop, Main)
     CorpseRagdollService::OnMainFrame();
     CreatorTogether::OnMainFrame();
     Actor::FlushPendingReset3D();
+    InterpolationSystem::OnMainFrame();
 
     const auto result = TiltedPhoques::ThisCall(MainLoop, apThis);
     ObjectService::OnMainFrameEnd();

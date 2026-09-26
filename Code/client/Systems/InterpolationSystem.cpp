@@ -12,6 +12,20 @@
 #include <Services/ObjectService.h>
 #include <Services/CharacterService.h>
 #include <Services/CreatorTogether.h>
+#include <Services/PlayerCollision.h>
+
+namespace
+{
+std::mutex s_unseatLock;
+std::vector<uint32_t> s_unseat;
+
+void QueueUnseat(const uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_unseatLock);
+    if (std::find(s_unseat.begin(), s_unseat.end(), aFormId) == s_unseat.end())
+        s_unseat.push_back(aFormId);
+}
+} // namespace
 
 void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aTick) noexcept
 {
@@ -84,10 +98,18 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
         // Diagnostic: a seated actor's body drawn away from its reference (the cart driver vanished
         // before the stop with his 3D present and not hidden). Skeleton root vs actor position, 4 Hz,
         // logged when it leaves or comes back within 80 units.
-        static std::unordered_map<uint32_t, std::pair<uint64_t, bool>> s_seatedDrift;
+        struct SeatedDrift
+        {
+            uint64_t NextCheck{};
+            bool Away{};
+            uint64_t AwaySince{};
+        };
+        static std::unordered_map<uint32_t, SeatedDrift> s_seatedDrift;
         if (pRoot && (sitSleepState == 2 || sitSleepState == 3 || s_seatedDrift.contains(apActor->formID)))
         {
-            auto& [nextCheck, away] = s_seatedDrift[apActor->formID];
+            auto& seated = s_seatedDrift[apActor->formID];
+            auto& nextCheck = seated.NextCheck;
+            auto& away = seated.Away;
             if (aTick >= nextCheck)
             {
                 nextCheck = aTick + 250;
@@ -104,6 +126,25 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                             "reference at {:.0f}, {:.0f}, {:.0f})", apActor->formID, away ? "drawn away from" : "back at", drift,
                             sitSleepState, w.x, w.y, w.z, apActor->position.x, apActor->position.y, apActor->position.z);
                     }
+                    // A remote player still seated here after the intro while its owner walks away: the seat
+                    // state only travels with actions, and leaving the intro cart sends none, so the copy
+                    // stayed glued to the old cart seat (body 80-90 units from where the player is, looking
+                    // half sunk and unanimated). Unseat it once the leader is free and the gap has lasted 1 s.
+                    const bool remotePlayer = apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer();
+                    if (remotePlayer && drift > 60.f && (sitSleepState == 2 || sitSleepState == 3) &&
+                        PlayerCollision::LeaderHasFreeControl())
+                    {
+                        if (!seated.AwaySince)
+                            seated.AwaySince = aTick;
+                        else if (aTick - seated.AwaySince > 1000)
+                        {
+                            seated.AwaySince = 0;
+                            QueueUnseat(apActor->formID);
+                            spdlog::info("Seated actor {:X}: a remote player left on an old seat ({:.0f} units); unseated", apActor->formID, drift);
+                        }
+                    }
+                    else
+                        seated.AwaySince = 0;
                 }
                 if (sitSleepState != 2 && sitSleepState != 3 && !away)
                     s_seatedDrift.erase(apActor->formID);
@@ -191,4 +232,24 @@ void InterpolationSystem::Clean(World& aWorld, const entt::entity aEntity) noexc
 {
     if (aWorld.all_of<InterpolationComponent>(aEntity))
         aWorld.remove<InterpolationComponent>(aEntity);
+}
+
+// Main thread (HookMainLoop): leave a stale seat with the engine's quick stop-interacting
+// (Actor::StopInteractingQuick, ID 38697, VA 0x1406D2A40).
+void InterpolationSystem::OnMainFrame() noexcept
+{
+    std::vector<uint32_t> unseat;
+    {
+        std::lock_guard lock(s_unseatLock);
+        unseat.swap(s_unseat);
+    }
+    for (const auto formId : unseat)
+    {
+        auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+        if (!pActor || !pActor->GetNiNode())
+            continue;
+        using TStopInteractingQuick = void(Actor*, bool);
+        POINTER_SKYRIMSE(TStopInteractingQuick, s_stopInteractingQuick, 38697);
+        s_stopInteractingQuick.Get()(pActor, true);
+    }
 }

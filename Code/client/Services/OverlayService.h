@@ -63,7 +63,7 @@ struct OverlayService
 
     void SendSystemMessage(const std::string& acMessage);
     // Character creation together: the banner over the creator (whose character is shown, ready or not).
-    void SetCreatorView(bool aVisible, int aPlayer, int aPlayerCount, bool aReady, bool aLocalReady = false);
+    void SetCreatorView(bool aVisible, int aPlayer, int aPlayerCount, bool aReady, bool aLocalReady = false, bool aGamepad = false);
     void ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly = false);
     bool InjectTestControllerButton(const std::string& acButton) noexcept;
 

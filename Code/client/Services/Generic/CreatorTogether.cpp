@@ -16,9 +16,12 @@
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
 #include <Services/OverlayService.h>
 
+#include <array>
 #include <atomic>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <xinput.h>
 
 namespace
 {
@@ -57,9 +60,7 @@ std::mutex s_appearanceLock;
 bool s_active{};                   // the creator is open here, in a party New Game
 std::vector<uint32_t> s_players;   // every player's character here (0x14 for this player), in party order
 size_t s_view{SIZE_MAX};           // index into s_players of the character shown
-bool s_prevKey{};
-bool s_nextKey{};
-bool s_editKey{};
+std::atomic<bool> s_gamepadInput{};
 bool s_hintShown{};
 bool s_logAfterSwitch{};
 std::unordered_map<uint32_t, bool> s_remoteReady; // form id -> that player clicked Done
@@ -67,6 +68,7 @@ int s_bannerPlayer{-1};
 int s_bannerCount{-1};
 int s_bannerReady{-1};
 int s_bannerLocalReady{-1};
+int s_bannerGamepad{-1};
 std::unordered_map<uint32_t, NotifyPlayerAppearance> s_pendingAppearances;
 std::unordered_map<uint32_t, NotifyPlayerAppearance> s_appliedAppearances;
 std::unordered_map<uint32_t, uint32_t> s_remoteActors;
@@ -97,7 +99,7 @@ void SetPanelsHidden(IMenu* apMenu, bool aHidden) noexcept
         {
             s_movieWasVisible = getVisible(pMovie);
             s_hiddenMovie = pMovie;
-            spdlog::info("Character creator: panels hidden, Backspace to edit again");
+            spdlog::info("Character creator: panels hidden, Backspace or View/Back to edit again");
         }
         setVisible(pMovie, false);
     }
@@ -215,6 +217,100 @@ bool GameInFocus() noexcept
     auto* pWindow = BSGraphics::GetMainWindow();
     return pWindow && pWindow->hWnd && GetForegroundWindow() == pWindow->hWnd;
 }
+
+struct CreatorInput
+{
+    bool Previous{};
+    bool Next{};
+    bool Edit{};
+};
+
+// Main thread only, including the edge history. Poll without consuming vanilla menu input.
+CreatorInput PollCreatorInput(bool aActive) noexcept
+{
+    using TXInputGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+    static const auto getState = []() -> TXInputGetState {
+        for (const wchar_t* library : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+            if (const auto module = LoadLibraryW(library))
+            {
+                if (const auto proc = GetProcAddress(module, "XInputGetState"))
+                    return reinterpret_cast<TXInputGetState>(proc);
+                FreeLibrary(module);
+            }
+        return nullptr;
+    }();
+    static bool wasFocused = false;
+    static std::array<bool, 256> previousKeys{};
+    static POINT previousCursor{};
+    static bool hadCursor = false;
+    static DWORD previousIndex = XUSER_MAX_COUNT;
+    static XINPUT_GAMEPAD previousPad{};
+    if (!aActive || !GameInFocus())
+    {
+        wasFocused = false;
+        previousIndex = XUSER_MAX_COUNT;
+        hadCursor = false;
+        return {};
+    }
+
+    std::array<bool, 256> keys{};
+    bool keyboardInput = false;
+    for (int key = 1; key < 256; ++key)
+    {
+        // Windows' gamepad virtual keys are not keyboard activity.
+        if (key >= 0xC3 && key <= 0xDA)
+            continue;
+        keys[key] = KeyPressed(key);
+        keyboardInput |= keys[key] && (!wasFocused || !previousKeys[key]);
+    }
+    POINT cursor{};
+    const bool hasCursor = GetCursorPos(&cursor) != FALSE;
+    keyboardInput |= wasFocused && hasCursor && hadCursor &&
+        (cursor.x != previousCursor.x || cursor.y != previousCursor.y);
+
+    XINPUT_STATE state{};
+    DWORD index = 0;
+    for (; index < XUSER_MAX_COUNT; ++index)
+        if (getState && getState(index, &state) == ERROR_SUCCESS)
+            break;
+    const bool connected = index < XUSER_MAX_COUNT;
+    const auto& pad = state.Gamepad;
+    const bool samePad = wasFocused && connected && index == previousIndex;
+    const WORD pressed = connected ? static_cast<WORD>(pad.wButtons & ~(samePad ? previousPad.wButtons : 0)) : 0;
+    const auto stickMoved = [](SHORT aNow, SHORT aBefore, int aDeadzone) {
+        return std::abs(static_cast<int>(aNow)) > aDeadzone &&
+            (std::abs(static_cast<int>(aBefore)) <= aDeadzone ||
+                std::abs(static_cast<int>(aNow) - aBefore) > 2048);
+    };
+    const bool padInput = connected && (pressed ||
+        (pad.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD && (!samePad || previousPad.bLeftTrigger <= XINPUT_GAMEPAD_TRIGGER_THRESHOLD)) ||
+        (pad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD && (!samePad || previousPad.bRightTrigger <= XINPUT_GAMEPAD_TRIGGER_THRESHOLD)) ||
+        stickMoved(pad.sThumbLX, samePad ? previousPad.sThumbLX : 0, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) ||
+        stickMoved(pad.sThumbLY, samePad ? previousPad.sThumbLY : 0, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) ||
+        stickMoved(pad.sThumbRX, samePad ? previousPad.sThumbRX : 0, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) ||
+        stickMoved(pad.sThumbRY, samePad ? previousPad.sThumbRY : 0, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE));
+    if (padInput)
+        s_gamepadInput.store(true);
+    if (keyboardInput || !connected)
+        s_gamepadInput.store(false);
+
+    // Seed history on focus gain, menu entry and reconnection. A held button is not a new press.
+    const auto keyPressed = [&](int aKey) { return wasFocused && keys[aKey] && !previousKeys[aKey]; };
+    const WORD padPressed = samePad ? pressed : 0;
+    // RaceSexPanels.handleInput uses L1/R1/L2/R2, not stick clicks. Native CanProcess
+    // (ID 52384, VA 14096b0d0) accepts Rotate/stick motion, not the Item Zoom R3 event.
+    CreatorInput input{
+        keyPressed(VK_OEM_4) || (padPressed & XINPUT_GAMEPAD_LEFT_THUMB) != 0,
+        keyPressed(VK_OEM_6) || (padPressed & XINPUT_GAMEPAD_RIGHT_THUMB) != 0,
+        keyPressed(VK_BACK) || (padPressed & XINPUT_GAMEPAD_BACK) != 0};
+    previousKeys = keys;
+    previousCursor = cursor;
+    hadCursor = hasCursor;
+    previousIndex = index;
+    previousPad = pad;
+    wasFocused = true;
+    return input;
+}
 } // namespace
 
 namespace CreatorTogether
@@ -253,7 +349,7 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             s_view = SIZE_MAX;
             s_hintShown = false;
             World::Get().GetOverlayService().SetCreatorView(false, 1, 1, false);
-            s_bannerPlayer = s_bannerCount = s_bannerReady = s_bannerLocalReady = -1;
+            s_bannerPlayer = s_bannerCount = s_bannerReady = s_bannerLocalReady = s_bannerGamepad = -1;
         }
         s_active = false;
         return;
@@ -287,40 +383,23 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
     s_view = selected == s_players.end() ? self : static_cast<size_t>(selected - s_players.begin());
 
 
-    // [ and ] cycle whose character stands on the spot.
-    const bool focus = GameInFocus();
-    const bool prev = focus && KeyPressed(VK_OEM_4);
-    const bool next = focus && KeyPressed(VK_OEM_6);
     const size_t count = s_players.size();
-    size_t wanted = s_view;
-    if (prev && !s_prevKey)
-        wanted = (s_view + count - 1) % count;
-    if (next && !s_nextKey)
-        wanted = (s_view + 1) % count;
-    if ((prev && !s_prevKey) || (next && !s_nextKey))
-        spdlog::info("Character creator together: {} pressed, {} players", prev ? "[" : "]", s_players.size());
-    s_prevKey = prev;
-    s_nextKey = next;
-    if (wanted != s_view)
-    {
-        s_view = wanted;
-        spdlog::info("Character creator together: viewing {:X}", s_players[s_view]);
-        s_logAfterSwitch = true;
-    }
 
     // The banner: whose character this is, and whether that player is ready.
     const bool ready = s_players[s_view] == 0x14 ? s_done.load() : s_remoteReady[s_players[s_view]];
     const int player = static_cast<int>(s_view) + 1;
     const int playerCount = static_cast<int>(count);
     const bool localReady = s_done.load();
+    const bool gamepad = s_gamepadInput.load();
     if (player != s_bannerPlayer || playerCount != s_bannerCount || static_cast<int>(ready) != s_bannerReady ||
-        static_cast<int>(localReady) != s_bannerLocalReady)
+        static_cast<int>(localReady) != s_bannerLocalReady || static_cast<int>(gamepad) != s_bannerGamepad)
     {
         s_bannerPlayer = player;
         s_bannerCount = playerCount;
         s_bannerReady = static_cast<int>(ready);
         s_bannerLocalReady = static_cast<int>(localReady);
-        World::Get().GetOverlayService().SetCreatorView(true, player, playerCount, ready, localReady);
+        s_bannerGamepad = static_cast<int>(gamepad);
+        World::Get().GetOverlayService().SetCreatorView(true, player, playerCount, ready, localReady, gamepad);
     }
 }
 
@@ -445,8 +524,25 @@ void OnMainFrame() noexcept
     }
 
     auto* pMenu = GetCreatorMenu();
-    const bool edit = pMenu && GameInFocus() && KeyPressed(VK_BACK);
-    if (edit && !s_editKey && s_holding.load() && !s_releaseRequested.load() &&
+    const auto input = PollCreatorInput(pMenu && s_holding.load() && !s_releasing.load());
+    if (input.Previous || input.Next)
+    {
+        std::lock_guard lock(s_lock);
+        if (s_active && s_view < s_players.size())
+        {
+            const auto count = s_players.size();
+            const auto wanted = input.Next ? (s_view + 1) % count : (s_view + count - 1) % count;
+            spdlog::info("Character creator together: {} pressed, {} players",
+                input.Next ? "] / R3" : "[ / L3", count);
+            if (wanted != s_view)
+            {
+                s_view = wanted;
+                spdlog::info("Character creator together: viewing {:X}", s_players[s_view]);
+                s_logAfterSwitch = true;
+            }
+        }
+    }
+    if (input.Edit && s_holding.load() && !s_releaseRequested.load() &&
         !s_releasing.load() && s_done.exchange(false))
     {
         s_heldMenu.store(nullptr);
@@ -457,7 +553,6 @@ void OnMainFrame() noexcept
         s_logAfterSwitch = true;
         spdlog::info("Character creator: editing again, readiness withdrawn");
     }
-    s_editKey = edit;
     SetPanelsHidden(pMenu, s_holding.load() && s_done.load() && !s_releasing.load());
 
     std::vector<uint32_t> players;

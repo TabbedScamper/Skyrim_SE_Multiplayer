@@ -1,6 +1,7 @@
 #include <Services/SmoothClock.h>
 #include <Games/ActorExtension.h>
 #include <Services/ObjectService.h>
+#include <Services/CorpseRagdollService.h>
 
 #include <World.h>
 #include <Events/DisconnectedEvent.h>
@@ -1535,8 +1536,10 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
                 v[2] * v[2]);
         }
     }
+    CorpseRagdollService::OnHavokStep(apWorld, aDeltaTime, false);
     const int result = s_originalNativeStep ?
         s_originalNativeStep(apWorld, aDeltaTime) : 0;
+    CorpseRagdollService::OnHavokStep(apWorld, aDeltaTime, true);
     if (beforeReadable && pSelectedBody ==
         s_watchedHavokBody.load(std::memory_order_acquire))
     {

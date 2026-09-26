@@ -4,7 +4,8 @@
 
 struct World;
 
-// One writer for every networked actor's rendered skeleton: the owner's.
+// Fresh owner poses drive networked skeletons. Living actors without a recent sample
+// use their local graph (driven by replayed actions/variables), then blend back.
 //
 // Every native path that copies a generated pose onto an actor's bone nodes goes through
 // ID 63856 (normal graph finalize ID 63589, the physics-step listener ID 63563, and others).
@@ -29,7 +30,7 @@ void SetCurrentTick(uint64_t aTick) noexcept;
 [[nodiscard]] double GetPresentationTimeMs() noexcept;
 void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
 // Cutscene follow: this PC's own player takes the pose of this actor (the leader's character
-// here); 0 turns it off. Applied from the next registry refresh.
+// here); 0 turns it off immediately. A new source starts at the next registry refresh.
 void SetLocalMirror(uint32_t aSourceFormId) noexcept;
 // Whether this actor's ragdoll bodies are simulating here (CorpseRagdollService, per frame). A
 // dying actor whose ragdoll is not simulating yet (a death animation) keeps taking its owner's pose.

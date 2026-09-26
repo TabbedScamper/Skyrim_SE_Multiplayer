@@ -134,11 +134,8 @@ bool ActorMediator::PerformAction(TESActionData* apAction) noexcept
 bool ActorMediator::ForceAction(TESActionData* apAction) noexcept
 {
     TP_THIS_FUNCTION(TAnimationStep, uint8_t, ActorMediator, TESActionData*);
-    using TApplyAnimationVariables = void*(void*, TESActionData*);
 
-    POINTER_SKYRIMSE(TApplyAnimationVariables, ApplyAnimationVariables, 39004);
     POINTER_SKYRIMSE(TAnimationStep, PerformComplexAction, 38953);
-    POINTER_SKYRIMSE(void*, qword_142F271B8, 403566);
 
     uint8_t result = 0;
 
@@ -146,8 +143,9 @@ bool ActorMediator::ForceAction(TESActionData* apAction) noexcept
     if (pActor)
     {
         result = TiltedPhoques::ThisCall(PerformComplexAction, this, apAction);
-
-        ApplyAnimationVariables(*qword_142F271B8.Get(), apAction);
+        // 38953 / 1406DFF90 already calls 39004 / 1406E2250 with the action's result.
+        // A second call here omitted its third argument and could repeat state transitions
+        // (including furniture state) using an undefined success byte.
     }
 
     return result;

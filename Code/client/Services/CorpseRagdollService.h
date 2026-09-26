@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <memory>
 
 struct World;
 struct TransportService;
@@ -18,16 +19,20 @@ struct NotifyDismember;
 // different transforms; the prisoner shot in the intro fell and spun differently on the follower).
 // The actor's owner streams every ragdoll body (relative to the actor) at 20 Hz while physics owns
 // the skeleton and the bodies move, and sends the settled pose afterwards (again every 5 s for
-// late arrivals). Other PCs keyframe ordered bodies through the native rigid-body controller's
-// backend. The detached head uses the same controller and the reliable dismember event's tick.
+// late arrivals). Other PCs place keyframed bodies at each physics step. The detached head
+// uses the same placement and the reliable dismember event's tick.
 class CorpseRagdollService
 {
 public:
     CorpseRagdollService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept;
     TP_NOCOPYMOVE(CorpseRagdollService);
-    // Called by the Main::Update hook on the main thread: the remote ragdolls are placed there,
-    // before the frame's physics step, not from the update job running beside it.
+    // Main::Update resolves graph/body bindings and publishes retained step snapshots.
+    // Game-thread death/dismember transitions stay here; placement runs at the physics step.
     static void OnMainFrame() noexcept;
+    // ID 61410: before/after the native solver, using a retained snapshot without ECS/graph locks.
+    static void OnHavokStep(void* apWorld, float aDeltaTime, bool aAfterStep) noexcept;
+    // Native postPhysics can run inside the solver's listeners, before its return hook.
+    static void PlaceForReadback(void* apDriver) noexcept;
     // True until the owner ends its ragdoll stream or authority is released:
     // nothing else may move it (the corpse cell correction reloaded it with MoveTo: naked, then
     // teleported to the owner's final position). Any thread.
@@ -38,6 +43,8 @@ public:
     static bool IsDismemberAuthorized(uint32_t aFormId) noexcept;
 
 private:
+    struct StepBinding;
+    struct StepFrame;
     struct OwnedRagdoll
     {
         uint64_t SettledSinceMs{};
@@ -58,26 +65,21 @@ private:
         std::array<Sample, 12> Ring{};
         uint32_t RingCount{};
         uint32_t RingNext{};
-        bool Asleep{};
         // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
         bool Knocked{};
         // The owner is dying (it reported the death), not only knocked down: set when this copy is
         // killed or knocked at the first sample.
         bool OwnerDying{};
-        bool LiveLogged{};
         bool CountMismatchLogged{};
         const char* LastSkipReason{};
         uint64_t DismemberTick{};
         uint64_t EndTick{};
-        uint64_t LastAppliedMs{};
         uint32_t LocalFormId{};
         Vector<uint32_t> BodyIds;
         Vector<const void*> BodyPointers;
         const void* PhysicsWorld{};
         Vector<uint8_t> MotionTypes;
-        // hkaKeyFrameHierarchyUtility::WorkElem, 0x40 bytes per body (IDs 65267/65268).
-        struct WorkElem { float Values[16]{}; };
-        std::array<WorkElem, CorpseRagdollRequest::kMaxBodies> ControllerState{};
+        std::shared_ptr<StepBinding> Binding;
     };
     struct Dismember
     {
@@ -105,6 +107,8 @@ private:
     Map<uint32_t, Dismember> m_dismembers;
     Map<uint32_t, uint64_t> m_sentDismembers;
     std::recursive_mutex m_remoteLock;
+    std::mutex m_stepLock;
+    std::shared_ptr<StepFrame> m_stepFrame;
     std::atomic<bool> m_applyOnMainFrame{};
     std::atomic<bool> m_disconnectPending{};
     entt::scoped_connection m_updateConnection;

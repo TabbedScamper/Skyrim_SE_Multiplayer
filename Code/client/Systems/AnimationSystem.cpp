@@ -42,6 +42,7 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
     bool captured = false;
     bool visualCaptured = false;
     const bool captureDiagnostics = GameTestService::IsDiagnosticCaptureArmed();
+    const bool living = ((apActor->actorState.flags1 >> 21) & 0x7F) == 0;
     // The exact array the engine last copied onto this actor's bones (PoseCopyAuthority hook on
     // ID 63856) rather than hkbCharacter::poseLocal, which a later copy can differ from.
     if (PoseCopyAuthority::GetCapturedPose(apActor->formID, arSnapshot))
@@ -49,11 +50,13 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
         arSnapshot.GraphDescriptor = apActor->GetExtension() ? apActor->GetExtension()->GraphDescriptorHash : 0;
         captured = true;
     }
-    if (!captured || captureDiagnostics)
+    // poseLocal has no evaluation timestamp. Reading it after the copy hook expires and
+    // stamping it with this packet's tick turned culled living actors into fresh frozen poses.
+    if ((!captured && !living) || captureDiagnostics)
     {
         BSScopedLock<BSRecursiveLock> graphLock(pManager->lock);
         const auto count = pManager->animationGraphs.size;
-        const auto index = pManager->animationGraphIndex;
+        const auto index = apActor->formID == 0x14 && living ? 0u : pManager->animationGraphIndex;
         if (count > 0 && count <= 32 && index < count)
         {
             const auto* pGraph = pManager->animationGraphs.Get(index);
@@ -63,7 +66,7 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
                     sizeof(graph), &bytesRead) && bytesRead == sizeof(graph))
             {
                 const auto poseCount = graph.characterInstance.numPoseLocal;
-                if (!captured && poseCount > 0 && poseCount <= EvaluatedPoseSnapshot::MaxBones &&
+                if (!captured && !living && poseCount > 0 && poseCount <= EvaluatedPoseSnapshot::MaxBones &&
                     graph.characterInstance.poseLocal)
                 {
                     std::array<QsTransform, EvaluatedPoseSnapshot::MaxBones> nativePose{};

@@ -1,4 +1,5 @@
 #include <Services/SmoothClock.h>
+#include <Services/CorpseRagdollService.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 
 #include <World.h>
@@ -22,6 +23,7 @@ constexpr size_t kMaxBones = EvaluatedPoseSnapshot::MaxBones;
 constexpr size_t kRingSize = 12;
 // A captured pose older than this is not sent (the actor is no longer being animated here).
 constexpr uint64_t kCaptureFreshMs = 250;
+constexpr uint64_t kLivingBlendMs = 150;
 
 enum class Role : uint8_t
 {
@@ -60,17 +62,19 @@ struct ActorPose
     uint32_t PendingCount{};
     uint64_t PendingFrame{};
     uint64_t PendingTick{};
+    uint64_t PendingAtMs{};
+    bool PendingLiving{};
     std::array<QsTransform, kMaxBones> Captured{};
     uint32_t CapturedCount{};
     uint64_t CapturedAtMs{};
     uint64_t CapturedTick{};
-    // Other PCs: hysteresis between the owner pose and the local graph. Switching every few
-    // hundred ms (sparse samples) showed as NPCs fighting two poses.
+    // Other PCs: legacy hysteresis for physics transitions; living samples blend back from
+    // the local graph after a gap instead of snapping or holding an indefinitely stale pose.
     bool Overriding{};
     uint64_t FreshSinceMs{};
-    // Other PCs. The newest owner value of every bone ever sent: when the owner animates fewer
-    // bones (its LOD for a distant actor), its other bones keep their last values there, so they
-    // hold those values here too. Filling them from the local graph blended two animations.
+    uint64_t LivingBlendSinceMs{};
+    // Other PCs. Retain the newest owner bone values for the physics transition paths.
+    // Living actors use their local graph for bones missing from current owner samples.
     std::array<QsTransform, kMaxBones> Held{};
     uint32_t HeldCount{};
     std::array<Sample, kRingSize> Ring{};
@@ -88,9 +92,15 @@ std::mutex s_simulatingLock;
 std::unordered_map<uint32_t, bool> s_ragdollSimulating;
 std::unordered_map<uint32_t, bool> s_ragdollPending;
 Vector<void*> s_controlledDrivers;
+struct RagdollRenderPose
+{
+    void* Driver{};
+    std::vector<QsTransform> Bones;
+};
+std::unordered_map<const void*, RagdollRenderPose> s_ragdollRenderPoses;
 
 // 58291 / 140AC6FB0 normally replaces controller targets and body motion types from the
-// local graph. Streamed copies use the same native controller backend with owner body targets.
+// local graph. Streamed copies place keyframed bodies at the native physics step instead.
 using TDriveToPose = void(void*, float, void*, void*);
 TDriveToPose* RealDriveToPose{};
 using TReadRagdollPose = void(void*, void*, void*);
@@ -113,6 +123,7 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
 {
     if (!ControlledDriver(apDriver))
         return RealReadRagdollPose(apDriver, apContext, apOutput);
+    CorpseRagdollService::PlaceForReadback(apDriver);
     // 58293 / 140AC8B80 skips physics readback when +CB says every bone belongs to
     // animation, or +C7/+C8 report no controller. Our bodies are keyframed to the OWNER,
     // so run native mapping back to the rendered skeleton without the local blend-out.
@@ -121,6 +132,10 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
     float fractions[2];
     std::memcpy(flags, bytes + 0xC6, sizeof(flags));
     std::memcpy(fractions, bytes + 0xB4, sizeof(fractions));
+    // 58308 / 140ACA000 chooses 64150 / 140BF3ED0 (swept-time sampling) when
+    // +1D is set. Exact step placement must read the current body transforms instead.
+    const auto asynchronous = bytes[0x1D];
+    bytes[0x1D] = 0;
     bytes[0xC6] = 1;
     bytes[0xC7] = 0;
     bytes[0xC8] = 1;
@@ -128,6 +143,38 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
     bytes[0xCB] = 0;
     std::memset(bytes + 0xB4, 0, sizeof(fractions));
     RealReadRagdollPose(apDriver, apContext, apOutput);
+    // 63563 / 140BCAB40 copies the mapped pose to the nodes after this call, but
+    // 63589 / 140BCF480 can also copy local animation. Keep this physics pose as the
+    // sole rendered pose while the stream owns the ragdoll. Otherwise the old
+    // RagdollSimulating branch passed every competing animation copy through.
+    auto* tracks = *static_cast<uint8_t**>(apOutput);
+    auto* character = *reinterpret_cast<uint8_t**>(bytes + 0x80);
+    if (tracks && character && bytes[0xCA] && *reinterpret_cast<int32_t*>(tracks + 4) > 2)
+    {
+        const auto count = *reinterpret_cast<int16_t*>(tracks + 0x32);
+        const auto capacity = *reinterpret_cast<int16_t*>(tracks + 0x30);
+        const auto offset = *reinterpret_cast<int16_t*>(tracks + 0x34);
+        const auto numBytes = *reinterpret_cast<int32_t*>(tracks);
+        if (count > 0 && count <= capacity && count <= kMaxBones && offset >= 0 &&
+            offset + count * sizeof(QsTransform) <= static_cast<size_t>((std::max)(numBytes, 0)))
+        {
+            const auto* pose = reinterpret_cast<const QsTransform*>(tracks + offset);
+            std::lock_guard lock(s_simulatingLock);
+            auto& rendered = s_ragdollRenderPoses[character + 0xA0]; // graph +160 boneNodes
+            if (rendered.Driver != apDriver)
+            {
+                spdlog::info("Ragdoll driver {}: current-transform physics readback, {} rendered bones (async was {})",
+                    fmt::ptr(apDriver), count, asynchronous);
+                rendered.Bones.clear();
+            }
+            rendered.Driver = apDriver;
+            // Like the native node copy, a short LOD pass leaves other bones alone.
+            if (rendered.Bones.size() < static_cast<size_t>(count))
+                rendered.Bones.resize(count);
+            std::copy_n(pose, count, rendered.Bones.begin());
+        }
+    }
+    bytes[0x1D] = asynchronous;
     std::memcpy(bytes + 0xC6, flags, sizeof(flags));
     std::memcpy(bytes + 0xB4, fractions, sizeof(fractions));
 }
@@ -170,12 +217,12 @@ uint64_t NowMs() noexcept
 using TCopyPoseToNodes = void(const QsTransform*, const void*, uint32_t);
 TCopyPoseToNodes* RealCopyPoseToNodes = nullptr;
 
-void Interpolate(const Sample& a, const Sample& b, const float t, const uint32_t aCount, QsTransform* apOut) noexcept
+void Interpolate(const QsTransform* a, const QsTransform* b, const float t, const uint32_t aCount, QsTransform* apOut) noexcept
 {
     for (uint32_t i = 0; i < aCount; ++i)
     {
-        const auto& x = a.Bones[i];
-        const auto& y = b.Bones[i];
+        const auto& x = a[i];
+        const auto& y = b[i];
         auto& o = apOut[i];
         for (int k = 0; k < 3; ++k)
             o.translation[k] = x.translation[k] + (y.translation[k] - x.translation[k]) * t;
@@ -201,10 +248,11 @@ void Interpolate(const Sample& a, const Sample& b, const float t, const uint32_t
 
 thread_local std::array<QsTransform, kMaxBones> t_override{};
 
-// Bones [aDriven, aCount) the owner's samples do not carry: its held values, else the local graph.
-void FillUndriven(const ActorPose& acPose, const QsTransform* apLocal, const uint32_t aDriven, const uint32_t aCount) noexcept
+// Bones [aDriven, aCount) the owner's samples do not carry.
+void FillUndriven(const ActorPose& acPose, const QsTransform* apLocal, const uint32_t aDriven, const uint32_t aCount, const bool aLiving) noexcept
 {
-    const uint32_t held = (std::min)(acPose.HeldCount, aCount);
+    // A living actor's culled bones must keep animating locally, not hold an old visible pose.
+    const uint32_t held = aLiving ? 0u : (std::min)(acPose.HeldCount, aCount);
     for (uint32_t i = aDriven; i < aCount; ++i)
         t_override[i] = i < held ? acPose.Held[i] : apLocal[i];
 }
@@ -232,10 +280,17 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
         // CorpseRagdollService drives those bodies.
         // Only once this copy's ragdoll is simulating: during a death animation the owner's pose
         // (its death animation) still drives it, so both PCs show the same death.
-        if (it->second.Kind == Role::Apply && it->second.pActor && PhysicsOwnsSkeleton(it->second.pActor) &&
+        if (it->second.Kind == Role::Apply && it->second.pActor &&
             RagdollSimulating(it->second.pActor->formID))
-            return RealCopyPoseToNodes(apPose, apBoneNodes, aCount);
+        {
+            std::lock_guard lock(s_simulatingLock);
+            const auto rendered = s_ragdollRenderPoses.find(apBoneNodes);
+            if (rendered != s_ragdollRenderPoses.end() && rendered->second.Bones.size() >= count)
+                return RealCopyPoseToNodes(rendered->second.Bones.data(), apBoneNodes, aCount);
+            // Until physics readback exists, retain the streamed owner skeleton below.
+        }
         auto& pose = s_poses[it->second.FormId];
+        const bool living = it->second.pActor && !PhysicsOwnsSkeleton(it->second.pActor);
         if (it->second.Kind == Role::Capture)
         {
             const auto frame = s_frame.load(std::memory_order_relaxed);
@@ -244,21 +299,28 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 std::copy_n(pose.Pending.begin(), pose.PendingCount, pose.Captured.begin());
                 pose.CapturedCount = pose.PendingCount;
                 pose.CapturedTick = pose.PendingTick;
-                pose.CapturedAtMs = NowMs();
+                pose.CapturedAtMs = living ? pose.PendingAtMs : NowMs();
+                // Merge partial passes within a living frame only. Otherwise a root-only
+                // off-screen copy re-dated all the old full-body bones indefinitely.
+                if (living)
+                    pose.PendingCount = 0;
             }
             // Merge every copy of the frame bone by bone, as the skeleton itself ends up: some passes
             // copy only the first bone or few (measured: samples of 1 to 5 of 98 bones), and
             // publishing such a pass as the frame's pose left the other PC's bones stale.
-            // Bones a pass does not write keep their values (as the nodes do), across frames too.
+            // Physics-owned skeletons also retain unwritten bones across frames.
             std::copy_n(apPose, count, pose.Pending.begin());
             pose.PendingCount = (std::max)(pose.PendingCount, count);
             pose.PendingFrame = frame;
             pose.PendingTick = s_currentTick.load(std::memory_order_relaxed);
+            pose.PendingAtMs = NowMs();
+            pose.PendingLiving = living;
             s_captured.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {
             const bool pendingRagdoll = RagdollPending(it->second.FormId);
+            const bool livingFallback = living && !pendingRagdoll;
             // Oldest-to-newest view of the ring; bracket the presentation tick.
             const auto size = static_cast<uint32_t>(pose.Ring.size());
             const auto sample = [&](uint32_t i) -> const Sample& { return pose.Ring[(pose.RingNext + size - pose.RingCount + i) % size]; };
@@ -272,43 +334,65 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 const auto& b = sample(i);
                 if (tick < a.Tick || tick > b.Tick)
                     continue;
+                // A resumed sample must not interpolate across an entire off-screen interval.
+                if (livingFallback && b.Tick - a.Tick > kCaptureFreshMs)
+                    continue;
                 // The owner may animate fewer bones (its LOD for this actor): drive the bones it
                 // sent and leave the rest to the local graph.
                 const uint32_t driven = (std::min)({count, a.Count, b.Count});
                 if (driven < count)
                 {
                     s_countMismatch.fetch_add(1, std::memory_order_relaxed);
-                    FillUndriven(pose, apPose, driven, count);
+                    FillUndriven(pose, apPose, driven, count, livingFallback);
                     auto& shortPose = s_shortPoses[it->second.FormId];
                     shortPose.Count = count;
                     shortPose.Driven = driven;
-                    shortPose.Held = pose.HeldCount;
+                    shortPose.Held = livingFallback ? 0u : pose.HeldCount;
                     ++shortPose.Frames;
                 }
                 const float t = b.Tick > a.Tick ? static_cast<float>((time - static_cast<double>(a.Tick)) /
                     static_cast<double>(b.Tick - a.Tick)) : 1.f;
-                Interpolate(a, b, t, driven, t_override.data());
+                Interpolate(a.Bones.data(), b.Bones.data(), t, driven, t_override.data());
                 useOverride = true;
             }
-            // Past the newest sample by less than one interval: hold the newest pose.
+            // Briefly hold the newest sample beyond the buffered timeline.
             if (!useOverride && pose.RingCount)
             {
                 const auto& newest = sample(pose.RingCount - 1);
                 // Hold the owner pose through sample gaps rather than dropping back to the local
                 // graph: alternating owner and local poses read as NPCs jittering to catch up.
-                if (tick >= newest.Tick && (tick - newest.Tick <= 250 || pendingRagdoll))
+                if (tick >= newest.Tick && (tick - newest.Tick <= kCaptureFreshMs || pendingRagdoll))
                 {
                     const uint32_t driven = (std::min)(count, newest.Count);
                     if (driven < count)
-                        FillUndriven(pose, apPose, driven, count);
+                        FillUndriven(pose, apPose, driven, count, livingFallback);
                     std::copy_n(newest.Bones.begin(), driven, t_override.begin());
                     useOverride = true;
                 }
             }
-            // Hysteresis: take the owner pose only after a second of steady samples; drop it only
-            // when samples actually stop (the hold above covers short gaps).
+            // Living actors resume their local graph after the hold expires and blend back.
+            // Keep the existing hysteresis for physics transitions.
             const auto nowMs = NowMs();
-            if (!useOverride)
+            if (livingFallback)
+            {
+                if (!useOverride)
+                {
+                    pose.Overriding = false;
+                    pose.FreshSinceMs = 0;
+                    pose.LivingBlendSinceMs = 0;
+                }
+                else
+                {
+                    if (!pose.LivingBlendSinceMs)
+                        pose.LivingBlendSinceMs = nowMs;
+                    const float blend = (std::min)(1.f, static_cast<float>(nowMs - pose.LivingBlendSinceMs) /
+                        static_cast<float>(kLivingBlendMs));
+                    if (blend < 1.f)
+                        Interpolate(apPose, t_override.data(), blend, count, t_override.data());
+                    pose.Overriding = true;
+                }
+            }
+            else if (!useOverride)
             {
                 pose.Overriding = false;
                 pose.FreshSinceMs = 0;
@@ -344,6 +428,11 @@ void SetControlledRagdollDrivers(const Vector<void*>& acDrivers) noexcept
 {
     std::lock_guard lock(s_simulatingLock);
     s_controlledDrivers = acDrivers;
+    for (auto it = s_ragdollRenderPoses.begin(); it != s_ragdollRenderPoses.end();)
+        if (std::find(acDrivers.begin(), acDrivers.end(), it->second.Driver) == acDrivers.end())
+            it = s_ragdollRenderPoses.erase(it);
+        else
+            ++it;
 }
 
 void ClearRagdollAuthority() noexcept
@@ -352,6 +441,7 @@ void ClearRagdollAuthority() noexcept
     s_ragdollSimulating.clear();
     s_ragdollPending.clear();
     s_controlledDrivers.clear();
+    s_ragdollRenderPoses.clear();
 }
 
 void RefreshRegistry(World& aWorld) noexcept
@@ -369,7 +459,9 @@ void RefreshRegistry(World& aWorld) noexcept
         {
             BSScopedLock<BSRecursiveLock> lock(pManager->lock);
             const auto count = pManager->animationGraphs.size;
-            const auto index = pManager->animationGraphIndex;
+            // The active player graph can be first-person arms/camera. Remote players and the
+            // cutscene body mirror use the third-person skeleton, like SaveAnimationVariables.
+            const auto index = aFormId == 0x14 && !PhysicsOwnsSkeleton(pActor) ? 0u : pManager->animationGraphIndex;
             if (count && count <= 32 && index < count)
             {
                 auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(index));
@@ -430,7 +522,15 @@ void SetRagdollSimulating(const uint32_t aFormId, const bool aSimulating) noexce
 
 void SetLocalMirror(const uint32_t aSourceFormId) noexcept
 {
-    s_localMirror.store(aSourceFormId, std::memory_order_relaxed);
+    if (s_localMirror.exchange(aSourceFormId, std::memory_order_relaxed) == aSourceFormId)
+        return;
+    // Stop copying immediately on release/source change, including during the 250 ms until
+    // the next registry refresh. Never let a stale mirror entry capture or drive this player.
+    std::lock_guard guard(s_lock);
+    std::erase_if(s_registry, [](const auto& entry) {
+        return entry.second.pActor && entry.second.pActor->formID == 0x14;
+    });
+    s_poses.erase(0x14);
 }
 
 void SetPresentationDelayMs(const uint32_t aDelayMs) noexcept
@@ -452,14 +552,23 @@ bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noex
 {
     std::lock_guard guard(s_lock);
     const auto it = s_poses.find(aFormId);
-    if (it == s_poses.end() || !it->second.CapturedCount || NowMs() - it->second.CapturedAtMs > kCaptureFreshMs)
+    if (it == s_poses.end())
         return false;
     const auto& pose = it->second;
-    arPose.SourceTick = pose.CapturedTick;
-    arPose.Bones.resize(pose.CapturedCount);
-    for (uint32_t i = 0; i < pose.CapturedCount; ++i)
+    // Publish a finished living frame even if culling means there is no subsequent copy to
+    // retire it. Its age is measured from the copy, never from this read or the next copy.
+    const bool pending = pose.PendingLiving && pose.PendingCount &&
+        pose.PendingFrame != s_frame.load(std::memory_order_relaxed);
+    const auto count = pending ? pose.PendingCount : pose.CapturedCount;
+    const auto capturedAt = pending ? pose.PendingAtMs : pose.CapturedAtMs;
+    if (!count || NowMs() - capturedAt > kCaptureFreshMs)
+        return false;
+    const auto& bones = pending ? pose.Pending : pose.Captured;
+    arPose.SourceTick = pending ? pose.PendingTick : pose.CapturedTick;
+    arPose.Bones.resize(count);
+    for (uint32_t i = 0; i < count; ++i)
     {
-        const auto& source = pose.Captured[i];
+        const auto& source = bones[i];
         auto& target = arPose.Bones[i];
         std::copy_n(source.translation, 3, target.Translation.begin());
         std::copy_n(source.rotation, 4, target.Rotation.begin());
@@ -480,6 +589,8 @@ void PushOwnerSample(const uint32_t aFormId, const EvaluatedPoseSnapshot& acPose
         if (aTick <= newest.Tick)
             return;
         const uint64_t gap = aTick - newest.Tick;
+        if (gap > kCaptureFreshMs)
+            pose.LivingBlendSinceMs = 0;
         if (gap < 5000)
         {
             s_gapTotalMs += gap;
