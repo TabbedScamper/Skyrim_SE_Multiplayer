@@ -18,6 +18,7 @@ using TAddMessage = void(void*, const BSFixedString*, UIMessage::UI_MESSAGE_TYPE
 TAddMessage* s_realAddMessage{};
 
 std::atomic<bool> s_holding{};
+std::atomic<bool> s_releaseRequested{};
 std::atomic<bool> s_done{};
 std::atomic<bool> s_releasing{};
 
@@ -142,6 +143,10 @@ namespace CreatorTogether
 void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcept
 {
     s_holding.store(aHolding);
+    // No longer holding (the party broke up, a player disconnected, the session moved on) with Done
+    // held: close the creator, or this player is stuck in it.
+    if (!aHolding && s_done.load())
+        Release();
     std::lock_guard lock(s_lock);
     const bool active = aHolding && aCreatorOpen;
     if (!active)
@@ -287,6 +292,13 @@ bool IsDone() noexcept
 
 void Release() noexcept
 {
+    s_releaseRequested.store(true);
+}
+
+void OnMainFrame() noexcept
+{
+    if (!s_releaseRequested.exchange(false))
+        return;
     if (!s_done.exchange(false))
         return;
     s_releasing.store(true);

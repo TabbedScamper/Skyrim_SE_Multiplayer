@@ -4,6 +4,7 @@
 #include <Misc/GameVM.h>
 #include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/CreatorTogether.h>
 
 extern std::unique_ptr<TiltedOnlineApp> g_appInstance;
 
@@ -41,6 +42,7 @@ short TP_MAKE_THISCALL(HookMainLoop, Main)
 {
     ObjectService::OnMainFrame();
     CorpseRagdollService::OnMainFrame();
+    CreatorTogether::OnMainFrame();
 
     const auto result = TiltedPhoques::ThisCall(MainLoop, apThis);
     ObjectService::OnMainFrameEnd();

@@ -18,8 +18,11 @@ namespace CreatorTogether
 void Update(World& aWorld, bool aHolding, bool aCreatorOpen) noexcept;
 // This player clicked Done while the party was still creating (its close is being held).
 [[nodiscard]] bool IsDone() noexcept;
-// Everyone is done: close the creator now.
+// Everyone is done: close the creator (on the next main-thread frame).
 void Release() noexcept;
+// From the main loop (Main::Update): performs a requested release, since the menu's close is not
+// safe from the off-main-thread client update.
+void OnMainFrame() noexcept;
 // Another player's creator state (from its live look): true once it clicked Done.
 void SetRemoteReady(uint32_t aFormId, bool aReady) noexcept;
 // For InterpolationSystem: where a remote player's character is shown while the creator is open
