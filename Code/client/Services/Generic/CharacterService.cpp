@@ -815,13 +815,11 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     // leader claims it right after. Applying the follower's spawn state moved the leader's scripted
     // intro dragon off its flight (the scene waited for a landing that never came) and made the
     // leader's beheaded prisoner loop create-and-remove every 6 s.
-    // Near the leader, whether or not its 3D is loaded yet (the intro dragon was still far off in the
-    // sky, without 3D, when the follower registered it).
-    const auto* pLeaderPlayer = PlayerCharacter::Get();
-    const bool nearLeader = pActor->GetNiNode() != nullptr || (pActor->parentCell && pActor->parentCell->IsAttached()) ||
-        (pLeaderPlayer && std::hypot(pActor->position.x - pLeaderPlayer->position.x, pActor->position.y - pLeaderPlayer->position.y) < 20000.f);
+    // Wherever it is: loaded or not (the intro dragon far off in the sky), or in a holding cell (the
+    // beheaded prisoner, whose copy on the follower was still alive and was resurrected on the
+    // leader every 6 s, stalling the execution scene).
     const bool keepLocalState = m_world.GetPartyService().IsLeader() && acMessage.FormId != GameId{} && !acMessage.IsPlayer &&
-        pActor->formID < 0xFF000000 && nearLeader;
+        pActor->formID < 0xFF000000;
     if (keepLocalState)
     {
         s_keepLocalSpawnState.insert(pActor->formID);
@@ -843,7 +841,8 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
         m_world.emplace_or_replace<PlayerComponent>(*entity, acMessage.PlayerId);
     }
 
-    if (!keepLocalState && pActor->IsDead() != acMessage.IsDead)
+    // A follower's copy can report a death the leader missed, never a resurrection.
+    if (pActor->IsDead() != acMessage.IsDead && (!keepLocalState || acMessage.IsDead))
         acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
 
     spdlog::info("Spawn Request Is summon {}", acMessage.IsPlayerSummon);
@@ -2846,7 +2845,7 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         m_weaponDrawUpdates[pActor->formID] = {waitingFor3D.SpawnRequest.IsWeaponDrawn};
 
-        if (!keepLocalState && pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead)
+        if (pActor->IsDead() != waitingFor3D.SpawnRequest.IsDead && (!keepLocalState || waitingFor3D.SpawnRequest.IsDead))
             waitingFor3D.SpawnRequest.IsDead ? pActor->Kill() : pActor->Respawn();
 
         if (pActor->IsVampireLord())

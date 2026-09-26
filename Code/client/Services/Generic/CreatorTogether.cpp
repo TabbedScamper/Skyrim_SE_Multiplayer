@@ -21,6 +21,26 @@ std::atomic<bool> s_holding{};
 std::atomic<bool> s_done{};
 std::atomic<bool> s_releasing{};
 
+// RaceSexMenu's begin-closing (ID 52388, VA 14096b7d0; called by ChangeName after Done and the name):
+// Scaleform FadeOut, camera saved, menu byte +0x1a0 = 1 (closing), after which the menu's per-frame
+// character update stops and every pose froze. Held while the party is still creating: the menu stays
+// in its editing state (idles keep playing); run for real by Release. Found by Reviewer B from the corpus.
+using TBeginClosing = void(void*);
+TBeginClosing* s_realBeginClosing{};
+std::atomic<void*> s_heldMenu{};
+
+void HookBeginClosing(void* apMenu)
+{
+    if (s_holding.load() && !s_releasing.load())
+    {
+        s_heldMenu.store(apMenu);
+        if (!s_done.exchange(true))
+            spdlog::info("Character creator: Done held in the editing state until every player is done");
+        return;
+    }
+    s_realBeginClosing(apMenu);
+}
+
 std::mutex s_lock;
 bool s_active{};                   // the creator is open here, in a party New Game
 std::vector<uint32_t> s_players;   // every player's character here (0x14 for this player), in party order
@@ -213,6 +233,14 @@ void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcep
             pRemote->position = pPlayer->position;
             pRemote->SetRotation(pRemote->rotation.x, pRemote->rotation.y, pPlayer->rotation.z);
             pRemote->Update3DPosition(true);
+            // Its scene graph advanced each frame as the menu does for this player's (NiAVObject::Update).
+            if (auto* pRoot = pRemote->GetNiNode())
+            {
+                using TNiUpdate = void(NiAVObject*, void*);
+                POINTER_SKYRIMSE(TNiUpdate, s_niUpdate, 70251);
+                uint8_t updateData[16]{};
+                s_niUpdate.Get()(pRoot, updateData);
+            }
         }
     }
 
@@ -261,12 +289,20 @@ void Release() noexcept
 {
     if (!s_done.exchange(false))
         return;
-    POINTER_SKYRIMSE(void*, s_uiMessageQueue, 400445);
-    if (!s_uiMessageQueue.Get() || !*s_uiMessageQueue.Get() || !s_realAddMessage)
-        return;
     s_releasing.store(true);
-    BSFixedString name("RaceSex Menu");
-    s_realAddMessage(*s_uiMessageQueue.Get(), &name, UIMessage::kHide, nullptr);
+    // The menu's own close (fade, camera, then it queues its hide), or the hide itself if Done was
+    // only held at the hide.
+    if (auto* pMenu = s_heldMenu.exchange(nullptr); pMenu && s_realBeginClosing)
+        s_realBeginClosing(pMenu);
+    else
+    {
+        POINTER_SKYRIMSE(void*, s_uiMessageQueue, 400445);
+        if (s_uiMessageQueue.Get() && *s_uiMessageQueue.Get() && s_realAddMessage)
+        {
+            BSFixedString name("RaceSex Menu");
+            s_realAddMessage(*s_uiMessageQueue.Get(), &name, UIMessage::kHide, nullptr);
+        }
+    }
     s_releasing.store(false);
     spdlog::info("Character creator: every player is done, closed together");
 }
@@ -289,4 +325,7 @@ static TiltedPhoques::Initializer s_creatorTogetherHooks(
         POINTER_SKYRIMSE(TAddMessage, s_addMessage, 13631);
         s_realAddMessage = s_addMessage.Get();
         TP_HOOK(&s_realAddMessage, HookAddMessage);
+        POINTER_SKYRIMSE(TBeginClosing, s_beginClosing, 52388);
+        s_realBeginClosing = s_beginClosing.Get();
+        TP_HOOK(&s_realBeginClosing, HookBeginClosing);
     });
