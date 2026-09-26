@@ -3139,8 +3139,10 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     {
                         const auto lerpAngle = [](float a, float b, float s)
                         { return a + std::remainder(b - a, static_cast<float>(TiltedPhoques::Pi * 2)) * s; };
-                        const NiPoint3 refPosition{pA->Position.x + (pB->Position.x - pA->Position.x) * t,
-                            pA->Position.y + (pB->Position.y - pA->Position.y) * t, pA->Position.z + (pB->Position.z - pA->Position.z) * t};
+                        NiPoint3 refPosition;
+                        refPosition.x = pA->Position.x + (pB->Position.x - pA->Position.x) * t;
+                        refPosition.y = pA->Position.y + (pB->Position.y - pA->Position.y) * t;
+                        refPosition.z = pA->Position.z + (pB->Position.z - pA->Position.z) * t;
                         const glm::vec3 moved{refPosition.x - pReference->position.x, refPosition.y - pReference->position.y,
                             refPosition.z - pReference->position.z};
                         if (glm::length(moved) > 0.05f)
