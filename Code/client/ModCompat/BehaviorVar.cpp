@@ -715,16 +715,18 @@ void BehaviorVar::Init()
         case 1: break;
 
         default:
+            // Expected for the shipped creatures (several share a signature variable): one summary line,
+            // the per-creature details only at debug level.
             if (firsttime++ == 0)
-                spdlog::warn(__FUNCTION__ ": some creatures have ambiguous signatures. This is expected for now,\n"
-                                          "    but a modder must create a unique signature in their mod.");
+                spdlog::info(__FUNCTION__ ": some creatures share a behavior signature (expected for the shipped set; a mod "
+                                          "adding a creature needs a unique one). Details at debug level.");
 
-            spdlog::warn(__FUNCTION__ ": {} signature {} matches:", signature.creatureName, signature.signatureVar);
+            spdlog::debug(__FUNCTION__ ": {} signature {} matches:", signature.creatureName, signature.signatureVar);
             for (auto hash : matches)
             {
                 auto iter = std::find(behaviorPool.begin(), behaviorPool.end(), hash);
                 if (iter < behaviorPool.end())
-                    spdlog::warn("    {}", std::find(behaviorPool.begin(), behaviorPool.end(), hash)->creatureName);
+                    spdlog::debug("    {}", iter->creatureName);
                 else
                     spdlog::warn("    {}: unable to find creature name for this hash, likely typo in SkyrimTogetherReborn tree", hash);
             }
