@@ -260,6 +260,7 @@ struct TriggerGate::State
         bool Trigger{};
         bool Left{};
         std::unordered_set<uint32_t> Members;
+        uint64_t Since{};
     };
     std::mutex Mutex;
     std::mutex MoveMutex;
@@ -290,6 +291,7 @@ struct TriggerGate::State
         if (GetTickCount64() - SampleTime > 500)
             return false;
         const auto inside = Inside.find(aTrigger.Handle);
+        const auto leader = Players.find(LeaderId);
         for (const auto& [id, player] : Players)
         {
             if (!SameSpace(player, aTrigger) || !player.Handle)
@@ -297,6 +299,14 @@ struct TriggerGate::State
             const auto delta = player.Position - aTrigger.Position;
             if (glm::dot(delta, delta) <= 400.f * 400.f)
                 continue;
+            // With the leader: a remote player's copy does not raise enter events here, so a big trigger
+            // (the intro dragon's landing box) was held for minutes with everyone standing together.
+            if (leader != Players.end() && SameSpace(player, leader->second))
+            {
+                const auto toLeader = player.Position - leader->second.Position;
+                if (glm::dot(toLeader, toLeader) <= 600.f * 600.f)
+                    continue;
+            }
             if (inside == Inside.end() || !inside->second.contains(player.Handle))
                 return false;
         }
@@ -385,6 +395,7 @@ bool TriggerGate::Hold(uint8_t aKind, TESObjectREFR* apTrigger, TESObjectREFR* a
             leaderId != state.LeaderId || generation != state.Generation)
             return false;
         State::Held item{trigger.Handle, apTrigger->formID, ++state.NextHold};
+        item.Since = GetTickCount64();
         for (const auto& [id, location] : state.Players)
             item.Members.insert(id);
         held = state.Pending.emplace(trigger.Handle, std::move(item)).first;
@@ -482,7 +493,10 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
             else
                 ++it;
         }
-        notice = active && leader && !state.Pending.empty() && now >= state.NextNotice;
+        // Only when it is needed: a trigger held for a while with a player actually left behind.
+        const bool someoneBehind = std::any_of(state.Pending.begin(), state.Pending.end(),
+            [now](const auto& aHeld) { return aHeld.second.Since && now - aHeld.second.Since > 8000; });
+        notice = active && leader && someoneBehind && now >= state.NextNotice;
         if (notice)
             state.NextNotice = now + 10000;
     }
