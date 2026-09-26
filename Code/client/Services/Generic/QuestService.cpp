@@ -643,23 +643,19 @@ void QuestService::ApplyPendingAliasFills() noexcept
         bool ready = stopping || ResolveAliasFills(pQuest, fills);
         // Force accepts stopped quests too. Preserve the leader's fills even if local startup
         // cannot satisfy its own conditions, then reapply after startup's native fill pass.
-        if (ready && !stopping && !pQuest->IsEnabled())
-            ready = PrepareAliasesForStage(pQuest);
+
         if (ready && !stopping)
         {
             // Cache before startup: its own native stage writes must see these fills too.
             if (fills.HasStage)
                 RecordHostStage(formId, fills.Stage, fills.AuthorityEpoch);
-            if (!pQuest->IsEnabled())
-            {
-                ScopedQuestOverride override;
-                bool starting = false;
-                pQuest->EnsureQuestStarted(starting, true);
-            }
-            ready = pQuest->IsEnabled() && pQuest->flags != TESQuest::StopStart &&
-                !(pQuest->flags & TESQuest::StageWait) && !pQuest->unkFlags;
+            // Never start a quest here to take the leader's fills: that started quests this PC never
+            // triggered (a follower "contracted vampirism"). A quest not running here gets its stage
+            // update below as before, and its fills once it runs.
+            ready = !pQuest->IsEnabled() || (pQuest->flags != TESQuest::StopStart &&
+                !(pQuest->flags & TESQuest::StageWait) && !pQuest->unkFlags);
         }
-        if (ready && !stopping)
+        if (ready && !stopping && pQuest->IsEnabled())
             ready = PrepareAliasesForStage(pQuest);
         if (!ready)
         {
@@ -681,9 +677,9 @@ void QuestService::ApplyPendingAliasFills() noexcept
             const auto applied = m_appliedQuestRevisions.find(formId);
             if (applied == m_appliedQuestRevisions.end() || applied->second < update.Revision)
             {
-                blocked.insert(formId);
-                ++it;
-                continue;
+                // Applied once and it did not take (for example a start at a stage the quest does not
+                // have): drop it. Retrying every 100 ms flooded the log and stalled the follower.
+                spdlog::warn("Alias fill: quest {:X} stage {} update did not apply; dropped", formId, update.Stage);
             }
         }
         if (stopping)
