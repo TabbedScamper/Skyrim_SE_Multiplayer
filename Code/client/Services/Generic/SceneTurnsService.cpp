@@ -105,7 +105,7 @@ SceneTurnsService::SceneTurnsService(World& aWorld, entt::dispatcher& aDispatche
     , m_updateConnection(aDispatcher.sink<UpdateEvent>().connect<&SceneTurnsService::OnUpdate>(this))
     , m_disconnectConnection(aDispatcher.sink<DisconnectedEvent>().connect<&SceneTurnsService::OnDisconnected>(this))
 {
-    spdlog::info("Scene turns: prototype {} (SKYRIM_COOP_SCENE_TURNS=1; paired validation required)",
+    spdlog::info("Scene turns: {} (on by default; SKYRIM_COOP_SCENE_TURNS=0 turns it off)",
         SceneTurnsNative::IsEnabled() ? "enabled" : "disabled");
 }
 

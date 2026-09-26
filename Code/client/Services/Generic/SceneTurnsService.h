@@ -9,7 +9,7 @@ struct UpdateEvent;
 struct DisconnectedEvent;
 
 // Experimental host choreography. Effects remain owned by the original fragments.
-// Enable before launching the host with SKYRIM_COOP_SCENE_TURNS=1.
+// On by default; launch the host with SKYRIM_COOP_SCENE_TURNS=0 to turn it off.
 struct SceneTurnsService
 {
     SceneTurnsService(World& aWorld, entt::dispatcher& aDispatcher,

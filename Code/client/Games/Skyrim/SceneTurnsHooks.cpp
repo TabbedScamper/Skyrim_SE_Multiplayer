@@ -145,8 +145,9 @@ bool IsEnabled() noexcept
 {
     static const bool enabled = []()
     {
+        // On by default; SKYRIM_COOP_SCENE_TURNS=0 turns it off.
         char value[8]{};
-        return GetEnvironmentVariableA("SKYRIM_COOP_SCENE_TURNS", value, sizeof(value)) == 1 && value[0] == '1';
+        return !(GetEnvironmentVariableA("SKYRIM_COOP_SCENE_TURNS", value, sizeof(value)) == 1 && value[0] == '0');
     }();
     return enabled;
 }
