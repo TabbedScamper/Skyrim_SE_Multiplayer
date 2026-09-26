@@ -73,8 +73,11 @@ void ActorValueService::CreateActorValuesComponent(const entt::entity aEntity, A
 
 void ActorValueService::OnLocalComponentAdded(entt::registry& aRegistry, const entt::entity aEntity) noexcept
 {
-    const auto& formIdComponent = aRegistry.get<FormIdComponent>(aEntity);
-    Actor* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
+    // A leader-native claim can gain its LocalComponent before its form id is bound again.
+    const auto* pFormIdComponent = aRegistry.try_get<FormIdComponent>(aEntity);
+    if (!pFormIdComponent)
+        return;
+    Actor* pActor = Cast<Actor>(TESForm::GetById(pFormIdComponent->Id));
 
     if (pActor != NULL)
     {

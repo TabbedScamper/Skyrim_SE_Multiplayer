@@ -1568,6 +1568,8 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
         {
             DeleteRemoteEntityComponents(cEntity);
             m_world.emplace_or_replace<LeaderNativeClaim>(cEntity).FormId = pActor->formID;
+            // Owned here: the local systems (actor values, capture) read its form id.
+            m_world.emplace_or_replace<FormIdComponent>(cEntity, pActor->formID);
             auto& local = m_world.emplace_or_replace<LocalComponent>(cEntity, acMessage.ServerId, acMessage.OwnershipEpoch);
             local.IsDead = pActor->IsDead();
             local.IsWeaponDrawn = pActor->actorState.IsWeaponDrawn();
