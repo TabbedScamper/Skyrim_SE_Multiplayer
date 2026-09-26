@@ -11,7 +11,7 @@
 #include <CampaignLedger.h>
 namespace
 {
-Console::Setting bEnableMiscQuestSync{"Gameplay:bEnableMiscQuestSync", "(Experimental) Syncs miscellaneous quests when possible", false};
+Console::Setting bEnableMiscQuestSync{"Gameplay:bEnableMiscQuestSync", "Syncs miscellaneous quests (on by default: a follower in a party never runs its own quest stages, so an unsynced one would stall)", true};
 
 }
 

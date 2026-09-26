@@ -396,7 +396,6 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
-    Actor::FlushPendingReset3D();
     EngineFixes::OnFrame();
     static uint64_t s_nextScriptedPackageMs = 0;
     if (const auto packageNow = GetTickCount64(); packageNow >= s_nextScriptedPackageMs)

@@ -687,6 +687,8 @@ namespace
 {
 // Actors whose biped parts SetActorInventory asked to rebuild, and when.
 std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> s_pendingReset3D;
+// Queued from the client update (off the main thread), flushed on the main thread (Main::Update).
+std::mutex s_pendingReset3DLock;
 } // namespace
 
 void Actor::SetActorInventory(const Inventory& acInventory) noexcept
@@ -721,26 +723,41 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
     // save loads, and rebuilding immediately each time raced the actor update (a crash in the
     // native per-actor update 15 s into a Continue).
     if (!GetExtension()->IsPlayer())
+    {
+        std::lock_guard lock(s_pendingReset3DLock);
         s_pendingReset3D[formID] = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    }
 }
 
 void Actor::QueueReset3D(const uint32_t aDelayMs) noexcept
 {
+    std::lock_guard lock(s_pendingReset3DLock);
     s_pendingReset3D[formID] = std::chrono::steady_clock::now() + std::chrono::milliseconds(aDelayMs);
 }
 
+// Main thread only (from HookMainLoop): DoReset3D (ID 40255) calls BipedAnim::RemoveAllParts before
+// it checks whether to use the task queue, so its destructive half ran on whatever thread called it.
 void Actor::FlushPendingReset3D() noexcept
 {
     const auto now = std::chrono::steady_clock::now();
-    for (auto it = s_pendingReset3D.begin(); it != s_pendingReset3D.end();)
+    std::vector<uint32_t> due;
     {
-        if (now < it->second)
+        std::lock_guard lock(s_pendingReset3DLock);
+        for (auto it = s_pendingReset3D.begin(); it != s_pendingReset3D.end();)
         {
-            ++it;
-            continue;
+            if (now < it->second)
+            {
+                ++it;
+                continue;
+            }
+            due.push_back(it->first);
+            it = s_pendingReset3D.erase(it);
         }
+    }
+    for (const auto formId : due)
+    {
         // Actor::DoReset3D(true) (ID 40255) drops every biped part and rebuilds them from what is worn.
-        auto* pActor = Cast<Actor>(TESForm::GetById(it->first));
+        auto* pActor = Cast<Actor>(TESForm::GetById(formId));
         // Not while dying, dead, knocked down or ragdolling (ActorState1 lifeState bits 21-24,
         // knockState 25-27): the rebuild drew the falling intro prisoner naked for a moment and put
         // his ragdoll back at the actor's position.
@@ -752,7 +769,6 @@ void Actor::FlushPendingReset3D() noexcept
             POINTER_SKYRIMSE(TDoReset3D, s_doReset3D, 40255);
             TiltedPhoques::ThisCall(s_doReset3D, pActor, true);
         }
-        it = s_pendingReset3D.erase(it);
     }
 }
 
