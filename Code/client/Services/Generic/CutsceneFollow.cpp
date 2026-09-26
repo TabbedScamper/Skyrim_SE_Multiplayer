@@ -7,6 +7,7 @@
 #include <Games/Skyrim/AI/Movement/PlayerControls.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
+#include <Services/PlayerCollision.h>
 
 namespace
 {
@@ -36,6 +37,7 @@ void Restore() noexcept
     }
     s_hiddenByUs.clear();
     PoseCopyAuthority::SetLocalMirror(0);
+    PlayerCollision::SetLocalPassThrough(false);
     if (s_movementDisabledByUs)
     {
         if (auto* pControls = PlayerControls::GetInstance(); pControls && pControls->pMovementHandler)
@@ -89,6 +91,7 @@ void Update(World& aWorld, const bool aActive, const bool aIsLeader, const uint3
 
     // Follower: its character takes the leader's place, heading and pose; no movement of its own.
     PoseCopyAuthority::SetLocalMirror(pLeader->formID);
+    PlayerCollision::SetLocalPassThrough(true);
     if (auto* pControls = PlayerControls::GetInstance(); pControls && pControls->pMovementHandler &&
         pControls->pMovementHandler->isEnabled)
     {

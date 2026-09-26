@@ -18,4 +18,7 @@ void SetMirroringScript(bool aMirroring) noexcept;
 void SetLeaderFreeControl(bool aFree) noexcept;
 // This player is not held by a script or cutscene (not AI driven, movement enabled).
 bool LocalHasFreeControl() noexcept;
+// This player's own character passes through everything (cutscene follow drives it into the
+// leader's place; its capsule pushed the cart it rides).
+void SetLocalPassThrough(bool aPassThrough) noexcept;
 } // namespace PlayerCollision

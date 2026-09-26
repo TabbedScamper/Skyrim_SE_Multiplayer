@@ -78,6 +78,26 @@ bool LocalHasFreeControl() noexcept
     return !LocalPlayerScripted();
 }
 
+void SetLocalPassThrough(const bool aPassThrough) noexcept
+{
+    static bool s_localPassThrough{};
+    static uint32_t s_localFilterBefore{};
+    auto* pPlayer = PlayerCharacter::Get();
+    void* pController = pPlayer ? GetController(pPlayer) : nullptr;
+    if (!pController || aPassThrough == s_localPassThrough)
+        return;
+    const uint32_t filter = GetFilter(pController);
+    if (aPassThrough)
+    {
+        s_localFilterBefore = filter;
+        SetFilter(pController, filter | kNoCollision);
+    }
+    else
+        SetFilter(pController, s_localFilterBefore & ~kNoCollision);
+    s_localPassThrough = aPassThrough;
+    spdlog::info("This player's character {} (cutscene follow)", aPassThrough ? "passes through everything" : "collides again");
+}
+
 void Update(World& aWorld) noexcept
 {
     const auto& party = aWorld.GetPartyService();
