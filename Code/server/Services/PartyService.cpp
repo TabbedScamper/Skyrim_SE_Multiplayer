@@ -110,7 +110,10 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partyGameplaySettingsConnection(aDispatcher.sink<PacketEvent<PartyGameplaySettingsRequest>>().connect<&PartyService::OnPartyGameplaySettings>(this))
     , m_checkpointSaveConnection(aDispatcher.sink<PacketEvent<CheckpointSaveRequest>>().connect<&PartyService::OnCheckpointSave>(this))
 {
-    aWorld.ctx().emplace<PartyUnstuckRelay>(*this, aDispatcher);
+    // Its own storage: emplacing into the world context from inside this constructor (while the
+    // context is still constructing this service) killed the server on startup.
+    static std::unique_ptr<PartyUnstuckRelay> s_unstuckRelay;
+    s_unstuckRelay = std::make_unique<PartyUnstuckRelay>(*this, aDispatcher);
 }
 
 const PartyService::Party* PartyService::GetById(uint32_t aId) const noexcept
