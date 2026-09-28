@@ -3749,8 +3749,10 @@ void CharacterService::RunSpawnUpdates() const noexcept
             const TES* pTES = TES::Get();
             const auto playerCoords = GridCellCoords(pTES->centerGridX, pTES->centerGridY);
 
-            // TODO(cosideci): IsDragon probably shouldn't be straight up false here.
-            if (GridCellCoords::IsCellInGridCell(characterCoords, playerCoords, false))
+            // Dragons replicate at the wider dragon grid (as every other call site does); this one said false, so a
+            // remote dragon outside the normal 5-cell range never materialized.
+            const auto* pExisting = Cast<Actor>(TESForm::GetById(remoteComponent.CachedRefId));
+            if (GridCellCoords::IsCellInGridCell(characterCoords, playerCoords, pExisting && pExisting->IsDragon()))
             {
                 auto* pActor = Cast<Actor>(TESForm::GetById(remoteComponent.CachedRefId));
                 if (!pActor)

@@ -140,7 +140,9 @@ void CombatService::OnProjectileLaunchRequest(const PacketEvent<ProjectileLaunch
     notify.UnkBool1 = packet.UnkBool1;
     notify.UnkBool2 = packet.UnkBool2;
 
-    const auto cShooterEntity = static_cast<entt::entity>(packet.ShooterID);
+    // Shooter 0: a world caster (non-actor temporary reference) launched by the leader; relay around its character.
+    const auto senderCharacter = acMessage.pPlayer ? acMessage.pPlayer->GetCharacter() : std::nullopt;
+    const auto cShooterEntity = packet.ShooterID == 0 && senderCharacter ? *senderCharacter : static_cast<entt::entity>(packet.ShooterID);
     if (!GameServer::Get()->SendToPlayersInRange(notify, cShooterEntity, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
 }

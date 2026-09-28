@@ -21,6 +21,14 @@ protected:
     void OnUpdate(const UpdateEvent& acEvent) const noexcept;
     void OnLocalComponentRemoved(entt::registry& aRegistry, entt::entity aEntity) const noexcept;
     void OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acEvent) const noexcept;
+
+public:
+    // World casters: projectiles launched by a non-actor temporary reference (Alduin's Helgen meteors come from a
+    // spell caster that each PC spawns for itself; both PCs fired their own meteors). While the leader's player is
+    // near, a follower does not launch its own and replays the leader's from its local caster of the same spell.
+    static bool FollowerDefersWorldProjectiles() noexcept;
+    static void RememberWorldCaster(uint32_t aSpellId, uint32_t aCasterFormId) noexcept;
+private:
     void OnNotifyProjectileLaunch(const NotifyProjectileLaunch& acMessage) const noexcept;
     void OnHitEvent(const HitEvent& acEvent) const noexcept;
 

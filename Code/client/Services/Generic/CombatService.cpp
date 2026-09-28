@@ -12,8 +12,10 @@
 #include <World.h>
 
 #include <Projectiles/Projectile.h>
+void SetReplayingLaunch(bool aReplaying) noexcept;
 #include <Forms/TESObjectWEAP.h>
 #include <Forms/TESAmmo.h>
+#include <Forms/TESObjectCELL.h>
 #include <Games/ActorExtension.h>
 #include <Combat/PlayerCombat.h>
 #include <Combat/CombatController.h>
@@ -30,9 +32,50 @@ CombatService::CombatService(World& aWorld, TransportService& aTransport, entt::
     m_projectileLaunchConnection = aDispatcher.sink<NotifyProjectileLaunch>().connect<&CombatService::OnNotifyProjectileLaunch>(this);
 }
 
+namespace
+{
+std::atomic<bool> s_followerDefersWorldProjectiles{};
+std::mutex s_worldCasterLock;
+std::unordered_map<uint32_t, uint32_t> s_worldCasters; // spell form id -> local caster form id
+} // namespace
+
+bool CombatService::FollowerDefersWorldProjectiles() noexcept
+{
+    return s_followerDefersWorldProjectiles.load(std::memory_order_relaxed);
+}
+
+void CombatService::RememberWorldCaster(const uint32_t aSpellId, const uint32_t aCasterFormId) noexcept
+{
+    std::lock_guard lock(s_worldCasterLock);
+    s_worldCasters[aSpellId] = aCasterFormId;
+}
+
 void CombatService::OnUpdate(const UpdateEvent& acEvent) const noexcept
 {
     RunTargetUpdates(static_cast<float>(acEvent.Delta));
+    // Follower with the leader's player copy loaded within 8192 u in the same worldspace/cell: the leader's game runs
+    // this area's world casters.
+    bool defer = false;
+    const auto& party = m_world.GetPartyService();
+    if (m_world.GetTransport().IsConnected() && party.IsInParty() && !party.IsLeader())
+    {
+        auto* pPlayer = PlayerCharacter::Get();
+        auto players = m_world.view<FormIdComponent, PlayerComponent>();
+        for (auto entity : players)
+        {
+            if (players.get<PlayerComponent>(entity).Id != party.GetLeaderPlayerId())
+                continue;
+            auto* pLeader = Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id));
+            if (!pLeader || !pPlayer || !pLeader->parentCell || !pPlayer->parentCell)
+                continue;
+            const bool sameSpace = pLeader->parentCell == pPlayer->parentCell ||
+                (pLeader->parentCell->worldspace && pLeader->parentCell->worldspace == pPlayer->parentCell->worldspace);
+            const auto d = pLeader->position - pPlayer->position;
+            defer = sameSpace && d.x * d.x + d.y * d.y + d.z * d.z < 8192.f * 8192.f;
+        }
+    }
+    if (s_followerDefersWorldProjectiles.exchange(defer, std::memory_order_relaxed) != defer)
+        spdlog::info("World-caster projectiles: {}", defer ? "the leader's are replayed here" : "launched locally");
 }
 
 void CombatService::OnLocalComponentRemoved(entt::registry& aRegistry, entt::entity aEntity) const noexcept
@@ -45,11 +88,14 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
     ModSystem& modSystem = m_world.Get().GetModSystem();
 
     const auto shooterEntityIt = Utils::FindLocalEntityByFormId(acEvent.ShooterID);
+    auto* pShooterRef = acEvent.ShooterID ? Cast<TESObjectREFR>(TESForm::GetById(acEvent.ShooterID)) : nullptr;
+    // World caster (non-actor temporary reference): sent by the leader with shooter 0; the server relays it around the
+    // leader's character.
+    const bool worldCaster = !shooterEntityIt && pShooterRef && !Cast<Actor>(pShooterRef) && pShooterRef->IsTemporary() &&
+        m_world.GetPartyService().IsInParty() && m_world.GetPartyService().IsLeader();
 
-    if (!shooterEntityIt)
+    if (!shooterEntityIt && !worldCaster)
         return;
-
-    LocalComponent& localComponent = m_world.get<LocalComponent>(*shooterEntityIt);
 
     ProjectileLaunchRequest request{};
 
@@ -61,7 +107,7 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
     modSystem.GetServerModId(acEvent.WeaponID, request.WeaponID);
     modSystem.GetServerModId(acEvent.AmmoID, request.AmmoID);
 
-    request.ShooterID = localComponent.Id;
+    request.ShooterID = worldCaster ? 0 : m_world.get<LocalComponent>(*shooterEntityIt).Id;
 
     request.ZAngle = acEvent.ZAngle;
     request.XAngle = acEvent.XAngle;
@@ -90,7 +136,7 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
     auto* pAimTarget = pShooter && pShooter->pCombatController
         ? Cast<Actor>(TESObjectREFR::GetByHandle(pShooter->pCombatController->targetHandle)) : nullptr;
     spdlog::info("Projectile send shooter {:X} server {:X} origin ({:.0f},{:.0f},{:.0f}) angles x {:.3f} z {:.3f} combat target {:X}",
-        acEvent.ShooterID, localComponent.Id, acEvent.Origin.x, acEvent.Origin.y, acEvent.Origin.z, acEvent.XAngle,
+        acEvent.ShooterID, request.ShooterID, acEvent.Origin.x, acEvent.Origin.y, acEvent.Origin.z, acEvent.XAngle,
         acEvent.ZAngle, pAimTarget ? pAimTarget->formID : 0);
 
     m_transport.Send(request);
@@ -100,15 +146,36 @@ void CombatService::OnNotifyProjectileLaunch(const NotifyProjectileLaunch& acMes
 {
     ModSystem& modSystem = World::Get().GetModSystem();
 
-    const auto remoteIt = Utils::FindRemoteActorByServerId(acMessage.ShooterID);
-
-    if (!remoteIt)
+    uint32_t shooterFormId{};
+    if (acMessage.ShooterID == 0)
     {
-        spdlog::warn("Shooter with remote id {:X} not found.", acMessage.ShooterID);
-        return;
+        // The leader's world caster: replay from this PC's own caster of the same spell (its own launches are held).
+        const uint32_t spellId = modSystem.GetGameId(acMessage.SpellID);
+        {
+            std::lock_guard lock(s_worldCasterLock);
+            const auto it = s_worldCasters.find(spellId);
+            if (it != s_worldCasters.end())
+                shooterFormId = it->second;
+        }
+        if (!shooterFormId || !Cast<TESObjectREFR>(TESForm::GetById(shooterFormId)))
+        {
+            static std::atomic<uint32_t> s_noCasterLogs{};
+            if (s_noCasterLogs.fetch_add(1, std::memory_order_relaxed) < 16)
+                spdlog::warn("World-caster projectile for spell {:X}: no local caster yet; skipped", spellId);
+            return;
+        }
     }
-
-    FormIdComponent formIdComponent = m_world.get<FormIdComponent>(*remoteIt);
+    else
+    {
+        const auto remoteIt = Utils::FindRemoteActorByServerId(acMessage.ShooterID);
+        if (!remoteIt)
+        {
+            spdlog::warn("Shooter with remote id {:X} not found.", acMessage.ShooterID);
+            return;
+        }
+        shooterFormId = m_world.get<FormIdComponent>(*remoteIt).Id;
+    }
+    FormIdComponent formIdComponent{shooterFormId};
 
     Projectile::LaunchData launchData{};
 
@@ -173,7 +240,9 @@ void CombatService::OnNotifyProjectileLaunch(const NotifyProjectileLaunch& acMes
         formIdComponent.Id, acMessage.ShooterID, acMessage.OriginX, acMessage.OriginY, acMessage.OriginZ, acMessage.XAngle,
         acMessage.ZAngle, copyPosition.x, copyPosition.y, copyPosition.z, pCopyTarget ? pCopyTarget->formID : 0);
 
+    SetReplayingLaunch(true);
     Projectile::Launch(&result, launchData);
+    SetReplayingLaunch(false);
 }
 
 void CombatService::OnHitEvent(const HitEvent& acEvent) const noexcept

@@ -8,6 +8,7 @@
 #include <Events/ProjectileLaunchedEvent.h>
 #include <Games/Skyrim/Forms/TESObjectCELL.h>
 #include <Forms/SpellItem.h>
+#include <Services/CombatService.h>
 
 TP_THIS_FUNCTION(TLaunch, BSPointerHandle<Projectile>*, BSPointerHandle<Projectile>, Projectile::LaunchData& arData);
 static TLaunch* RealLaunch = nullptr;
@@ -38,6 +39,13 @@ BSPointerHandle<Projectile>* Projectile::Launch(BSPointerHandle<Projectile>* apR
     return result;
 }
 
+thread_local bool t_replayingLaunch{};
+
+void SetReplayingLaunch(const bool aReplaying) noexcept
+{
+    t_replayingLaunch = aReplaying;
+}
+
 BSPointerHandle<Projectile>* TP_MAKE_THISCALL(HookLaunch, BSPointerHandle<Projectile>, Projectile::LaunchData& arData)
 {
     // sync concentration spells through spell cast sync, the rest through projectile sync
@@ -50,6 +58,34 @@ BSPointerHandle<Projectile>* TP_MAKE_THISCALL(HookLaunch, BSPointerHandle<Projec
                 return TiltedPhoques::ThisCall(RealLaunch, apThis, arData);
             }
         }
+    }
+
+    // Launch probe (Helgen: Alduin's meteors were never relayed; the shooter is not a networked local actor): log who
+    // launches what, per shooter/projectile pair once.
+    {
+        static std::mutex s_launchLogLock;
+        static std::unordered_set<uint64_t> s_launchLogged;
+        const uint32_t shooterId = arData.pShooter ? arData.pShooter->formID : 0;
+        const uint32_t baseId = arData.pProjectileBase ? arData.pProjectileBase->formID : 0;
+        std::lock_guard lock(s_launchLogLock);
+        if (s_launchLogged.size() < 256 && s_launchLogged.insert((uint64_t{shooterId} << 32) | baseId).second)
+        {
+            auto* pShooterActor = arData.pShooter ? Cast<Actor>(arData.pShooter) : nullptr;
+            spdlog::info("Projectile launch: shooter {:X} (type {:X}, actor {}, remote {}) projectile {:X} spell {:X} weapon {:X}",
+                shooterId, arData.pShooter ? static_cast<uint32_t>(arData.pShooter->formType) : 0, pShooterActor != nullptr,
+                pShooterActor && pShooterActor->GetExtension() && pShooterActor->GetExtension()->IsRemote(), baseId,
+                arData.pSpell ? arData.pSpell->formID : 0, arData.pFromWeapon ? arData.pFromWeapon->formID : 0);
+        }
+    }
+
+    // World caster on a follower near the leader: remember the caster for replays and do not launch our own.
+    if (arData.pShooter && !Cast<Actor>(arData.pShooter) && arData.pShooter->IsTemporary() && !t_replayingLaunch &&
+        CombatService::FollowerDefersWorldProjectiles())
+    {
+        if (arData.pSpell)
+            CombatService::RememberWorldCaster(arData.pSpell->formID, arData.pShooter->formID);
+        apThis->handle.iBits = 0;
+        return apThis;
     }
 
     if (arData.pShooter)

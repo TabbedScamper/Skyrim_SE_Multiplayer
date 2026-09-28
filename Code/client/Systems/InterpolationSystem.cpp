@@ -101,8 +101,15 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // alike. Placing it from the actor stream instead fought the seat and left the cart's driver
     // and passengers trailing their cart. The owner's pose still drives the body.
     const uint32_t sitSleepState = (apActor->actorState.flags1 >> 14) & 0xF;
-    if ((sitSleepState == 2 || sitSleepState == 3) && !vehicleTimeline && s_unseatRemotePlayers.load(std::memory_order_relaxed) &&
-        apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer())
+    // A remote dragon never keeps a local perch: its local AI picked its own perch (Alduin drawn 210-265 u from the host's
+    // on the Helgen tower, Muse diag-alduin); unseated, the owner's stream places it (ForcePosition below).
+    // Off: measured, the perched copy already matches the owner within 1 u (run 20260928-143935); the audit's 200 u was
+    // two snapshots of a dragon flying at over 1000 u/s taken at different moments, and the unseat never stuck.
+    constexpr bool kUnseatRemoteDragons = false;
+    const bool remoteDragon = kUnseatRemoteDragons && (sitSleepState == 2 || sitSleepState == 3) && !vehicleTimeline &&
+        apActor->GetExtension() && apActor->GetExtension()->IsRemote() && !apActor->GetExtension()->IsPlayer() && apActor->IsDragon();
+    if (remoteDragon || ((sitSleepState == 2 || sitSleepState == 3) && !vehicleTimeline &&
+        s_unseatRemotePlayers.load(std::memory_order_relaxed) && apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer()))
     {
         static std::unordered_map<uint32_t, uint64_t> s_lastUnseat;
         auto& last = s_lastUnseat[apActor->formID];
@@ -110,8 +117,8 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
         {
             last = aTick;
             QueueUnseat(apActor->formID);
-            spdlog::info("Remote player {:X}: left unseated on static furniture (sit state {}); the owner's stream places it",
-                apActor->formID, sitSleepState);
+            spdlog::info("Remote {} {:X}: left unseated on static furniture (sit state {}); the owner's stream places it",
+                remoteDragon ? "dragon" : "player", apActor->formID, sitSleepState);
         }
     }
     {

@@ -600,7 +600,7 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             if (character.BaseId.Id == message.FormId)
             {
                 static std::atomic<uint32_t> sRejectLogs{0};
-                const char* reason = !owner.GetOwner() ? "no owner" : owner.GetOwner() == acMessage.pPlayer ? "own entity" :
+                const char* reason = !owner.GetOwner() ? "no owner" :
                     owner.GetOwner()->GetParty().JoinedPartyId != requesterParty ? "other party" :
                     std::find(provenance.BoundPlayerIds.begin(), provenance.BoundPlayerIds.end(), acMessage.pPlayer->GetId()) !=
                         provenance.BoundPlayerIds.end() ? "already bound" :
@@ -613,7 +613,10 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
                         acMessage.pPlayer->GetId(), refId.BaseId, World::ToInteger(candidate), reason,
                         now >= provenance.CreatedTick ? now - provenance.CreatedTick : 0);
             }
-            if (!owner.GetOwner() || owner.GetOwner() == acMessage.pPlayer ||
+            // Who already bound a native is tracked by BoundPlayerIds (the creator is in it). Ownership is not: the leader
+            // can already own a follower-created entity (leader authority) before its own native registers, and
+            // rejecting that as "own entity" minted a duplicate (DB3/DB5, run 20260928-144856).
+            if (!owner.GetOwner() ||
                 owner.GetOwner()->GetParty().JoinedPartyId != requesterParty ||
                 std::find(provenance.BoundPlayerIds.begin(), provenance.BoundPlayerIds.end(),
                     acMessage.pPlayer->GetId()) != provenance.BoundPlayerIds.end() ||
@@ -642,7 +645,9 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
                 acMessage.pPlayer->GetId());
             AssignCharacterResponse response{};
             response.Cookie = message.Cookie;
-            response.Owner = false;
+            // The leader may already own the entity (leader authority took it from the follower that registered
+            // first); its native then becomes the owned copy.
+            response.Owner = m_world.get<OwnerComponent>(match).GetOwner() == acMessage.pPlayer;
             PopulateAssignmentResponse(match, response);
             acMessage.pPlayer->Send(response);
             spdlog::info("Reconciled temporary actor {:X} from player {:X} to server {:X}{}",
