@@ -8,6 +8,10 @@ struct Actor;
  */
 struct InterpolationSystem
 {
+    // Other players' copies are left unseated on static furniture (unseat_remote_players switch).
+    static void SetUnseatRemotePlayers(bool aEnabled) noexcept;
+    static bool IsUnseatRemotePlayers() noexcept;
+
     static void Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, uint64_t aTick) noexcept;
     // Main thread: applies the stale-seat releases queued by Update.
     static void OnMainFrame() noexcept;

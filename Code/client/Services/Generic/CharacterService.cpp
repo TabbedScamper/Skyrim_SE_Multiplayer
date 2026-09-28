@@ -43,6 +43,7 @@
 #include <Events/PartyJoinedEvent.h>
 
 #include <Structs/ActionEvent.h>
+#include <Messages/NotifyDrawWeapon.h>
 #include <Messages/AssignCharacterRequest.h>
 #include <Messages/AssignCharacterResponse.h>
 #include <Messages/ServerReferencesMoveRequest.h>
@@ -148,6 +149,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
     m_referenceAddedConnection = m_dispatcher.sink<ActorAddedEvent>().connect<&CharacterService::OnActorAdded>(this);
     m_scriptedActorStateConnection = m_dispatcher.sink<NotifyScriptedActorState>().connect<&CharacterService::OnScriptedActorState>(this);
     m_referenceRemovedConnection = m_dispatcher.sink<ActorRemovedEvent>().connect<&CharacterService::OnActorRemoved>(this);
+    m_drawWeaponConnection = m_dispatcher.sink<NotifyDrawWeapon>().connect<&CharacterService::OnNotifyDrawWeapon>(this);
 
     m_updateConnection = m_dispatcher.sink<UpdateEvent>().connect<&CharacterService::OnUpdate>(this);
     m_actionConnection = m_dispatcher.sink<ActionEvent>().connect<&CharacterService::OnActionEvent>(this);
@@ -3808,4 +3810,23 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
 
     for (uint32_t id : toRemove)
         m_weaponDrawUpdates.erase(id);
+}
+
+void CharacterService::OnNotifyDrawWeapon(const NotifyDrawWeapon& acMessage) noexcept
+{
+    auto view = m_world.view<RemoteComponent, FormIdComponent>();
+    for (auto entity : view)
+    {
+        if (view.get<RemoteComponent>(entity).Id != acMessage.Id)
+            continue;
+        const auto formId = view.get<FormIdComponent>(entity).Id;
+        // The same two-pass apply as at spawn; the first pass runs on the next update (no half-second wait).
+        WeaponDrawData data{acMessage.IsWeaponDrawn};
+        data.m_timer = 0.5;
+        m_weaponDrawUpdates[formId] = data;
+        static std::atomic<uint32_t> s_logs{};
+        if (s_logs.fetch_add(1, std::memory_order_relaxed) < 64)
+            spdlog::info("Weapon {} on remote {:X} (server {:X})", acMessage.IsWeaponDrawn ? "drawn" : "sheathed", formId, acMessage.Id);
+        return;
+    }
 }

@@ -5,6 +5,7 @@
 
 #include <Services/GameTestService.h>
 #include <Services/CheckpointSaves.h>
+#include <Systems/InterpolationSystem.h>
 #include <Camera/PlayerCamera.h>
 #include <Systems/AnimationSystem.h>
 #include <Misc/NativeDispatchDiagnostic.h>
@@ -5520,6 +5521,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
                 ObjectService::SetCartNodeRefresh(enabled != "false");
             return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsCartNodeRefresh()));
+        }
+        if (command == "unseat_remote_players")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                InterpolationSystem::SetUnseatRemotePlayers(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", InterpolationSystem::IsUnseatRemotePlayers()));
         }
         if (command == "exact_body_drive")
         {

@@ -20,6 +20,7 @@ struct ServerReferencesMoveRequest;
 struct NotifyInventoryChanges;
 struct NotifyFactionsChanges;
 struct NotifyRemoveCharacter;
+struct NotifyDrawWeapon;
 struct NotifyOwnershipTransfer;
 struct SpellCastEvent;
 struct NotifySpellCast;
@@ -127,6 +128,7 @@ struct CharacterService
     void OnFactionsChanges(const NotifyFactionsChanges& acEvent) const noexcept;
     void OnOwnershipTransfer(const NotifyOwnershipTransfer& acMessage) noexcept;
     void OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) noexcept;
+    void OnNotifyDrawWeapon(const NotifyDrawWeapon& acMessage) noexcept;
     void OnMountEvent(const MountEvent& acEvent) const noexcept;
     void OnNotifyMount(const NotifyMount& acMessage) noexcept;
     void OnInitPackageEvent(const InitPackageEvent& acEvent) const noexcept;
@@ -281,6 +283,7 @@ private:
 
     entt::scoped_connection m_referenceAddedConnection;
     entt::scoped_connection m_referenceRemovedConnection;
+    entt::scoped_connection m_drawWeaponConnection;
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_actionConnection;
     entt::scoped_connection m_factionsConnection;

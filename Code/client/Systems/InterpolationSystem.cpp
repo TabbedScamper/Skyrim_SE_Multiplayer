@@ -19,6 +19,10 @@
 
 namespace
 {
+// Another player's copy on static furniture (not riding a host-driven vehicle) is left unseated: its owner's stream
+// places and poses it. Seated locally, the copy took this PC's own furniture animation at the Helgen chopping block
+// (pelvis 85 u off the owner's, run 20260928-120033) and stayed seated after its owner got up (4964 u off).
+std::atomic<bool> s_unseatRemotePlayers{false}; // no effect at the block (run 20260928-124808): the copy re-seats
 std::mutex s_unseatLock;
 std::vector<uint32_t> s_unseat;
 
@@ -97,6 +101,19 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // alike. Placing it from the actor stream instead fought the seat and left the cart's driver
     // and passengers trailing their cart. The owner's pose still drives the body.
     const uint32_t sitSleepState = (apActor->actorState.flags1 >> 14) & 0xF;
+    if ((sitSleepState == 2 || sitSleepState == 3) && !vehicleTimeline && s_unseatRemotePlayers.load(std::memory_order_relaxed) &&
+        apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer())
+    {
+        static std::unordered_map<uint32_t, uint64_t> s_lastUnseat;
+        auto& last = s_lastUnseat[apActor->formID];
+        if (aTick >= last + 500)
+        {
+            last = aTick;
+            QueueUnseat(apActor->formID);
+            spdlog::info("Remote player {:X}: left unseated on static furniture (sit state {}); the owner's stream places it",
+                apActor->formID, sitSleepState);
+        }
+    }
     {
         // Diagnostic: a remote actor's model appearing or disappearing (no 3D, or the root hidden:
         // NiAVObject flags bit 0), with its sit state (the cart driver vanished at the stop).
@@ -290,4 +307,15 @@ void InterpolationSystem::OnMainFrame() noexcept
         POINTER_SKYRIMSE(TStopInteractingQuick, s_stopInteractingQuick, 38697);
         s_stopInteractingQuick.Get()(pActor, true);
     }
+}
+
+void InterpolationSystem::SetUnseatRemotePlayers(bool aEnabled) noexcept
+{
+    s_unseatRemotePlayers.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Unseat remote players: {}", aEnabled);
+}
+
+bool InterpolationSystem::IsUnseatRemotePlayers() noexcept
+{
+    return s_unseatRemotePlayers.load(std::memory_order_relaxed);
 }

@@ -10,6 +10,7 @@
 #include <Messages/RequestEquipmentChanges.h>
 #include <Messages/NotifyEquipmentChanges.h>
 #include <Messages/DrawWeaponRequest.h>
+#include <Messages/NotifyDrawWeapon.h>
 #include <Messages/RequestNpcWorn.h>
 #include <Messages/NotifyNpcWorn.h>
 #include <Messages/RequestNpcLoot.h>
@@ -221,5 +222,11 @@ void InventoryService::OnWeaponDrawnRequest(const PacketEvent<DrawWeaponRequest>
         auto& characterComponent = characterView.get<CharacterComponent>(*it);
         characterComponent.SetWeaponDrawn(message.IsWeaponDrawn);
         spdlog::debug("Updating weapon drawn state {:x}:{}", message.Id, message.IsWeaponDrawn);
+        // Relay it: the state used to be stored only, so copies learned a draw only at spawn (owner report: archers
+        // held their bows on the host while the follower's copies kept them on their backs).
+        NotifyDrawWeapon notify{};
+        notify.Id = message.Id;
+        notify.IsWeaponDrawn = message.IsWeaponDrawn;
+        GameServer::Get()->SendToPlayersInRange(notify, *it, acMessage.pPlayer);
     }
 }
