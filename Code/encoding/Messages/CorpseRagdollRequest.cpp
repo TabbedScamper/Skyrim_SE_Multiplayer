@@ -76,6 +76,7 @@ void CorpseRagdollRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) 
     aWriter.WriteBits(Dying, 1);
     for (const float value : Origin)
         TiltedPhoques::Serialization::WriteFloat(aWriter, value);
+    TiltedPhoques::Serialization::WriteFloat(aWriter, Heading);
     CorpseRagdollEncoding::WriteBodies(aWriter, Bodies);
 }
 
@@ -96,7 +97,7 @@ void CorpseRagdollRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader
             return;
         ServerId = static_cast<uint32_t>(id);
         Limb = static_cast<uint32_t>(limb);
-        if (CheckedRead::RemainingBits(aReader) < 3 * 32)
+        if (CheckedRead::RemainingBits(aReader) < 4 * 32)
             return;
         for (float& value : Origin)
         {
@@ -104,6 +105,9 @@ void CorpseRagdollRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader
             if (!std::isfinite(value) || std::abs(value) >= 10'000'000.f)
                 return;
         }
+        Heading = TiltedPhoques::Serialization::ReadFloat(aReader);
+        if (!std::isfinite(Heading) || std::abs(Heading) > 100.f)
+            return;
         m_valid = CorpseRagdollEncoding::ReadBodies(aReader, Bodies) &&
             (Active ? !Bodies.empty() : Bodies.empty()) &&
             (Limb ? DismemberTick && DismemberTick <= Tick && (!Active || Bodies.size() == 1) : !DismemberTick);

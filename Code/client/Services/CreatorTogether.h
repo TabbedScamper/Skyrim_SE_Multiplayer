@@ -20,6 +20,8 @@ namespace CreatorTogether
 void Update(World& aWorld, bool aHolding, bool aCreatorOpen) noexcept;
 // This player clicked Done while the party was still creating (its close is being held).
 [[nodiscard]] bool IsDone() noexcept;
+// Every other party player in the creator has pressed Done (or none is known). Continued sessions close on this.
+bool OthersDone() noexcept;
 // Everyone is done: close on the next main-thread frame. Force honors a server release even
 // when a local unready crossed the final ready packet, only for this shared creator session.
 void Release(bool aForce = false) noexcept;

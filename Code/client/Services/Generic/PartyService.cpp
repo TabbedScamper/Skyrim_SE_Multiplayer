@@ -550,9 +550,17 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
         }
     }
 
-    // Character creation together: hold Done until every player is done, then close together.
-    CreatorTogether::Update(m_world, m_inParty && m_campaignMode == 1 && m_sessionState == 2, creatorOpen);
-    if (m_sessionState >= 3)
+    // Character creation together: hold Done until every player is done, then close together. Continue counts too: a
+    // shared checkpoint from before the Helgen creator (the cart-exit save) reached the creator with this off, so the
+    // vanilla menu showed the other player's copy standing in the same spot (owner: "double characters").
+    // A continued session is already in play (state 3) when a checkpoint before the creator reaches it, so it runs
+    // the creator on its own: others hidden, Done held until every other player is done, then close together.
+    const bool continuedCreator = m_inParty && m_campaignMode == PartyStartRequest::kContinue && m_sessionState >= 2;
+    CreatorTogether::Update(m_world, (m_inParty && m_campaignMode == PartyStartRequest::kNew && m_sessionState == 2) ||
+        continuedCreator, creatorOpen);
+    if (m_sessionState >= 3 && m_campaignMode != PartyStartRequest::kContinue)
+        CreatorTogether::Release(true);
+    if (continuedCreator && creatorOpen && CreatorTogether::IsDone() && CreatorTogether::OthersDone())
         CreatorTogether::Release(true);
 
     // Cutscene follow: until the leader is free, the scene plays once, the leader's way (not during

@@ -354,7 +354,11 @@ void HookHighActorCull(void* apCuller, Actor* apActor)
     if ((visibility & 7) == 7)
         return;
     const auto* extension = apActor->GetExtension();
-    if (!extension || extension->IsRemote() || !World::Get().GetTransport().IsConnected())
+    // NPCs and creatures only. A player's own body is deliberately "not seen" in first person (the Helgen intro starts
+    // there); forcing it seen changed the local player's update path and the bound-hands pose stopped holding (owner
+    // report after force_seen shipped).
+    if (!extension || extension->IsRemote() || extension->IsPlayer() || apActor->formID == 0x14 ||
+        !World::Get().GetTransport().IsConnected())
         return;
     using TGet3D = NiAVObject*(TESObjectREFR*);
     POINTER_SKYRIMSE(TGet3D, get3D, 19735);

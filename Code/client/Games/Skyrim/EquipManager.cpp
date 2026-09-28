@@ -201,6 +201,33 @@ void* TP_MAKE_THISCALL(UnEquipHook, EquipManager, Actor* apActor, TESForm* apIte
         // Without this check, the game will not accept null as a return, and it'll keep trying to unequip infinitely
         if (!ScopedEquipOverride::IsOverriden() && !ScopedInventoryOverride::IsOverriden())
             return nullptr;
+        // A remote NPC went naked for about a second at death on the follower (Lokir, run 20260928-093355): its worn
+        // list emptied under one of our overrides while the owner's list still had everything but the cuffs its
+        // OnDeath script removes. Name the path: item, override kind and the call stack (module+RVA).
+        const auto life = (apActor->actorState.flags1 >> 21) & 0xF;
+        static std::atomic<uint32_t> s_deathUnequipLogs{};
+        if (life != 0 && !pExtension->IsPlayer() && s_deathUnequipLogs.fetch_add(1, std::memory_order_relaxed) < 64)
+        {
+            void* frames[12]{};
+            const auto count = RtlCaptureStackBackTrace(0, 12, frames, nullptr);
+            std::string stack;
+            for (USHORT i = 0; i < count; ++i)
+            {
+                HMODULE module{};
+                char name[MAX_PATH]{};
+                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        static_cast<LPCWSTR>(frames[i]), &module) && module)
+                {
+                    GetModuleFileNameA(module, name, MAX_PATH);
+                    const char* file = strrchr(name, '\\');
+                    stack += fmt::format(" {}+{:X}", file ? file + 1 : name,
+                        reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(module));
+                }
+            }
+            spdlog::info("Dead copy unequip: {:X} item {:X} life {} equipOverride {} inventoryOverride {} stack{}",
+                apActor->formID, apItem ? apItem->formID : 0, life, ScopedEquipOverride::IsOverriden(),
+                ScopedInventoryOverride::IsOverriden(), stack);
+        }
     }
 
     if (pExtension->IsLocal() && !ScopedUnequipOverride::IsOverriden() && !apData->bQueueEquip)

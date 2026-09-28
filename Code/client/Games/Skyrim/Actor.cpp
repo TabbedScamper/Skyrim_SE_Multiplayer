@@ -1548,6 +1548,37 @@ bool TP_MAKE_THISCALL(HookInitiateMountPackage, Actor, Actor* apMount)
 TP_THIS_FUNCTION(TUnequipObject, void, Actor, void* apUnk1, TESBoundObject* apObject, int32_t aUnk2, void* apUnk3);
 static TUnequipObject* RealUnequipObject = nullptr;
 
+// Naked flash at death on the follower (Lokir, run 20260928-103902): the copy's death-time 3D rebuild
+// (AIProcess::Update3DModel_Impl 39395 -> worn-part rebuild 19743 -> ... -> outfit reset 418622) clears every worn flag
+// and re-equips the outfit through Actor::AddWornOutfit (19692) in the same call. On the owner that re-equip goes
+// through, so nothing shows. On a remote copy our equip hook refused it (remote equips only under ScopedEquipOverride),
+// leaving the corpse bare until the naked guard re-equipped it. The engine's own outfit re-equip is a restore, not
+// a new decision: let it through on remote NPC copies; the naked guard still reconciles items with the owner's list.
+using TAddWornOutfit = void(Actor*, void*, bool);
+static TAddWornOutfit* RealAddWornOutfit = nullptr;
+
+static void HookAddWornOutfit(Actor* apActor, void* apOutfit, bool aUpdate3D)
+{
+    const auto* pExtension = apActor ? apActor->GetExtension() : nullptr;
+    if (pExtension && pExtension->IsRemote() && !pExtension->IsPlayer())
+    {
+        static std::atomic<uint32_t> s_logs{};
+        if (s_logs.fetch_add(1, std::memory_order_relaxed) < 32)
+            spdlog::info("Outfit restore on remote copy {:X} (life {}): native re-equip allowed", apActor->formID,
+                (apActor->actorState.flags1 >> 21) & 0xF);
+        ScopedEquipOverride equipOverride;
+        RealAddWornOutfit(apActor, apOutfit, aUpdate3D);
+        return;
+    }
+    RealAddWornOutfit(apActor, apOutfit, aUpdate3D);
+}
+
+static TiltedPhoques::Initializer s_addWornOutfitHook([]() {
+    POINTER_SKYRIMSE(TAddWornOutfit, addWornOutfit, 19692);
+    RealAddWornOutfit = addWornOutfit.Get();
+    TP_HOOK(&RealAddWornOutfit, HookAddWornOutfit);
+});
+
 void TP_MAKE_THISCALL(HookUnequipObject, Actor, void* apUnk1, TESBoundObject* apObject, int32_t aUnk2, void* apUnk3)
 {
     TiltedPhoques::ThisCall(RealUnequipObject, apThis, apUnk1, apObject, aUnk2, apUnk3);

@@ -770,7 +770,102 @@ void DrainObservations()
             s_observationDropped.load() - s_observationDroppedBase, value.Count, bodies));
     }
 }
+// Worn-marker probe (naked flash at death, runs 20260928-095932 / -101047): a dying copy's worn list empties 33..66 ms
+// after its death with no unequip call. The worn state is ExtraWorn / ExtraWornLeft extra data; every removal deletes the
+// object through its vtable slot 0 (scalar deleting destructor; ExtraWorn vtable ID 186681, ExtraWornLeft 186683). For
+// 400 ms after a copy's death transition, log the full stack of every such deletion to name the native caller.
+using TExtraDtor = void*(void*, uint32_t);
+TExtraDtor* s_realWornDtor{};
+TExtraDtor* s_realWornLeftDtor{};
+std::atomic<uint64_t> s_wornProbeUntilMs{};
+std::atomic<uint32_t> s_wornProbeLogs{};
+
+void LogWornDeletion(const char* apKind) noexcept
+{
+    if (GetTickCount64() > s_wornProbeUntilMs.load(std::memory_order_relaxed) ||
+        s_wornProbeLogs.fetch_add(1, std::memory_order_relaxed) >= 24)
+        return;
+    void* frames[28]{};
+    const auto count = RtlCaptureStackBackTrace(1, 28, frames, nullptr);
+    std::string stack;
+    for (USHORT i = 0; i < count; ++i)
+    {
+        HMODULE module{};
+        char name[MAX_PATH]{};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                static_cast<LPCWSTR>(frames[i]), &module) && module)
+        {
+            GetModuleFileNameA(module, name, MAX_PATH);
+            const char* file = strrchr(name, '\\');
+            stack += fmt::format(" {}+{:X}", file ? file + 1 : name,
+                reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(module));
+        }
+        else
+            stack += fmt::format(" ?{:X}", reinterpret_cast<uintptr_t>(frames[i]));
+    }
+    // The unwinder stops inside game code (the launcher-mapped image has no registered unwind data), so also scan the
+    // raw stack: keep values that point into the game's code just after a call instruction (return addresses).
+    std::string scan;
+    HMODULE game{};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(s_realWornDtor), &game) && game)
+    {
+        const auto base = reinterpret_cast<uintptr_t>(game);
+        ULONG_PTR low{}, high{};
+        GetCurrentThreadStackLimits(&low, &high);
+        auto* cursor = reinterpret_cast<const uintptr_t*>(&frames[0]);
+        const auto* end = reinterpret_cast<const uintptr_t*>((std::min)(static_cast<uintptr_t>(high),
+            reinterpret_cast<uintptr_t>(cursor) + 16384));
+        int found = 0;
+        for (; cursor + 1 <= end && found < 24; ++cursor)
+        {
+            const uintptr_t value = *cursor;
+            if (value < base + 0x1000 || value >= base + 0x17C0000)
+                continue;
+            const auto* code = reinterpret_cast<const uint8_t*>(value);
+            const bool call = code[-5] == 0xE8 || (code[-6] == 0xFF && (code[-5] & 0x38) == 0x10) ||
+                (code[-2] == 0xFF && (code[-1] & 0xF8) == 0xD0) || (code[-3] == 0xFF && (code[-2] & 0x38) == 0x10);
+            if (!call)
+                continue;
+            scan += fmt::format(" {:X}", value - base);
+            ++found;
+        }
+    }
+    spdlog::info("Worn marker deleted ({}) on thread {}: stack{} | scan{}", apKind, GetCurrentThreadId(), stack, scan);
+}
+
+void* HookWornDtor(void* apThis, uint32_t aFlags)
+{
+    LogWornDeletion("ExtraWorn");
+    return s_realWornDtor(apThis, aFlags);
+}
+
+void* HookWornLeftDtor(void* apThis, uint32_t aFlags)
+{
+    LogWornDeletion("ExtraWornLeft");
+    return s_realWornLeftDtor(apThis, aFlags);
+}
+
+void PatchVtableSlot0(uint32_t aVtableId, void* apHook, TExtraDtor*& arReal) noexcept
+{
+    POINTER_SKYRIMSE(void*, vtable, aVtableId);
+    auto** table = reinterpret_cast<void**>(vtable.Get());
+    DWORD previous{};
+    if (table && VirtualProtect(&table[0], sizeof(void*), PAGE_EXECUTE_READWRITE, &previous))
+    {
+        arReal = reinterpret_cast<TExtraDtor*>(table[0]);
+        table[0] = apHook;
+        DWORD ignored{};
+        VirtualProtect(&table[0], sizeof(void*), previous, &ignored);
+    }
+}
+
+TiltedPhoques::Initializer s_wornProbeInit([]() {
+    PatchVtableSlot0(186681, reinterpret_cast<void*>(&HookWornDtor), s_realWornDtor);
+    PatchVtableSlot0(186683, reinterpret_cast<void*>(&HookWornLeftDtor), s_realWornLeftDtor);
+});
 } // namespace
+
 
 struct CorpseRagdollService::StepBinding
 {
@@ -1580,6 +1675,7 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
     sample.Settled = acMessage.Settled;
     sample.Dying = acMessage.Dying;
     std::copy(std::begin(acMessage.Origin), std::end(acMessage.Origin), std::begin(sample.Origin));
+    sample.Heading = acMessage.Heading;
     sample.Bodies = acMessage.Bodies;
     ragdoll.RingNext = (ragdoll.RingNext + 1) % size;
     ragdoll.RingCount = (std::min)(ragdoll.RingCount + 1, size);
@@ -1697,6 +1793,7 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             request.Origin[0] = actor->position.x;
             request.Origin[1] = actor->position.y;
             request.Origin[2] = actor->position.z;
+            request.Heading = actor->rotation.z;
             for (auto* rigid : bodies)
             {
                 CorpseRagdollBody body{};
@@ -1794,7 +1891,16 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             // rendered root 393 u, bones 42 u). Hold the reference on the owner's actor origin; the bodies are
             // not moved (aSyncHavok=false), the step drive keeps them on the owner pose.
             const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
-            const auto& newest = ragdoll.Ring[(ragdoll.RingNext + size - 1) % size];
+            // The PRESENTED sample (newest at or before the presentation clock), the one the bodies are evaluated
+            // at: the newest leads the drawn bodies by the ring depth during the fall (Muse refute-corpse).
+            uint32_t presented = (ragdoll.RingNext + size - ragdoll.RingCount) % size;
+            for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
+            {
+                const auto index = (ragdoll.RingNext + size - ragdoll.RingCount + i) % size;
+                if (ragdoll.Ring[index].Tick <= presentation)
+                    presented = index;
+            }
+            const auto& newest = ragdoll.Ring[presented];
             NiPoint3 origin;
             origin.x = newest.Origin[0];
             origin.y = newest.Origin[1];
@@ -1812,6 +1918,18 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 ScopedReferencesOverride recursionGuard;
                 actor->SetPosition(origin, false);
                 ++ragdoll.AnchorMoves;
+            }
+            // Heading too: the rendered body sits on the reference's heading. The owner turns its reference at
+            // death (97 -> 306..330 deg for Lokir, then 108 at the settle); the copy stayed at 97, so its drawn
+            // body was the owner's pose turned by the difference (151 deg measured = the reference gap, run
+            // 20260928-093355), seen as the corpse spinning during the fall.
+            const float turn = std::remainder(newest.Heading - actor->rotation.z, 6.2831853f);
+            if (std::isfinite(turn) && std::abs(turn) > 0.02f)
+            {
+                if (std::abs(turn) > 0.5f)
+                    spdlog::info("Ragdoll {:X} (server {:X}): heading {:.0f} deg from the owner's, turned to match",
+                        actor->formID, serverId, turn * 57.29578f);
+                actor->SetRotation(actor->rotation.x, actor->rotation.y, newest.Heading);
             }
         }
         if (!limb)
@@ -1881,8 +1999,25 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 spdlog::info("Ragdoll {:X}: copy was not ragdolling (flags1 {:08X}); knocked into ragdoll to follow the owner",
                     actor->formID, actor->actorState.flags1);
             }
+            if (!ragdoll.Knocked)
+                ragdoll.WatchSinceMs = aNowMs;
+                s_wornProbeUntilMs.store(GetTickCount64() + 400, std::memory_order_relaxed);
             ragdoll.Knocked = true;
             ragdoll.RetryTransitionMs = aNowMs + 250;
+        }
+        if (!limb && ragdoll.WatchSinceMs && aNowMs - ragdoll.WatchSinceMs < 2000)
+        {
+            std::string worn;
+            for (const auto& item : actor->GetActorInventory().Entries)
+                if (item.IsWorn())
+                    worn += fmt::format(" {:X}", item.BaseId.BaseId);
+            if (worn != ragdoll.WatchWorn)
+            {
+                spdlog::info("Death watch {:X} +{} ms: worn [{}] life {} knock {} root {}", actor->formID,
+                    aNowMs - ragdoll.WatchSinceMs, worn, (actor->actorState.flags1 >> 21) & 0xF,
+                    (actor->actorState.flags1 >> 25) & 0x7, static_cast<const void*>(actor->GetNiNode()));
+                ragdoll.WatchWorn = worn;
+            }
         }
         RetainedBodies bodies;
         void* driver{};

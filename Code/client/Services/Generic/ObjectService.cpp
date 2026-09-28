@@ -1,4 +1,5 @@
 #include <Services/SmoothClock.h>
+#include <fstream>
 #include <Games/ActorExtension.h>
 #include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
@@ -778,6 +779,83 @@ void SetTetheredHorse(uint32_t aFormId, bool aTethered) noexcept
 std::unordered_map<void*, uint32_t> s_tetherVehicles;
 std::vector<uint32_t> s_newAssemblies, s_assembliesRefreshing;
 std::atomic<uint64_t> s_assemblyTick{};
+// Same presentation time as s_assemblyTick, unrounded (ms with the fraction). The cart replay reads it when the
+// cart curve switch is on: a whole-millisecond clock moves the interpolation fraction in steps of about 6% of a
+// 16 ms frame, which shows as small speed changes.
+std::atomic<double> s_assemblyTimeMs{};
+// Cart curve (follower replay): position between two owner samples follows a cubic that also matches the owner
+// body's velocity at both samples (Hermite), on the unrounded clock. Straight lines change speed at every sample
+// because each sample's tick carries timing noise (see s_hermitePlaybackEnabled, the older path's version).
+std::atomic<bool> s_cartCurve{false};
+
+// Motion trace (test bridge motion_trace): per main frame, the rendered world position and heading of chosen
+// references (a named bone for actors when present, else the root node). Compared between the PCs to measure
+// frame-level stutter and spins that 100 ms samples cannot show. Main thread only.
+struct MotionTraceRecord
+{
+    double SteadyMs;
+    double SharedMs;
+    uint32_t FormId;
+    float X, Y, Z, Heading, ReferenceZ;
+    uint32_t PlayerId; // party player id when traced as a player ("players"), else 0
+    float RefX, RefY, RefZ;    // reference (actor) position
+    float RootX, RootY, RootZ; // 3D root node world position (differs from the reference in furniture/paired poses)
+};
+std::atomic<bool> s_motionTraceOn{false};
+std::vector<uint32_t> s_motionTraceIds;
+std::string s_motionTraceBone;
+// "players" in the ids: also trace every player character (the local one and each remote copy), tagged with its party
+// player id so one player can be compared across PCs (e.g. the follower walked to the chopping block).
+bool s_motionTracePlayers{};
+std::vector<MotionTraceRecord> s_motionTrace;
+std::mutex s_motionTraceLock;
+constexpr size_t kMotionTraceMax = 400000;
+
+void RecordMotionTrace(World& aWorld) noexcept
+{
+    if (!s_motionTraceOn.load(std::memory_order_relaxed) || s_motionTrace.size() >= kMotionTraceMax)
+        return;
+    std::lock_guard lock(s_motionTraceLock);
+    const double steady = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double shared = SmoothClock::NowMs();
+    static BSFixedString s_bone("");
+    static std::string s_boneName;
+    if (s_boneName != s_motionTraceBone)
+    {
+        s_boneName = s_motionTraceBone;
+        s_bone = BSFixedString(s_boneName.c_str());
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> targets; // form id, player id
+    for (const auto id : s_motionTraceIds)
+        targets.emplace_back(id, 0);
+    if (s_motionTracePlayers)
+    {
+        targets.emplace_back(0x14, aWorld.GetTransport().GetLocalPlayerId());
+        auto players = aWorld.view<FormIdComponent, PlayerComponent>();
+        for (auto entity : players)
+            if (players.get<FormIdComponent>(entity).Id != 0x14)
+                targets.emplace_back(players.get<FormIdComponent>(entity).Id, players.get<PlayerComponent>(entity).Id);
+    }
+    for (const auto& [id, playerId] : targets)
+    {
+        auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(id));
+        NiAVObject* pNode = pReference ? pReference->GetNiNode() : nullptr;
+        if (!pNode)
+            continue;
+        const auto rootWorld = pNode->world.translate;
+        if (!s_boneName.empty() && Cast<Actor>(pReference))
+            if (auto* pBone = pNode->GetByName(s_bone))
+                pNode = pBone;
+        const auto& w = pNode->world;
+        // Local +Y is forward: world forward is the rotation's second column.
+        const float heading = std::atan2(w.rotate.entry[0][1], w.rotate.entry[1][1]) * 57.2957795f;
+        s_motionTrace.push_back({steady, shared, id, w.translate.x, w.translate.y, w.translate.z, heading,
+            pReference->rotation.z * 57.2957795f, playerId, pReference->position.x, pReference->position.y,
+            pReference->position.z, rootWorld.x, rootWorld.y, rootWorld.z});
+    }
+}
+
 std::atomic<bool> s_assemblyFollower{};
 std::atomic<void*> s_tetherVtable{};
 uint64_t s_assemblyEpoch{}; // main only
@@ -3612,6 +3690,7 @@ void ObjectService::OnMainFrame() noexcept
         node->DecRef();
     s_assemblyNodesDraining.clear();
     pService->m_world.GetSharedDropService().OnMainFrame();
+    RecordMotionTrace(pService->m_world);
     if (IsRenderDiagnosticsArmed())
     {
         std::lock_guard lock(pService->m_remotePhysicsLock);
@@ -3755,6 +3834,10 @@ void ObjectService::OnMainFrame() noexcept
     const uint64_t presentationDelay = pService->m_world.GetCharacterService().GetPresentationDelayMs();
     const uint64_t assemblyTick = frameTick > presentationDelay ? frameTick - presentationDelay : 0;
     s_assemblyTick.store(assemblyTick, std::memory_order_release);
+    {
+        const double nowMs = SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() : static_cast<double>(frameTick);
+        s_assemblyTimeMs.store(nowMs - static_cast<double>(presentationDelay), std::memory_order_release);
+    }
     {
         std::lock_guard assemblyLock(s_assembliesLock);
         const auto epoch = active ? pService->m_world.GetPartyService().GetStartEpoch() : 0;
@@ -4134,6 +4217,60 @@ void DrainActorSceneUpdates() noexcept
     s_sceneUpdateDraining.clear();
 }
 
+void ObjectService::SetCartCurve(bool aEnabled) noexcept
+{
+    s_cartCurve.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Cart curve: {}", aEnabled);
+}
+
+bool ObjectService::IsCartCurve() noexcept
+{
+    return s_cartCurve.load(std::memory_order_relaxed);
+}
+
+std::string ObjectService::MotionTrace(const std::string& aIds, const std::string& aBone, const std::string& aDump) noexcept
+{
+    // The bridge runs on the window thread; the recorder on the main frame. One lock covers both.
+    std::lock_guard lock(s_motionTraceLock);
+    if (!aDump.empty())
+    {
+        s_motionTraceOn.store(false, std::memory_order_relaxed);
+        std::ofstream out(aDump, std::ios::trunc);
+        for (const auto& r : s_motionTrace)
+            out << fmt::format("{{\"t\":{:.3f},\"s\":{:.3f},\"id\":{},\"p\":[{:.2f},{:.2f},{:.2f}],\"h\":{:.2f},\"rz\":{:.2f},\"pl\":{},\"ref\":[{:.1f},{:.1f},{:.1f}],\"root\":[{:.1f},{:.1f},{:.1f}]}}\n",
+                r.SteadyMs, r.SharedMs, r.FormId, r.X, r.Y, r.Z, r.Heading, r.ReferenceZ, r.PlayerId, r.RefX, r.RefY, r.RefZ,
+                r.RootX, r.RootY, r.RootZ);
+        const auto count = s_motionTrace.size();
+        s_motionTrace.clear();
+        s_motionTrace.shrink_to_fit();
+        return fmt::format("\"dumped\":{},\"ok\":{}", count, static_cast<bool>(out));
+    }
+    if (!aIds.empty())
+    {
+        s_motionTraceIds.clear();
+        s_motionTracePlayers = false;
+        size_t start = 0;
+        while (start < aIds.size())
+        {
+            const auto end = aIds.find(',', start);
+            const auto part = aIds.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (part == "players")
+                s_motionTracePlayers = true;
+            else if (!part.empty())
+                s_motionTraceIds.push_back(static_cast<uint32_t>(std::stoul(part, nullptr, 0)));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        s_motionTraceBone = aBone;
+        s_motionTrace.clear();
+        s_motionTrace.reserve(kMotionTraceMax);
+        s_motionTraceOn.store(true, std::memory_order_relaxed);
+    }
+    return fmt::format("\"on\":{},\"ids\":{},\"records\":{}", s_motionTraceOn.load(), s_motionTraceIds.size(),
+        s_motionTrace.size());
+}
+
 void ObjectService::SetCartReplayEnabled(bool aEnabled) noexcept
 {
     s_cartReplay.store(aEnabled, std::memory_order_relaxed);
@@ -4368,7 +4505,9 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     cartAssembly = found != s_assemblies.end() && found->second.Complete &&
                         found->second.Root.get() == pReference->GetNiNode();
                 }
-                const double renderTime = cartAssembly ? static_cast<double>(s_assemblyTick.load(std::memory_order_acquire)) :
+                const bool curve = cartAssembly && s_cartCurve.load(std::memory_order_relaxed);
+                const double renderTime = cartAssembly ? (curve ? s_assemblyTimeMs.load(std::memory_order_acquire) :
+                    static_cast<double>(s_assemblyTick.load(std::memory_order_acquire))) :
                     (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
                     static_cast<double>(m_transport.GetClock().GetCurrentTick())) -
                     static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs());
@@ -4522,6 +4661,16 @@ void ObjectService::ApplyRemotePhysics() noexcept
                             s_stepTargets[index].Body != target.Body || s_stepTargets[index].BodyUid != target.BodyUid;
                     }
                     glm::vec3 position = pA->BodyPosition + (pB->BodyPosition - pA->BodyPosition) * t;
+                    if (curve && !atFinalPose && pB->Tick > pA->Tick && pB->Tick - pA->Tick <= 250)
+                    {
+                        // Tangents: each sample's owner body velocity (game u/s -> Havok u/s) over the interval.
+                        const float span = static_cast<float>(pB->Tick - pA->Tick) / 1000.f;
+                        const glm::vec3 mA = glm::vec3{pA->Velocity.x, pA->Velocity.y, pA->Velocity.z} / kHavokToGameUnits * span;
+                        const glm::vec3 mB = glm::vec3{pB->Velocity.x, pB->Velocity.y, pB->Velocity.z} / kHavokToGameUnits * span;
+                        const float t2 = t * t, t3 = t2 * t;
+                        position = (2.f * t3 - 3.f * t2 + 1.f) * pA->BodyPosition + (t3 - 2.f * t2 + t) * mA +
+                            (-2.f * t3 + 3.f * t2) * pB->BodyPosition + (t3 - t2) * mB;
+                    }
                     const glm::quat qa{pA->BodyRotation.w, pA->BodyRotation.x, pA->BodyRotation.y, pA->BodyRotation.z};
                     const glm::quat qb{pB->BodyRotation.w, pB->BodyRotation.x, pB->BodyRotation.y, pB->BodyRotation.z};
                     glm::quat rotation = glm::normalize(glm::slerp(qa, qb, t));

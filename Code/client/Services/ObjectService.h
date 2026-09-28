@@ -169,6 +169,11 @@ public:
     // Follower cart assemblies: true = replay (bodies keyframed onto the owner pose each physics step),
     // false = the dynamic steer. Toggle for in-run A/B via the cart_replay bridge command.
     static void SetCartReplayEnabled(bool aEnabled) noexcept;
+    // Follower cart replay: Hermite curve through owner samples on the unrounded clock (cart_curve switch).
+    static void SetCartCurve(bool aEnabled) noexcept;
+    static bool IsCartCurve() noexcept;
+    // Per-frame rendered position/heading trace of chosen references (motion_trace). Ids start a trace; dump writes it.
+    static std::string MotionTrace(const std::string& aIds, const std::string& aBone, const std::string& aDump) noexcept;
     static bool IsCartReplayEnabled() noexcept;
     // Lock-free: true for a local horse tethered to a cart. Its native position moves keep their Havok sync
     // (HookSetPosition), called from engine threads about once a frame per horse.

@@ -63,6 +63,7 @@ private:
     {
         uint64_t Tick{};
         float Origin[3]{};
+        float Heading{};
         Vector<CorpseRagdollBody> Bodies;
         bool Settled{};
         bool Dying{};
@@ -75,6 +76,9 @@ private:
         uint64_t Revision{}, PublishedRevision{};
         // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
         bool Knocked{};
+        // Death watch: for 2 s after the copy's death transition, log every change of its worn list (naked flash).
+        uint64_t WatchSinceMs{};
+        std::string WatchWorn{"?"};
         // The owner is dying (it reported the death), not only knocked down: set when this copy is
         // killed or knocked at the first sample.
         bool OwnerDying{};

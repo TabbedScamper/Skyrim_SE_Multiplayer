@@ -4,6 +4,7 @@
 #include <Services/FarmMode.h>
 
 #include <Services/GameTestService.h>
+#include <Services/CheckpointSaves.h>
 #include <Camera/PlayerCamera.h>
 #include <Systems/AnimationSystem.h>
 #include <Misc/NativeDispatchDiagnostic.h>
@@ -5520,6 +5521,15 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 ObjectService::SetCartNodeRefresh(enabled != "false");
             return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsCartNodeRefresh()));
         }
+        if (command == "cart_curve")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                ObjectService::SetCartCurve(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsCartCurve()));
+        }
+        if (command == "motion_trace")
+            return Result(id, ObjectService::MotionTrace(GetJsonString(acLine, "ids"), GetJsonString(acLine, "bone"),
+                GetJsonString(acLine, "dump")));
         if (command == "force_seen")
         {
             if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
@@ -5773,9 +5783,14 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 party.GetReadyPlayerCount() != party.GetPartyMembers().size() ||
                 party.GetSessionState() != 0)
                 return Error(id, "party needs two or more members, all ready, and an idle session");
-            party.SelectCampaign(PartyStartRequest::kContinue);
-            party.StartTogether(PartyStartRequest::kContinue);
-            return Result(id, "\"campaignMode\":2");
+            // Optional "checkpoint": a specific SSC_ checkpoint id present on every PC (e.g. the cart-exit save before
+            // Lokir dies), instead of the newest. Empty keeps Continue's newest-checkpoint behavior.
+            const String checkpoint = GetJsonString(acLine, "checkpoint").c_str();
+            if (!checkpoint.empty() && !CheckpointSaves::Has(checkpoint))
+                return Error(id, "checkpoint is not on this PC");
+            party.SelectCampaign(PartyStartRequest::kContinue, checkpoint);
+            party.StartTogether(PartyStartRequest::kContinue, checkpoint);
+            return Result(id, fmt::format("\"campaignMode\":2,\"checkpoint\":\"{}\"", EscapeJson(checkpoint.c_str())));
         }
         if (command == "close_options")
         {

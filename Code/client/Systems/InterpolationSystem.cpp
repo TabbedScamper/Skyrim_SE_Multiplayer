@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Systems/InterpolationSystem.h>
+#include <Services/CorpseRagdollService.h>
 #include <Components.h>
 
 #include <AI/AIProcess.h>
@@ -85,7 +86,9 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // pose. Keep consuming the network timeline above for identity/spawn
     // bookkeeping, but do not teleport the dead reference or reload its
     // movement graph every presentation frame.
-    if (apActor->actorState.IsDeadState())
+    // A dying copy that follows the owner's ragdoll takes its heading from that stream (CorpseRagdollService);
+    // a second writer here raced it (Muse refute-corpse).
+    if (apActor->actorState.IsDeadState() || CorpseRagdollService::IsFollowingOwner(apActor->formID))
         return;
 
     // Seated (ActorState1 sitSleepState, bits 14-17: 2 sitting down, 3 sitting): this PC's engine

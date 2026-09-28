@@ -1087,6 +1087,29 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, TESObjectREFR, TESBoundObject* apIte
 BSPointerHandle<TESObjectREFR>*
 TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObjectREFR>* apResult, TESBoundObject* apItem, int32_t aCount, ITEM_REMOVE_REASON aReason, ExtraDataList* apExtraList, TESObjectREFR* apMoveToRef, const NiPoint3* apDropLoc, const NiPoint3* apRotate)
 {
+    // A dead or dying NPC copy's inventory belongs to its owner. Its own death scripts also run here (Lokir's
+    // MQ101LokirScript.OnDeath: RemoveItem(PrisonerCuffs)); that local removal unequipped the cuffs during the native
+    // death transition and cleared every worn flag, a naked corpse for about half a second on the follower (run
+    // 20260928-095901: worn [3 items] at +0 ms, cuffs unequipped +16 ms on the script thread, worn [] at +33 ms).
+    // The owner runs the same script and its removal arrives through sync (cuffs removed cleanly at +1926 ms).
+    // Only plain removals are skipped: looting into a container or player, drops, and our own sync still apply.
+    if (!ScopedInventoryOverride::IsOverriden() && aReason == ITEM_REMOVE_REASON::kRemove && !apMoveToRef && !apDropLoc)
+    {
+        auto* pActor = Cast<Actor>(apThis);
+        const auto* pExtension = pActor ? pActor->GetExtension() : nullptr;
+        if (pExtension && pExtension->IsRemote() && !pExtension->IsPlayer() &&
+            (((pActor->actorState.flags1 >> 21) & 0xF) == 1 || ((pActor->actorState.flags1 >> 21) & 0xF) == 2) &&
+            World::Get().GetTransport().IsConnected())
+        {
+            static std::atomic<uint32_t> s_skipped{};
+            if (s_skipped.fetch_add(1, std::memory_order_relaxed) < 32)
+                spdlog::info("Dead copy {:X}: local removal of {:X} x{} skipped; the owner's inventory decides",
+                    apThis->formID, apItem ? apItem->formID : 0, aCount);
+            if (apResult)
+                *apResult = {};
+            return apResult;
+        }
+    }
     if (!ScopedInventoryOverride::IsOverriden())
     {
         auto& modSystem = World::Get().GetModSystem();

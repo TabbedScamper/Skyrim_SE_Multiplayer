@@ -924,6 +924,7 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     notify.Active = acMessage.Packet.Active;
     notify.Dying = acMessage.Packet.Dying;
     std::copy(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin), std::begin(notify.Origin));
+    notify.Heading = acMessage.Packet.Heading;
     notify.Bodies = bodies;
     if (notify.Active)
         GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.pPlayer);

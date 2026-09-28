@@ -528,7 +528,24 @@ void NakedNpcGuard::UpdateNative() noexcept
         // Native EquipObject has no dead/dying exclusion. Keep the root/process
         // readiness check, but never put the known worn set behind the content hold.
         if (!root || !actor->currentProcess || now < state.NextCheck) continue;
-        if (life != 0 && state.Sequence == state.DeathSequence && now < state.DeathHoldUntil)
+        bool releasedEarly = false;
+        if (life == 2 && state.Sequence == state.DeathSequence && now < state.DeathHoldUntil &&
+            now >= state.DeathHoldUntil - 500 + 40 && !state.Worn.Entries.empty())
+        {
+            // The hold only has to outlast the native death-time clear of the worn flags (measured +33..66 ms after
+            // the death, runs 20260928-095932 and -101047; no unequip call is involved). Once that clear has happened
+            // re-equip at once: waiting out the full 500 ms showed the corpse naked for about half a second.
+            Inventory current;
+            if (ReadArmor(m_world, actor, current) &&
+                std::none_of(current.Entries.begin(), current.Entries.end(), [](const auto& e) { return e.IsWorn(); }))
+            {
+                spdlog::info("Worn hold: {:X} native death cleared the worn list {} ms after death; re-equipping now",
+                    target.Form, now - (state.DeathHoldUntil - 500));
+                state.DeathHoldUntil = now;
+                releasedEarly = true;
+            }
+        }
+        if (!releasedEarly && life != 0 && state.Sequence == state.DeathSequence && now < state.DeathHoldUntil)
         {
             if (state.Observe)
                 spdlog::info("Worn hold: {:X} died with pre-death worn seq {}; waiting for the owner's post-death list",

@@ -421,6 +421,18 @@ void QueueAppearance(const uint32_t aFormId, const NotifyPlayerAppearance& acApp
     s_pendingAppearances[aFormId] = acAppearance;
 }
 
+bool OthersDone() noexcept
+{
+    std::lock_guard lock(s_lock);
+    for (const auto& [formId, serverId] : s_remoteActors)
+    {
+        const auto it = s_remoteReady.find(formId);
+        if (it == s_remoteReady.end() || !it->second)
+            return false;
+    }
+    return true;
+}
+
 bool IsDone() noexcept
 {
     return s_done.load();
