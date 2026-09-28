@@ -31,6 +31,8 @@ struct TransportService : Client
     TP_NOCOPYMOVE(TransportService);
 
     bool Send(const ClientMessage& acMessage) const noexcept;
+    // aReliable false: stale-able state (movement/pose snapshots without actions); a lost packet is skipped.
+    bool Send(const ClientMessage& acMessage, bool aReliable) const noexcept;
 
     void OnConsume(const void* apData, uint32_t aSize) override;
     void OnConnected() override;

@@ -751,6 +751,40 @@ void PushOwnerSample(const uint32_t aFormId, const EvaluatedPoseSnapshot& acPose
         const uint64_t gap = aTick - newest.Tick;
         if (gap > kCaptureFreshMs)
             pose.LivingBlendSinceMs = 0;
+        // Burst log (owner report: intermittent stutters where every NPC "regrabs" the host). Per wall-clock second:
+        // how many samples came with a source gap over 150 ms (the owner skipped capturing) and how many arrived later
+        // than the presentation delay (network), so a stutter can be matched to one of the two.
+        {
+            static uint64_t s_burstSecond{}, s_burstGaps{}, s_burstLate{}, s_burstSamples{}, s_burstMaxLate{};
+            static std::atomic<uint32_t> s_burstLogs{};
+            const auto nowMs = GetTickCount64();
+            const auto second = nowMs / 1000;
+            if (second != s_burstSecond)
+            {
+                if (s_burstSecond && (s_burstGaps >= 5 || s_burstLate >= 5) &&
+                    s_burstLogs.fetch_add(1, std::memory_order_relaxed) < 400)
+                {
+                    // Connection state at the burst: received-packet quality (1.0 = no loss), ping, and our own queue.
+                    const auto status = World::Get().GetTransport().GetConnectionStatus();
+                    spdlog::info("Pose burst: {} of {} samples with an owner gap > 150 ms, {} arrived late (worst {} ms); "
+                        "ping {} ms, quality local {:.3f} remote {:.3f}, pending reliable {} B, queue {} us",
+                        s_burstGaps, s_burstSamples, s_burstLate, s_burstMaxLate, status.m_nPing,
+                        status.m_flConnectionQualityLocal, status.m_flConnectionQualityRemote, status.m_cbPendingReliable,
+                        static_cast<int64_t>(status.m_usecQueueTime));
+                }
+                s_burstSecond = second;
+                s_burstGaps = s_burstLate = s_burstSamples = s_burstMaxLate = 0;
+            }
+            ++s_burstSamples;
+            if (gap > 150 && gap < 5000)
+                ++s_burstGaps;
+            const auto presentation = static_cast<uint64_t>(GetPresentationTimeMs());
+            if (presentation > aTick)
+            {
+                ++s_burstLate;
+                s_burstMaxLate = (std::max)(s_burstMaxLate, presentation - aTick);
+            }
+        }
         if (gap < 5000)
         {
             s_gapTotalMs += gap;

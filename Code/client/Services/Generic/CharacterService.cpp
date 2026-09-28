@@ -3149,6 +3149,20 @@ void CharacterService::RunLocalUpdates() const noexcept
     else
         nextSendTimePoint += cDelayBetweenSnapshots;
 
+    // Send-cadence diagnostic (periodic ~27 s bursts: the follower saw every snapshot late and the owner's samples
+    // with 150+ ms gaps while this PC's frames stayed smooth): log a long gap between snapshot sends on this thread.
+    {
+        static std::chrono::steady_clock::time_point s_lastSend{};
+        static std::atomic<uint32_t> s_sendGapLogs{};
+        if (s_lastSend.time_since_epoch().count())
+        {
+            const auto gapMs = std::chrono::duration<double, std::milli>(now - s_lastSend).count();
+            if (gapMs > 80.0 && s_sendGapLogs.fetch_add(1, std::memory_order_relaxed) < 400)
+                spdlog::warn("Snapshot send gap: {:.0f} ms since the previous send on thread {}", gapMs, GetCurrentThreadId());
+        }
+        s_lastSend = now;
+    }
+
     ClientReferencesMoveRequest message;
     message.Tick = m_transport.GetClock().GetCurrentTick();
 
@@ -3339,7 +3353,10 @@ void CharacterService::RunLocalUpdates() const noexcept
     m_localPoseLastBatchUs.store(batchUs, std::memory_order_relaxed);
     m_localPoseLastBatchActors.store(selectedActors, std::memory_order_relaxed);
 
-    m_transport.Send(message);
+    // Action-free snapshots go unreliable (see the server relay): a lost packet no longer stalls the stream.
+    const bool hasActions = std::any_of(message.Updates.begin(), message.Updates.end(),
+        [](const auto& entry) { return !entry.second.ActionEvents.empty(); });
+    m_transport.Send(message, hasActions);
 }
 
 void CharacterService::RunRemoteUpdates() noexcept

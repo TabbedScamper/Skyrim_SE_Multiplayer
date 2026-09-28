@@ -57,6 +57,7 @@ struct GameServer final : Server
 
     // Packet dispatching
     void Send(ConnectionId_t aConnectionId, const ServerMessage& acServerMessage) const;
+    void Send(ConnectionId_t aConnectionId, const ServerMessage& acServerMessage, bool aReliable) const;
     void Send(ConnectionId_t aConnectionId, const ServerAdminMessage& acServerMessage) const;
     void SendToLoaded(const ServerMessage& acServerMessage) const;
     void SendToPlayers(const ServerMessage& acServerMessage, const Player* apExcludeSender = nullptr) const;

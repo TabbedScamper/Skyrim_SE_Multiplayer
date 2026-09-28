@@ -41,6 +41,9 @@ struct Player
     void SetCellComponent(const CellIdComponent& aCellComponent) noexcept;
 
     void Send(const ServerMessage& acServerMessage) const;
+    // Unreliable for stale-able state (movement/pose snapshots without actions): a lost packet is skipped instead of
+    // stalling every later message until it is resent.
+    void SendWithReliability(const ServerMessage& acServerMessage, bool aReliable) const;
 
     // Set before leave callbacks, while the Player object is still alive.
     bool Disconnecting{};

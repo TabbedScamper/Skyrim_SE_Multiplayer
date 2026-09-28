@@ -673,6 +673,14 @@ void GameServer::OnUpdate()
 
     dispatcher.trigger(UpdateEvent{cDeltaSeconds});
 
+    // Stall diagnostic (periodic ~28 s bursts where every relayed snapshot arrived 150-220 ms late on both PCs):
+    // a long gap since the previous tick (the process was starved or blocked elsewhere) vs a long tick (our update).
+    const auto updateMs = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - cNow).count();
+    const auto gapMs = std::chrono::duration<double, std::milli>(cDelta).count();
+    static std::atomic<uint32_t> s_stallLogs{};
+    if ((gapMs > 60.0 || updateMs > 30.0) && s_stallLogs.fetch_add(1, std::memory_order_relaxed) < 500)
+        spdlog::warn("Server tick stall: {:.1f} ms since the previous tick, this update {:.1f} ms", gapMs, updateMs);
+
     if (m_requestStop)
         Close();
 }
@@ -815,6 +823,13 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
 void GameServer::Send(const ConnectionId_t aConnectionId, const ServerMessage& acServerMessage) const
 {
     WithEncodedServerMessage(acServerMessage, [&](auto& packet) { Server::Send(aConnectionId, &packet); });
+}
+
+void GameServer::Send(const ConnectionId_t aConnectionId, const ServerMessage& acServerMessage, const bool aReliable) const
+{
+    WithEncodedServerMessage(acServerMessage, [&](auto& packet) {
+        Server::Send(aConnectionId, &packet, aReliable ? TiltedPhoques::kReliable : TiltedPhoques::kUnreliable);
+    });
 }
 
 void GameServer::Send(ConnectionId_t aConnectionId, const ServerAdminMessage& acServerMessage) const

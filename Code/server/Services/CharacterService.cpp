@@ -405,7 +405,7 @@ void CharacterService::StampOwnership(entt::entity aEntity, Player* apPlayer) co
     owner.PartyId = apPlayer->GetParty().JoinedPartyId;
     const auto* party = m_world.GetPartyService().GetPlayerParty(apPlayer);
     owner.PartyEpoch = party ? party->StartEpoch : 0;
-    owner.FinishGrant(m_world.GetPartyService().IsPlayerLeader(apPlayer));
+    owner.FinishGrant(m_world.GetPartyService().IsPlayerLeader(apPlayer), GameServer::Get()->GetTick());
 }
 
 void CharacterService::ReconcileCellOwnership(Player* apPlayer, bool aCellEntry) const noexcept
@@ -441,6 +441,8 @@ void CharacterService::ReconcileActorOwnership(Player* apPlayer, entt::entity en
     {
         owner.InvalidOwners.erase(std::remove(owner.InvalidOwners.begin(), owner.InvalidOwners.end(), apPlayer), owner.InvalidOwners.end());
         owner.RetryLeader = false;
+        if (aCellEntry)
+            owner.QuickLeaderBounces = 0;
     }
     const bool connected = previous && !previous->Disconnecting &&
         previous->GetParty().JoinedPartyId == apPlayer->GetParty().JoinedPartyId;
@@ -1010,13 +1012,19 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         auto& cellIdComponent = view.get<CellIdComponent>(*itor);
         auto& animationComponent = view.get<AnimationComponent>(*itor);
 
-        movementComponent.Tick = message.Tick;
+        // Snapshots without actions arrive unreliable and unordered: never roll state back to an older one (the
+        // actions it carries still apply). Muse refute-unreliable.
+        const bool staleMovement = movementComponent.Tick && message.Tick < movementComponent.Tick;
+        if (!staleMovement)
+            movementComponent.Tick = message.Tick;
 
         const auto movementCopy = movementComponent;
 
         auto& update = entry.second;
         auto& movement = update.UpdatedMovement;
 
+        if (!staleMovement)
+        {
         movementComponent.Position = movement.Position;
         movementComponent.Rotation = glm::vec3(movement.Rotation.x, 0.f, movement.Rotation.y);
         movementComponent.Variables = movement.Variables;
@@ -1038,6 +1046,7 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         cellIdComponent.Cell = movement.CellId;
         cellIdComponent.WorldSpaceId = movement.WorldSpaceId;
         cellIdComponent.CenterCoords = GridCellCoords::CalculateGridCellCoords(movement.Position.x, movement.Position.y);
+        }
 
         for (auto& action : update.ActionEvents)
         {
@@ -1843,7 +1852,13 @@ void CharacterService::ProcessMovementChanges() const noexcept
 
     for (auto& [pPlayer, message] : messages)
     {
-        if (!message.Updates.empty())
-            pPlayer->Send(message);
+        if (message.Updates.empty())
+            continue;
+        // Snapshots are stale-able state; only animation action events must arrive. A follower on Wi-Fi lost about 1
+        // in 300-1000 packets, and each loss held every later reliable snapshot for 120-215 ms (all NPCs stalled, then
+        // caught up). Send action-free snapshots unreliable; one lost is simply skipped.
+        const bool hasActions = std::any_of(message.Updates.begin(), message.Updates.end(),
+            [](const auto& entry) { return !entry.second.ActionEvents.empty(); });
+        pPlayer->SendWithReliability(message, hasActions);
     }
 }

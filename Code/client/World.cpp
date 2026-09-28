@@ -256,6 +256,18 @@ void World::Update() noexcept
     const auto afterDispatcher = std::chrono::steady_clock::now();
     ctx().at<GameTestService>().OnGameThread();
     const auto afterGameTest = std::chrono::steady_clock::now();
+    // Long update diagnostic: snapshots are sent from this update, so a slow phase here delays every NPC's stream
+    // (periodic ~27 s bursts, 150-220 ms late on the other PC, with this PC's frames smooth).
+    {
+        const auto preMs = DurationUs(entry, afterPreUpdate) / 1000;
+        const auto runnerMs = DurationUs(afterPreUpdate, afterRunner) / 1000;
+        const auto dispatchMs = DurationUs(afterRunner, afterDispatcher) / 1000;
+        const auto testMs = DurationUs(afterDispatcher, afterGameTest) / 1000;
+        static std::atomic<uint32_t> s_longUpdateLogs{};
+        if (preMs + runnerMs + dispatchMs + testMs > 80 && s_longUpdateLogs.fetch_add(1, std::memory_order_relaxed) < 400)
+            spdlog::warn("Long world update: pre-update {} ms, runner {} ms, dispatch {} ms, test bridge {} ms", preMs, runnerMs,
+                dispatchMs, testMs);
+    }
     s_worldPreUpdateTotalUs.fetch_add(DurationUs(entry, afterPreUpdate),
         std::memory_order_relaxed);
     s_worldRunnerTotalUs.fetch_add(DurationUs(afterPreUpdate, afterRunner),

@@ -107,6 +107,11 @@ std::atomic<uint64_t> g_transportMessagesSent{};
 
 bool TransportService::Send(const ClientMessage& acMessage) const noexcept
 {
+    return Send(acMessage, true);
+}
+
+bool TransportService::Send(const ClientMessage& acMessage, const bool aReliable) const noexcept
+{
     static thread_local ScratchAllocator s_allocator(1 << 18);
 
     struct ScopedReset
@@ -127,7 +132,7 @@ bool TransportService::Send(const ClientMessage& acMessage) const noexcept
         g_transportBytesSent.fetch_add(writer.Size(), std::memory_order_relaxed);
         g_transportMessagesSent.fetch_add(1, std::memory_order_relaxed);
 
-        Client::Send(&packet);
+        Client::Send(&packet, aReliable ? TiltedPhoques::kReliable : TiltedPhoques::kUnreliable);
 
         return true;
     }
