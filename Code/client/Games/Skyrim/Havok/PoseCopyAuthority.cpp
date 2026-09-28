@@ -535,6 +535,147 @@ void ClearRagdollAuthority() noexcept
     s_ragdollRenderKeys.clear();
 }
 
+
+// Third-person 3D of a reference (E19735 reads loadedState->data3D; for the player that is the third-person skeleton,
+// unlike GetNiNode, which returns the first-person one in first person).
+NiAVObject* ThirdPersonRoot(Actor* apActor) noexcept
+{
+    using TGet3D = NiAVObject*(TESObjectREFR*);
+    POINTER_SKYRIMSE(TGet3D, get3D, 19735);
+    return apActor ? get3D.Get()(apActor) : nullptr;
+}
+
+// Resolve a boneNodes entry to its node: 63856 uses either a direct node or a BSFlattenedBoneTree entry
+// (+130, stride 80, node +70).
+const void* ResolveBoneNode(const BoneNodeEntry& aBone) noexcept
+{
+    const void* pNode = aBone.node;
+    const auto index = static_cast<int32_t>(aBone.unk08);
+    if (pNode && index >= 0)
+    {
+        const auto* pEntries = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(pNode) + 0x130);
+        pNode = pEntries ? *reinterpret_cast<void* const*>(pEntries + static_cast<size_t>(index) * 0x80 + 0x70) : nullptr;
+    }
+    return pNode;
+}
+
+// The graph that animates the drawn third-person skeleton: the one whose boneNodes hold its pelvis. The player has two
+// graphs; at the Helgen chopping block graph 0 did not hold the drawn pelvis (probe: pelvis[-1]) and the captured pose
+// was not the drawn one, so the other PC showed a different pose (pelvis 85-90 u off). Caller holds the manager lock.
+std::atomic<DWORD> s_mainThreadId{0};
+std::atomic<uint32_t> s_localDrawnGraph{0}; // main-thread result for the local player, read by the registry/capture
+
+uint32_t DrawnGraphIndex(Actor* apActor, BSAnimationGraphManager* apManager, const uint32_t aFallback) noexcept
+{
+    // Off the main thread use the stored main-thread result (no scene-graph walk on the update job).
+    if (apActor && apActor->formID == 0x14 && GetCurrentThreadId() != s_mainThreadId.load(std::memory_order_relaxed))
+        return s_localDrawnGraph.load(std::memory_order_relaxed);
+    static BSFixedString s_pelvisName("NPC Pelvis [Pelv]");
+    auto* pRoot = ThirdPersonRoot(apActor);
+    const void* pelvis = pRoot ? pRoot->GetByName(s_pelvisName) : nullptr;
+    const auto count = apManager->animationGraphs.size;
+    if (!pelvis || !count || count > 32)
+        return aFallback;
+    for (uint32_t g = 0; g < count; ++g)
+    {
+        auto* pGraph = reinterpret_cast<const uint8_t*>(apManager->animationGraphs.Get(g));
+        if (!pGraph)
+            continue;
+        const auto& nodes = reinterpret_cast<const AnimationGraph*>(pGraph)->boneNodes;
+        for (uint32_t i = 0; nodes.data && i < nodes.length && i < kMaxBones; ++i)
+            if (ResolveBoneNode(nodes.data[i]) == pelvis)
+                return g;
+    }
+    return aFallback;
+}
+
+// Seated-pose probe (Helgen chopping block: the other player's copy drew its pelvis 85-90 u off the owner's with the
+// owner pose "overriding"; Muse diag-blockpose). For a seated player, every registry refresh (250 ms, main thread):
+// the pelvis/COM local translation from the pose this PC sends (owner) or the newest owner sample it applies (copy),
+// against the drawn node's local translation. Owner sent != drawn: the capture misses a later writer. Copy
+// sample != drawn: a local writer re-poses the copy after our override.
+void ProbeSeatedPose(Actor* apActor, const bool aOwner) noexcept
+{
+    const auto sit = (apActor->actorState.flags1 >> 14) & 0xF;
+    if (sit != 2 && sit != 3)
+        return;
+    auto* pRoot = ThirdPersonRoot(apActor);
+    BSAnimationGraphManager* pManager{};
+    if (!pRoot || !apActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return;
+    static BSFixedString s_pelvisName("NPC Pelvis [Pelv]");
+    static BSFixedString s_comName("NPC COM [COM ]");
+    const void* pelvis = pRoot->GetByName(s_pelvisName);
+    const void* com = pRoot->GetByName(s_comName);
+    int32_t pelvisIndex = -1, comIndex = -1;
+    uint32_t graphIndex{}, graphCount{};
+    {
+        BSScopedLock<BSRecursiveLock> lock(pManager->lock);
+        graphCount = pManager->animationGraphs.size;
+        graphIndex = apActor->formID == 0x14 && !PhysicsOwnsSkeleton(apActor) ?
+            DrawnGraphIndex(apActor, pManager, 0u) : pManager->animationGraphIndex;
+        if (graphCount && graphCount <= 32 && graphIndex < graphCount)
+        {
+            auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(graphIndex));
+            const auto& nodes = reinterpret_cast<const AnimationGraph*>(pGraph)->boneNodes;
+            for (uint32_t i = 0; pGraph && nodes.data && i < nodes.length && i < kMaxBones; ++i)
+            {
+                const auto& bone = nodes.data[i];
+                const void* pNode = bone.node;
+                const auto index = static_cast<int32_t>(bone.unk08);
+                if (pNode && index >= 0)
+                {
+                    const auto* pEntries = *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(pNode) + 0x130);
+                    pNode = pEntries ? *reinterpret_cast<void* const*>(pEntries + static_cast<size_t>(index) * 0x80 + 0x70) : nullptr;
+                }
+                if (pNode && pNode == pelvis)
+                    pelvisIndex = static_cast<int32_t>(i);
+                if (pNode && pNode == com)
+                    comIndex = static_cast<int32_t>(i);
+            }
+        }
+    }
+    pManager->Release();
+    std::array<float, 3> sentPelvis{}, sentCom{};
+    uint32_t count{};
+    {
+        std::lock_guard guard(s_lock);
+        const auto it = s_poses.find(apActor->formID);
+        if (it == s_poses.end())
+            return;
+        const auto& pose = it->second;
+        const QsTransform* pBones{};
+        if (aOwner)
+        {
+            pBones = pose.Captured.data();
+            count = pose.CapturedCount;
+        }
+        else if (pose.RingCount)
+        {
+            const auto& newest = pose.Ring[(pose.RingNext + kRingSize - 1) % kRingSize];
+            pBones = newest.Bones.data();
+            count = newest.Count;
+        }
+        if (!pBones)
+            return;
+        if (pelvisIndex >= 0 && static_cast<uint32_t>(pelvisIndex) < count)
+            std::copy_n(pBones[pelvisIndex].translation, 3, sentPelvis.begin());
+        if (comIndex >= 0 && static_cast<uint32_t>(comIndex) < count)
+            std::copy_n(pBones[comIndex].translation, 3, sentCom.begin());
+    }
+    const auto* pPelvis = static_cast<const NiAVObject*>(pelvis);
+    const auto* pCom = static_cast<const NiAVObject*>(com);
+    static std::atomic<uint32_t> s_logs{};
+    if (s_logs.fetch_add(1, std::memory_order_relaxed) >= 600)
+        return;
+    spdlog::info("Seated pose {:X} ({}): sit {} graph {}/{} bones {} pelvis[{}] {} ({:.1f},{:.1f},{:.1f}) drawn ({:.1f},{:.1f},{:.1f}); "
+        "COM[{}] {} ({:.1f},{:.1f},{:.1f}) drawn ({:.1f},{:.1f},{:.1f})", apActor->formID, aOwner ? "owner" : "copy", sit, graphIndex,
+        graphCount, count, pelvisIndex, aOwner ? "sent" : "sample", sentPelvis[0], sentPelvis[1], sentPelvis[2],
+        pPelvis ? pPelvis->local.translate.x : 0.f, pPelvis ? pPelvis->local.translate.y : 0.f, pPelvis ? pPelvis->local.translate.z : 0.f,
+        comIndex, aOwner ? "sent" : "sample", sentCom[0], sentCom[1], sentCom[2], pCom ? pCom->local.translate.x : 0.f,
+        pCom ? pCom->local.translate.y : 0.f, pCom ? pCom->local.translate.z : 0.f);
+}
+
 void RefreshRegistry(World& aWorld) noexcept
 {
     std::unordered_map<const void*, RegistryEntry> registry;
@@ -552,7 +693,8 @@ void RefreshRegistry(World& aWorld) noexcept
             const auto count = pManager->animationGraphs.size;
             // The active player graph can be first-person arms/camera. Remote players and the
             // cutscene body mirror use the third-person skeleton, like SaveAnimationVariables.
-            const auto index = aFormId == 0x14 && !PhysicsOwnsSkeleton(pActor) ? 0u : pManager->animationGraphIndex;
+            const auto index = aFormId == 0x14 && !PhysicsOwnsSkeleton(pActor) ?
+                DrawnGraphIndex(pActor, pManager, 0u) : pManager->animationGraphIndex;
             if (count && count <= 32 && index < count)
             {
                 auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(index));
@@ -609,6 +751,31 @@ void RefreshRegistry(World& aWorld) noexcept
         live[entry.FormId] = true;
     for (auto it = s_poses.begin(); it != s_poses.end();)
         it = live.contains(it->first) ? std::next(it) : s_poses.erase(it);
+}
+
+void ProbeSeatedPlayers(World& aWorld) noexcept
+{
+    s_mainThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    if (auto* pPlayer = Cast<Actor>(TESForm::GetById(0x14)))
+    {
+        BSAnimationGraphManager* pManager{};
+        if (pPlayer->animationGraphHolder.GetBSAnimationGraph(&pManager) && pManager)
+        {
+            uint32_t index{};
+            {
+                BSScopedLock<BSRecursiveLock> lock(pManager->lock);
+                index = DrawnGraphIndex(pPlayer, pManager, 0u);
+            }
+            pManager->Release();
+            if (s_localDrawnGraph.exchange(index, std::memory_order_relaxed) != index)
+                spdlog::info("Local player drawn graph: {}", index);
+        }
+        ProbeSeatedPose(pPlayer, true);
+    }
+    auto players = aWorld.view<FormIdComponent, RemoteComponent, PlayerComponent>();
+    for (auto entity : players)
+        if (auto* pCopy = Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id)))
+            ProbeSeatedPose(pCopy, false);
 }
 
 void SetPresentationTick(const uint64_t aTick) noexcept

@@ -47,6 +47,10 @@ void ClearRagdollAuthority() noexcept;
 [[nodiscard]] bool NeedsLocalGraph(uint32_t aFormId) noexcept;
 // Diagnostic: whether the owner's pose currently overrides this actor's skeleton, and the newest sample's age.
 [[nodiscard]] std::string DescribeOverride(uint32_t aFormId) noexcept;
+// Diagnostic, main thread: seated players' pelvis/COM (sent or sampled vs drawn), logged per call.
+void ProbeSeatedPlayers(World& aWorld) noexcept;
+// The graph animating the drawn third-person skeleton (the player has two); caller holds the manager lock.
+uint32_t DrawnGraphIndex(Actor* apActor, BSAnimationGraphManager* apManager, uint32_t aFallback) noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.
 bool GetCapturedPose(uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept;

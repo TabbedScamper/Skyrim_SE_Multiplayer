@@ -594,7 +594,8 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
     {
         BSScopedLock<BSRecursiveLock> graphLock(pManager->lock);
         const auto count = pManager->animationGraphs.size;
-        const auto index = apActor->formID == 0x14 && living ? 0u : pManager->animationGraphIndex;
+        const auto index = apActor->formID == 0x14 && living ?
+            PoseCopyAuthority::DrawnGraphIndex(apActor, pManager, 0u) : pManager->animationGraphIndex;
         if (count > 0 && count <= 32 && index < count)
         {
             const auto* pGraph = pManager->animationGraphs.Get(index);

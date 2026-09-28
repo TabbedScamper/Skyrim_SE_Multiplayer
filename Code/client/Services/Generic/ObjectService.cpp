@@ -1,5 +1,6 @@
 #include <Services/SmoothClock.h>
 #include <fstream>
+#include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Games/ActorExtension.h>
 #include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
@@ -3738,6 +3739,16 @@ void ObjectService::OnMainFrame() noexcept
     s_assemblyNodesDraining.clear();
     pService->m_world.GetSharedDropService().OnMainFrame();
     RecordMotionTrace(pService->m_world);
+    {
+        // Seated-pose probe on the main thread (scene-graph reads never on the update job; a crash in the native
+        // animation job followed running it there).
+        static uint64_t s_nextSeatedProbe{};
+        if (const auto nowMs = GetTickCount64(); nowMs >= s_nextSeatedProbe)
+        {
+            s_nextSeatedProbe = nowMs + 250;
+            PoseCopyAuthority::ProbeSeatedPlayers(pService->m_world);
+        }
+    }
     if (IsRenderDiagnosticsArmed())
     {
         std::lock_guard lock(pService->m_remotePhysicsLock);

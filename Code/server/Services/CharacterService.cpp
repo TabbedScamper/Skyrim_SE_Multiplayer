@@ -578,6 +578,7 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             CellIdComponent, MovementComponent, OwnerComponent>();
         entt::entity match = entt::null;
         bool ambiguous = false;
+        float bestDistanceSquared = 0.f;
         for (const auto candidate : candidates)
         {
             const auto& provenance = candidates.get<TemporaryActorProvenance>(candidate);
@@ -588,6 +589,14 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             // Diagnostic (duplicate soldiers after a Continue, 2026-09-28: the follower's saved temporaries registered
             // 42 ms before the leader's identical ones and were not matched): name the failing condition for every
             // candidate of the same base.
+            // An empty leveled pick (not recoverable for a temporary base on one client after a Continue) matches any.
+            const bool pickMatch = character.LeveledNpcPickId.Id == message.LeveledNpcPickId ||
+                character.LeveledNpcPickId.Id == GameId{} || message.LeveledNpcPickId == GameId{};
+            const auto requestedPosition = static_cast<glm::vec3>(message.Position);
+            const auto currentDelta = movement.Position - requestedPosition;
+            const auto creationDelta = provenance.CreationPosition - requestedPosition;
+            const float placementDistanceSquared = (std::min)(glm::dot(currentDelta, currentDelta), glm::dot(creationDelta, creationDelta));
+            constexpr float kMaxPlacementDistanceSquared = 192.f * 192.f;
             if (character.BaseId.Id == message.FormId)
             {
                 static std::atomic<uint32_t> sRejectLogs{0};
@@ -596,8 +605,9 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
                     std::find(provenance.BoundPlayerIds.begin(), provenance.BoundPlayerIds.end(), acMessage.pPlayer->GetId()) !=
                         provenance.BoundPlayerIds.end() ? "already bound" :
                     now < provenance.CreatedTick || now - provenance.CreatedTick > 10000 ? "age" :
-                    character.LeveledNpcPickId.Id != message.LeveledNpcPickId ? "leveled pick" :
-                    cell.Cell != message.CellId || cell.WorldSpaceId != message.WorldSpaceId ? "cell" : "candidate";
+                    !pickMatch ? "leveled pick" :
+                    cell.Cell != message.CellId || cell.WorldSpaceId != message.WorldSpaceId ? "cell" :
+                    placementDistanceSquared > kMaxPlacementDistanceSquared ? "distance" : "candidate";
                 if (sRejectLogs.fetch_add(1, std::memory_order_relaxed) < 256)
                     spdlog::info("Temporary match: request from player {:X} ref {:X} vs server {:X}: {} (age {} ms)",
                         acMessage.pPlayer->GetId(), refId.BaseId, World::ToInteger(candidate), reason,
@@ -609,31 +619,24 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
                     acMessage.pPlayer->GetId()) != provenance.BoundPlayerIds.end() ||
                 now < provenance.CreatedTick || now - provenance.CreatedTick > 10000 ||
                 character.IsPlayer() || character.IsPlayerSummon() || character.IsMount() ||
-                character.BaseId.Id != message.FormId ||
-                character.LeveledNpcPickId.Id != message.LeveledNpcPickId ||
+                character.BaseId.Id != message.FormId || !pickMatch ||
                 cell.Cell != message.CellId || cell.WorldSpaceId != message.WorldSpaceId)
                 continue;
 
-            // Scene-driven natives can already have walked away by the time
-            // the other machine discovers its copy.  Compare the original
-            // placement as well as the live position.  This remains a
-            // conservative heuristic: two plausible candidates are never
-            // collapsed into one actor.
-            const auto requestedPosition = static_cast<glm::vec3>(message.Position);
-            const auto currentDelta = movement.Position - requestedPosition;
-            const auto creationDelta = provenance.CreationPosition - requestedPosition;
-            constexpr float kMaxPlacementDistanceSquared = 192.f * 192.f;
-            if (glm::dot(currentDelta, currentDelta) > kMaxPlacementDistanceSquared &&
-                glm::dot(creationDelta, creationDelta) > kMaxPlacementDistanceSquared)
+            // Scene-driven natives can already have walked away by the time the other machine discovers its copy:
+            // compare the original placement as well as the live position. Several identical candidates (two soldiers
+            // of one base at one spot) take the nearest, not a new actor: each client registers each of its natives,
+            // and the ones already bound to this requester are excluded above, so every native finds its own.
+            if (placementDistanceSquared > kMaxPlacementDistanceSquared)
                 continue;
-            if (match != entt::null)
+            if (match == entt::null || placementDistanceSquared < bestDistanceSquared)
             {
-                ambiguous = true;
-                break;
+                ambiguous = match != entt::null && placementDistanceSquared + 1.f >= bestDistanceSquared;
+                match = candidate;
+                bestDistanceSquared = placementDistanceSquared;
             }
-            match = candidate;
         }
-        if (match != entt::null && !ambiguous)
+        if (match != entt::null)
         {
             m_world.get<TemporaryActorProvenance>(match).BoundPlayerIds.push_back(
                 acMessage.pPlayer->GetId());
@@ -642,13 +645,22 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             response.Owner = false;
             PopulateAssignmentResponse(match, response);
             acMessage.pPlayer->Send(response);
-            spdlog::info("Reconciled temporary actor {:X} from player {:X} to server {:X}",
-                refId.BaseId, acMessage.pPlayer->GetId(), World::ToInteger(match));
+            spdlog::info("Reconciled temporary actor {:X} from player {:X} to server {:X}{}",
+                refId.BaseId, acMessage.pPlayer->GetId(), World::ToInteger(match), ambiguous ? " (nearest of equal candidates)" : "");
+            // Order-independent authority: when the leader binds onto a follower-created temporary (the follower
+            // registered first after a Continue), the leader takes ownership; the follower's native stays as its
+            // remote copy (quest aliases intact).
+            if (m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer))
+            {
+                auto* pOwner = m_world.get<OwnerComponent>(match).GetOwner();
+                if (pOwner && pOwner != acMessage.pPlayer &&
+                    TransferOwnership(acMessage.pPlayer, match, OwnershipTransferReason::LeaderAssignment))
+                    spdlog::info("Leader authority: temporary {:X} moves from player {:X} to the leader", World::ToInteger(match),
+                        pOwner->GetId());
+            }
             return;
         }
-        if (ambiguous)
-            spdlog::warn("Ambiguous temporary NPC placement for player {:X}, base {:X}:{:X}; keeping distinct actors",
-                acMessage.pPlayer->GetId(), message.FormId.ModId, message.FormId.BaseId);
+
     }
 
     // Check if id is the player
