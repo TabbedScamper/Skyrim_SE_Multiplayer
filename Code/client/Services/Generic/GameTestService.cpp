@@ -5388,6 +5388,13 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             NiPoint3 target = pPlayer->position;
             target.x += std::sin(pPlayer->rotation.z) * distance;
             target.y += std::cos(pPlayer->rotation.z) * distance;
+            // Or at an explicit point (the same spot on every PC, e.g. at another player's feet).
+            if (!GetJsonString(acLine, "x").empty())
+            {
+                target.x = std::stof(GetJsonString(acLine, "x"));
+                target.y = std::stof(GetJsonString(acLine, "y"));
+                target.z = std::stof(GetJsonString(acLine, "z"));
+            }
             pPlaced->MoveTo(pPlayer->parentCell, target);
             return Result(id, fmt::format("\"form_id\":\"{:X}\"", pPlaced->formID));
         }

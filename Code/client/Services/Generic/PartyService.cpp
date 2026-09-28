@@ -42,6 +42,7 @@
 #include <OverlayApp.hpp>
 
 #include <Forms/TESGlobal.h>
+#include <Games/TES.h>
 #include <Games/Skyrim/Interface/MainMenuIntegration.h>
 #include <Games/Skyrim/Interface/UI.h>
 #include <Games/Skyrim/AI/Movement/PlayerControls.h>
@@ -433,8 +434,41 @@ void PartyService::OnCheckpointSave(const NotifyCheckpointSave& acMessage) noexc
     m_pendingCheckpoint = acMessage.CheckpointId;
 }
 
+namespace
+{
+// Survival Mode Creation (ccqdrsse001-survivalmode.esl). Survival_MainScript's OnUpdate (every 5 s) shows the
+// Survival_StartPrompt message box on each PC once the player is outdoors with combat controls
+// (Survival_MainScript.ModeCanBeEnabled) unless Survival_PlayerHasBeenPrompted (local 0x0E8DF) is 1; the answer sets
+// Survival_ModeToggle and the same loop starts/stops the mode. Each PC answered its own prompt at Helgen's exit.
+// Until the mode is party-wide, a co-op session marks the prompt as shown; the Gameplay Settings toggle still works.
+void SuppressSurvivalPrompt() noexcept
+{
+    static uint32_t s_formId = UINT32_MAX;
+    if (s_formId == UINT32_MAX)
+    {
+        auto* pMod = ModManager::Get()->GetByName("ccqdrsse001-survivalmode.esl");
+        s_formId = pMod ? pMod->GetFormId(0x0E8DF) : 0;
+    }
+    auto* pPrompted = s_formId ? Cast<TESGlobal>(TESForm::GetById(s_formId)) : nullptr;
+    if (!pPrompted || pPrompted->f == 1.f)
+        return;
+    pPrompted->f = 1.f;
+    spdlog::info("Survival Mode: start prompt marked as shown for this co-op session");
+}
+} // namespace
+
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
+    {
+        static uint64_t s_nextSurvivalCheck{};
+        if (const auto nowMs = GetTickCount64(); nowMs >= s_nextSurvivalCheck)
+        {
+            s_nextSurvivalCheck = nowMs + 2000;
+            if (m_transport.IsConnected() && IsInParty() && GetSessionState() >= 2)
+                SuppressSurvivalPrompt();
+        }
+    }
+
     // Followers are passive spectators while the leader drives MQ101's cart
     // sequence.  Their local Havok world can briefly disagree with the host
     // while cells and the cart settle, so do not allow that private simulation

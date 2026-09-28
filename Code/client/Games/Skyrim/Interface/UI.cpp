@@ -148,7 +148,9 @@ static void UnfreezeMenu(IMenu* apEntry)
 
 static constexpr const char* kAllowList[] = {
     "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu", "MessageBoxMenu",
-    "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console",       "Journal Menu"
+    "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console",       "Journal Menu",
+    // Paused, it froze the picking PC's world and every actor it simulates on the other screens (owner, 2026-09-28).
+    "Lockpicking Menu"
     //"MapMenu", // MapMenu is disabled till we find a proper fix for first person.
 };
 

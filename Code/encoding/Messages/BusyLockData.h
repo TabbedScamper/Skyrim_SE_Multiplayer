@@ -3,7 +3,7 @@
 #include <Structs/GameId.h>
 
 enum class BusyLockAction : uint8_t { Acquire, Heartbeat, Release, Granted, Denied, Unavailable };
-enum class BusyLockKind : uint8_t { Speaking, Searching, Bartering };
+enum class BusyLockKind : uint8_t { Speaking, Searching, Bartering, Lockpicking };
 enum class BusyLockReason : uint8_t { Closed, Cancelled, Timeout, Load, Death, PartyLeft, Disconnected };
 
 struct BusyLockData

@@ -131,6 +131,37 @@ void TESObjectREFR::Save_Reversed(const uint32_t aChangeFlags, Buffer::Writer& a
 
 #endif
 
+// AIProcess: an NPC's pending door activation (39408 / 0x1406F6E40). The native takes the door handle from the
+// middle-high process (+0xD8), clears it, activates the door (ActivateRef 19796, through our hook) and then writes
+// middleHigh+0x470 = 0 through a fresh read of process+0x10. A load door into a cell the local player has not loaded
+// unloads the actor inside that activation and frees the middle-high process, so the write hit a null pointer
+// (host crash 2026-09-28 18:02:24 at 0x1406F6ED7: Ralof leaving Helgen's cave while the host was still inside and
+// the follower had already left). Same steps; the write is skipped when the process is gone.
+using TRunPendingDoor = bool(void* apProcess, TESObjectREFR* apActor);
+static TRunPendingDoor* RealRunPendingDoor = nullptr;
+
+static bool HookRunPendingDoor(void* apProcess, TESObjectREFR* apActor)
+{
+    auto** ppMiddleHigh = reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(apProcess) + 0x10);
+    if (!*ppMiddleHigh)
+        return false;
+    auto* pHandle = reinterpret_cast<uint32_t*>(*ppMiddleHigh + 0xD8);
+    auto* pDoor = TESObjectREFR::GetByHandle(*pHandle);
+    if (!pDoor)
+        return false;
+    *pHandle = 0; // null handle
+    if (apActor == PlayerCharacter::Get())
+        return false;
+    POINTER_SKYRIMSE(TActivate, s_activateEntry, 19796);
+    TiltedPhoques::ThisCall(s_activateEntry.Get(), pDoor, apActor, 0, nullptr, 1, 0);
+    if (auto* pMiddleHigh = *ppMiddleHigh)
+        pMiddleHigh[0x470] = 0;
+    else
+        spdlog::info("Pending door {:X}: actor {:X} lost its middle-high process during the activation (unloaded)",
+            pDoor->formID, apActor ? apActor->formID : 0);
+    return true;
+}
+
 TESObjectREFR* TESObjectREFR::GetByHandle(uint32_t aHandle) noexcept
 {
     TESObjectREFR* pResult = nullptr;
@@ -1219,6 +1250,9 @@ static TiltedPhoques::Initializer s_objectReferencesHooks(
         TP_HOOK(&RealRotateY, HookRotateY);
         TP_HOOK(&RealRotateZ, HookRotateZ);
         TP_HOOK(&RealActivate, HookActivate);
+        POINTER_SKYRIMSE(TRunPendingDoor, s_runPendingDoor, 39408);
+        RealRunPendingDoor = s_runPendingDoor.Get();
+        TP_HOOK(&RealRunPendingDoor, HookRunPendingDoor);
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);
         TP_HOOK(&RealRemoveInventoryItem, HookRemoveInventoryItem);
         TP_HOOK(&RealPlayAnimationAndWait, HookPlayAnimationAndWait);

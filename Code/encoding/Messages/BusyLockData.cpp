@@ -27,7 +27,7 @@ void BusyLockData::DeserializeData(TiltedPhoques::Buffer::Reader& aReader)
     const auto length = CheckedRead::VarInt(aReader);
     if (base > UINT32_MAX || mod > UINT32_MAX || !RequestId ||
         action > static_cast<uint8_t>(BusyLockAction::Unavailable) ||
-        kind > static_cast<uint8_t>(BusyLockKind::Bartering) ||
+        kind > static_cast<uint8_t>(BusyLockKind::Lockpicking) ||
         reason > static_cast<uint8_t>(BusyLockReason::Disconnected) ||
         length > 80 || length > CheckedRead::RemainingBits(aReader) / 8)
         throw std::runtime_error("invalid busy lock packet");

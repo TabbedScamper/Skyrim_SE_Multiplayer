@@ -59,7 +59,8 @@ std::shared_ptr<spdlog::sinks::sink> CreateClientLogSink(const std::filesystem::
     // warnings. Each farm process already has a unique, run-scoped directory.
     if (FarmMode::Enabled())
         return std::make_shared<spdlog::sinks::basic_file_sink_mt>(acLogPath / filename, true);
-    return std::make_shared<spdlog::sinks::rotating_file_sink_mt>(acLogPath / filename, 1048576 * 5, 3);
+    // 64 MB x 6: a two-hour session writes ~5 MB per 8 minutes; 5 MB x 3 lost the first half of a playthrough.
+    return std::make_shared<spdlog::sinks::rotating_file_sink_mt>(acLogPath / filename, 1048576 * 64, 6);
 }
 }
 

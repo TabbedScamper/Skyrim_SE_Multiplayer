@@ -79,6 +79,7 @@ uint32_t MenuBit(const char* aName)
     if (std::strcmp(aName, "Dialogue Menu") == 0) return 1;
     if (std::strcmp(aName, "ContainerMenu") == 0) return 2;
     if (std::strcmp(aName, "BarterMenu") == 0) return 4;
+    if (std::strcmp(aName, "Lockpicking Menu") == 0) return 8;
     return 0;
 }
 
@@ -162,13 +163,18 @@ bool BusyLockService::TryHold(TESObjectREFR* aReference, TESObjectREFR* aActivat
         aActivator != PlayerCharacter::Get() || !aReference || !aReference->baseForm)
         return false;
     auto* actor = Cast<Actor>(aReference);
-    if (!actor && aReference->baseForm->formType != FormType::Container)
+    // A locked door or container opens the lockpicking minigame: one player at a time (two could pick at once).
+    const auto* lock = !actor ? aReference->GetLock() : nullptr;
+    const bool locked = lock && lock->IsLocked();
+    if (!actor && aReference->baseForm->formType != FormType::Container && !locked)
         return false;
     Activation activation;
     activation.Object = aObject ? aObject->formID : 0;
     activation.Count = aCount;
     activation.Unk1 = aUnk1;
     activation.DefaultProcessing = aDefaultProcessing;
+    if (locked)
+        return Begin(aReference, activation, BusyLockKind::Lockpicking);
     const bool searching = !actor || actor->IsDead() || (PlayerCharacter::Get()->actorState.flags1 & (1u << 9));
     return Begin(aReference, activation, searching ? BusyLockKind::Searching : BusyLockKind::Speaking);
 }
@@ -365,6 +371,8 @@ void BusyLockService::OnNotify(const NotifyBusyLock& aMessage) noexcept
         }
         else if (aMessage.Kind == BusyLockKind::Speaking || aMessage.Kind == BusyLockKind::Bartering)
             Notice(fmt::format("{} is speaking with {}", name && *name ? name : "This person", aMessage.Holder));
+        else if (aMessage.Kind == BusyLockKind::Lockpicking)
+            Notice(fmt::format("{} is picking this lock", aMessage.Holder));
         else
             Notice(fmt::format("{} is searching this", aMessage.Holder));
         Reset(BusyLockReason::Cancelled);
@@ -394,6 +402,9 @@ uint32_t BusyLockService::OpenMenus(TESObjectREFR* aReference) const noexcept
         mask |= 2;
     if (ui->GetMenuOpen(BSFixedString("BarterMenu")) && TESObjectREFR::GetByHandle(*barterHandle.Get()) == aReference)
         mask |= 4;
+    // The minigame only opens for the reference this lease activated.
+    if (ui->GetMenuOpen(BSFixedString("Lockpicking Menu")) && aReference->GetHandle().handle.iBits == m_activation.Handle)
+        mask |= 8;
     return mask;
 }
 
@@ -445,13 +456,14 @@ void BusyLockService::OnUpdate(const UpdateEvent&) noexcept
     }
     const auto menus = OpenMenus(reference);
     // An open and close can both occur between two world updates.
-    if ((events & 7) & (events >> 8))
+    if ((events & 15) & (events >> 8))
         m_seenMenu = true;
     if (menus)
     {
         m_seenMenu = true;
         m_closedAt = 0;
-        const auto kind = (menus & 4) ? BusyLockKind::Bartering : (menus & 2) ? BusyLockKind::Searching : BusyLockKind::Speaking;
+        const auto kind = (menus & 8) ? BusyLockKind::Lockpicking : (menus & 4) ? BusyLockKind::Bartering :
+            (menus & 2) ? BusyLockKind::Searching : BusyLockKind::Speaking;
         if (kind != m_request.Kind)
             m_nextHeartbeat = 0;
         m_request.Kind = kind;
@@ -460,7 +472,7 @@ void BusyLockService::OnUpdate(const UpdateEvent&) noexcept
     {
         // A close event is a signal to recheck all target menus, not an immediate
         // release: dialogue and barter can hand over during the same UI queue drain.
-        if (!m_closedAt || (events & 7))
+        if (!m_closedAt || (events & 15))
             m_closedAt = now;
         if (now - m_closedAt >= 250)
         {
