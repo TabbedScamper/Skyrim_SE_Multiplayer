@@ -5308,32 +5308,43 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 return Error(id, "player not found");
             // Each native only if it was found by name (a missing one was a call to address 0).
             std::string missing;
+            // keep_quest: release this player only (a separated test away from the intro scene); stopping the intro
+            // on one PC of a session would reach the others through quest sync.
+            const bool keepQuest = GetJsonString(acLine, "keep_quest") == "true";
             PAPYRUS_FUNCTION(void, Quest, Stop);
             if (!s_pStop)
                 missing += "Quest.Stop ";
-            else if (pIntro)
+            else if (pIntro && !keepQuest)
                 s_pStop(pIntro);
             PAPYRUS_FUNCTION(void, Game, SetInChargen, bool, bool, bool);
             if (!s_pSetInChargen)
                 missing += "Game.SetInChargen ";
             else
                 s_pSetInChargen(nullptr, false, false, false);
-            PAPYRUS_FUNCTION(void, Game, EnablePlayerControls, bool, bool, bool, bool, bool, bool, bool, bool, int32_t);
-            if (!s_pEnablePlayerControls)
-                missing += "Game.EnablePlayerControls ";
-            else
-                s_pEnablePlayerControls(nullptr, true, true, true, true, true, true, true, true, 0);
-            PAPYRUS_FUNCTION(void, Game, SetPlayerAIDriven, bool);
-            if (!s_pSetPlayerAIDriven)
-                missing += "Game.SetPlayerAIDriven ";
-            else
-                s_pSetPlayerAIDriven(nullptr, false);
+            // Game's static natives register without a direct address (papyrus_natives.tsv); call their
+            // implementations (VM, stack id, static tag, arguments): EnablePlayerControls 55455
+            // (0x140A23FC0), SetPlayerAIDriven 55577 (0x140A2AE50).
+            {
+                using TEnableControls = void(void*, uint32_t, void*, bool, bool, bool, bool, bool, bool, bool, bool, int32_t);
+                using TSetAIDriven = void(void*, uint32_t, void*, bool);
+                POINTER_SKYRIMSE(TEnableControls, enableControls, 55455);
+                POINTER_SKYRIMSE(TSetAIDriven, setAIDriven, 55577);
+                auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr;
+                if (!pVM)
+                    missing += "VM ";
+                else
+                {
+                    enableControls.Get()(pVM, 0, nullptr, true, true, true, true, true, true, true, true, 0);
+                    setAIDriven.Get()(pVM, 0, nullptr, false);
+                }
+            }
             PAPYRUS_FUNCTION(void, Actor, SetRestrained, bool);
             if (!s_pSetRestrained)
                 missing += "Actor.SetRestrained ";
             else
                 s_pSetRestrained(pPlayer, false);
-            return Result(id, fmt::format("\"introStopped\":{},\"missing\":\"{}\"", JsonBool(pIntro != nullptr), missing));
+            return Result(id, fmt::format("\"introStopped\":{},\"missing\":\"{}\"", JsonBool(pIntro != nullptr && !keepQuest),
+                missing));
         }
         // Testing ground (docs: C:\Tools\skyrim_re\testground.ps1). Move this PC's player to a
         // persistent reference (a map marker), offset sideways so players do not overlap.
@@ -5435,9 +5446,13 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             worn += "]";
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
-                "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{},\"health\":{:.1f},\"inCombat\":{},\"combatTarget\":\"{:X}\","
+                "\"remote\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
-                CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor)));
+                CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor),
+                pActor->GetActorValue(ActorValueInfo::kHealth), JsonBool(pActor->IsInCombat()),
+                pActor->GetCombatTarget() ? pActor->GetCombatTarget()->formID : 0,
+                JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote())));
         }
         if (command == "ref_bodies")
         {
