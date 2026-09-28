@@ -56,6 +56,15 @@ GetFlags s_getFlags{};
 using UsesTaskQueue = uint8_t (*)();
 UsesTaskQueue s_usesTaskQueue{};
 std::atomic<DWORD> s_mainThread{};
+// Another player's copy whose bound event was rejected right after its appearance rebuild (graph not ready yet):
+// retried every main frame until accepted or the deadline (owner report: the other player's copy had unbound hands
+// after the character creator; the rebuild event was rejected once and never retried). Main thread only.
+struct PendingReplica
+{
+    uint64_t DeadlineMs{};
+    const char* Reason{};
+};
+std::unordered_map<uint32_t, PendingReplica> s_pendingReplicas;
 
 uint8_t ModelFlags(Actor* aActor)
 {
@@ -350,7 +359,11 @@ bool BoundPoseKeeper::AfterRebuild(Actor* aActor, Pose aBefore, const char* aRea
     if (accepted)
         spdlog::info("Bound pose: re-applied after rebuild ({}) actor={:X} local={}", aReason, aActor->formID, aActor == PlayerCharacter::Get());
     else
+    {
         spdlog::warn("Bound pose: rebuild event rejected ({}) actor={:X}", aReason, aActor->formID);
+        if (aActor != PlayerCharacter::Get())
+            s_pendingReplicas[aActor->formID] = {GetTickCount64() + 3000, aReason};
+    }
     return accepted;
 }
 
@@ -377,6 +390,23 @@ void BoundPoseKeeper::OnMainFrame(bool aCreatorOpen, bool aSharedCreation) noexc
         s_sharedCreation = false;
     }
     s_creatorWasOpen = aCreatorOpen;
+    for (auto it = s_pendingReplicas.begin(); it != s_pendingReplicas.end();)
+    {
+        auto* pCopy = Cast<Actor>(TESForm::GetById(it->first));
+        bool done = !pCopy || now >= it->second.DeadlineMs;
+        if (pCopy && !done && pCopy->GetNiNode() && !ModelFlags(pCopy) && pCopy->animationGraphHolder.IsReady())
+        {
+            BSFixedString event("OffsetBoundStandingPlayerInstant");
+            if (pCopy->animationGraphHolder.SendAnimationEvent(&event))
+            {
+                spdlog::info("Bound pose: re-applied to {:X} on retry ({})", it->first, it->second.Reason);
+                done = true;
+            }
+        }
+        if (done && pCopy && now >= it->second.DeadlineMs)
+            spdlog::warn("Bound pose: retry for {:X} timed out ({})", it->first, it->second.Reason);
+        it = done ? s_pendingReplicas.erase(it) : std::next(it);
+    }
     if (s_creatorCloseDeadline)
     {
         if (!player || !player->parentCell || player->parentCell->formID != s_creatorCell ||

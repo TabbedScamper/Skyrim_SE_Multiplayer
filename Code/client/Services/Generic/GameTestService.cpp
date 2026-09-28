@@ -5521,6 +5521,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 ObjectService::SetCartNodeRefresh(enabled != "false");
             return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsCartNodeRefresh()));
         }
+        if (command == "exact_body_drive")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                ObjectService::SetExactBodyDrive(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsExactBodyDrive()));
+        }
         if (command == "cart_curve")
         {
             if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())

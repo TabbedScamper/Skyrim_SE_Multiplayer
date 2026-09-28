@@ -1726,18 +1726,11 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             m_owned.erase(found);
             return true;
         };
-        if (!physics && endStream(0) && endStream(1))
-        {
-            m_captureEntities.erase(entity);
-            continue;
-        }
-        m_captureQueue.push_back(entity);
-        if (!loaded) continue;
-        GraphRef graphRef;
-        std::optional<BSScopedLock<BSRecursiveLock>> graphLock;
-        if (actor->animationGraphHolder.GetBSAnimationGraph(&graphRef.pManager) && graphRef.pManager)
-            graphLock.emplace(graphRef.pManager->lock);
+        // The limb event goes out as soon as the head comes off, before the physics gate below: a beheading happens in
+        // a killmove, still animated, so the victim's skeleton is not physics-owned yet and the event used to wait
+        // for the ragdoll (4.8 s in run 20260928-111810; the follower's head appeared that late).
         uint64_t eventTick{};
+        if (actor)
         {
             std::lock_guard lock(s_dismemberLock);
             const auto event = s_localDismembers.find(actor->formID);
@@ -1754,6 +1747,23 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
                 spdlog::info("Dismember {:X} (server {:X}): sent reliable limb 1 event at {}", actor->formID, serverId, eventTick);
             }
         }
+        // A severed head is loose physics while the body is still in its killmove animation: keep streaming the head
+        // (limb 1) then. Gating it on the body's ragdoll left the follower's head flying on local physics for 4.7 s
+        // before snapping to the owner's (run 20260928-120033).
+        const bool looseHead = loaded && eventTick != 0;
+        if (!physics && !looseHead && endStream(0) && endStream(1))
+        {
+            m_captureEntities.erase(entity);
+            continue;
+        }
+        if (!physics && looseHead)
+            endStream(0);
+        m_captureQueue.push_back(entity);
+        if (!loaded) continue;
+        GraphRef graphRef;
+        std::optional<BSScopedLock<BSRecursiveLock>> graphLock;
+        if (actor->animationGraphHolder.GetBSAnimationGraph(&graphRef.pManager) && graphRef.pManager)
+            graphLock.emplace(graphRef.pManager->lock);
         for (uint32_t limb = 0; limb <= 1; ++limb)
         {
             if ((!limb && !PhysicsOwnsSkeleton(actor)) || (limb && !eventTick))

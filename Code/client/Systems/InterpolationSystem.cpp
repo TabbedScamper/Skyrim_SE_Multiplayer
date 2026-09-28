@@ -2,6 +2,7 @@
 
 #include <Systems/InterpolationSystem.h>
 #include <Services/CorpseRagdollService.h>
+#include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Components.h>
 
 #include <AI/AIProcess.h>
@@ -139,8 +140,9 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                     {
                         away = drift > 80.f;
                         spdlog::info("Seated actor {:X}: body {} its reference ({:.0f} units; sit state {}, body at {:.0f}, {:.0f}, {:.0f}, "
-                            "reference at {:.0f}, {:.0f}, {:.0f})", apActor->formID, away ? "drawn away from" : "back at", drift,
-                            sitSleepState, w.x, w.y, w.z, apActor->position.x, apActor->position.y, apActor->position.z);
+                            "reference at {:.0f}, {:.0f}, {:.0f}; owner pose: {})", apActor->formID, away ? "drawn away from" : "back at", drift,
+                            sitSleepState, w.x, w.y, w.z, apActor->position.x, apActor->position.y, apActor->position.z,
+                            PoseCopyAuthority::DescribeOverride(apActor->formID));
                     }
                     // A remote player still seated here after the intro while its owner walks away: the seat
                     // state only travels with actions, and leaving the intro cart sends none, so the copy

@@ -694,6 +694,20 @@ bool NeedsLocalGraph(const uint32_t aFormId) noexcept
     return tick < newest.Tick || tick - newest.Tick > kLivingHoldMs;
 }
 
+std::string DescribeOverride(const uint32_t aFormId) noexcept
+{
+    const auto tick = static_cast<uint64_t>(GetPresentationTimeMs());
+    std::lock_guard guard(s_lock);
+    const auto it = s_poses.find(aFormId);
+    if (it == s_poses.end() || !it->second.RingCount)
+        return "no owner samples";
+    const auto& pose = it->second;
+    const auto& newest = pose.Ring[(pose.RingNext + kRingSize - 1) % kRingSize];
+    return fmt::format("overriding {} samples {} newest {} ms {} presentation, bones {}", pose.Overriding, pose.RingCount,
+        tick >= newest.Tick ? tick - newest.Tick : newest.Tick - tick, tick >= newest.Tick ? "behind" : "ahead of",
+        newest.Count);
+}
+
 bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept
 {
     std::lock_guard guard(s_lock);

@@ -372,6 +372,10 @@ std::atomic<bool> s_visualLagFrameEnabled{true};
 // pose: its velocity plus a correction. Keyframed playback moved the follower's cart like a puppet,
 // without the host cart's jolts, and its riders and camera with it ("floaty").
 std::atomic<bool> s_cartPhysicsEnabled{true};
+// Loose host-driven bodies (not cart assemblies): drive each step to land exactly on the host's pose at the end of that
+// step, as the cart replay does, instead of the local simulation plus a time-constant correction. The follower saw
+// objects "shaking, then lining up" with the correction (owner, 2026-09-28). Switch exact_body_drive for A/B.
+std::atomic<bool> s_exactBodyDrive{true};
 
 // Remote actors riding a host-driven reference: on the host the engine seats a cart's driver and
 // passengers at the cart's own position; here their position came from the actor stream, placed
@@ -800,6 +804,8 @@ struct MotionTraceRecord
     uint32_t PlayerId; // party player id when traced as a player ("players"), else 0
     float RefX, RefY, RefZ;    // reference (actor) position
     float RootX, RootY, RootZ; // 3D root node world position (differs from the reference in furniture/paired poses)
+    float SkelX, SkelY, SkelZ; // NPC Root (skeleton root) world position
+    uint32_t Sit;              // actor sitSleepState (3 = seated in furniture)
 };
 std::atomic<bool> s_motionTraceOn{false};
 std::vector<uint32_t> s_motionTraceIds;
@@ -844,6 +850,16 @@ void RecordMotionTrace(World& aWorld) noexcept
         if (!pNode)
             continue;
         const auto rootWorld = pNode->world.translate;
+        // Skeleton root (NPC Root) and sit state: in furniture the engine can move the skeleton away from the 3D root.
+        static BSFixedString s_skeletonRoot("NPC Root [Root]");
+        NiPoint3 skeletonWorld = rootWorld;
+        uint32_t sitState = 0;
+        if (auto* pActor = Cast<Actor>(pReference))
+        {
+            sitState = (pActor->actorState.flags1 >> 14) & 0xF;
+            if (auto* pSkeleton = pNode->GetByName(s_skeletonRoot))
+                skeletonWorld = pSkeleton->world.translate;
+        }
         if (!s_boneName.empty() && Cast<Actor>(pReference))
             if (auto* pBone = pNode->GetByName(s_bone))
                 pNode = pBone;
@@ -852,7 +868,8 @@ void RecordMotionTrace(World& aWorld) noexcept
         const float heading = std::atan2(w.rotate.entry[0][1], w.rotate.entry[1][1]) * 57.2957795f;
         s_motionTrace.push_back({steady, shared, id, w.translate.x, w.translate.y, w.translate.z, heading,
             pReference->rotation.z * 57.2957795f, playerId, pReference->position.x, pReference->position.y,
-            pReference->position.z, rootWorld.x, rootWorld.y, rootWorld.z});
+            pReference->position.z, rootWorld.x, rootWorld.y, rootWorld.z, skeletonWorld.x, skeletonWorld.y, skeletonWorld.z,
+            sitState});
     }
 }
 
@@ -1890,6 +1907,36 @@ int RunNativeStep(void* apWorld, float aDeltaTime, NativeStep&& aNativeStep, boo
                         velocityAfterWrite = glm::length(glm::vec3{pBody->linearVelocity[0],
                             pBody->linearVelocity[1], pBody->linearVelocity[2]});
                     }
+                    continue;
+                }
+                // Only while the host's body moves: at rest, driving a constrained part (a parked cart's wheel on its
+                // axle) exactly each step fought its joint and showed as the wheel spinning (owner, 2026-09-28).
+                const bool hostMoving = glm::length(glm::vec3{target.Velocity[0], target.Velocity[1], target.Velocity[2]}) *
+                    kHavokToGameUnits > 2.f || glm::length(glm::vec3{target.Angular[0], target.Angular[1], target.Angular[2]}) > 0.05f;
+                if (s_exactBodyDrive.load(std::memory_order_relaxed) && hostMoving)
+                {
+                    if (gap > 150.f)
+                    {
+                        alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
+                        alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
+                        s_placeBody.Get()(target.Body, position, quaternion);
+                        ++probe.Teleports;
+                    }
+                    const glm::vec3 feed{target.Velocity[0], target.Velocity[1], target.Velocity[2]};
+                    const auto goal = wanted + feed * aDeltaTime;
+                    alignas(16) float position[4]{goal.x, goal.y, goal.z, 0.f};
+                    glm::quat want{target.Rotation[3], target.Rotation[0], target.Rotation[1], target.Rotation[2]};
+                    const glm::vec3 angular{target.Angular[0], target.Angular[1], target.Angular[2]};
+                    const float speed = glm::length(angular);
+                    if (speed > 0.0001f)
+                        want = glm::normalize(glm::angleAxis(speed * aDeltaTime, angular / speed) * want);
+                    alignas(16) float rotation[4]{want.x, want.y, want.z, want.w};
+                    using ActivateFn = void(void*);
+                    POINTER_SKYRIMSE(ActivateFn, activateExact, 60849);
+                    activateExact.Get()(target.Body);
+                    using Drive = void(const float*, const float*, float, void*);
+                    POINTER_SKYRIMSE(Drive, driveExact, 62478);
+                    driveExact.Get()(position, rotation, 1.f / aDeltaTime, target.Body);
                     continue;
                 }
                 if (glm::length(error) > kFollowTeleport)
@@ -4217,6 +4264,17 @@ void DrainActorSceneUpdates() noexcept
     s_sceneUpdateDraining.clear();
 }
 
+void ObjectService::SetExactBodyDrive(bool aEnabled) noexcept
+{
+    s_exactBodyDrive.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Exact body drive: {}", aEnabled);
+}
+
+bool ObjectService::IsExactBodyDrive() noexcept
+{
+    return s_exactBodyDrive.load(std::memory_order_relaxed);
+}
+
 void ObjectService::SetCartCurve(bool aEnabled) noexcept
 {
     s_cartCurve.store(aEnabled, std::memory_order_relaxed);
@@ -4237,9 +4295,9 @@ std::string ObjectService::MotionTrace(const std::string& aIds, const std::strin
         s_motionTraceOn.store(false, std::memory_order_relaxed);
         std::ofstream out(aDump, std::ios::trunc);
         for (const auto& r : s_motionTrace)
-            out << fmt::format("{{\"t\":{:.3f},\"s\":{:.3f},\"id\":{},\"p\":[{:.2f},{:.2f},{:.2f}],\"h\":{:.2f},\"rz\":{:.2f},\"pl\":{},\"ref\":[{:.1f},{:.1f},{:.1f}],\"root\":[{:.1f},{:.1f},{:.1f}]}}\n",
+            out << fmt::format("{{\"t\":{:.3f},\"s\":{:.3f},\"id\":{},\"p\":[{:.2f},{:.2f},{:.2f}],\"h\":{:.2f},\"rz\":{:.2f},\"pl\":{},\"ref\":[{:.1f},{:.1f},{:.1f}],\"root\":[{:.1f},{:.1f},{:.1f}],\"skel\":[{:.1f},{:.1f},{:.1f}],\"sit\":{}}}\n",
                 r.SteadyMs, r.SharedMs, r.FormId, r.X, r.Y, r.Z, r.Heading, r.ReferenceZ, r.PlayerId, r.RefX, r.RefY, r.RefZ,
-                r.RootX, r.RootY, r.RootZ);
+                r.RootX, r.RootY, r.RootZ, r.SkelX, r.SkelY, r.SkelZ, r.Sit);
         const auto count = s_motionTrace.size();
         s_motionTrace.clear();
         s_motionTrace.shrink_to_fit();

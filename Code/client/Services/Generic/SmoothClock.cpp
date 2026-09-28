@@ -1,5 +1,7 @@
 #include <Services/SmoothClock.h>
 
+#include <spdlog/spdlog.h>
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -34,6 +36,15 @@ void Observe(const uint64_t aSharedTick) noexcept
     const int64_t current = s_offsetUs.load(std::memory_order_relaxed);
     if (current == INT64_MIN || std::llabs(raw - current) > kSnapUs)
     {
+        // A snap moves every remote actor's presentation at once (owner report: intermittent stutters where all NPCs
+        // "regrab" the host). Log each one with its size so a stutter can be matched to a clock jump.
+        if (current != INT64_MIN)
+        {
+            static std::atomic<uint32_t> s_snaps{};
+            if (s_snaps.fetch_add(1, std::memory_order_relaxed) < 200)
+                spdlog::warn("Smooth clock snapped by {:.1f} ms (shared tick {})", static_cast<double>(raw - current) / 1000.0,
+                    aSharedTick);
+        }
         s_offsetUs.store(raw, std::memory_order_relaxed);
         return;
     }

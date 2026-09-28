@@ -45,6 +45,8 @@ void ClearRagdollAuthority() noexcept;
 // Whether the presentation timeline needs the living actor's local graph. Physics
 // transitions are excluded by the caller; pending streamed ragdolls never fall back.
 [[nodiscard]] bool NeedsLocalGraph(uint32_t aFormId) noexcept;
+// Diagnostic: whether the owner's pose currently overrides this actor's skeleton, and the newest sample's age.
+[[nodiscard]] std::string DescribeOverride(uint32_t aFormId) noexcept;
 // Owner side: the last pose array the engine copied onto this actor's bones, if recent.
 // Sets arPose.SourceTick to the shared-clock tick of the frame the pose was copied in.
 bool GetCapturedPose(uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept;

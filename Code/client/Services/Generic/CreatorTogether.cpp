@@ -642,6 +642,20 @@ void OnMainFrame() noexcept
                     SetHidden(pRemote, false);
                 if (viewed && pRemote && pPlayer)
                 {
+                    // The previewed copy advances its own graph here and never received the bound-hands idle the
+                    // local player keeps (owner report: her character in the creator was not bound like the host's).
+                    // Send it the same instant bound event BoundPoseKeeper uses, once per copy 3D while viewed.
+                    static std::unordered_map<uint32_t, const void*> s_boundCopies;
+                    auto* pCopyRoot = pRemote->GetNiNode();
+                    if (pCopyRoot && s_boundCopies[pRemote->formID] != pCopyRoot)
+                    {
+                        BSFixedString boundEvent("OffsetBoundStandingPlayerInstant");
+                        const bool accepted = pRemote->animationGraphHolder.SendAnimationEvent(&boundEvent);
+                        if (accepted)
+                            s_boundCopies[pRemote->formID] = pCopyRoot;
+                        spdlog::info("Character creator together: bound pose sent to previewed copy {:X}: {}", pRemote->formID,
+                            accepted ? "accepted" : "rejected");
+                    }
                     pRemote->position = pPlayer->position;
                     pRemote->SetRotation(pRemote->rotation.x, pRemote->rotation.y, pPlayer->rotation.z);
                     pRemote->Update3DPosition(true);

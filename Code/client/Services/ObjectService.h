@@ -170,6 +170,9 @@ public:
     // false = the dynamic steer. Toggle for in-run A/B via the cart_replay bridge command.
     static void SetCartReplayEnabled(bool aEnabled) noexcept;
     // Follower cart replay: Hermite curve through owner samples on the unrounded clock (cart_curve switch).
+    // Loose host-driven bodies land exactly on the host pose each step (exact_body_drive switch).
+    static void SetExactBodyDrive(bool aEnabled) noexcept;
+    static bool IsExactBodyDrive() noexcept;
     static void SetCartCurve(bool aEnabled) noexcept;
     static bool IsCartCurve() noexcept;
     // Per-frame rendered position/heading trace of chosen references (motion_trace). Ids start a trace; dump writes it.

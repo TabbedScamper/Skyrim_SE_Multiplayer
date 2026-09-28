@@ -583,6 +583,24 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
             const auto& cell = candidates.get<CellIdComponent>(candidate);
             const auto& movement = candidates.get<MovementComponent>(candidate);
             const auto& owner = candidates.get<OwnerComponent>(candidate);
+            // Diagnostic (duplicate soldiers after a Continue, 2026-09-28: the follower's saved temporaries registered
+            // 42 ms before the leader's identical ones and were not matched): name the failing condition for every
+            // candidate of the same base.
+            if (character.BaseId.Id == message.FormId)
+            {
+                static std::atomic<uint32_t> sRejectLogs{0};
+                const char* reason = !owner.GetOwner() ? "no owner" : owner.GetOwner() == acMessage.pPlayer ? "own entity" :
+                    owner.GetOwner()->GetParty().JoinedPartyId != requesterParty ? "other party" :
+                    std::find(provenance.BoundPlayerIds.begin(), provenance.BoundPlayerIds.end(), acMessage.pPlayer->GetId()) !=
+                        provenance.BoundPlayerIds.end() ? "already bound" :
+                    now < provenance.CreatedTick || now - provenance.CreatedTick > 10000 ? "age" :
+                    character.LeveledNpcPickId.Id != message.LeveledNpcPickId ? "leveled pick" :
+                    cell.Cell != message.CellId || cell.WorldSpaceId != message.WorldSpaceId ? "cell" : "candidate";
+                if (sRejectLogs.fetch_add(1, std::memory_order_relaxed) < 256)
+                    spdlog::info("Temporary match: request from player {:X} ref {:X} vs server {:X}: {} (age {} ms)",
+                        acMessage.pPlayer->GetId(), refId.BaseId, World::ToInteger(candidate), reason,
+                        now >= provenance.CreatedTick ? now - provenance.CreatedTick : 0);
+            }
             if (!owner.GetOwner() || owner.GetOwner() == acMessage.pPlayer ||
                 owner.GetOwner()->GetParty().JoinedPartyId != requesterParty ||
                 std::find(provenance.BoundPlayerIds.begin(), provenance.BoundPlayerIds.end(),
