@@ -3,6 +3,7 @@
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Games/ActorExtension.h>
 #include <Services/ObjectService.h>
+#include <Services/CharacterService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/Generic/SharedDropService.h>
 
@@ -4174,6 +4175,7 @@ void ObjectService::OnMainFrame() noexcept
     s_assemblyNodesDraining.clear();
     pService->m_world.GetSharedDropService().OnMainFrame();
     pService->CaptureHazards();
+    CharacterService::ApplyAnimObjectsOnMainFrame();
     RecordMotionTrace(pService->m_world);
     {
         // Seated-pose probe on the main thread (scene-graph reads never on the update job; a crash in the native

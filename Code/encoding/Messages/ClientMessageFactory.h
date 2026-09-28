@@ -41,6 +41,7 @@
 #include <Messages/ProjectileLaunchRequest.h>
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/DrawWeaponRequest.h>
+#include <Messages/AnimObjectRequest.h>
 #include <Messages/MountRequest.h>
 #include <Messages/NewPackageRequest.h>
 #include <Messages/RequestRespawn.h>
@@ -100,7 +101,7 @@ struct ClientMessageFactory
         auto s_visitor = CreateMessageVisitor<RequestHarness, RequestNpcWorn, RequestNpcLoot, RequestWorldState, RequestWorldStateCell, RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
             RequestScriptedActorState, AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
-            RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,
+            RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, AnimObjectRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,
             RequestEquipmentChanges, SendChatMessageRequest, TeleportCommandRequest, PlayerRespawnRequest, DialogueRequest, SubtitleRequest, PlayerDialogueRequest, PlayerLevelRequest, TeleportRequest, RequestPlayerHealthUpdate, RequestWeatherChange, RequestCurrentWeather, RequestSetWaypoint,
             RequestRemoveWaypoint, RemoveSpellRequest, SetTimeCommandRequest, PartyReadyRequest, PartyStartRequest, PartySessionSettingsRequest, PartyGameplaySettingsRequest, PhysicsReferencesMoveRequest, CameraStateRequest, SceneTimelineRequest, CheckpointSaveRequest, CorpseRagdollRequest, PlayerAppearanceRequest, LeaderControlRequest>;
 

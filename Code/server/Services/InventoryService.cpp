@@ -11,6 +11,8 @@
 #include <Messages/NotifyEquipmentChanges.h>
 #include <Messages/DrawWeaponRequest.h>
 #include <Messages/NotifyDrawWeapon.h>
+#include <Messages/AnimObjectRequest.h>
+#include <Messages/NotifyAnimObject.h>
 #include <Messages/RequestNpcWorn.h>
 #include <Messages/NotifyNpcWorn.h>
 #include <Messages/RequestNpcLoot.h>
@@ -82,6 +84,7 @@ InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher)
     m_inventoryChangeConnection = aDispatcher.sink<PacketEvent<RequestInventoryChanges>>().connect<&InventoryService::OnInventoryChanges>(this);
     m_equipmentChangeConnection = aDispatcher.sink<PacketEvent<RequestEquipmentChanges>>().connect<&InventoryService::OnEquipmentChanges>(this);
     m_drawWeaponConnection = aDispatcher.sink<PacketEvent<DrawWeaponRequest>>().connect<&InventoryService::OnWeaponDrawnRequest>(this);
+    m_animObjectConnection = aDispatcher.sink<PacketEvent<AnimObjectRequest>>().connect<&InventoryService::OnAnimObjectRequest>(this);
 }
 
 InventoryService::~InventoryService() = default;
@@ -208,6 +211,22 @@ void InventoryService::OnEquipmentChanges(const PacketEvent<RequestEquipmentChan
     const entt::entity cOrigin = static_cast<entt::entity>(message.ServerId);
     if (!GameServer::Get()->SendToPlayersInRange(notify, cOrigin, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
+}
+
+void InventoryService::OnAnimObjectRequest(const PacketEvent<AnimObjectRequest>& acMessage) noexcept
+{
+    const auto& message = acMessage.Packet;
+    if (!message.AnimObject || message.Kind >= AnimObjectRequest::kKindCount)
+        return;
+    auto characterView = m_world.view<CharacterComponent, OwnerComponent>();
+    const auto it = characterView.find(static_cast<entt::entity>(message.Id));
+    if (it == std::end(characterView) || characterView.get<OwnerComponent>(*it).GetOwner() != acMessage.pPlayer)
+        return;
+    NotifyAnimObject notify{};
+    notify.Id = message.Id;
+    notify.Kind = message.Kind;
+    notify.AnimObject = message.AnimObject;
+    GameServer::Get()->SendToPlayersInRange(notify, *it, acMessage.pPlayer);
 }
 
 void InventoryService::OnWeaponDrawnRequest(const PacketEvent<DrawWeaponRequest>& acMessage) noexcept

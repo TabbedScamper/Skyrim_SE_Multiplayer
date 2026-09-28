@@ -21,6 +21,7 @@ struct NotifyInventoryChanges;
 struct NotifyFactionsChanges;
 struct NotifyRemoveCharacter;
 struct NotifyDrawWeapon;
+struct NotifyAnimObject;
 struct NotifyOwnershipTransfer;
 struct SpellCastEvent;
 struct NotifySpellCast;
@@ -129,6 +130,19 @@ struct CharacterService
     void OnOwnershipTransfer(const NotifyOwnershipTransfer& acMessage) noexcept;
     void OnRemoveCharacter(const NotifyRemoveCharacter& acMessage) noexcept;
     void OnNotifyDrawWeapon(const NotifyDrawWeapon& acMessage) noexcept;
+    void OnNotifyAnimObject(const NotifyAnimObject& acMessage) noexcept;
+    void RunAnimObjectUpdates() noexcept;
+
+public:
+    // Animation-graph prop events (AnimationObjects.cpp hooks, any thread): owned actors' events are relayed.
+    static void QueueAnimObjectEvent(uint32_t aFormId, uint32_t aAnimObjectId, bool aDraw) noexcept;
+    // Main thread (ObjectService::OnMainFrame): received props onto remote copies (Draw writes the scene node).
+    static void ApplyAnimObjectsOnMainFrame() noexcept;
+
+private:
+    uint64_t m_nextAnimObjectSnapshot{};
+    uint64_t m_nextAnimObjectResend{};
+    std::set<std::tuple<uint32_t, uint32_t, bool>> m_sentAnimObjects{};
     void OnMountEvent(const MountEvent& acEvent) const noexcept;
     void OnNotifyMount(const NotifyMount& acMessage) noexcept;
     void OnInitPackageEvent(const InitPackageEvent& acEvent) const noexcept;
@@ -284,6 +298,7 @@ private:
     entt::scoped_connection m_referenceAddedConnection;
     entt::scoped_connection m_referenceRemovedConnection;
     entt::scoped_connection m_drawWeaponConnection;
+    entt::scoped_connection m_animObjectConnection;
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_actionConnection;
     entt::scoped_connection m_factionsConnection;

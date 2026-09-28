@@ -44,6 +44,8 @@
 
 #include <Structs/ActionEvent.h>
 #include <Messages/NotifyDrawWeapon.h>
+#include <Messages/NotifyAnimObject.h>
+#include <Messages/AnimObjectRequest.h>
 #include <Messages/AssignCharacterRequest.h>
 #include <Messages/AssignCharacterResponse.h>
 #include <Messages/ServerReferencesMoveRequest.h>
@@ -150,6 +152,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
     m_scriptedActorStateConnection = m_dispatcher.sink<NotifyScriptedActorState>().connect<&CharacterService::OnScriptedActorState>(this);
     m_referenceRemovedConnection = m_dispatcher.sink<ActorRemovedEvent>().connect<&CharacterService::OnActorRemoved>(this);
     m_drawWeaponConnection = m_dispatcher.sink<NotifyDrawWeapon>().connect<&CharacterService::OnNotifyDrawWeapon>(this);
+    m_animObjectConnection = m_dispatcher.sink<NotifyAnimObject>().connect<&CharacterService::OnNotifyAnimObject>(this);
 
     m_updateConnection = m_dispatcher.sink<UpdateEvent>().connect<&CharacterService::OnUpdate>(this);
     m_actionConnection = m_dispatcher.sink<ActionEvent>().connect<&CharacterService::OnActionEvent>(this);
@@ -824,6 +827,7 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    RunAnimObjectUpdates();
     RunScriptedActorUpdates();
     EngineFixes::OnFrame();
     static uint64_t s_nextScriptedPackageMs = 0;
@@ -3829,6 +3833,159 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
 
     for (uint32_t id : toRemove)
         m_weaponDrawUpdates.erase(id);
+}
+
+namespace
+{
+struct AnimObjectEvent
+{
+    uint32_t FormId{};
+    uint32_t AnimObjectId{};
+    uint8_t Kind{};
+};
+struct AnimObjectApply
+{
+    uint32_t FormId{};
+    uint32_t AnimObjectId{};
+    uint8_t Kind{};
+    uint64_t DeadlineMs{};
+};
+std::mutex s_animObjectEventsLock;
+Vector<AnimObjectEvent> s_animObjectEvents;
+std::mutex s_animObjectAppliesLock;
+Vector<AnimObjectApply> s_animObjectApplies;
+std::atomic<uint32_t> s_animObjectLogs{};
+
+const char* AnimObjectKindName(uint8_t aKind) noexcept
+{
+    return aKind == AnimObjectRequest::kDetach ? "detach" : aKind == AnimObjectRequest::kDraw ? "draw" : "load";
+}
+} // namespace
+
+void ApplyAnimObject(TESObjectREFR* apReference, TESForm* apAnimObject, uint8_t aKind) noexcept;
+void CollectAnimObjects(const std::function<bool(uint32_t)>& acWanted,
+    std::vector<std::tuple<uint32_t, uint32_t, bool>>& arOut) noexcept;
+
+void CharacterService::QueueAnimObjectEvent(uint32_t aFormId, uint32_t aAnimObjectId, bool aDraw) noexcept
+{
+    std::lock_guard lock(s_animObjectEventsLock);
+    if (s_animObjectEvents.size() < 256)
+        s_animObjectEvents.push_back({aFormId, aAnimObjectId,
+            static_cast<uint8_t>(aDraw ? AnimObjectRequest::kDraw : AnimObjectRequest::kLoad)});
+}
+
+// Update thread: send owned actors' props. Live graph events go at once; a snapshot of the AnimationObjects manager
+// every second sends new or changed props (a save restores them without events) and detaches for props that are
+// gone, and every 10 s resends all of them for copies that appeared later.
+void CharacterService::RunAnimObjectUpdates() noexcept
+{
+    Vector<AnimObjectEvent> events;
+    {
+        std::lock_guard lock(s_animObjectEventsLock);
+        events.swap(s_animObjectEvents);
+    }
+    const auto nowMs = GetTickCount64();
+    const bool connected = m_transport.IsConnected();
+    const size_t liveEvents = events.size();
+    if (connected && nowMs >= m_nextAnimObjectSnapshot)
+    {
+        m_nextAnimObjectSnapshot = nowMs + 1000;
+        const bool resend = nowMs >= m_nextAnimObjectResend;
+        if (resend)
+            m_nextAnimObjectResend = nowMs + 10000;
+        std::vector<std::tuple<uint32_t, uint32_t, bool>> owned;
+        CollectAnimObjects([](uint32_t aFormId) { return Utils::GetLocalOwnershipTokenOnRunner(aFormId).has_value(); },
+            owned);
+        std::set<std::tuple<uint32_t, uint32_t, bool>> current(owned.begin(), owned.end());
+        for (const auto& [formId, animObjectId, drawn] : current)
+        {
+            if (!resend && m_sentAnimObjects.contains({formId, animObjectId, drawn}))
+                continue;
+            events.push_back({formId, animObjectId,
+                static_cast<uint8_t>(drawn ? AnimObjectRequest::kDraw : AnimObjectRequest::kLoad)});
+        }
+        for (const auto& [formId, animObjectId, drawn] : m_sentAnimObjects)
+            if (!current.contains({formId, animObjectId, true}) && !current.contains({formId, animObjectId, false}))
+                events.push_back({formId, animObjectId, static_cast<uint8_t>(AnimObjectRequest::kDetach)});
+        m_sentAnimObjects.swap(current);
+    }
+    else if (!connected)
+        m_sentAnimObjects.clear();
+    for (size_t i = 0; i < events.size(); ++i)
+    {
+        const auto& event = events[i];
+        const auto token = Utils::GetLocalOwnershipTokenOnRunner(event.FormId);
+        AnimObjectRequest request{};
+        if (!token || !connected || !m_world.GetModSystem().GetServerModId(event.AnimObjectId, request.AnimObject))
+            continue;
+        request.Id = token->ServerId;
+        request.Kind = event.Kind;
+        m_transport.Send(request);
+        if (s_animObjectLogs.fetch_add(1, std::memory_order_relaxed) < 200)
+            spdlog::info("Anim object {} {:X} on owned {:X} (server {:X}) sent ({})", AnimObjectKindName(event.Kind),
+                event.AnimObjectId, event.FormId, request.Id, i < liveEvents ? "graph event" : "snapshot");
+    }
+}
+
+void CharacterService::ApplyAnimObjectsOnMainFrame() noexcept
+{
+    Vector<AnimObjectApply> pending;
+    {
+        std::lock_guard lock(s_animObjectAppliesLock);
+        if (s_animObjectApplies.empty())
+            return;
+        pending.swap(s_animObjectApplies);
+    }
+    const auto nowMs = GetTickCount64();
+    Vector<AnimObjectApply> retry;
+    for (const auto& apply : pending)
+    {
+        auto* pActor = Cast<Actor>(TESForm::GetById(apply.FormId));
+        auto* pAnimObject = TESForm::GetById(apply.AnimObjectId);
+        if (pActor && pAnimObject && pActor->GetNiNode() && !pActor->IsDeleted())
+        {
+            ApplyAnimObject(pActor, pAnimObject, apply.Kind);
+            if (s_animObjectLogs.fetch_add(1, std::memory_order_relaxed) < 200)
+                spdlog::info("Anim object {} {:X} applied on remote {:X}", AnimObjectKindName(apply.Kind),
+                    apply.AnimObjectId, apply.FormId);
+        }
+        else if (nowMs < apply.DeadlineMs && apply.Kind != AnimObjectRequest::kDetach)
+            retry.push_back(apply); // the copy's 3D is not there yet
+    }
+    if (!retry.empty())
+    {
+        std::lock_guard lock(s_animObjectAppliesLock);
+        for (auto& apply : retry)
+            if (s_animObjectApplies.size() < 256)
+                s_animObjectApplies.push_back(apply);
+    }
+}
+
+void CharacterService::OnNotifyAnimObject(const NotifyAnimObject& acMessage) noexcept
+{
+    const auto animObjectId = acMessage.Kind < NotifyAnimObject::kKindCount ?
+        m_world.GetModSystem().GetGameId(acMessage.AnimObject) : 0;
+    if (!animObjectId)
+        return;
+    auto view = m_world.view<RemoteComponent, FormIdComponent>();
+    for (auto entity : view)
+    {
+        if (view.get<RemoteComponent>(entity).Id != acMessage.Id)
+            continue;
+        // Coalesced per copy and prop: the latest kind wins (Load and Draw both load first, so order holds).
+        const auto formId = view.get<FormIdComponent>(entity).Id;
+        std::lock_guard lock(s_animObjectAppliesLock);
+        for (auto& apply : s_animObjectApplies)
+            if (apply.FormId == formId && apply.AnimObjectId == animObjectId)
+            {
+                apply.Kind = acMessage.Kind;
+                apply.DeadlineMs = GetTickCount64() + 5000;
+                return;
+            }
+        if (s_animObjectApplies.size() < 256)
+            s_animObjectApplies.push_back({formId, animObjectId, acMessage.Kind, GetTickCount64() + 5000});
+        return;
+    }
 }
 
 void CharacterService::OnNotifyDrawWeapon(const NotifyDrawWeapon& acMessage) noexcept

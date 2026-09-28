@@ -9,6 +9,7 @@ struct RequestObjectInventoryChanges;
 struct RequestInventoryChanges;
 struct RequestEquipmentChanges;
 struct DrawWeaponRequest;
+struct AnimObjectRequest;
 struct PlayerLeaveCellEvent;
 struct NpcInventoryRelay;
 
@@ -33,6 +34,7 @@ public:
      * @brief Relays weapon draw changes to other clients and updates server side weapon draw state.
      */
     void OnWeaponDrawnRequest(const PacketEvent<DrawWeaponRequest>& acMessage) noexcept;
+    void OnAnimObjectRequest(const PacketEvent<AnimObjectRequest>& acMessage) noexcept;
 
 private:
     World& m_world;
@@ -41,4 +43,5 @@ private:
     entt::scoped_connection m_inventoryChangeConnection;
     entt::scoped_connection m_equipmentChangeConnection;
     entt::scoped_connection m_drawWeaponConnection;
+    entt::scoped_connection m_animObjectConnection;
 };

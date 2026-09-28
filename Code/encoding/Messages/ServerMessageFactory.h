@@ -40,6 +40,7 @@
 #include <Messages/NotifyProjectileLaunch.h>
 #include <Messages/NotifyScriptAnimation.h>
 #include <Messages/NotifyDrawWeapon.h>
+#include <Messages/NotifyAnimObject.h>
 #include <Messages/NotifyMount.h>
 #include <Messages/NotifyNewPackage.h>
 #include <Messages/NotifyRespawn.h>
@@ -98,7 +99,7 @@ struct ServerMessageFactory
         auto s_visitor = CreateMessageVisitor<NotifyHarness, NotifyNpcWorn, NotifyNpcLoot, NotifyWorldState, NotifyPlayerControlState, NotifySharedDrop, NotifyDialogueListen, NotifyBusyLock, NotifyPlayerCombatState, NotifyQuestItems, NotifyScriptedCamera, NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
             NotifyScriptedActorState, AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate, NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite,
             NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
-            NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,
+            NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyAnimObject, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,
             NotifySubtitle, NotifyPlayerDialogue, NotifyActorTeleport, NotifyPlayerLeft, NotifyPlayerJoined, NotifyDialogue, NotifySubtitle, NotifyPlayerDialogue, NotifyPlayerLevel, NotifyPlayerCellChanged, NotifyTeleport, NotifyPlayerHealthUpdate, NotifySettingsChange,
             NotifyWeatherChange, NotifySetWaypoint, NotifyRemoveWaypoint, NotifySetTimeResult, NotifyRemoveSpell, NotifyPhysicsReferencesMove, NotifyCameraState, NotifySceneTimeline, NotifyCheckpointSave, NotifyCorpseRagdoll, NotifyPlayerAppearance, NotifyLeaderControl>;
 

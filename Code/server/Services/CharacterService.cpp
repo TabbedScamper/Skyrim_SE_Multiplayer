@@ -74,21 +74,32 @@ struct LeaderParkedActor
 };
 
 // World-owned state: entity destruction/session teardown cannot leave stale locks.
-// Settled streams remain active; either limb pins the same actor's authority.
+// Settled streams remain active; a limb still in motion pins the same actor's authority. A corpse whose active
+// limbs have all settled may move (its streams are ended first): at a checkpoint load the first PC to register a
+// long-dead corpse otherwise kept it for good, outside the leader's authority (Lokir, 2026-09-28: the follower
+// owned and simulated him, local meteor blasts threw him around, the host never bound its own copy).
 struct RagdollRelayState
 {
     std::array<uint64_t, 2> Ticks{};
     std::array<uint64_t, 2> DismemberTicks{};
     std::array<bool, 2> Active{};
+    std::array<bool, 2> Settled{};
     std::optional<RequestOwnershipTransfer> PendingRelease;
 
     bool IsActive() const noexcept { return Active[0] || Active[1]; }
+    bool IsMoving() const noexcept { return (Active[0] && !Settled[0]) || (Active[1] && !Settled[1]); }
 };
 
 bool HasActiveRagdoll(World& aWorld, entt::entity aEntity)
 {
     const auto* state = aWorld.try_get<RagdollRelayState>(aEntity);
     return state && state->IsActive();
+}
+
+bool HasMovingRagdoll(World& aWorld, entt::entity aEntity)
+{
+    const auto* state = aWorld.try_get<RagdollRelayState>(aEntity);
+    return state && state->IsMoving();
 }
 
 // A disconnected owner cannot send its own end. End every limb reliably BEFORE
@@ -951,6 +962,7 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     state.Ticks[limb] = acMessage.Packet.Tick;
     state.DismemberTicks[limb] = acMessage.Packet.DismemberTick;
     state.Active[limb] = acMessage.Packet.Active;
+    state.Settled[limb] = acMessage.Packet.Active && acMessage.Packet.Settled;
 
     NotifyCorpseRagdoll notify{};
     notify.ServerId = acMessage.Packet.ServerId;
@@ -1578,8 +1590,15 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     if (pOldOwner == apPlayer)
         return true;
 
-    if (HasActiveRagdoll(m_world, aEntity))
+    if (HasMovingRagdoll(m_world, aEntity))
         return false;
+    if (HasActiveRagdoll(m_world, aEntity))
+    {
+        // Settled corpse: end the old owner's streams reliably before the new owner starts its own.
+        spdlog::info("Ragdoll server {:X}: settled streams ended for an ownership transfer to player {}",
+            World::ToInteger(aEntity), apPlayer->GetId());
+        EndRagdollStreams(m_world, aEntity);
+    }
 
     const uint32_t oldOwnerId = pOldOwner ? pOldOwner->GetId() : 0;
     const uint32_t oldEpoch = ownerComponent.OwnershipEpoch;
