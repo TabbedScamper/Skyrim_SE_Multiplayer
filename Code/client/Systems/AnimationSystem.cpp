@@ -76,18 +76,28 @@ struct AnimationInterest
     const Actor* ActorPtr{};
     float DistanceSquared{};
     uint64_t LastForcedTick{};
-    uint64_t SelectedTick{};
+    size_t Rank{};
 };
-constexpr size_t kInterestActorsPerFrame = 64;
-constexpr size_t kInterestCapacity = 256;
-constexpr float kInterestRadius = 4096.f;
+// Max-sync: every actor near a player is forced every frame (was a 64-actor rotating slice).
+constexpr size_t kInterestActorsPerFrame = 512;
+// Owner: every NPC the host runs is animated as if seen, even when the follower is across the map (same
+// worldspace or cell). Was 4096 u around a player.
+constexpr float kInterestRadius = 1.0e7f;
 std::mutex s_interestLock;
 std::unordered_map<uint32_t, AnimationInterest> s_animationInterest;
 uint64_t s_interestPublishedAt{}, s_interestFrame{};
+size_t s_interestFirst{};
+std::atomic_bool s_hasAnimationInterest{};
+// Conservative membership filter: collisions only take the existing lock.
+// Publish the union before replacing the table, then the new bits afterward.
+// No actor can be dropped because two form IDs hash to the same bit.
+std::array<std::atomic<uint64_t>, 16> s_interestBits{};
+size_t InterestBit(uint32_t aId) noexcept { return (aId * 2654435761u) >> 22; }
 uint64_t s_interestFrames{}, s_interestActors{}, s_interestUs{}, s_interestMaxActors{}, s_interestMaxUs{};
 uint64_t s_frameActors{}, s_frameUs{}, s_interestDeferred{}, s_interestOverflow{};
 std::atomic<uint64_t> s_fallbackGraphUpdates{}, s_interestGraphUpdates{}, s_posePackets{};
 std::atomic<uint64_t> s_remoteAnimationTasks{}, s_fallbackGraphUs{};
+std::atomic<uint64_t> s_playerGraphCalls{}, s_playerGraphDeltaUs{}, s_playerGraphLongSteps{};
 
 // Publish all nearby owned actors independently of this packet's pose selection.
 // Only the serialization thread visits ECS. Native workers use pointer-checked,
@@ -98,21 +108,37 @@ void PublishAnimationInterest(World& aWorld, uint64_t aBatchTick)
     if (lastBatchTick == aBatchTick)
         return;
     lastBatchTick = aBatchTick;
+    const auto started = HostFrameCost::Begin();
+    struct PublishCost
+    {
+        std::chrono::steady_clock::time_point Started;
+        ~PublishCost() { HostFrameCost::End(9, Started); }
+    } cost{started};
     std::vector<Actor*> observers;
     auto players = aWorld.view<FormIdComponent, PlayerComponent>();
     for (auto entity : players)
     {
         auto* actor = Cast<Actor>(TESForm::GetById(players.get<FormIdComponent>(entity).Id));
-        if (actor && actor->formID != 0x14 && actor->GetExtension()->IsRemote() &&
+        const auto* extension = actor ? actor->GetExtension() : nullptr;
+        if (extension && actor->formID != 0x14 && extension->IsRemote() &&
             actor->parentCell && actor->GetNiNode())
             observers.push_back(actor);
     }
+    // The owner's own surroundings count as well: looking away from an NPC must not change how the owner
+    // simulates it (owner repro 2026-09-27: horses float, carts break, whenever the host looks away).
+    if (auto* self = PlayerCharacter::Get(); self && self->parentCell && self->GetNiNode() && !observers.empty())
+        observers.push_back(self);
     std::vector<std::pair<uint32_t, AnimationInterest>> candidates;
     auto owned = aWorld.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
     for (auto entity : owned)
     {
+        // Without a loaded receiver every distance test would fail. Publish the
+        // empty table below as usual so previous receiver interest expires.
+        if (observers.empty())
+            break;
         auto* actor = Cast<Actor>(TESForm::GetById(owned.get<FormIdComponent>(entity).Id));
-        if (!actor || actor->formID == 0x14 || actor->GetExtension()->IsRemote() ||
+        const auto* extension = actor ? actor->GetExtension() : nullptr;
+        if (!extension || actor->formID == 0x14 || extension->IsRemote() ||
             !actor->parentCell || !actor->currentProcess || !actor->GetNiNode() ||
             actor->IsDeleted() || actor->IsDisabled() || ((actor->actorState.flags1 >> 21) & 0x7F) != 0)
             continue;
@@ -129,31 +155,55 @@ void PublishAnimationInterest(World& aWorld, uint64_t aBatchTick)
         if (nearest <= kInterestRadius * kInterestRadius)
             candidates.push_back({actor->formID, {actor, nearest}});
     }
+    // Stable rank supports a rotating frame slice without sorting or allocating
+    // on animation workers. Retain every candidate, including crowded cells.
     std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
-        return a.second.DistanceSquared == b.second.DistanceSquared ? a.first < b.first :
-            a.second.DistanceSquared < b.second.DistanceSquared;
+        return a.first < b.first;
     });
-    std::lock_guard lock(s_interestLock);
-    s_interestOverflow = candidates.size() > kInterestCapacity ? candidates.size() - kInterestCapacity : 0;
-    if (candidates.size() > kInterestCapacity)
-        candidates.resize(kInterestCapacity);
+    size_t rank = 0;
     std::unordered_map<uint32_t, AnimationInterest> next;
+    std::array<uint64_t, 16> bits{};
+    next.reserve(candidates.size());
     for (auto& [id, interest] : candidates)
     {
-        const auto it = s_animationInterest.find(id);
-        if (it != s_animationInterest.end() && it->second.ActorPtr == interest.ActorPtr)
-        {
-            interest.LastForcedTick = it->second.LastForcedTick;
-            interest.SelectedTick = it->second.SelectedTick;
-        }
+        interest.Rank = rank++;
         next.emplace(id, interest);
+        const auto bit = InterestBit(id);
+        bits[bit / 64] |= uint64_t{1} << (bit % 64);
     }
-    s_animationInterest.swap(next);
-    s_interestPublishedAt = GetTickCount64();
+    {
+        // Allocate and reclaim tables outside the worker lock. Carry only the
+        // duplicate-evaluation guard across publication, with pointer identity.
+        std::lock_guard lock(s_interestLock);
+        for (size_t i = 0; i < bits.size(); ++i)
+            s_interestBits[i].fetch_or(bits[i], std::memory_order_release);
+        for (auto& [id, interest] : next)
+        {
+            const auto it = s_animationInterest.find(id);
+            if (it != s_animationInterest.end() && it->second.ActorPtr == interest.ActorPtr)
+                interest.LastForcedTick = it->second.LastForcedTick;
+        }
+        s_interestOverflow = 0;
+        s_animationInterest.swap(next);
+        s_interestPublishedAt = GetTickCount64();
+        s_hasAnimationInterest.store(!s_animationInterest.empty(), std::memory_order_release);
+        for (size_t i = 0; i < bits.size(); ++i)
+            s_interestBits[i].store(bits[i], std::memory_order_release);
+    }
 }
 
 bool ClaimAnimationInterest(Actor* apActor)
 {
+    if (!s_hasAnimationInterest.load(std::memory_order_acquire))
+        return false;
+    const auto bit = InterestBit(apActor->formID);
+    if (!(s_interestBits[bit / 64].load(std::memory_order_acquire) & (uint64_t{1} << (bit % 64))))
+        return false;
+    struct ClaimCost
+    {
+        std::chrono::steady_clock::time_point Started{HostFrameCost::Begin()};
+        ~ClaimCost() { HostFrameCost::End(10, Started); }
+    } cost;
     std::lock_guard lock(s_interestLock);
     const auto it = s_animationInterest.find(apActor->formID);
     if (it == s_animationInterest.end() || it->second.ActorPtr != apActor ||
@@ -165,7 +215,7 @@ bool ClaimAnimationInterest(Actor* apActor)
         return false;
     if (s_interestFrame != frame)
     {
-        if (s_interestFrame)
+        if (s_interestFrame && HostFrameCost::Session())
         {
             ++s_interestFrames;
             s_interestActors += s_frameActors;
@@ -175,31 +225,151 @@ bool ClaimAnimationInterest(Actor* apActor)
         }
         s_interestFrame = frame;
         s_frameActors = s_frameUs = 0;
-        std::vector<std::pair<uint32_t, AnimationInterest*>> order;
-        for (auto& [id, interest] : s_animationInterest)
-            order.push_back({id, &interest});
-        // Oldest scheduled first avoids native task order starving a remote player.
-        // Rotate even actors with no native task so they cannot hold every slot.
-        std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
-            if (a.second->SelectedTick != b.second->SelectedTick)
-                return a.second->SelectedTick < b.second->SelectedTick;
-            return a.second->DistanceSquared == b.second->DistanceSquared ? a.first < b.first :
-                a.second->DistanceSquared < b.second->DistanceSquared;
-        });
-        for (size_t i = 0; i < order.size() && i < kInterestActorsPerFrame; ++i)
-            order[i].second->SelectedTick = frame;
+        s_interestFirst = (s_interestFirst + kInterestActorsPerFrame) % s_animationInterest.size();
     }
     auto& interest = it->second;
     if (interest.LastForcedTick == frame)
         return false;
-    if (interest.SelectedTick != frame || s_frameActors >= kInterestActorsPerFrame)
+    const auto rank = (interest.Rank + s_animationInterest.size() -
+        s_interestFirst % s_animationInterest.size()) % s_animationInterest.size();
+    if (rank >= kInterestActorsPerFrame || s_frameActors >= kInterestActorsPerFrame)
     {
-        ++s_interestDeferred;
+        if (HostFrameCost::Session())
+            ++s_interestDeferred;
         return false;
     }
     interest.LastForcedTick = frame;
     ++s_frameActors;
     return true;
+}
+
+// The host's camera cull suspends an actor's character controller (bhkCharacterController flags +0x218:
+// kNoSim 1<<17, kFarAway 1<<18, kQuickSimulate 1<<20) while its AI path still moves it: owner-reported
+// "horses float and carts go nuts whenever the host looks away", seen by the follower too. For owned actors a
+// remote player is near (this interest set), keep the controller fully simulated. Muse diag-offscreen.
+// Default off: holding kFarAway clear did not change the host float (measured 2026-09-28); kept as a switch.
+std::atomic<bool> s_offscreenSimulate{false};
+std::atomic<uint64_t> s_offscreenClears{};
+constexpr uint32_t kControllerOffscreenBits = (1u << 17) | (1u << 18) | (1u << 20);
+
+void KeepControllerSimulated(Actor* apActor) noexcept
+{
+    auto* process = apActor->currentProcess;
+    if (!process || !process->middleProcess)
+        return;
+    auto* controller = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(process->middleProcess) + 0x250);
+    if (!controller)
+        return;
+    auto* flags = reinterpret_cast<uint32_t*>(controller + 0x218);
+    if (*flags & kControllerOffscreenBits)
+    {
+        *flags &= ~kControllerOffscreenBits;
+        s_offscreenClears.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+// Membership only (no frame claim): owned actor near any player, published within the last 250 ms.
+bool HasAnimationInterest(uint32_t aFormId) noexcept
+{
+    if (!s_hasAnimationInterest.load(std::memory_order_acquire))
+        return false;
+    const auto bit = InterestBit(aFormId);
+    if (!(s_interestBits[bit / 64].load(std::memory_order_acquire) & (uint64_t{1} << (bit % 64))))
+        return false;
+    std::lock_guard lock(s_interestLock);
+    return s_animationInterest.contains(aFormId) && GetTickCount64() - s_interestPublishedAt <= 250;
+}
+
+// E37992 / 0x1406B1620 copies the actor 3D's culled bit (NiAVObject flags +0xF4 bit 20) into the character
+// controller's kFarAway (+0x218 bit 18) every update. Recorded: 0x2280509 normally, 0x22C0509 exactly while
+// the host looked away, when horses held height and dropped ~185 u (run 232211). Clearing it afterwards
+// (21,839 clears) was too late: the engine had already used it. Decide it here for actors near any player.
+using TUpdateFarAway = void(Actor*, void*);
+TUpdateFarAway* s_realUpdateFarAway{};
+
+void HookUpdateFarAway(Actor* apActor, void* apController)
+{
+    s_realUpdateFarAway(apActor, apController);
+    if (!apActor || !apController || !s_offscreenSimulate.load(std::memory_order_relaxed))
+        return;
+    auto* flags = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(apController) + 0x218);
+    if (!(*flags & (1u << 18)))
+        return;
+    const auto* extension = apActor->GetExtension();
+    // Owner: every NPC the host runs is treated as seen (not only those near a player).
+    if (!extension || extension->IsRemote() || !World::Get().GetTransport().IsConnected())
+        return;
+    *flags &= ~(1u << 18);
+    s_offscreenClears.fetch_add(1, std::memory_order_relaxed);
+}
+
+// "Render them all" at the cull itself (owner 2026-09-28). NiCullingProcess::SetFrustum (E71081) copies the camera
+// frustum (left/right/top/bottom as slopes at unit distance, near, far, ortho) and builds the cull planes from it.
+// Widening only these extents makes nearly everything within ~178 degrees pass the cull, so the engine treats it as
+// seen and runs its full per-frame work (skeleton world transforms, physics->reference sync). What appears on screen
+// is unchanged: the projection used for drawing is separate. Live switch wide_cull for paired A/B.
+struct NiFrustumView { float Left, Right, Top, Bottom, Near, Far; bool Ortho; };
+using TSetFrustum = void(void*, const NiFrustumView*);
+TSetFrustum* s_realSetFrustum{};
+std::atomic<bool> s_wideCull{false};
+std::atomic<uint64_t> s_wideCullCalls{};
+
+void HookSetFrustum(void* apProcess, const NiFrustumView* apFrustum)
+{
+    if (apFrustum && !apFrustum->Ortho && s_wideCull.load(std::memory_order_relaxed) &&
+        World::Get().GetTransport().IsConnected())
+    {
+        NiFrustumView wide = *apFrustum;
+        constexpr float kSlope = 50.f; // tan(88.9 deg)
+        wide.Left = -kSlope; wide.Right = kSlope; wide.Top = kSlope; wide.Bottom = -kSlope;
+        s_wideCullCalls.fetch_add(1, std::memory_order_relaxed);
+        return s_realSetFrustum(apProcess, &wide);
+    }
+    s_realSetFrustum(apProcess, apFrustum);
+}
+
+// The engine's actual "is this actor seen" decision (read 2026-09-28). HighActorCuller vtable slot 1, E40335
+// (0x14073C5C0), runs for every high-process actor each frame: it tests the actor 3D bound against the host camera
+// frustum (0x141514CE0) and writes the result twice: NiAVObject flags +0xF4 bit 20 on the 3D root when outside, and
+// the actor's visibility nibble +0x27C (bit 0 tested, bit 1 inside the frustum, bit 2 faded in; 7 = fully seen).
+// Everything downstream reads those two results, not the renderer:
+//  - E37992 copies bit 20 into the character controller's kFarAway (controller quick-simulates, reference lags);
+//  - 0x1406B3F20 recomputes Actor boolBits kWasInFrustrum (+0xE8 bit 21) from +0x27C every update, which is why
+//    latching that bit from the main thread did nothing;
+//  - 0x140784240 (ProcessLists actor update) passes "visible" from bit 20 into the actor's update;
+//  - E37434, 0x140707C70, AIProcess::RandomlyPlaySpecialIdles and 0x14067F1D0 branch on (+0x27C & 7) == 7.
+// Owner: every NPC the host runs is treated as seen, wherever the camera looks. So after the native test, a locally
+// owned actor with a faded-in 3D gets the "seen" result. The renderer still frustum-culls for drawing on its own.
+using THighActorCull = void(void*, Actor*);
+THighActorCull* s_realHighActorCull{};
+std::atomic<bool> s_forceSeen{true}; // paired A/B run 20260928-0902: floats 7.74 -> 0/min, cart jumps 47 -> 0/min
+std::atomic<uint64_t> s_forceSeenChanged{}, s_forceSeenCalls{};
+
+void HookHighActorCull(void* apCuller, Actor* apActor)
+{
+    s_realHighActorCull(apCuller, apActor);
+    if (!apActor || !s_forceSeen.load(std::memory_order_relaxed))
+        return;
+    auto& visibility = *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(apActor) + 0x27C);
+    if ((visibility & 7) == 7)
+        return;
+    const auto* extension = apActor->GetExtension();
+    if (!extension || extension->IsRemote() || !World::Get().GetTransport().IsConnected())
+        return;
+    using TGet3D = NiAVObject*(TESObjectREFR*);
+    POINTER_SKYRIMSE(TGet3D, get3D, 19735);
+    auto* root = get3D(apActor);
+    if (!root)
+        return;
+    // Slot 5 AsFadeNode; BSFadeNode current fade at +0x130 (same reads as E40335).
+    using TAsFadeNode = uint8_t*(NiAVObject*);
+    auto* fade = reinterpret_cast<TAsFadeNode*>((*reinterpret_cast<void***>(root))[5])(root);
+    s_forceSeenCalls.fetch_add(1, std::memory_order_relaxed);
+    if (!fade || !(*reinterpret_cast<float*>(fade + 0x130) >= 1e-05f))
+        return;
+    *reinterpret_cast<uint32_t*>(fade + 0xF4) &= ~(1u << 20);
+    visibility = (visibility & ~0xFu) | 7u;
+    s_forceSeenChanged.fetch_add(1, std::memory_order_relaxed);
 }
 
 TP_THIS_FUNCTION(TFillActorUpdateData, void, Actor, GraphUpdateData*);
@@ -210,7 +380,8 @@ void TP_MAKE_THISCALL(HookFillActorUpdateData, Actor, GraphUpdateData* apData)
 {
     TiltedPhoques::ThisCall(s_realFillActorUpdateData, apThis, apData);
     t_interestUpdateData = nullptr;
-    if (apThis->GetExtension()->IsRemote() || ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
+    const auto* extension = apThis->GetExtension();
+    if (!extension || extension->IsRemote() || ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
         !apThis->currentProcess || !apThis->parentCell || apThis->IsDeleted() || apThis->IsDisabled() ||
         !(apData->Delta > 0.f) || !std::isfinite(apData->Delta) || !ClaimAnimationInterest(apThis))
         return;
@@ -221,7 +392,10 @@ void TP_MAKE_THISCALL(HookFillActorUpdateData, Actor, GraphUpdateData* apData)
     apData->Visible = true;
     apData->ForceUpdate = true;
     t_interestUpdateData = apData;
+    if (s_offscreenSimulate.load(std::memory_order_relaxed))
+        KeepControllerSimulated(apThis);
 }
+
 
 TP_THIS_FUNCTION(TUpdateGraphManager, void, BSAnimationGraphManager, const GraphUpdateData*);
 TUpdateGraphManager* s_realUpdateGraphManager{};
@@ -232,11 +406,14 @@ void TP_MAKE_THISCALL(HookUpdateGraphManager, BSAnimationGraphManager, const Gra
     t_interestUpdateData = nullptr;
     if (!interested)
         return TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, apData);
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = HostFrameCost::Begin();
     TiltedPhoques::ThisCall(s_realUpdateGraphManager, apThis, apData);
-    const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - started).count());
+    const auto elapsed = started == std::chrono::steady_clock::time_point{} ? 0 :
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    if (started != std::chrono::steady_clock::time_point{})
     {
+        HostFrameCost::Add(11, elapsed * 1000);
         std::lock_guard lock(s_interestLock);
         s_frameUs += elapsed;
     }
@@ -250,7 +427,8 @@ TQueuedAnimationUpdate* s_realQueuedAnimationUpdate{};
 
 bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
 {
-    if (!apThis->GetExtension()->IsRemote() ||
+    const auto* extension = apThis ? apThis->GetExtension() : nullptr;
+    if (!extension || !extension->IsRemote() ||
         !World::Get().GetTransport().IsConnected() ||
         ((apThis->actorState.flags1 >> 21) & 0x7F) != 0 ||
         CorpseRagdollService::IsFollowingOwner(apThis->formID))
@@ -278,7 +456,17 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
         !apThis->currentProcess || !apThis->parentCell ||
         apThis->IsDeleted() || apThis->IsDisabled())
         return true;
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = HostFrameCost::Begin();
+    struct RemoteGraphCost
+    {
+        bool Player;
+        std::chrono::steady_clock::time_point Started;
+        ~RemoteGraphCost()
+        {
+            if (Player)
+                HostFrameCost::End(7, Started);
+        }
+    } cost{extension->IsRemotePlayer(), started};
     // Preserve the graph's world transform/scale synchronization before evaluating
     // (ID 37364, 0x14067DA60). The queued caller has already done this.
     if (!aTransformSynced)
@@ -307,9 +495,17 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
         // simulated flag; ID 63358 still applies LOD.
         TiltedPhoques::ThisCall(s_realUpdateGraphManager, manager, &data);
         manager->Release();
+        if (extension->IsRemotePlayer() && started != std::chrono::steady_clock::time_point{})
+        {
+            s_playerGraphCalls.fetch_add(1, std::memory_order_relaxed);
+            s_playerGraphDeltaUs.fetch_add(static_cast<uint64_t>((std::min)(aDelta, 60.f) * 1000000.f), std::memory_order_relaxed);
+            if (aDelta > 0.05f)
+                s_playerGraphLongSteps.fetch_add(1, std::memory_order_relaxed);
+        }
         s_fallbackGraphUpdates.fetch_add(1, std::memory_order_relaxed);
-        s_fallbackGraphUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+        if (started != std::chrono::steady_clock::time_point{})
+            s_fallbackGraphUs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     }
     // The normal finalize still passes through PoseCopyAuthority's copy hook
     // (63856). Its living fallback resets the blend during gaps and blends incoming
@@ -328,7 +524,7 @@ void TP_MAKE_THISCALL(HookQueuedAnimationUpdate, TESObjectREFR, float aDelta)
     auto* actor = Cast<Actor>(apThis);
     if (actor)
     {
-        if (actor->GetExtension()->IsRemote())
+        if (actor->GetExtension() && actor->GetExtension()->IsRemote())
             s_remoteAnimationTasks.fetch_add(1, std::memory_order_relaxed);
         if (UpdateRemoteGraph(actor, aDelta, true))
             return;
@@ -358,6 +554,15 @@ TiltedPhoques::Initializer s_distantAnimationInitializer([]() {
     TP_HOOK(&s_realQueuedAnimationUpdate, HookQueuedAnimationUpdate);
     TP_HOOK(&s_realUpdateGraphManager, HookUpdateGraphManager);
     TP_HOOK(&s_realFillActorUpdateData, HookFillActorUpdateData);
+    POINTER_SKYRIMSE(THighActorCull, highActorCull, 40335);
+    s_realHighActorCull = highActorCull.Get();
+    TP_HOOK(&s_realHighActorCull, HookHighActorCull);
+    POINTER_SKYRIMSE(TSetFrustum, setFrustum, 71081);
+    s_realSetFrustum = setFrustum.Get();
+    TP_HOOK(&s_realSetFrustum, HookSetFrustum);
+    POINTER_SKYRIMSE(TUpdateFarAway, updateFarAway, 37992);
+    s_realUpdateFarAway = updateFarAway.Get();
+    TP_HOOK(&s_realUpdateFarAway, HookUpdateFarAway);
 });
 
 bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
@@ -489,14 +694,54 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 {
     auto& actions = aAnimationComponent.TimePoints;
 
-    const auto it = std::begin(actions);
-    if (it != std::end(actions) && it->Tick <= aTick)
+    // Retain the established single-action budget until paired observations
+    // establish event ordering across native evaluations. Never burst ForceAction.
+    const auto session = HostFrameCost::Session();
+    const bool player = session && apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer();
+    const uint32_t budget = 1;
+    struct ActionStats
     {
+        uint64_t ReportAt{}, LastSeen{}, Replayed{}, LateMax{}, BacklogMax{}, Failures{}, NotReady{};
+        uint64_t Frames{}, DueAfterBudget{}, LastReplayedTick{};
+    };
+    static std::unordered_map<uint32_t, ActionStats> stats;
+    static uint64_t lastSession{}, nextPrune{};
+    ActionStats* sample = nullptr;
+    uint64_t wallNow{};
+    if (player)
+    {
+        wallNow = GetTickCount64();
+        if (lastSession != session)
+        {
+            stats.clear();
+            lastSession = session;
+            nextPrune = 0;
+        }
+        if (wallNow >= nextPrune)
+        {
+            std::erase_if(stats, [wallNow](const auto& entry) { return wallNow - entry.second.LastSeen > 10000; });
+            nextPrune = wallNow + 5000;
+        }
+        sample = &stats[apActor->formID];
+        if (!sample->ReportAt)
+            sample->ReportAt = wallNow + 5000;
+        sample->LastSeen = wallNow;
+        ++sample->Frames;
+    }
+    for (uint32_t processed = 0; processed < budget && !actions.empty() && actions.front().Tick <= aTick; ++processed)
+    {
+        if (player)
+        {
+            sample->LateMax = (std::max)(sample->LateMax, aTick - actions.front().Tick);
+            sample->BacklogMax = (std::max)(sample->BacklogMax, static_cast<uint64_t>(actions.size()));
+        }
         // Check if animation graph is ready before attempting to play animations
         if (!apActor->animationGraphHolder.IsReady())
         {
-            // Animation graph not ready, keep the action in queue and try again later
-            return;
+            // Retain the action and report readiness stalls as well as late replay.
+            if (player)
+                ++sample->NotReady;
+            break;
         }
         if (aAnimationComponent.ReplayCount > 0 && aAnimationComponent.ResetAnimationGraphForReplay)
         {
@@ -504,7 +749,12 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
             aAnimationComponent.ResetAnimationGraphForReplay = false;
         }
 
-        const auto& first = *it;
+        const auto& first = actions.front();
+        if (player)
+        {
+            ++sample->Replayed;
+            sample->LastReplayedTick = first.Tick;
+        }
 
         const auto actionId = first.ActionId;
         const auto targetId = first.TargetId;
@@ -527,11 +777,27 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 
         const auto result = ActorMediator::Get()->ForceAction(&actionData);
         aAnimationComponent.LastRanActionResult = result != 0;
+        if (player && !result)
+            ++sample->Failures;
 
         if (aAnimationComponent.ReplayCount > 0)
             aAnimationComponent.ReplayCount--;
 
         actions.pop_front();
+    }
+    if (player)
+    {
+        // Only inspect the front, not the whole queue. Future events are not a
+        // replay backlog. This distinguishes budget pressure from readiness stalls.
+        sample->DueAfterBudget += !actions.empty() && actions.front().Tick <= aTick ? 1 : 0;
+        if (wallNow >= sample->ReportAt)
+        {
+            spdlog::info("Remote player actions: form={:X} replayed={} maxLateMs={} maxQueue={} failures={} notReadyFrames={} frames={} dueAfterBudgetFrames={} lastReplayedTick={} presentationTick={} wallMs={} budget=1 (interval, this player; same-tick events retained)",
+                apActor->formID, sample->Replayed, sample->LateMax, sample->BacklogMax,
+                sample->Failures, sample->NotReady, sample->Frames, sample->DueAfterBudget,
+                sample->LastReplayedTick, aTick, wallNow);
+            *sample = {wallNow + 5000, wallNow};
+        }
     }
 }
 
@@ -632,8 +898,22 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
             animationComponent.LastSentVisualBones = {};
     }
     static uint64_t nextGraphReportMs{};
-    if (const auto reportNow = GetTickCount64(); reportNow >= nextGraphReportMs)
+    static uint64_t graphReportSession{};
+    const auto profileSession = HostFrameCost::Session();
+    if (profileSession && profileSession != graphReportSession)
     {
+        graphReportSession = profileSession;
+        nextGraphReportMs = GetTickCount64() + 5000;
+        s_playerGraphCalls.exchange(0, std::memory_order_relaxed);
+        s_playerGraphDeltaUs.exchange(0, std::memory_order_relaxed);
+        s_playerGraphLongSteps.exchange(0, std::memory_order_relaxed);
+        std::lock_guard lock(s_interestLock);
+        s_interestFrames = s_interestActors = s_interestUs = s_interestMaxActors = s_interestMaxUs = 0;
+        s_interestDeferred = s_frameUs = 0;
+    }
+    if (profileSession && GetTickCount64() >= nextGraphReportMs)
+    {
+        const auto reportNow = GetTickCount64();
         nextGraphReportMs = reportNow + 5000;
         spdlog::info("Distant animation: graphOnlyCalls={} interestCalls={} posesQueued={} remoteAnimationTasks={} graphOnlyUs={} (cumulative, far native LOD retained)",
             s_fallbackGraphUpdates.load(std::memory_order_relaxed),
@@ -653,7 +933,12 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
             overflow = s_interestOverflow;
             registered = s_animationInterest.size();
         }
-        spdlog::info("Animation interest: registered={} frames={} forcedActorsPerFrame={:.2f} graphUsPerFrame={:.2f} maxActors={} maxGraphUs={} deferred={} overflow={} budget={} radius={} (interval, graph call time excludes async finalize)",
+        const auto playerCalls = s_playerGraphCalls.exchange(0, std::memory_order_relaxed);
+        const auto playerDeltaUs = s_playerGraphDeltaUs.exchange(0, std::memory_order_relaxed);
+        spdlog::info("Remote player graph: wallMs={} calls={} meanNativeDeltaUs={} stepsOver50Ms={} (interval, all players, graph-only native opportunities; independent of 50 ms network cadence)",
+            GetTickCount64(), playerCalls, playerCalls ? playerDeltaUs / playerCalls : 0,
+            s_playerGraphLongSteps.exchange(0, std::memory_order_relaxed));
+        spdlog::info("Animation interest: registered={} frames={} forcedActorsPerFrame={:.2f} graphUsPerFrame={:.2f} maxActors={} maxGraphUs={} deferred={} overflow={} budget={} radius={} (interval, no minimum spacing, rotating 64-actor native opportunity budget; graph timing only while profiling, excludes async finalize)",
             registered, frames, frames ? double(actors) / frames : 0.0, frames ? double(us) / frames : 0.0,
             maxActors, maxUs, deferred, overflow, kInterestActorsPerFrame, kInterestRadius);
     }
@@ -710,4 +995,52 @@ bool AnimationSystem::Serialize(World& aWorld, const ActionEvent& aActionEvent, 
     apData->assign(buffer.GetData(), buffer.GetData() + writer.Size());
 
     return true;
+}
+
+void AnimationSystem::SetOffscreenSimulate(bool aEnabled) noexcept
+{
+    s_offscreenSimulate.store(aEnabled, std::memory_order_relaxed);
+}
+
+std::string AnimationSystem::OffscreenSimulateJson() noexcept
+{
+    return fmt::format("\"enabled\":{},\"clears\":{}", s_offscreenSimulate.load(), s_offscreenClears.load());
+}
+
+bool AnimationSystem::IsNearAnyPlayer(uint32_t aFormId) noexcept
+{
+    return HasAnimationInterest(aFormId);
+}
+
+bool AnimationSystem::IsOffscreenSimulateEnabled() noexcept
+{
+    return s_offscreenSimulate.load(std::memory_order_relaxed);
+}
+
+void AnimationSystem::CountOffscreenClear() noexcept
+{
+    s_offscreenClears.fetch_add(1, std::memory_order_relaxed);
+}
+
+void AnimationSystem::SetWideCull(bool aEnabled) noexcept
+{
+    s_wideCull.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Wide cull: {}", aEnabled);
+}
+
+std::string AnimationSystem::WideCullJson() noexcept
+{
+    return fmt::format("\"enabled\":{},\"calls\":{}", s_wideCull.load(), s_wideCullCalls.load());
+}
+
+void AnimationSystem::SetForceSeen(bool aEnabled) noexcept
+{
+    s_forceSeen.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Force seen: {}", aEnabled);
+}
+
+std::string AnimationSystem::ForceSeenJson() noexcept
+{
+    return fmt::format("\"enabled\":{},\"checked\":{},\"changed\":{}", s_forceSeen.load(), s_forceSeenCalls.load(),
+        s_forceSeenChanged.load());
 }

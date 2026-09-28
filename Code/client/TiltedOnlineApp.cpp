@@ -10,6 +10,7 @@
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <Systems/RenderSystemD3D11.h>
@@ -17,6 +18,7 @@
 #include <Services/OverlayService.h>
 #include <Services/ImguiService.h>
 #include <Services/DiscordService.h>
+#include <Services/FarmMode.h>
 
 #include <NvidiaUtil.h>
 
@@ -25,7 +27,7 @@ using TiltedPhoques::Debug;
 namespace
 {
 // Client instances use tp_client.log, tp_client_instance_2.log, tp_client_instance_3.log, etc.
-std::shared_ptr<spdlog::sinks::rotating_file_sink_mt> CreateClientLogSink(const std::filesystem::path& acLogPath)
+std::shared_ptr<spdlog::sinks::sink> CreateClientLogSink(const std::filesystem::path& acLogPath)
 {
     std::string filename = "tp_client.log";
     for (uint32_t instance = 1;; ++instance)
@@ -53,6 +55,10 @@ std::shared_ptr<spdlog::sinks::rotating_file_sink_mt> CreateClientLogSink(const 
             filename = fmt::format("tp_client_instance_{}.log", instance);
         break;
     }
+    // Farm acceptance needs the entire lifetime, including early trace-loss
+    // warnings. Each farm process already has a unique, run-scoped directory.
+    if (FarmMode::Enabled())
+        return std::make_shared<spdlog::sinks::basic_file_sink_mt>(acLogPath / filename, true);
     return std::make_shared<spdlog::sinks::rotating_file_sink_mt>(acLogPath / filename, 1048576 * 5, 3);
 }
 }
@@ -63,6 +69,7 @@ TiltedOnlineApp::TiltedOnlineApp()
     SetConsoleOutputCP(CP_UTF8);
 
     auto logPath = TiltedPhoques::GetPath() / "logs";
+    if (FarmMode::Enabled()) logPath = FarmMode::Root() / "logs";
 
     std::error_code ec;
     create_directory(logPath, ec);

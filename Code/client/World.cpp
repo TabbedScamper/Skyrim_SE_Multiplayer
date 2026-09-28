@@ -2,6 +2,7 @@
 
 #include "World.h"
 #include "GameLoopDiagnostic.h"
+#include <Utils.h>
 
 #include <Services/DiscoveryService.h>
 #include <Services/InputService.h>
@@ -11,6 +12,7 @@
 #include <Services/PapyrusService.h>
 #include <Services/DiscordService.h>
 #include <Services/ObjectService.h>
+#include <Services/WorldStateService.h>
 #include <Services/QuestService.h>
 #include <Services/Generic/QuestItemService.h>
 #include <Services/ActorValueService.h>
@@ -27,6 +29,7 @@
 #include <Services/SteamLobbyService.h>
 #include <Services/GameSettingsService.h>
 #include <Services/GameTestService.h>
+#include <Services/HarnessService.h>
 #include <Services/CameraService.h>
 #include <Services/SceneTimelineService.h>
 #include <Services/Generic/SceneTurnsService.h>
@@ -39,6 +42,10 @@
 #include <Services/Generic/HeadTrackService.h>
 #include <Services/Generic/DialogueListenService.h>
 #include <Services/Generic/NakedNpcGuard.h>
+#include <Services/Generic/NpcLootService.h>
+#include <Services/Generic/PlayerStateTrace.h>
+#include <Services/Generic/BoundPoseKeeper.h>
+#include <Services/Generic/OrphanTrace.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -155,6 +162,7 @@ World::World()
     , m_modSystem(m_dispatcher)
     , m_lastFrameTime{std::chrono::high_resolution_clock::now()}
 {
+    Utils::InitializeEntityIndex(*this);
     ctx().emplace<ImguiService>();
     ctx().emplace<HeadTrackService>(*this, m_dispatcher);
     ctx().emplace<DiscoveryService>(*this, m_dispatcher);
@@ -165,24 +173,28 @@ World::World()
     ctx().emplace<PapyrusService>(m_dispatcher);
     ctx().emplace<DiscordService>(m_dispatcher);
     ctx().emplace<ObjectService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<WorldStateService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CalendarService>(*this, m_dispatcher, m_transport);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<QuestItemService>(*this, m_dispatcher, m_transport);
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<PlayerStateTrace>(*this, m_dispatcher);
+    ctx().emplace<BoundPoseKeeper>(m_dispatcher);
+    ctx().emplace<OrphanTrace>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher, m_transport);
     ctx().emplace<BusyLockService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SharedDropService>(*this, m_dispatcher, m_transport);
     ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
-    ctx().emplace<UnstuckReset>(*this, m_dispatcher);
     ctx().emplace<CameraService>(*this, m_dispatcher, m_transport);
-    ctx().at<UnstuckReset>().ConnectUpdate(m_dispatcher);
+    ctx().emplace<UnstuckReset>(*this, m_dispatcher);
     ctx().emplace<SceneTimelineService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SceneTurnsService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CorpseRagdollService>(*this, m_dispatcher, m_transport);
     ctx().emplace<ActorValueService>(*this, m_dispatcher, m_transport);
     ctx().emplace<InventoryService>(*this, m_dispatcher, m_transport);
     ctx().emplace<NakedNpcGuard>(*this, m_dispatcher);
+    ctx().emplace<NpcLootService>(*this, m_dispatcher);
     ctx().emplace<MagicService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CommandService>(*this, m_transport, m_dispatcher);
     ctx().emplace<PlayerService>(*this, m_dispatcher, m_transport);
@@ -195,6 +207,7 @@ World::World()
     ctx().emplace<SteamLobbyService>(*this, m_dispatcher);
     ctx().emplace<GameSettingsService>(*this, m_dispatcher);
     ctx().emplace<GameTestService>(*this);
+    ctx().emplace<HarnessService>(*this);
 
     BehaviorVar::Get()->Init();
 }
@@ -203,6 +216,7 @@ World::~World() = default;
 
 void World::Update() noexcept
 {
+    const Utils::EntityDispatchScope scaleDispatch;
     const auto entry = std::chrono::steady_clock::now();
     const auto entryNs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -335,4 +349,9 @@ void World::Create() noexcept
 World& World::Get() noexcept
 {
     return entt::locator<World>::value();
+}
+
+NpcLootService& World::GetNpcLootService() noexcept
+{
+    return ctx().at<NpcLootService>();
 }

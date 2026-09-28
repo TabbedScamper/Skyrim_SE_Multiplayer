@@ -17,6 +17,20 @@
 
 #include <Structs/ServerSettings.h>
 
+#include <chrono>
+
+// Optional bounded profiling windows; Begin returns an empty timestamp when off.
+// Durations include nested work and worker waits, so they are not additive CPU time.
+namespace HostFrameCost
+{
+// Zero while disabled; a new value for each explicitly armed window.
+uint64_t Session() noexcept;
+std::chrono::steady_clock::time_point Begin() noexcept;
+void Add(uint32_t aFeature, uint64_t aNanoseconds) noexcept;
+void End(uint32_t aFeature, std::chrono::steady_clock::time_point aStart) noexcept;
+void TriggerTimingInstalled() noexcept;
+}
+
 class QuestService;
 struct QuestItemService;
 struct DoorVoteService;
@@ -27,7 +41,9 @@ struct HeadTrackService;
 struct DialogueListenService;
 struct StealthService;
 struct NakedNpcGuard;
+struct NpcLootService;
 struct UnstuckReset;
+struct WorldStateService;
 
 struct World : entt::registry
 {
@@ -61,6 +77,7 @@ struct World : entt::registry
     HeadTrackService& GetHeadTrackService() noexcept;
     DialogueListenService& GetDialogueListenService() noexcept;
     NakedNpcGuard& GetNakedNpcGuard() noexcept;
+    NpcLootService& GetNpcLootService() noexcept;
     UnstuckReset& GetUnstuckReset() noexcept;
     ReviveService& GetReviveService() noexcept { return ctx().at<ReviveService>(); }
 

@@ -23,6 +23,9 @@ struct GameTestService : BSTEventSink<TESTriggerEnterEvent>, BSTEventSink<TESTri
 
     void OnWindowThread() noexcept;
     void OnGameThread() noexcept;
+    // Harness calls this only at the native main-loop tail. It uses the same
+    // creator/path implementation without the pipe or window-thread executor.
+    std::string HarnessDriverTick(const std::string& aRequest = {});
     [[nodiscard]] std::string GetCachedGameSnapshot() const noexcept;
     // Short, explicitly requested window for render bones and native camera tracing.
     [[nodiscard]] static bool IsDiagnosticCaptureArmed() noexcept;
@@ -141,6 +144,39 @@ private:
         std::array<bool, 2> Present{};
         std::array<std::array<float, 3>, 2> HorsePosition{};
         std::array<bool, 2> HorsePresent{};
+        // Cart reference angles (radians): a flip shows as x/y leaving ~0.
+        std::array<std::array<float, 3>, 2> Rotation{};
+        // Horse AI process level (0 high .. 3 low, AIProcess +0x137) and whether it has a character
+        // controller (middle-high process +0x250): a horse without one moves on the path with no ground.
+        std::array<uint8_t, 2> HorseLevel{0xFF, 0xFF};
+        std::array<bool, 2> HorseController{};
+        // Controller flags (+0x218), current state (+0x200), supported state (+0x1A0).
+        std::array<uint32_t, 2> HorseControllerFlags{};
+        std::array<uint32_t, 2> HorseControllerState{0xFF, 0xFF};
+        std::array<uint32_t, 2> HorseSupported{0xFF, 0xFF};
+        // What the horse controller stands on (+0x2B0 supportBody): motion type (0xFF none), its z (game
+        // units), and whether it is the cart's own root body. Owner: horses float when the host looks away.
+        std::array<uint32_t, 2> SupportMotion{0xFF, 0xFF};
+        std::array<float, 2> SupportZ{};
+        std::array<bool, 2> SupportIsCart{};
+        std::array<uint64_t, 2> SupportBody{};
+        // Horse 3D root node world z and the last native SetPosition input z (reference-phase probe on horse 1),
+        // to tell a frozen reference from a frozen scene node.
+        std::array<float, 2> HorseNodeZ{};
+        std::array<float, 2> HorseCharZ{};
+        float ProbeInputZ{};
+        // Host camera view: angle (degrees) between the camera's forward axis and each cart / horse, plus FOV.
+        // Under ~FOV/2 is on screen. Owner repro: chaos in whatever the host is not looking at.
+        std::array<float, 2> CartViewAngle{-1.f, -1.f};
+        std::array<float, 2> HorseViewAngle{-1.f, -1.f};
+        float CameraFov{};
+        // Horse character controller (Muse diag-horsez stage 1): proxy position z (vslot 02, game units), fall
+        // timer +0x244, fall start +0x240, step delta z +0x188. Frozen together = controller not stepped.
+        std::array<float, 2> CtrlZ{};
+        std::array<float, 2> CtrlFallTime{};
+        std::array<float, 2> CtrlFallStart{};
+        std::array<float, 2> CtrlDeltaZ{};
+        uint64_t ProbeCalls{};
     };
     std::array<HitchCartSample, 64> m_hitchCartHistory{};
     uint32_t m_hitchCartNext{};

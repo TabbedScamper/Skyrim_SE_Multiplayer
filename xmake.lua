@@ -1,5 +1,14 @@
 set_xmakever("3.0.0")
 
+option("harness")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Compile the opt-in unattended in-engine test harness")
+option_end()
+if has_config("harness") then
+    add_defines("SEAMLESS_HARNESS=1")
+end
+
 -- If newer version of xmake, remove ccache until it actually works
 if set_policy ~= nil then
     set_policy("build.ccache", false)

@@ -16,7 +16,9 @@ Player::Player(ConnectionId_t aConnectionId)
 }
 
 Player::Player(Player&& aRhs) noexcept
-    : m_id{std::exchange(aRhs.m_id, 0)}
+    : Disconnecting{std::exchange(aRhs.Disconnecting, false)}
+    , LastPacketTick{std::exchange(aRhs.LastPacketTick, 0)}
+    , m_id{std::exchange(aRhs.m_id, 0)}
     , m_connectionId{std::exchange(aRhs.m_connectionId, 0)}
     , m_character{std::exchange(aRhs.m_character, std::nullopt)}
     , m_mods{std::exchange(aRhs.m_mods, {})}

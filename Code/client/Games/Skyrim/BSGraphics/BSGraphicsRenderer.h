@@ -137,10 +137,15 @@ struct ApplicationWindowProperties
     int iX;
     int iY;
     uint32_t uiRefreshRate;
+    uint32_t uiPresentInterval;
     bool bFullScreen;
     bool bBorderlessWindow;
     bool bVSync;
-    uint32_t uiPresentInterval;
 };
+// AL77226/141007B70 reads present interval at 0x14 and mode flags at 0x18/19.
+static_assert(offsetof(ApplicationWindowProperties, uiPresentInterval) == 0x14);
+static_assert(offsetof(ApplicationWindowProperties, bFullScreen) == 0x18);
+static_assert(offsetof(ApplicationWindowProperties, bBorderlessWindow) == 0x19);
+static_assert(sizeof(ApplicationWindowProperties) == 0x1C);
 
 } // namespace BSGraphics

@@ -1,4 +1,5 @@
 #pragma once
+#include <Messages/Harness.h>
 #include <Messages/BusyLockRequest.h>
 
 #include <Messages/Message.h>
@@ -82,6 +83,11 @@
 
 #include <Messages/RequestDialogueListen.h>
 #include <Messages/RequestSharedDrop.h>
+#include <Messages/RequestWorldState.h>
+#include <Messages/RequestWorldStateCell.h>
+
+#include <Messages/RequestNpcWorn.h>
+#include <Messages/RequestNpcLoot.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -91,7 +97,7 @@ struct ClientMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<RequestHarness, RequestNpcWorn, RequestNpcLoot, RequestWorldState, RequestWorldStateCell, RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
             RequestScriptedActorState, AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
             RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,

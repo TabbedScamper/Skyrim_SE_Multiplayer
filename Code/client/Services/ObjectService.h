@@ -5,7 +5,9 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <vector>
+#include <unordered_map>
 #include <Messages/PhysicsReferencesMoveRequest.h>
 
 struct ServerTimeSettings;
@@ -24,10 +26,131 @@ struct UpdateEvent;
 struct NotifyPhysicsReferencesMove;
 struct TESObjectREFR;
 
+// Pure incremental membership; snapshots iterate contiguous IDs without allocating.
+// BEGIN PHYSICS SCAN SET
+namespace PhysicsScan
+{
+struct Set
+{
+    std::vector<uint32_t> Ids;
+    std::unordered_map<uint32_t, size_t> Indices;
+
+    void Insert(uint32_t aId)
+    {
+        if (Indices.try_emplace(aId, Ids.size()).second)
+            Ids.push_back(aId);
+    }
+    void Erase(uint32_t aId)
+    {
+        const auto it = Indices.find(aId);
+        if (it == Indices.end())
+            return;
+        const auto index = it->second;
+        Ids[index] = Ids.back();
+        Indices.find(Ids[index])->second = index;
+        Ids.pop_back();
+        Indices.erase(it);
+    }
+    void Clear() { Ids.clear(); Indices.clear(); }
+};
+struct PlaybackWindow
+{
+    uint32_t A{}, B{};
+    float Fraction{};
+    bool Available{}, Hold{};
+};
+template <class TickAt>
+PlaybackWindow SelectPlaybackWindow(uint32_t aCount, double aTime, TickAt&& aTick)
+{
+    if (!aCount)
+        return {};
+    PlaybackWindow result{aCount - 1, aCount - 1, 0.f, true, aTime - static_cast<double>(aTick(aCount - 1)) > 300.0};
+    if (aTime <= static_cast<double>(aTick(0)))
+        result.A = result.B = 0;
+    else
+        for (uint32_t i = 1; i < aCount; ++i)
+        {
+            const auto end = aTick(i);
+            if (aTime > static_cast<double>(end))
+                continue;
+            const auto start = aTick(i - 1);
+            result.A = i - 1;
+            result.B = i;
+            result.Fraction = end > start ? static_cast<float>((aTime - static_cast<double>(start)) /
+                static_cast<double>(end - start)) : 1.f;
+            break;
+        }
+    return result;
+}
+inline bool MakeSnapshotRoom(size_t& aRead, size_t& aCount, size_t aCapacity) noexcept
+{
+    if (aCount != aCapacity)
+        return false;
+    aRead = (aRead + 1) % aCapacity;
+    --aCount;
+    return true;
+}
+template <class Visit>
+void VisitRepair(const Set& aSet, size_t& aCursor, size_t aBudget, Visit&& aVisit)
+{
+    const auto count = aSet.Ids.size() < aBudget ? aSet.Ids.size() : aBudget;
+    for (size_t i = 0; i < count; ++i)
+        aVisit(aSet.Ids[aCursor++ % aSet.Ids.size()]);
+}
+
+// Fixed storage for coalesced native movement notifications. Drain cost depends only
+// on occupied slots, not capacity or the total admitted/sleeping reference population.
+template <size_t Capacity>
+struct MovementQueue
+{
+    std::array<uint32_t, Capacity> Slots{};
+    std::array<size_t, Capacity> Occupied{};
+    size_t Count{};
+    std::vector<uint32_t> Overflow; // rare growth preserves admission beyond fixed capacity
+    bool Insert(uint32_t aId) noexcept
+    {
+        if (!aId)
+            return true;
+        size_t slot = (static_cast<uint64_t>(aId) * 2654435761u) % Capacity;
+        for (size_t attempts = 0; attempts < Capacity; ++attempts, slot = (slot + 1) % Capacity)
+        {
+            if (Slots[slot] == aId)
+                return true;
+            if (!Slots[slot])
+            {
+                Slots[slot] = aId;
+                Occupied[Count++] = slot;
+                return true;
+            }
+        }
+        Overflow.push_back(aId);
+        return false; // report pressure, but do not lose this movement notification
+    }
+    template <class F> void Drain(F&& aVisit)
+    {
+        for (size_t i = 0; i < Count; ++i)
+        {
+            const auto slot = Occupied[i];
+            aVisit(Slots[slot]);
+            Slots[slot] = 0;
+        }
+        Count = 0;
+        for (auto id : Overflow)
+            aVisit(id);
+        Overflow.clear();
+    }
+};
+
+}
+// END PHYSICS SCAN SET
+
 /**
  * @brief Handles objects in the environment.
  */
-class ObjectService final : public BSTEventSink<TESActivateEvent>
+class ObjectService final : public BSTEventSink<TESActivateEvent>,
+    public BSTEventSink<TESObjectLoadedEvent>,
+    public BSTEventSink<TESCellAttachDetachEvent>,
+    public BSTEventSink<TESMoveAttachDetachEvent>
 {
 public:
     ObjectService(World&, entt::dispatcher&, TransportService&);
@@ -43,12 +166,42 @@ public:
     static void SetBodyVelocityEnabled(bool aEnabled) noexcept;
     static void SetVisualLagFrameEnabled(bool aEnabled) noexcept;
     static void SetCartPhysicsEnabled(bool aEnabled) noexcept;
+    // Follower cart assemblies: true = replay (bodies keyframed onto the owner pose each physics step),
+    // false = the dynamic steer. Toggle for in-run A/B via the cart_replay bridge command.
+    static void SetCartReplayEnabled(bool aEnabled) noexcept;
+    static bool IsCartReplayEnabled() noexcept;
+    // Lock-free: true for a local horse tethered to a cart. Its native position moves keep their Havok sync
+    // (HookSetPosition), called from engine threads about once a frame per horse.
+    static bool IsTetheredHorse(uint32_t aFormId) noexcept;
+    // Expected reference z for a tethered horse (from its character controller), or NaN if unknown.
+    static float TetheredHorseExpectedZ(uint32_t aFormId) noexcept;
+    // Session ended (disconnect, left party, epoch change): forget published horse heights.
+    static void ResetTetheredHorseState() noexcept;
+    // Called from actor-process jobs: queue an owned NPC for a main-thread scene refresh (off-camera bones).
+    static void QueueActorSceneUpdate(uint32_t aFormId) noexcept;
+    // Off-camera refresh mode for live A/B: 0 off, 1 main thread (not seated or riders), 2 main thread (all),
+    // 3 inside the actor job (all; deadlock risk, diagnosis only).
+    static void SetSceneUpdateMode(uint32_t aMode) noexcept;
+    // Horse controller->reference z writeback (float fix), live-switchable for paired in-ride A/B.
+    static void SetHorseWriteback(bool aEnabled) noexcept;
+    // Owned actors and carts always drawn/updated regardless of the camera (render_all switch, default on).
+    static void SetRenderAll(bool aEnabled) noexcept;
+    static bool IsRenderAll() noexcept;
+    // Host cart scene-node refresh every frame (unproven; paired A/B switch).
+    static void SetCartNodeRefresh(bool aEnabled) noexcept;
+    static bool IsCartNodeRefresh() noexcept;
+    static bool IsHorseWriteback() noexcept;
+    static uint32_t GetSceneUpdateMode() noexcept;
     static void ArmRenderDiagnostics() noexcept;
     [[nodiscard]] static bool IsRenderDiagnosticsArmed() noexcept;
     // A remote actor at this host position (played-back timeline) that rides a host-driven
     // reference (a cart's driver or passenger) is placed with that reference on the main thread;
     // returns true when the caller must not place it itself. Any thread.
     static bool AttachRider(Actor* apActor, const NiPoint3& acHostPosition, float aHostHeading) noexcept;
+    // Active tether assemblies share a frame clock, including the horse and SetVehicle riders.
+    static bool VehiclePresentationTick(Actor* apActor, uint64_t& aTick) noexcept;
+    static void QueueVehiclePose(Actor* apActor, uint64_t aTick, const NiPoint3& aPosition,
+        const NiPoint3& aRotation, const NiPoint3& aVelocity, const NiPoint3& aAngular) noexcept;
     // Called by the Main::Update hook on the game's main thread, before the frame's jobs.
     static void OnMainFrame() noexcept;
     // After Main::Update (the frame is drawn): end-of-frame probe of host-driven bodies.
@@ -258,6 +411,14 @@ private:
     void OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove&) noexcept;
 
     BSTEventResult OnEvent(const TESActivateEvent*, const EventDispatcher<TESActivateEvent>*) override;
+    BSTEventResult OnEvent(const TESObjectLoadedEvent*, const EventDispatcher<TESObjectLoadedEvent>*) override;
+    BSTEventResult OnEvent(const TESCellAttachDetachEvent*, const EventDispatcher<TESCellAttachDetachEvent>*) override;
+    BSTEventResult OnEvent(const TESMoveAttachDetachEvent*, const EventDispatcher<TESMoveAttachDetachEvent>*) override;
+    void QueuePhysicsRefresh(uint32_t aFormId) noexcept;
+    void RefreshPhysicsCandidates() noexcept;
+    void RefreshPhysicsDiagnostics() noexcept;
+    void RefreshPhysicsReference(uint32_t aFormId) noexcept;
+    void FlushPhysicsSnapshots() noexcept;
 
     entt::entity CreateObjectEntity(const uint32_t acFormId, const uint32_t acServerId) noexcept;
 
@@ -283,11 +444,20 @@ private:
         std::array<float, 16> LastSentBodyTransform{};
         glm::vec3 LastSentBodyVelocity{};
         std::chrono::steady_clock::time_point LastSent{};
+        std::chrono::steady_clock::time_point LastActive{};
         bool HasMoved{};
         bool HasBodyState{};
         // Sent as a simulated body before: the followers steer their copy to it, so it keeps
         // being sent when a scene makes it keyframed (the intro carts pulled into place on arrival).
         bool StreamedDynamic{};
+        bool Shared{};
+        uint8_t MissingChecks{};
+        bool Promote{};
+        bool Body{};
+        bool Assembly{};
+        uint32_t Generation{};
+        // Reused packet scratch. Child storage is reserved on admission, never in capture.
+        PhysicsReferenceUpdate Update;
     };
     struct RemoteReferencePose
     {
@@ -298,6 +468,8 @@ private:
         uint64_t PriorTick{};
         uint64_t AuthorityEpoch{};
         std::chrono::steady_clock::time_point LastApplied{};
+        std::shared_ptr<void> BodyLifetime;
+        uint32_t BodyUid{};
         bool Kinematic{};
         bool BodyDriven{};
         glm::vec3 LinearVelocity{};
@@ -318,7 +490,8 @@ private:
             glm::vec3 BodyPosition{};
             glm::vec4 BodyRotation{0.f, 0.f, 0.f, 1.f};
         };
-        std::array<Sample, 12> Samples{};
+        // 800 ms of history at the owner frame rate (the main lane captures every frame).
+        std::array<Sample, 48> Samples{};
         uint32_t SampleCount{};
         uint32_t SampleNext{};
         uint32_t HostMotionType{3};
@@ -386,18 +559,63 @@ private:
     };
     std::unordered_map<uint32_t, ReferencePose> m_referencePoses;
     std::unordered_map<uint32_t, RemoteReferencePose> m_remoteReferencePoses;
-    Set<uint32_t> m_physicsStreamCandidates;
-    std::chrono::steady_clock::time_point m_nextPhysicsSnapshot{};
-    std::chrono::steady_clock::time_point m_nextCurrentCellDiscovery{};
-    std::chrono::steady_clock::time_point m_nextPhysicsPosePrune{};
-    uint32_t m_gridDiscoveryCursor{};
+    std::unordered_map<uint32_t, uint32_t> m_ownedPhysicsGenerations;
+    std::vector<uint32_t> m_physicsMovingScratch;
+    PhysicsScan::Set m_physicsBodies;
+    PhysicsScan::Set m_physicsUpdateRefs;
+    std::vector<uint32_t> m_physicsPromotions;
+    std::array<std::chrono::steady_clock::time_point, 2> m_nextPhysicsSnapshot{};
+    struct PhysicsCellScan
+    {
+        uint32_t FormId{};
+        uint32_t Cursor{};
+        std::chrono::steady_clock::time_point NextSweep{};
+    };
+    std::vector<PhysicsCellScan> m_physicsCells;
+    size_t m_physicsCellCursor{};
+    size_t m_physicsMaintenanceCursor{};
+    size_t m_physicsPassiveCursor{};
+    uint64_t m_physicsSnapshotEvictions{}, m_physicsMaintenanceReportUs{}, m_physicsRepairReportUs{};
+    std::chrono::steady_clock::time_point m_nextPhysicsCells{};
+    std::chrono::steady_clock::time_point m_nextOwnedPhysics{};
+    std::chrono::steady_clock::time_point m_nextPhysicsMaintenance{};
+    uint64_t m_physicsEpoch{};
+    bool m_physicsLeader{};
+    std::mutex m_physicsEventsLock;
+    PhysicsScan::Set m_physicsDirty;
+    PhysicsScan::Set m_physicsRefresh;
+    // Discovery publishes one reference at a time. Network serialization never holds this lock.
+    std::recursive_mutex m_hostPhysicsLock;
+    struct CapturedPhysics
+    {
+        uint32_t FormId{};
+        uint32_t Generation{};
+        GameId Id{};
+        glm::vec3 Position{}, Rotation{}, LinearVelocity{};
+        uint8_t MotionType{};
+        std::array<float, 16> BodyTransform{};
+        std::array<std::array<float, 7>, PhysicsReferenceUpdate::kMaxChildBodies> Children{};
+        size_t ChildCount{};
+        bool Shared{};
+    };
+    struct PhysicsSnapshot
+    {
+        uint64_t Tick{}, Epoch{};
+        size_t Count{};
+        std::vector<CapturedPhysics> Entries;
+    };
+    std::array<PhysicsSnapshot, 8> m_physicsSnapshots;
+    PhysicsSnapshot m_physicsSending;
+    size_t m_physicsSnapshotRead{}, m_physicsSnapshotCount{};
+    std::chrono::steady_clock::time_point m_nextPhysicsScanReport{};
+    uint64_t m_physicsScanReportTotalUs{}, m_physicsScanReportCount{};
+    uint32_t m_physicsScanReportMaxUs{};
     void ApplyRemotePhysics() noexcept;
     // m_remoteReferencePoses is filled on the VM job thread and played back on the main thread.
     mutable std::recursive_mutex m_remotePhysicsLock;
     std::atomic<bool> m_applyOnMainFrame{};
-    // Owner snapshots default to the main frame; followers sample only their owned drops.
-    // Both legacy physics packets and shared-drop moves are sent from the update thread.
-    void CaptureHostPhysics(bool aSendNow) noexcept;
+    // Main owns scene/Havok capture: moving bodies plus bounded repair.
+    // OnUpdate only serializes captured values; it never traverses native bodies.
+    void CaptureHostPhysics(bool aUpdateThread) noexcept;
     std::atomic<bool> m_captureOnMainFrame{};
-    std::vector<PhysicsReferencesMoveRequest> m_pendingPhysicsRequests;
 };

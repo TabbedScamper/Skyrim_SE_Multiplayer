@@ -5,6 +5,7 @@
 #include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/CreatorTogether.h>
+#include <Services/HarnessService.h>
 #include <Games/Skyrim/Actor.h>
 #include <Systems/InterpolationSystem.h>
 
@@ -50,6 +51,7 @@ short TP_MAKE_THISCALL(HookMainLoop, Main)
 
     const auto result = TiltedPhoques::ThisCall(MainLoop, apThis);
     ObjectService::OnMainFrameEnd();
+    HarnessService::MainThreadUpdate();
     return result;
 }
 

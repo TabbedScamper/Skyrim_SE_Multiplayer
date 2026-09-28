@@ -42,6 +42,12 @@ struct Player
 
     void Send(const ServerMessage& acServerMessage) const;
 
+    // Set before leave callbacks, while the Player object is still alive.
+    bool Disconnecting{};
+    // Read/written on Server::Update's dispatch loop. Evidence only; loading
+    // can pause application packets without stopping the transport thread.
+    uint64_t LastPacketTick{};
+
 private:
     uint32_t m_id{0};
     ConnectionId_t m_connectionId;

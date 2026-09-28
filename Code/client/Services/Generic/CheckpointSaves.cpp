@@ -1,4 +1,5 @@
 #include <Services/CheckpointSaves.h>
+#include <Services/FarmMode.h>
 
 #include <Games/TES.h>
 
@@ -58,11 +59,13 @@ fs::path SavesDirectory() noexcept
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &pDocuments)))
         result = fs::path(pDocuments) / "My Games" / "Skyrim Special Edition" / "Saves";
     CoTaskMemFree(pDocuments);
+    if (FarmMode::Enabled() && !result.empty()) result /= fs::path("Farm") / FarmMode::Token();
     return result;
 }
 
 fs::path RegistryPath() noexcept
 {
+    if (FarmMode::Enabled()) return FarmMode::Root() / "checkpoints.txt";
     return TiltedPhoques::GetPath() / "checkpoints.txt";
 }
 

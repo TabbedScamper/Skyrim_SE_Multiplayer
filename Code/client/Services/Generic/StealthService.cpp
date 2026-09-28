@@ -98,7 +98,7 @@ void StealthService::OnUpdate(const UpdateEvent&)
         auto* player = PlayerCharacter::Get();
         if (player && player->GetNiNode())
         {
-            const auto token = Utils::GetLocalOwnershipToken(player->formID);
+            const auto token = Utils::GetLocalOwnershipTokenOnRunner(player->formID);
             if (token)
             {
                 PlayerCombatState state;
@@ -111,11 +111,13 @@ void StealthService::OnUpdate(const UpdateEvent&)
         return;
     }
 
+    // One observer snapshot per host tick; preserve track and native query order.
+    std::optional<PlayerCombat::ObserverSnapshot> observers;
     for (auto it = m_tracks.begin(); it != m_tracks.end();)
     {
         auto& track = it->second;
-        auto* actor = Utils::GetByServerId<Actor>(it->first);
-        const auto token = actor ? Utils::GetRemoteOwnershipToken(actor->formID) : std::nullopt;
+        auto* actor = Utils::GetByServerIdOnRunner<Actor>(it->first);
+        const auto token = actor ? Utils::GetRemoteOwnershipTokenOnRunner(actor->formID) : std::nullopt;
         if (!actor || !actor->GetExtension()->IsRemotePlayer() || !token ||
             token->OwnershipEpoch != track.State.OwnershipEpoch || now - track.ReceivedAt >= 2000)
         {
@@ -144,7 +146,9 @@ void StealthService::OnUpdate(const UpdateEvent&)
             result.Type = PlayerCombatState::Detection;
             result.ActorId = it->first;
             result.OwnershipEpoch = token->OwnershipEpoch;
-            PlayerCombat::GetAwareness(actor, result.DetectionLevel, result.LOSCount);
+            if (!observers)
+                observers.emplace();
+            PlayerCombat::GetAwareness(actor, result.DetectionLevel, result.LOSCount, observers->Get());
             result.MeterLevel = PlayerCombat::GetMeterLevel(actor, result.DetectionLevel);
             if (now >= track.NextDiagnostic)
             {
@@ -186,17 +190,17 @@ void StealthService::OnNotify(const NotifyPlayerCombatState& aMessage)
     }
     else if (state.Type == PlayerCombatState::Detection && !leader)
     {
-        const auto token = Utils::GetLocalOwnershipToken(0x14);
+        const auto token = Utils::GetLocalOwnershipTokenOnRunner(0x14);
         if (token && token->ServerId == state.ActorId && token->OwnershipEpoch == state.OwnershipEpoch)
             PlayerCombat::SetMeter(state.MeterLevel, state.LOSCount);
     }
     else if (state.Type == PlayerCombatState::Damage && !leader)
     {
-        const auto token = Utils::GetLocalOwnershipToken(0x14);
+        const auto token = Utils::GetLocalOwnershipTokenOnRunner(0x14);
         if (!token || token->ServerId != state.TargetId || token->OwnershipEpoch != state.TargetOwnershipEpoch)
             return;
-        auto* attacker = Utils::GetByServerId<Actor>(state.ActorId);
-        const auto sourceEntity = Utils::FindEntityByServerId(state.ActorId);
+        auto* attacker = Utils::GetByServerIdOnRunner<Actor>(state.ActorId);
+        const auto sourceEntity = Utils::FindEntityByServerIdOnRunner(state.ActorId);
         const auto* source = sourceEntity ? m_world.try_get<RemoteComponent>(*sourceEntity) : nullptr;
         if (!source || source->OwnershipEpoch != state.OwnershipEpoch)
             return;
@@ -205,10 +209,10 @@ void StealthService::OnNotify(const NotifyPlayerCombatState& aMessage)
     }
     else if (state.Type == PlayerCombatState::Threat && leader)
     {
-        auto* attacker = Utils::GetByServerId<Actor>(state.ActorId);
-        auto* victim = Utils::GetByServerId<Actor>(state.TargetId);
-        const auto victimToken = victim ? Utils::GetLocalOwnershipToken(victim->formID) : std::nullopt;
-        const auto attackerToken = attacker ? Utils::GetRemoteOwnershipToken(attacker->formID) : std::nullopt;
+        auto* attacker = Utils::GetByServerIdOnRunner<Actor>(state.ActorId);
+        auto* victim = Utils::GetByServerIdOnRunner<Actor>(state.TargetId);
+        const auto victimToken = victim ? Utils::GetLocalOwnershipTokenOnRunner(victim->formID) : std::nullopt;
+        const auto attackerToken = attacker ? Utils::GetRemoteOwnershipTokenOnRunner(attacker->formID) : std::nullopt;
         if (attacker && victim && attackerToken && victimToken && attacker->GetExtension()->IsRemotePlayer() &&
             !victim->GetExtension()->IsPlayer() && !victim->IsDead() &&
             attackerToken->OwnershipEpoch == state.OwnershipEpoch && victimToken->OwnershipEpoch == state.TargetOwnershipEpoch)
@@ -236,8 +240,8 @@ void StealthService::OnImpact(const PlayerCombat::Impact& aImpact)
     auto* victim = Cast<Actor>(TESForm::GetById(aImpact.VictimFormId));
     if (!attacker || !victim)
         return;
-    const auto source = Utils::GetLocalOwnershipToken(attacker->formID);
-    const auto target = Utils::GetRemoteOwnershipToken(victim->formID);
+    const auto source = Utils::GetLocalOwnershipTokenOnRunner(attacker->formID);
+    const auto target = Utils::GetRemoteOwnershipTokenOnRunner(victim->formID);
     if (!source || !target)
         return;
     const bool leader = m_world.GetPartyService().IsLeader();

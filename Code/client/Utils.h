@@ -34,9 +34,36 @@ static void Assert(const char* apExpression, const char* apMessage)
 }
 
 std::optional<uint32_t> GetServerId(entt::entity aEntity) noexcept;
+// Read-only lane diagnostics; this scope never serializes or skips an update.
+struct EntityDispatchScope
+{
+    EntityDispatchScope() noexcept;
+    ~EntityDispatchScope() noexcept;
+    EntityDispatchScope(const EntityDispatchScope&) = delete;
+    EntityDispatchScope& operator=(const EntityDispatchScope&) = delete;
+};
+void InitializeEntityIndex(entt::registry& aRegistry);
 std::optional<entt::entity> FindEntityByServerId(uint32_t aServerId) noexcept;
+std::optional<entt::entity> FindMovementEntityByServerId(uint32_t aServerId) noexcept;
+std::optional<entt::entity> FindLocalEntityByFormId(uint32_t aFormId) noexcept;
+std::optional<entt::entity> FindRemoteActorByServerId(uint32_t aServerId) noexcept;
 std::optional<ActorOwnershipToken> GetLocalOwnershipToken(uint32_t aFormId) noexcept;
 std::optional<ActorOwnershipToken> GetRemoteOwnershipToken(uint32_t aFormId) noexcept;
+
+// Only for synchronous World::Update handlers. Native hooks keep the original
+// helpers; neither these indexes nor their mutex serialize registry mutation.
+std::optional<entt::entity> FindEntityByServerIdOnRunner(uint32_t aServerId) noexcept;
+std::optional<ActorOwnershipToken> GetLocalOwnershipTokenOnRunner(uint32_t aFormId) noexcept;
+std::optional<ActorOwnershipToken> GetRemoteOwnershipTokenOnRunner(uint32_t aFormId) noexcept;
+
+template <class T> T* GetByServerIdOnRunner(uint32_t aServerId) noexcept
+{
+    if (const auto entity = FindEntityByServerIdOnRunner(aServerId))
+        if (const auto* form = World::Get().try_get<FormIdComponent>(*entity))
+            if (auto* native = TESForm::GetById(form->Id))
+                return Cast<T>(native);
+    return nullptr;
+}
 
 template <class T> T* GetByServerId(const uint32_t acServerId) noexcept
 {

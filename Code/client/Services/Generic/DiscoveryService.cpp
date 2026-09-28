@@ -206,8 +206,16 @@ void DiscoveryService::DetectGridCellChange(TESWorldSpace* aWorldSpace, bool aNe
 
 void DiscoveryService::VisitForms() noexcept
 {
-    static Set<uint32_t> s_previousForms;
-    s_previousForms = m_forms;
+    // Retain membership storage. Only changed forms allocate; the native census
+    // still runs at the same cadence and removals still precede queued adds.
+    // A generation stamp avoids clearing A membership flags every update.
+    if (++m_census == 0)
+    {
+        for (auto it = m_seenForms.begin(); it != m_seenForms.end(); ++it)
+            it.value() = 0;
+        ++m_census;
+    }
+    m_addedForms.clear();
 
     const auto visitor = [this](TESObjectREFR* apReference)
     {
@@ -219,14 +227,13 @@ void DiscoveryService::VisitForms() noexcept
         if (auto* pActor = Cast<Actor>(apReference))
             characters.ObserveDiscoveredActor(pActor);
 
-        if (!m_forms.count(formId))
+        if (!m_seenForms.count(formId))
         {
-            m_forms.insert(formId);
+            m_addedForms.push_back(formId);
 
             m_dispatcher.enqueue(ActorAddedEvent(formId));
         }
-        else
-            s_previousForms.erase(formId);
+        m_seenForms[formId] = m_census;
     };
 
     ProcessLists* const pProcessLists = ProcessLists::Get();
@@ -248,8 +255,17 @@ void DiscoveryService::VisitForms() noexcept
     // Not in actor holder
     visitor(PlayerCharacter::Get());
 
+    // Collect only removals in the previous set's order before new insertions
+    // can rehash it. Apply the same insert/erase sequence as the old set copy.
+    m_removedForms.clear();
+    for (uint32_t formId : m_forms)
+        if (m_seenForms[formId] != m_census)
+            m_removedForms.push_back(formId);
+    for (uint32_t formId : m_addedForms)
+        m_forms.insert(formId);
+
     // We dispatch removal events first to prevent needless reallocations
-    for (uint32_t formId : s_previousForms)
+    for (uint32_t formId : m_removedForms)
     {
         // A conform can remove both the 3D and the high-process handle. Keep the
         // existing discovery entry so rebuilding it does not cancel its assignment.
@@ -275,6 +291,7 @@ void DiscoveryService::VisitForms() noexcept
 
         m_dispatcher.trigger(ActorRemovedEvent(formId));
         m_forms.erase(formId);
+        m_seenForms.erase(formId);
     }
 
     // Dispatch all adds
@@ -286,7 +303,22 @@ void DiscoveryService::OnUpdate(const PreUpdateEvent& acUpdateEvent) noexcept
     TP_UNUSED(acUpdateEvent);
 
     VisitCell();
+    const auto scaleStarted = std::chrono::steady_clock::now();
     VisitForms();
+    // Read-only census timing includes the unchanged add/remove callbacks.
+    static thread_local uint64_t scaleCalls{}, scaleTotalUs{}, scaleMaxUs{};
+    static thread_local auto scaleNextLog = scaleStarted + std::chrono::seconds(5);
+    const auto scaleFinished = std::chrono::steady_clock::now();
+    const auto scaleUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        scaleFinished - scaleStarted).count());
+    ++scaleCalls; scaleTotalUs += scaleUs; scaleMaxUs = (std::max)(scaleMaxUs, scaleUs);
+    if (scaleFinished >= scaleNextLog)
+    {
+        spdlog::info("Scale cost: discovery batches={} total-us={} max-us={} tracked={}",
+            scaleCalls, scaleTotalUs, scaleMaxUs, m_forms.size());
+        scaleNextLog = scaleFinished + std::chrono::seconds(5);
+        scaleCalls = scaleTotalUs = scaleMaxUs = 0;
+    }
 }
 
 void DiscoveryService::OnConnected(const ConnectedEvent& acEvent) noexcept

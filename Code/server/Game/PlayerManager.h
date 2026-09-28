@@ -61,4 +61,5 @@ struct PlayerManager
 
 private:
     TMap m_players;
+    TiltedPhoques::Map<uint32_t, Player*> m_playersById;
 };

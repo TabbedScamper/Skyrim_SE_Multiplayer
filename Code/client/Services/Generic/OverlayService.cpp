@@ -320,7 +320,9 @@ void OverlayService::Create(RenderSystemD3D11* apRenderSystem) noexcept
     m_pProvider = TiltedPhoques::MakeUnique<D3D11RenderProvider>(apRenderSystem);
     m_pOverlay = new OverlayApp(m_pProvider.get(), new ::OverlayClient(m_transport, m_pProvider->Create()));
 
-    if (!m_pOverlay->Initialize())
+    const bool initialized = m_pOverlay->Initialize();
+    m_cefInitialized.store(initialized);
+    if (!initialized)
     {
         spdlog::error("Overlay could not be initialized");
         if (int32_t exitCode = CefGetExitCode())

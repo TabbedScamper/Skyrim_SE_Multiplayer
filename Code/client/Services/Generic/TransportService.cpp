@@ -1,6 +1,7 @@
 
 #include <Services/SmoothClock.h>
 #include <Services/TransportService.h>
+#include <steam/isteamnetworkingutils.h>
 
 #include <Events/ConnectedEvent.h>
 #include <Events/ConnectionErrorEvent.h>
@@ -56,6 +57,12 @@ TransportService::TransportService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
     , m_dispatcher(aDispatcher)
 {
+    // Max-sync: GameNetworkingSockets defaults to a 256 KB/s send rate per connection; at every-frame sync
+    // (~2.7 MB/s for two players) messages queued and the follower fell 550-650 ms behind (run 20260927-234313).
+    // Global defaults apply to every connection this client opens.
+    SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, 64 * 1024 * 1024);
+    SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 64 * 1024 * 1024);
+    SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendBufferSize, 32 * 1024 * 1024);
     m_updateConnection = m_dispatcher.sink<UpdateEvent>().connect<&TransportService::HandleUpdate>(this);
     m_settingsChangeConnection = m_dispatcher.sink<NotifySettingsChange>().connect<&TransportService::HandleNotifySettingsChange>(this);
     m_connectedConnection = m_dispatcher.sink<ConnectedEvent>().connect<&TransportService::HandleConnected>(this);
@@ -94,6 +101,10 @@ TransportService::TransportService(World& aWorld, entt::dispatcher& aDispatcher)
     };
 }
 
+// Max-sync bandwidth accounting (read by the sync_level bridge command).
+std::atomic<uint64_t> g_transportBytesSent{};
+std::atomic<uint64_t> g_transportMessagesSent{};
+
 bool TransportService::Send(const ClientMessage& acMessage) const noexcept
 {
     static thread_local ScratchAllocator s_allocator(1 << 18);
@@ -113,6 +124,8 @@ bool TransportService::Send(const ClientMessage& acMessage) const noexcept
 
         acMessage.Serialize(writer);
         TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), writer.Size());
+        g_transportBytesSent.fetch_add(writer.Size(), std::memory_order_relaxed);
+        g_transportMessagesSent.fetch_add(1, std::memory_order_relaxed);
 
         Client::Send(&packet);
 

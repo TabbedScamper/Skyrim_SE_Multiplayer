@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/SteamLobbyService.h>
+#include <Services/FarmMode.h>
 #include <Services/OverlayService.h>
 #include <Services/TransportService.h>
 #include <World.h>
@@ -534,6 +535,7 @@ void SteamLobbyService::OnUpdate(const UpdateEvent&) noexcept
 
 void SteamLobbyService::PumpCallbacks() noexcept
 {
+    if (FarmMode::Enabled()) return; // Farm owns loopback servers; do not auto-host a Steam lobby.
     // World::Update does not reliably run on the title screen. This queue is
     // also drained by PollMainMenuOptions, unlike the gameplay RunnerService.
     m_titleScreenTasks.Drain();
@@ -556,6 +558,10 @@ void SteamLobbyService::PumpCallbacks() noexcept
 
     if (m_serverProcess && WaitForSingleObject(m_serverProcess, 0) == WAIT_OBJECT_0)
     {
+        DWORD exitCode{};
+        GetExitCodeProcess(m_serverProcess, &exitCode);
+        spdlog::error("Local server exited: pid={} code=0x{:08X}; see game-root logs/STServerOut.log",
+            GetProcessId(m_serverProcess), exitCode);
         const bool wasHosting = m_isHost;
         if (wasHosting)
         {
@@ -964,6 +970,8 @@ bool SteamLobbyService::StartLocalServer() noexcept
 
     m_serverProcess = process.hProcess;
     m_serverThread = process.hThread;
+    spdlog::info("Local server launched: pid={} cwd={} executable={}", process.dwProcessId,
+        gameDirectory.string(), serverPath.string());
     if (!AssignProcessToJobObject(m_serverJob, m_serverProcess) || ResumeThread(m_serverThread) == static_cast<DWORD>(-1))
     {
         StopLocalServer();

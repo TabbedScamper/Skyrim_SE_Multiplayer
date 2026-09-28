@@ -15,9 +15,26 @@
 #include <atomic>
 #include <memory>
 #include <unordered_map>
+#include <chrono>
+
 
 namespace
 {
+// Count added work, excluding the chained native face-node update.
+struct LipCost
+{
+    std::chrono::steady_clock::time_point Started{HostFrameCost::Begin()};
+    bool Running{true};
+    void Stop()
+    {
+        if (Running)
+        {
+            HostFrameCost::End(3, Started);
+            Running = false;
+        }
+    }
+    ~LipCost() { Stop(); }
+};
 // Research, SkyrimSE 1.7.104 (kept here because this task's edit allowlist
 // excludes docs/REFERENCE_RESEARCH.md):
 // CommonLibSSE-NG, inspected BSFaceGenAnimationData.h, BSFaceGenNiNode.h,
@@ -260,6 +277,7 @@ struct ReplayStore
     }
     void OnUpdate(const PreUpdateEvent&)
     {
+        LipCost cost;
         std::lock_guard lock(Lock);
         const auto now = GetTickCount64();
         for (auto it = Lines.begin(); it != Lines.end();)
@@ -331,16 +349,24 @@ bool HookFaceUpdate(FaceData* apData, float aDelta, bool aUpdate)
 
     BSScopedLock<BSRecursiveLock> lock(apData->Lock);
     const bool nativeChanged = RealFaceUpdate(apData, aDelta, aUpdate);
+    LipCost cost;
     const bool changed = ApplyPhonemes(apData, *s_faceContext);
     return nativeChanged || changed;
 }
 
 void HookFaceNodeUpdate(FaceNode* apNode, void* apUpdate)
 {
+    if (!apNode)
+        return;
+    if (!apNode->Animation || !World::Get().GetTransport().IsConnected() ||
+        !World::Get().GetPartyService().IsInParty())
+        return RealFaceNodeUpdate(apNode, apUpdate);
+    LipCost cost;
     ActorReference reference(apNode->ActorHandle);
     auto* pActor = reference.Get();
-    if (!apNode->Animation || !LipSyncHooks::IsRemoteSpeaker(pActor))
+    if (!LipSyncHooks::IsRemoteSpeaker(pActor))
     {
+        cost.Stop();
         RealFaceNodeUpdate(apNode, apUpdate);
         return;
     }
@@ -377,10 +403,10 @@ void HookFaceNodeUpdate(FaceNode* apNode, void* apUpdate)
     s_faceContext = &context;
     {
         BSScopedLock<BSRecursiveLock> lock(apNode->Animation->Lock);
-        if ((apNode->Flags & 4) == 0)
-            ApplyPhonemes(apNode->Animation, context);
-        apNode->Animation->Update = true;
+        if ((apNode->Flags & 4) != 0 || ApplyPhonemes(apNode->Animation, context))
+            apNode->Animation->Update = true;
     }
+    cost.Stop();
     RealFaceNodeUpdate(apNode, apUpdate);
     s_faceContext = previous;
 }
@@ -391,8 +417,9 @@ namespace LipSyncHooks
 bool IsRemoteSpeaker(Actor* apActor) noexcept
 {
     auto& world = World::Get();
-    return apActor && world.GetTransport().IsConnected() && world.GetPartyService().IsInParty() &&
-        apActor->GetExtension()->IsRemote() && !apActor->GetExtension()->IsPlayer() &&
+    const auto* extension = apActor ? apActor->GetExtension() : nullptr;
+    return extension && world.GetTransport().IsConnected() && world.GetPartyService().IsInParty() &&
+        extension->IsRemote() && !extension->IsPlayer() &&
         !MenuTopicManager::IsPlayerDialogueSpeaker(apActor);
 }
 

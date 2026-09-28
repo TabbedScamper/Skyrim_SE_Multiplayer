@@ -77,6 +77,12 @@ enum ClientOpcode : unsigned char
     kRequestDialogueListen,
     kRequestSharedDrop,
     kRequestPlayerControlState,
+    kRequestWorldState,
+    kRequestWorldStateCell,
+    kRequestNpcWorn,
+    kRequestNpcLoot,
+    kRequestPlayerMirror, // Reserved. Experimental player replay was withdrawn.
+    kRequestHarness,
     kClientOpcodeMax
 };
 
@@ -156,5 +162,10 @@ enum ServerOpcode : unsigned char
     kNotifyDialogueListen,
     kNotifySharedDrop,
     kNotifyPlayerControlState,
+    kNotifyWorldState,
+    kNotifyNpcWorn,
+    kNotifyNpcLoot,
+    kNotifyPlayerMirror, // Reserved. Experimental player replay was withdrawn.
+    kNotifyHarness,
     kServerOpcodeMax
 };

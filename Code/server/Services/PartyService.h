@@ -34,6 +34,12 @@ struct PartyService
         Vector<uint32_t> LoadedPlayerIds;
         Vector<uint32_t> GameplayReadyPlayerIds;
         GameId CachedWeather{};
+        // Host sky state (weather blend and wind), replayed to members who join or reload.
+        bool CachedHasSky{};
+        GameId CachedLastWeather{};
+        float CachedWeatherPercent{1.f};
+        float CachedWindSpeed{};
+        float CachedWindAngle{};
         uint8_t CampaignMode{};
         uint8_t SessionState{};
         uint64_t StartEpoch{};

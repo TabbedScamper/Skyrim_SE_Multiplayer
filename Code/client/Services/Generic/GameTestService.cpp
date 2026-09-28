@@ -1,6 +1,11 @@
 #include <TiltedOnlinePCH.h>
+#include <Services/WorldStateService.h>
+#include <Services/HarnessService.h>
+#include <Services/FarmMode.h>
 
 #include <Services/GameTestService.h>
+#include <Camera/PlayerCamera.h>
+#include <Systems/AnimationSystem.h>
 #include <Misc/NativeDispatchDiagnostic.h>
 #include <Services/GameSettingsService.h>
 #include <Services/OverlayService.h>
@@ -33,6 +38,7 @@
 #include <Games/Skyrim/Camera/TESCameraState.h>
 #include <Games/Skyrim/AI/AIProcess.h>
 #include <Games/Skyrim/Actor.h>
+#include <Games/Skyrim/ArmorAttachmentTrace.h>
 #include <Forms/TESIdleForm.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Combat/CombatController.h>
@@ -53,10 +59,176 @@
 #include <Structs/AnimationGraphDescriptorManager.h>
 #include <OverlayApp.hpp>
 #include <OverlayRenderHandler.hpp>
+#include <Games/Memory.h>
+#include <Services/CreatorTogether.h>
+#include <MinHook.h>
+
+// Research handoff: perf2-r1-check/reference-research.patch records the native
+// call paths and prior art. This task cannot edit the shared research document.
+namespace HostFrameCost
+{
+// 0 cull, 1 capture, 2 headtrack, 3 lips, 4 naked, 5 trigger, 6 doors, 7 players,
+// 8 pose selection, 9 interest publication, 10 interest claims, 11 forced graphs.
+// These are inclusive elapsed scopes, including worker waits.
+std::array<std::atomic<uint64_t>, 12> s_nanoseconds{}, s_calls{}, s_maxNs{};
+std::atomic_bool s_enabled{};
+std::atomic<uint64_t> s_untilMs{};
+std::atomic<uint64_t> s_session{};
+bool s_doorTimingInstalled{};
+std::atomic<uint32_t> s_triggerTimingInstalled{};
+
+void TriggerTimingInstalled() noexcept
+{
+    s_triggerTimingInstalled.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint64_t Session() noexcept
+{
+    return s_session.load(std::memory_order_relaxed);
+}
+
+std::chrono::steady_clock::time_point Begin() noexcept
+{
+    return s_enabled.load(std::memory_order_relaxed) ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
+}
+
+void Add(uint32_t aFeature, uint64_t aNanoseconds) noexcept
+{
+    if (aFeature >= s_nanoseconds.size() || !s_enabled.load(std::memory_order_relaxed))
+        return;
+    s_nanoseconds[aFeature].fetch_add(aNanoseconds, std::memory_order_relaxed);
+    s_calls[aFeature].fetch_add(1, std::memory_order_relaxed);
+    auto previous = s_maxNs[aFeature].load(std::memory_order_relaxed);
+    while (previous < aNanoseconds && !s_maxNs[aFeature].compare_exchange_weak(
+        previous, aNanoseconds, std::memory_order_relaxed)) {}
+}
+
+void End(uint32_t aFeature, std::chrono::steady_clock::time_point aStart) noexcept
+{
+    if (aStart != std::chrono::steady_clock::time_point{})
+        Add(aFeature, std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - aStart).count());
+}
+
+void Report(World& aWorld, uint64_t aNow) noexcept
+{
+    static uint64_t next{}, frames{}, previousCaptureUs{}, windowStart{}, maxWorldGapUs{}, generation{};
+    static GameLoopDiagnostic previousLoop{};
+    const bool enabled = aNow < s_untilMs.load(std::memory_order_relaxed) &&
+        aWorld.GetTransport().IsConnected();
+    const bool wasEnabled = s_enabled.load(std::memory_order_relaxed);
+    if (!enabled && !wasEnabled)
+        return;
+    const auto loop = GetGameLoopDiagnostic();
+    if (enabled && !wasEnabled)
+    {
+        for (size_t i = 0; i < s_nanoseconds.size(); ++i)
+        {
+            s_nanoseconds[i].exchange(0, std::memory_order_relaxed);
+            s_calls[i].exchange(0, std::memory_order_relaxed);
+            s_maxNs[i].exchange(0, std::memory_order_relaxed);
+        }
+        previousCaptureUs = ObjectService::GetPreStepPlaybackDiagnostic().HostScanTotalUs;
+        previousLoop = loop;
+        windowStart = aNow;
+        frames = maxWorldGapUs = 0;
+        next = aNow + 5000;
+        s_enabled.store(true, std::memory_order_relaxed);
+        s_session.store(++generation, std::memory_order_relaxed);
+        spdlog::info("Host frame profile: started wallMs={} session={} leader={} remoteCameraOverride=native-tracking-phase actionBudget=1 (inclusive elapsed scopes)",
+            aNow, generation, aWorld.GetPartyService().IsLeader());
+    }
+    if (!enabled && !wasEnabled)
+        return;
+    ++frames;
+    maxWorldGapUs = (std::max)(maxWorldGapUs, uint64_t{loop.WorldLastEntryGapUs});
+    if (enabled && aNow < next)
+        return;
+    s_enabled.store(enabled, std::memory_order_relaxed);
+    if (!enabled)
+        s_session.store(0, std::memory_order_relaxed);
+    next = aNow + 5000;
+    std::array<double, 12> us{}, maxUs{};
+    std::array<uint64_t, 12> calls{};
+    for (size_t i = 0; i < us.size(); ++i)
+    {
+        us[i] = static_cast<double>(s_nanoseconds[i].exchange(0, std::memory_order_relaxed)) / (1000.0 * frames);
+        maxUs[i] = s_maxNs[i].exchange(0, std::memory_order_relaxed) / 1000.0;
+        calls[i] = s_calls[i].exchange(0, std::memory_order_relaxed);
+    }
+    // Aggregate once per report, not with extra clocks/atomics on the workers.
+    for (size_t i = 9; i <= 11; ++i)
+    {
+        us[0] += us[i];
+        maxUs[0] = (std::max)(maxUs[0], maxUs[i]);
+        calls[0] += calls[i];
+    }
+    const auto captureUs = ObjectService::GetPreStepPlaybackDiagnostic().HostScanTotalUs;
+    us[1] = static_cast<double>(captureUs >= previousCaptureUs ? captureUs - previousCaptureUs : captureUs) / frames;
+    previousCaptureUs = captureUs;
+    spdlog::info("Host frame cost: cull {} us, capture {} us, headtrack {} us, lips {} us, naked {} us, trigger {} us, doors {} us, remote players {} us (wallMs={} windowMs={} worldUpdates={} inclusive elapsed/world update; overlapping worker durations, NOT render critical path; capture=active physics lane only, doors=automatic distance controller including callback, excludes vote service; doorsInstalled={})",
+        us[0], us[1], us[2], us[3], us[4], s_triggerTimingInstalled.load(std::memory_order_relaxed) == 2 ? us[5] : -1.0,
+        s_doorTimingInstalled ? us[6] : -1.0, us[7], aNow, aNow - windowStart, frames, s_doorTimingInstalled);
+    spdlog::info("Host frame scope peaks: wallMs={} cull={}/{} headtrack={}/{} lips={}/{} naked={}/{} trigger={}/{} players={}/{} poseSelection={}/{} doors={}/{} (maxUs/calls; poseSelectionMeanUs={})",
+        aNow, maxUs[0], calls[0], maxUs[2], calls[2], maxUs[3], calls[3], maxUs[4], calls[4],
+        maxUs[5], calls[5], maxUs[7], calls[7], maxUs[8], calls[8], maxUs[6], calls[6], us[8]);
+    spdlog::info("Host frame cadence: wallMs={} maxWorldGapUs={} gapsOver50Ms={} dispatcherUs={} vmAppUs={} vmNativeUs={} (interval totals; VM/update thread, not render frame time)",
+        aNow, maxWorldGapUs, loop.WorldGapsOver50Ms - previousLoop.WorldGapsOver50Ms,
+        loop.WorldDispatcherTotalUs - previousLoop.WorldDispatcherTotalUs,
+        loop.VmAppTotalUs - previousLoop.VmAppTotalUs, loop.VmOriginalTotalUs - previousLoop.VmOriginalTotalUs);
+    spdlog::info("Host cull breakdown: wallMs={} publish={}/{}/{} claim={}/{}/{} forcedGraph={}/{}/{} (meanUsPerWorldUpdate/maxUs/calls; claim includes mutex wait; summed worker elapsed, not frame critical path)",
+        aNow, us[9], maxUs[9], calls[9], us[10], maxUs[10], calls[10], us[11], maxUs[11], calls[11]);
+    spdlog::info("Host frame coverage: wallMs={} triggerHooks={}/2 automaticDoorHook={} (missing coverage reports -1, not zero cost)",
+        aNow, s_triggerTimingInstalled.load(std::memory_order_relaxed), s_doorTimingInstalled);
+    previousLoop = loop;
+    windowStart = aNow;
+    frames = maxWorldGapUs = 0;
+    if (!enabled)
+        spdlog::info("Host frame profile: stopped wallMs={}", aNow);
+}
+}
 
 namespace
 {
-constexpr wchar_t cTestPipeName[] = LR"(\\.\pipe\SkyrimSEMultiplayer.Test)";
+// Read-only timing at the caller of the existing automatic-door hook. 40201 /
+// 140738120 is NiTimeController slot 0x27, void(this, NiUpdateData*), and calls +0x58
+// only on distance crossings. 17934 / 1402848F0 installs 17933 / 1402846B0
+// through 140738110. Do not hook 17933 twice or alter its arguments/decisions.
+// 140EE09B0 passes the data pointer in RDX in this exe. The older CommonLib
+// float signature is not the 1.7.104 call-site ABI; forward the pointer unchanged.
+using TDistanceUpdate = void(void*, void*);
+TDistanceUpdate* s_distanceUpdate{};
+uintptr_t s_automaticDoorCallback{};
+
+void HookDistanceUpdate(void* apController, void* apUpdateData)
+{
+    const bool measure = HostFrameCost::Session() &&
+        *reinterpret_cast<const uintptr_t*>(static_cast<const uint8_t*>(apController) + 0x58) == s_automaticDoorCallback;
+    const auto started = measure ? HostFrameCost::Begin() : std::chrono::steady_clock::time_point{};
+    s_distanceUpdate(apController, apUpdateData);
+    HostFrameCost::End(6, started);
+}
+
+TiltedPhoques::Initializer s_doorCostHook([]() {
+    POINTER_SKYRIMSE(TDistanceUpdate, update, 40201);
+    using TDoorCallback = void(void*, uint32_t, bool);
+    POINTER_SKYRIMSE(TDoorCallback, callback, 17933);
+    s_automaticDoorCallback = reinterpret_cast<uintptr_t>(callback.Get());
+    s_distanceUpdate = update.Get();
+    TiltedPhoques::FunctionHookManager::GetInstance();
+    const auto target = reinterpret_cast<void*>(update.Get());
+    const auto created = MH_CreateHook(target, reinterpret_cast<void*>(HookDistanceUpdate),
+        reinterpret_cast<void**>(&s_distanceUpdate));
+    if (created == MH_OK)
+    {
+        const auto enabled = MH_EnableHook(target);
+        HostFrameCost::s_doorTimingInstalled = enabled == MH_OK;
+        if (enabled != MH_OK)
+            MH_RemoveHook(target);
+    }
+});
+
 constexpr DWORD cPipeRejectRemoteClients = 0x00000008;
 std::atomic<uint64_t> s_diagnosticCaptureUntilMs{};
 
@@ -152,6 +324,623 @@ const char* JsonBool(bool aValue)
     return aValue ? "true" : "false";
 }
 
+// Bridge-only capture driver. Requests and published JSON cross threads; all
+// engine calls and the walking state belong exclusively to OnGameThread.
+namespace IntroDriver
+{
+std::mutex mutex;
+std::string pending, published = "\"state\":\"idle\"";
+uint64_t queuedSequence{}, appliedSequence{};
+bool active{}, ownsAI{};
+void* ownedController{};
+bool jumping{}, jumpIssued{}, jumpAirborne{};
+uint64_t jumpIssuedAt{};
+uint32_t jumpState = UINT32_MAX, jumpRequestedState = UINT32_MAX;
+bool walkPace{};
+bool harnessCombatTravel{};
+bool harnessNudge{};
+bool harnessArrival{};
+uint64_t arrivalStillSince{};
+NiPoint3 arrivalPoint{};
+NiPoint3 arrivalTargetPoint{};
+uint64_t jumpStart{};
+float jumpHeading{};
+uint32_t targetId{}, markerId{}, startCell{}, questId{};
+uint16_t objectiveId{};
+float radius = 64.f, distance{}, bestDistance{};
+NiPoint3 submittedPoint{};
+NiPoint3 progressPoint{};
+uint64_t started{}, lastProgress{}, nextTick{}, clearCombatSince{};
+int32_t pathId = -1;
+std::string state = "idle", reason, creator = "idle";
+std::string questFilter;
+uint32_t harnessObjectiveRef{};
+uint16_t harnessObjectiveIndex{};
+
+float Number(const std::string& line, const char* key, float fallback)
+{
+    auto pos = line.find(std::string("\"") + key + "\"");
+    if (pos == std::string::npos) return fallback;
+    pos = line.find(':', pos);
+    if (pos == std::string::npos) throw std::runtime_error("invalid number");
+    ++pos;
+    while (pos < line.size() && (std::isspace(static_cast<unsigned char>(line[pos])) || line[pos] == '"')) ++pos;
+    char* end{};
+    const float value = std::strtof(line.c_str() + pos, &end);
+    if (end == line.c_str() + pos || !std::isfinite(value)) throw std::runtime_error("invalid finite number");
+    return value;
+}
+
+bool Driven(PlayerCharacter* player)
+{
+    // ID 40586 / 1407559F0 reads and writes this bit.
+    return player && (reinterpret_cast<const uint8_t*>(player)[0xBEA] & 8) != 0;
+}
+
+void* Controller(PlayerCharacter* player)
+{
+    // Actor getter 1406A51B0 returns the smart pointer at +150 in 1.7.104.
+    void* controller{};
+    if (player) std::memcpy(&controller, reinterpret_cast<uint8_t*>(player) + 0x150, sizeof(controller));
+    return controller;
+}
+
+bool ControlsDriven(void* controller)
+{
+    if (!controller) return false;
+    auto** table = *reinterpret_cast<void***>(controller);
+    return reinterpret_cast<bool (*)(void*)>(table[0xF])(controller);
+}
+
+void SetMovementMode(void* controller, bool ai)
+{
+    // CommonLib MovementControllerNPC slots 0C/0D, IDs 41709/41710.
+    // Do not set PlayerCharacter's quest AI bit: it revives MQ101's old package.
+    auto** table = *reinterpret_cast<void***>(controller);
+    reinterpret_cast<void (*)(void*)>(table[ai ? 0xC : 0xD])(controller);
+}
+
+void Release(PlayerCharacter* player)
+{
+    arrivalStillSince = 0;
+    if (!ownsAI) return;
+    if (player && Controller(player) == ownedController && (jumping || harnessNudge))
+    {
+        auto* direct = static_cast<uint8_t*>(ownedController) + 0x138;
+        auto** table = *reinterpret_cast<void***>(direct);
+        reinterpret_cast<void (*)(void*)>(table[8])(direct);
+    }
+    if (player && !Driven(player) && Controller(player) == ownedController && !ControlsDriven(ownedController))
+    {
+        using Stop = void(Actor*, float);
+        POINTER_SKYRIMSE(Stop, stop, 37817);
+        stop.Get()(player, 0.f);
+        SetMovementMode(ownedController, false);
+    }
+    ownsAI = false;
+    ownedController = nullptr;
+    jumping = jumpIssued = jumpAirborne = false;
+    harnessNudge = false;
+    pathId = -1;
+}
+
+void Finish(PlayerCharacter* player, const char* result, const char* why)
+{
+    Release(player);
+    active = false;
+    harnessCombatTravel = false;
+    harnessNudge = false;
+    harnessArrival = false;
+    state = result;
+    reason = why;
+    if (markerId)
+    {
+        if (auto* marker = Cast<TESObjectREFR>(TESForm::GetById(markerId)))
+        {
+            // The disabled, nonpersistent marker has no loaded 3D. Mark it
+            // deleted through TESForm's native virtual; never call the latent
+            // ObjectReference.Delete wrapper with a fabricated VM stack.
+            auto** table = *reinterpret_cast<void***>(marker);
+            reinterpret_cast<void (*)(TESForm*, bool)>(table[0x23])(marker, true);
+        }
+        markerId = 0;
+    }
+    spdlog::info("Intro driver: {} reason={} target={:X} distance={}", state, reason, targetId, distance);
+}
+
+float Distance(const NiPoint3& a, const NiPoint3& b)
+{
+    const float x = a.x - b.x, y = a.y - b.y, z = a.z - b.z;
+    return std::sqrt(x*x + y*y + z*z);
+}
+
+int32_t RunPath(PlayerCharacter* player, TESObjectREFR* target)
+{
+    // Compose the same engine request as ID37893, with native run parameters
+    // (ID37823, speed 2). ID37893 clamps its argument to 1, which only walks.
+    using Construct = void*(void*);
+    using Setup = void(Actor*, void**, const NiPoint3*, TESObjectCELL*, TESWorldSpace*, float, void*);
+    using Parameters = void(Actor*, void**);
+    using Submit = bool(Actor*, void**);
+    using Worldspace = TESWorldSpace*(TESObjectREFR*);
+    using Register = int32_t(void*, void*);
+    POINTER_SKYRIMSE(Construct, construct, 30875);
+    POINTER_SKYRIMSE(Setup, setup, 37820);
+    POINTER_SKYRIMSE(Parameters, runParameters, 37823);
+    POINTER_SKYRIMSE(Parameters, walkParameters, 37822);
+    POINTER_SKYRIMSE(Submit, submit, 37801);
+    POINTER_SKYRIMSE(Worldspace, worldspace, 19816);
+    POINTER_SKYRIMSE(Register, registerPath, 91842);
+    POINTER_SKYRIMSE(void*, manager, 403558);
+    void* memory = Memory::Allocate(0x100);
+    if (!memory) return -1;
+    struct RequestRef
+    {
+        void* value;
+        ~RequestRef()
+        {
+            if (value && InterlockedDecrement(reinterpret_cast<volatile LONG*>(static_cast<uint8_t*>(value) + 8)) == 0)
+            {
+                auto** table = *reinterpret_cast<void***>(value);
+                reinterpret_cast<void (*)(void*, bool)>(table[0])(value, true);
+            }
+        }
+    } request{construct.Get()(memory)};
+    InterlockedIncrement(reinterpret_cast<volatile LONG*>(static_cast<uint8_t*>(request.value) + 8));
+    // Aim inside the requested 3D completion sphere: native stopping tolerance
+    // and target height can otherwise leave an ended path just outside it
+    // (observed 65.3 vs 64). 35 is the native PathToReference default.
+    const float nativeRadius = (std::min)(35.f, radius * 0.5f);
+    setup.Get()(player, &request.value, &target->position, target->GetParentCellEx(), worldspace.Get()(target), nativeRadius, nullptr);
+    (walkPace ? walkParameters.Get() : runParameters.Get())(player,
+        reinterpret_cast<void**>(static_cast<uint8_t*>(request.value) + 0xF8));
+    if (!submit.Get()(player, &request.value)) return -1;
+    return registerPath.Get()(*manager.Get(), request.value);
+}
+
+bool CanJump(PlayerCharacter* player)
+{
+    using InJump = bool(Actor*);
+    POINTER_SKYRIMSE(InJump, inJump, 37949);
+    const auto actorFlags = player->actorState.flags1;
+    if ((actorFlags & ((1 << 8) | (1 << 10) | (0xF << 14) | (7 << 18) | (0xF << 21) | (7 << 25))) ||
+        (player->actorState.flags2 & (1 << 13)) || inJump.Get()(player)) return false;
+    using GetController = void*(Actor*);
+    POINTER_SKYRIMSE(GetController, getController, 37258);
+    auto* controller = static_cast<uint8_t*>(getController.Get()(player));
+    uint32_t flags{};
+    if (controller) std::memcpy(&flags, controller + 0x218, sizeof(flags));
+    return (flags & (1 << 10)) != 0;
+}
+
+bool ReadJumpState(PlayerCharacter* player)
+{
+    // 37258 returns the controller. 78280 / 141065F00 transfers wantState
+    // at +21C into context.currentState at +200; these are not CanJump flags.
+    using GetController = void*(Actor*);
+    POINTER_SKYRIMSE(GetController, getController, 37258);
+    auto* controller = player ? static_cast<uint8_t*>(getController.Get()(player)) : nullptr;
+    jumpState = jumpRequestedState = UINT32_MAX;
+    if (!controller) return false;
+    std::memcpy(&jumpState, controller + 0x200, sizeof(jumpState));
+    std::memcpy(&jumpRequestedState, controller + 0x21C, sizeof(jumpRequestedState));
+    return true;
+}
+
+bool SameSpace(PlayerCharacter* player, TESObjectREFR* target)
+{
+    auto* a = player->GetParentCellEx();
+    auto* b = target->GetParentCellEx();
+    return a && b && (a == b || (a->worldspace && a->worldspace == b->worldspace));
+}
+
+TESObjectREFR* CoordinateTarget(PlayerCharacter* player, TESObjectCELL* cell, const std::string& request)
+{
+    NiPoint3 point{};
+    point.x = Number(request, "x", NAN);
+    point.y = Number(request, "y", NAN);
+    point.z = Number(request, "z", NAN);
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) throw std::runtime_error("form_id or x,y,z required");
+    if (Distance(player->position, point) > 8192.f) throw std::runtime_error("coordinate target exceeds local 8192-unit range");
+    // A disabled XMarker in this same cell provides a native reference target.
+    // Recreate it for recovery: Finish deleted the previous path's marker.
+    using ObjectReference = TESObjectREFR;
+    PAPYRUS_FUNCTION(TESObjectREFR*, ObjectReference, PlaceAtMe, TESForm*, int32_t, bool, bool);
+    auto* target = s_pPlaceAtMe ? s_pPlaceAtMe(player, TESForm::GetById(0x3B), 1, false, true) : nullptr;
+    if (target) { markerId = target->formID; target->MoveTo(cell, point); }
+    return target;
+}
+
+TESObjectREFR* Objective(PlayerCharacter* player)
+{
+    TESObjectREFR* selected{};
+    float nearest = FLT_MAX;
+    // The driver follows one named quest or the two intro quests. Discover
+    // those forms once in 32-entry slices, never a full quest scan per event.
+    static const void* questData{};
+    static uint32_t questLength{}, questCursor{};
+    static std::string cachedFilter;
+    static std::array<uint32_t, 2> resolved{};
+    auto* mods = ModManager::Get();
+    if (!mods) return nullptr;
+    if (questData != mods->quests.data || questLength != mods->quests.length || cachedFilter != questFilter)
+    {
+        questData = mods->quests.data; questLength = mods->quests.length;
+        cachedFilter = questFilter; questCursor = 0; resolved = {};
+    }
+    for (unsigned budget = 0; questCursor < questLength && budget < 32; ++budget)
+    {
+        auto* quest = mods->quests[questCursor++];
+        if (!quest) continue;
+        const std::string_view name = quest->idName.AsAscii();
+        if (name == (questFilter.empty() ? "MQ101" : questFilter)) resolved[0] = quest->formID;
+        if (questFilter.empty() && name == "MQ101DragonAttack") resolved[1] = quest->formID;
+        if (resolved[0] && (!questFilter.empty() || resolved[1])) { questCursor = questLength; break; }
+    }
+    if (questCursor < questLength) return nullptr;
+    unsigned objectiveBudget = 64, targetBudget = 128;
+    for (auto id : resolved)
+    {
+        auto* quest = id ? Cast<TESQuest>(TESForm::GetById(id)) : nullptr;
+        if (!quest || quest->IsStopped() || !quest->IsActive()) continue;
+        const std::string_view name = quest->idName.AsAscii();
+        if (!questFilter.empty() ? name != questFilter : (name != "MQ101" && name != "MQ101DragonAttack")) continue;
+        for (auto* objective : quest->objectives)
+        {
+            if (!objectiveBudget--) throw std::runtime_error("objective_lookup_budget_exceeded");
+            if (!objective || objective->state != 1) continue;
+            void** targets{};
+            uint32_t count{};
+            std::memcpy(&targets, objective->pad10, sizeof(targets));
+            std::memcpy(&count, objective->pad10 + 8, sizeof(count));
+            if (count > 128) continue;
+            using GetTarget = uint32_t*(void*, uint32_t*, bool, const TESQuest*);
+            POINTER_SKYRIMSE(GetTarget, getTarget, 25284);
+            for (uint32_t i = 0; targets && i < count; ++i)
+            {
+                if (!targetBudget--) throw std::runtime_error("objective_target_budget_exceeded");
+                if (!targets[i]) continue;
+                uint32_t handle{};
+                getTarget.Get()(targets[i], &handle, false, quest);
+                auto* ref = TESObjectREFR::GetByHandle(handle);
+                if (!ref || ref == player || !SameSpace(player, ref)) continue;
+                // Match native objective enumeration 1403DD6B0: resolve the
+                // alias, set quest condition context, then evaluate target+8.
+                // A displayed objective can retain several inactive targets.
+                alignas(8) std::array<uint8_t, 0x38> check{};
+                std::memcpy(check.data(), &ref, sizeof(ref));
+                using Context = void(void*, TESForm*);
+                using Evaluate = bool(void*, void*);
+                POINTER_SKYRIMSE(Context, setContext, 29872);
+                POINTER_SKYRIMSE(Evaluate, evaluate, 29889);
+                setContext.Get()(check.data(), quest);
+                if (!evaluate.Get()(static_cast<uint8_t*>(targets[i]) + 8, check.data())) continue;
+                // The ordered host scenario selects a fork only among native,
+                // displayed, condition-valid targets. Ordinary driving is unchanged.
+                if (harnessObjectiveRef && HarnessService::IsEnabled() && HarnessService::OwnsDriver() &&
+                    objective->stageId == harnessObjectiveIndex && ref->formID != harnessObjectiveRef) continue;
+                const float d = Distance(player->position, ref->position);
+                if (d >= nearest) continue;
+                selected = ref;
+                nearest = d;
+                questId = quest->formID;
+                objectiveId = objective->stageId;
+            }
+        }
+    }
+    return selected;
+}
+
+void Tick()
+{
+    const auto now = GetTickCount64();
+    std::string request;
+    { std::scoped_lock lock(mutex); request.swap(pending); }
+    if (request.empty() && now < nextTick) return;
+    nextTick = now + 100;
+    auto* player = PlayerCharacter::Get();
+    auto* ui = UI::Get();
+    auto* cell = player ? player->GetParentCellEx() : nullptr;
+    const bool creatorOpen = ui && ui->GetMenuOpen(BSFixedString("RaceSex Menu"));
+    const bool loading = !ui || ui->GetMenuOpen(BSFixedString("Loading Menu")) || ui->GetMenuOpen(BSFixedString("Main Menu"));
+    POINTER_SKYRIMSE(void*, controlMap, 400863);
+    uint32_t controls{};
+    if (auto* map = *controlMap.Get()) std::memcpy(&controls, static_cast<uint8_t*>(map) + 0x120, sizeof(controls));
+    try
+    {
+        const auto command = GetJsonString(request, "command");
+        if (command == "creator_finish")
+        {
+            const auto name = GetJsonString(request, "name");
+            if (!creatorOpen || !player) creator = "failed: creator not open";
+            else if (CreatorTogether::IsDone()) creator = "already_done: existing name retained";
+            else if (ui->GetMenuOpen(BSFixedString("MessageBoxMenu"))) creator = "failed: dismiss existing message box first";
+            else
+            {
+                auto* menu = ui->FindMenuByName(BSFixedString("RaceSex Menu"));
+                using ChangeName = void(void*, const char*);
+                POINTER_SKYRIMSE(ChangeName, changeName, 52415);
+                if (!menu) creator = "failed: menu unavailable";
+                else
+                {
+                    changeName.Get()(menu, name.c_str());
+                    creator = CreatorTogether::IsDone() ? "done_held" : "close_requested";
+                    spdlog::info("Intro driver: creator_finish native ChangeName name={} held={}", name, CreatorTogether::IsDone());
+                }
+            }
+        }
+        else if (command == "walk_cancel") Finish(player, "cancelled", "requested");
+        else if (command == "jump_toward" || command == "walk_nudge")
+        {
+            const bool nudge = command == "walk_nudge";
+            if (nudge && !(HarnessService::IsEnabled() && HarnessService::OwnsDriver()))
+                throw std::runtime_error("walk_nudge requires active test harness");
+            if (active) Finish(player, "cancelled", "replaced by jump_toward");
+            auto form = GetJsonString(request, "form_id");
+            auto* target = form.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            if (nudge && form.empty() && player && cell && !loading && !creatorOpen)
+                target = CoordinateTarget(player, cell, request);
+            if (!player || !cell || !player->GetNiNode() || loading || creatorOpen || !target || !SameSpace(player, target) ||
+                Driven(player) || !(controls & 1) || !(controls & (1 << 10)) || !ControlsDriven(Controller(player)) ||
+                (!nudge && player->IsInCombat()) || player->actorState.IsDeadState() || player->GetNativeMountFormId() || !CanJump(player))
+                Finish(player, "failed", "jump requires an eligible free player and a local target");
+            else if (reinterpret_cast<uint8_t*>(Controller(player))[0x1C6])
+                Finish(player, "failed", "native direct movement already owned");
+            else if (Distance(player->position, target->position) > 1200.f)
+                Finish(player, "failed", "jump target exceeds 1200-unit range");
+            else
+            {
+                targetId = target->formID;
+                startCell = cell->formID;
+                started = lastProgress = jumpStart = now;
+                progressPoint = player->position;
+                ownedController = Controller(player);
+                SetMovementMode(ownedController, true);
+                ownsAI = active = true;
+                jumping = !nudge;
+                harnessNudge = nudge;
+                radius = nudge ? 35.f : std::clamp(Number(request, "radius", 64.f), 8.f, 256.f);
+                walkPace = nudge;
+                jumpIssued = jumpAirborne = false;
+                jumpIssuedAt = 0;
+                ReadJumpState(player);
+                auto* direct = static_cast<uint8_t*>(ownedController) + 0x138;
+                auto** table = *reinterpret_cast<void***>(direct);
+                NiPoint3 direction{};
+                jumpHeading = std::atan2(target->position.x - player->position.x, target->position.y - player->position.y);
+                // The direct handler consumes actor-relative movement angles,
+                // like PlayerControls, not the planner's world-facing angles.
+                direction.z = std::remainder(jumpHeading - player->rotation.z, 6.283185307f);
+                reinterpret_cast<void (*)(void*, const NiPoint3*)>(table[2])(direct, &direction);
+                reinterpret_cast<void (*)(void*, float)>(table[3])(direct, nudge ? 1.f : 2.f);
+                spdlog::info("Intro driver: {} target={:X} worldHeading={} facing={} relativeHeading={} speed={} position={},{},{}", nudge ? "walk nudge" : "jump runup", targetId,
+                    jumpHeading, player->rotation.z, direction.z, nudge ? 1.f : 2.f, player->position.x, player->position.y, player->position.z);
+                state = nudge ? "walk_nudge" : "jump_runup";
+                reason.clear();
+            }
+        }
+        else if (command == "walk_to" || command == "follow_objective")
+        {
+            questFilter = GetJsonString(request, "quest");
+            harnessObjectiveRef = 0;
+            harnessObjectiveIndex = 0;
+            if (command == "follow_objective" && HarnessService::IsEnabled() && HarnessService::OwnsDriver())
+            {
+                const auto preferred = GetJsonString(request, "objective_ref");
+                if (!preferred.empty())
+                {
+                    const auto index = Number(request, "objective_id", -1.f);
+                    if (index < 0 || index > UINT16_MAX || std::floor(index) != index)
+                        throw std::runtime_error("objective_id must be 0..65535");
+                    harnessObjectiveIndex = static_cast<uint16_t>(index);
+                    harnessObjectiveRef = static_cast<uint32_t>(std::stoul(preferred, nullptr, 16));
+                }
+            }
+            const auto pace = GetJsonString(request, "pace");
+            if (!pace.empty() && pace != "run" && pace != "walk") throw std::runtime_error("pace must be run or walk");
+            const bool requestedWalk = pace == "walk";
+            if (command == "walk_to" && active) Finish(player, "cancelled", "replaced by walk_to");
+            if (active && requestedWalk != walkPace) Finish(player, "cancelled", "requested pace changed");
+            if (command == "follow_objective" && active && player)
+            {
+                if (auto* next = Objective(player); next && next->formID != targetId)
+                    Finish(player, "cancelled", "active objective changed");
+            }
+            // Repeated follow requests are idempotent while a path is running.
+            // Re-resolve on the next leg, preserving the chosen fork for this leg.
+            harnessCombatTravel = HarnessService::IsEnabled() && HarnessService::OwnsDriver() &&
+                GetJsonString(request, "allow_combat") == "true";
+            if (!active)
+            {
+                walkPace = requestedWalk;
+                reason.clear();
+                questId = objectiveId = 0;
+                targetId = 0;
+                radius = Number(request, "radius", 64.f);
+                if (radius < 8.f || radius > 1024.f) throw std::runtime_error("radius must be 8..1024");
+                if (!player || !cell || !player->currentProcess || !player->GetNiNode() || loading || creatorOpen)
+                    Finish(player, "waiting", "player or world unavailable");
+                else if (Driven(player) || !ControlsDriven(Controller(player)) || !(controls & 1))
+                    Finish(player, "waiting", "vanilla or co-op still owns player controls");
+                else
+                {
+                    TESObjectREFR* target{};
+                    if (command == "follow_objective") target = Objective(player);
+                    else if (auto form = GetJsonString(request, "form_id"); !form.empty())
+                        target = Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+                    else
+                        target = CoordinateTarget(player, cell, request);
+                    if (!target) Finish(player, "waiting", "no resolved active objective or reference");
+                    else if (!SameSpace(player, target)) Finish(player, "failed", "target is across cells; approach a local load door first");
+                    else
+                    {
+                        targetId = target->formID;
+                        startCell = cell->formID;
+                        bestDistance = distance = Distance(player->position, target->position);
+                        progressPoint = player->position;
+                        started = lastProgress = now;
+                        harnessArrival = HarnessService::IsEnabled() && HarnessService::OwnsDriver();
+                        arrivalStillSince = 0;
+                        clearCombatSince = 0;
+                        active = true;
+                        state = "starting";
+                    }
+                }
+            }
+        }
+        if (active)
+        {
+            auto* target = Cast<TESObjectREFR>(TESForm::GetById(targetId));
+            if (!player || !cell || loading || creatorOpen || !player->currentProcess)
+                Finish(player, "interrupted", "world or menu transition");
+            else if (cell->formID != startCell && !cell->worldspace)
+                Finish(player, "transitioned", "native interior cell transition");
+            else if (!target || !SameSpace(player, target)) Finish(player, "failed", "target unloaded or changed space");
+            else if (player->actorState.IsDeadState()) Finish(player, "failed", "player died");
+            else if (Driven(player)) Finish(player, "interrupted", "script acquired quest AI control");
+            else if (harnessArrival && (!(controls & 1) || !HarnessService::IsEnabled() || !HarnessService::OwnsDriver()))
+                Finish(player, "interrupted", "harness arrival lost control authorization");
+            else if (ownsAI && (Controller(player) != ownedController || ControlsDriven(ownedController)))
+                Finish(player, "interrupted", "movement controller replaced or released");
+            else if (now - started > 180000) Finish(player, "failed", "180-second path timeout");
+            else
+            {
+                distance = Distance(player->position, target->position);
+                bool settledArrival = false;
+                if (harnessArrival && ownsAI && !jumping && !harnessNudge && distance <= radius)
+                {
+                    if (!arrivalStillSince || Distance(player->position, arrivalPoint) > 2.f ||
+                        Distance(target->position, arrivalTargetPoint) > 2.f)
+                    {
+                        arrivalStillSince = now;
+                        arrivalPoint = player->position;
+                        arrivalTargetPoint = target->position;
+                    }
+                    settledArrival = now - arrivalStillSince >= 1000;
+                }
+                else arrivalStillSince = 0;
+                if (jumping || harnessNudge)
+                {
+                    auto* direct = static_cast<uint8_t*>(ownedController) + 0x138;
+                    auto** table = *reinterpret_cast<void***>(direct);
+                    NiPoint3 direction{};
+                    direction.z = std::remainder(jumpHeading - player->rotation.z, 6.283185307f);
+                    reinterpret_cast<void (*)(void*, const NiPoint3*)>(table[2])(direct, &direction);
+                    if (harnessNudge)
+                    {
+                        if (!HarnessService::IsEnabled() || !HarnessService::OwnsDriver() || !(controls & 1))
+                            Finish(player, "interrupted", "harness nudge lost control authorization");
+                        else if (distance <= radius || now - jumpStart >= 1200)
+                            Finish(player, "nudge_finished", "bounded collision-enabled walking interval ended");
+                    }
+                    else if (player->IsInCombat() || !(controls & 1)) Finish(player, "interrupted", "jump interrupted by combat or controls");
+                    else if (!jumpIssued && now - jumpStart >= 250)
+                    {
+                        if (!CanJump(player)) Finish(player, "failed", "native jump eligibility lost during runup");
+                        else
+                        {
+                            using Jump = void(Actor*);
+                            POINTER_SKYRIMSE(Jump, jump, 37257);
+                            jump.Get()(player);
+                            jumpIssued = true;
+                            jumpIssuedAt = now;
+                            ReadJumpState(player);
+                            state = "jumping";
+                            spdlog::info("Intro driver: native jump toward {:X} controllerState={} requestedState={}", targetId, jumpState, jumpRequestedState);
+                            // 78262 synchronously writes wantState=1 when reached,
+                            // but 78280 consumes it. This sample is diagnostic;
+                            // actual target proximity qualifies the harness step.
+                        }
+                    }
+                    else if (jumpIssued)
+                    {
+                        if (!ReadJumpState(player)) Finish(player, "failed", "native_jump_controller_unavailable");
+                        else
+                        {
+                            // Native state types: OnGround=0, Jumping=1, InAir=2.
+                            // State transitions are not a collision manifold sample.
+                            if (jumpState == 1 || jumpState == 2) jumpAirborne = true;
+                            const bool harnessApproach = HarnessService::IsEnabled() && HarnessService::OwnsDriver();
+                            if (harnessApproach && jumpAirborne && jumpState == 0 && distance > radius)
+                                state = "jump_landing_approach";
+                            // A roof-edge landing can precede the floor-level target.
+                            // Keep collision-enabled travel bounded and require actual proximity.
+                            if (jumpAirborne && jumpState == 0 && now - jumpIssuedAt >= 250 &&
+                                (!harnessApproach || distance <= radius))
+                                Finish(player, "jump_landed", "native controller returned to OnGround");
+                            else if (now - jumpIssuedAt >= (harnessApproach ? 4000 : 2000))
+                                Finish(player, "jump_finished", jumpAirborne ?
+                                    "native movement interval ended; gravity and collision remain active" :
+                                    "native movement interval ended; air state not observed in samples");
+                        }
+                    }
+                }
+                else if (distance <= radius && (!harnessArrival || distance <= (std::min)(35.f, radius * 0.5f) || settledArrival))
+                    Finish(player, "arrived", !harnessArrival ? "within radius" : settledArrival ? "arrived_settled" : "arrived_inner");
+                else if (player->IsInCombat() && !(harnessCombatTravel && HarnessService::IsEnabled() && HarnessService::OwnsDriver()))
+                {
+                    Release(player);
+                    clearCombatSince = 0;
+                    lastProgress = now;
+                    state = "waiting_combat";
+                }
+                else if (!(controls & 1)) Finish(player, "interrupted", "script or co-op movement hold");
+                else
+                {
+                    // PathToReference copies the destination. Complete each
+                    // engine leg before pursuing an actor that has moved away.
+                    if (ownsAI && Distance(player->position, submittedPoint) <= radius &&
+                        Distance(submittedPoint, target->position) > radius)
+                    {
+                        Release(player);
+                        clearCombatSince = now;
+                        bestDistance = distance;
+                        lastProgress = now;
+                        state = "retargeting";
+                    }
+                    if (!clearCombatSince) clearCombatSince = now;
+                    if (!ownsAI && now - clearCombatSince >= 1000)
+                    {
+                        if (Driven(player) || !ControlsDriven(Controller(player))) Finish(player, "interrupted", "another system acquired AI control");
+                        else
+                        {
+                            ownedController = Controller(player);
+                            SetMovementMode(ownedController, true);
+                            ownsAI = true;
+                            submittedPoint = target->position;
+                            pathId = RunPath(player, target);
+                            arrivalStillSince = 0;
+                            state = "walking";
+                            lastProgress = now;
+                            if (pathId == -1) Finish(player, "failed", "native path request rejected");
+                            else spdlog::info("Intro driver: native path={} target={:X} distance={} radius={} pace={}", pathId, targetId, distance, radius, walkPace ? "walk" : "run");
+                        }
+                    }
+                    if (Distance(player->position, progressPoint) >= 16.f)
+                    {
+                        progressPoint = player->position;
+                        lastProgress = now;
+                    }
+                    if (active && now - lastProgress > 20000) Finish(player, "failed", "no path progress for 20 seconds");
+                }
+            }
+        }
+    }
+    catch (const std::exception& e) { Finish(player, "failed", e.what()); }
+    const auto json = fmt::format("\"state\":\"{}\",\"reason\":\"{}\",\"active\":{},\"ownsAI\":{},\"aiDriven\":{},\"creator\":\"{}\",\"creatorOpen\":{},\"creatorDone\":{},\"movementEnabled\":{},\"cellId\":{},\"targetId\":{},\"questId\":{},\"objectiveId\":{},\"distance\":{},\"radius\":{},\"pathId\":{},\"elapsedMs\":{},\"sampleMs\":{}",
+        state, EscapeJson(reason), JsonBool(active), JsonBool(ownsAI), JsonBool(Driven(player)), EscapeJson(creator), JsonBool(creatorOpen), JsonBool(CreatorTogether::IsDone()), JsonBool((controls & 1) != 0), cell ? cell->formID : 0, targetId, questId, objectiveId, distance, radius, pathId, active ? now - started : 0, now);
+    {
+        std::scoped_lock lock(mutex);
+        // A window request can arrive while this tick processes its predecessor.
+        if (!request.empty()) ++appliedSequence;
+        published = json + fmt::format(",\"appliedSequence\":{},\"pace\":\"{}\",\"combat\":{},\"harnessCombatTravel\":{},\"harnessNudge\":{},\"travelReady\":{}", appliedSequence, walkPace ? "walk" : "run", JsonBool(player && player->IsInCombat()), JsonBool(harnessCombatTravel), JsonBool(harnessNudge),
+            JsonBool(player && cell && player->currentProcess && player->GetNiNode() && !loading && !creatorOpen &&
+                !Driven(player) && ControlsDriven(Controller(player)) && (controls & 1)));
+        published += fmt::format(",\"jumpControllerState\":{},\"jumpRequestedState\":{},\"jumpIssuedAtMs\":{}", jumpState, jumpRequestedState, jumpIssuedAt);
+    }
+}
+}
+
 bool HandlerEnabled(const PlayerInputHandler* apHandler)
 {
     return apHandler && apHandler->isEnabled;
@@ -180,6 +969,33 @@ struct SceneActionDiagnosticView
 static_assert(offsetof(SceneActionDiagnosticView, ActionId) == 0x18);
 static_assert(sizeof(SceneActionDiagnosticView) == 0x20);
 
+// Pages already proven readable during the current audit snapshot. ReadNative queried
+// VirtualQuery for every field and every string byte, so one world audit made hundreds of
+// thousands of syscalls and held the game thread 2 s (host) to 4.6 s (follower). Only active
+// inside ReadablePageCacheScope and cleared per snapshot, so a page is validated once per audit.
+struct ReadablePageCache
+{
+    bool Active{};
+    std::array<uintptr_t, 256> Pages{};
+    uint32_t Count{};
+    uint32_t Next{};
+};
+thread_local ReadablePageCache s_readablePages;
+
+struct ReadablePageCacheScope
+{
+    ReadablePageCacheScope() noexcept { s_readablePages = {}; s_readablePages.Active = true; }
+    ~ReadablePageCacheScope() noexcept { s_readablePages = {}; }
+};
+
+bool IsCachedReadablePage(uintptr_t aPage) noexcept
+{
+    for (uint32_t i = 0; i < s_readablePages.Count; ++i)
+        if (s_readablePages.Pages[i] == aPage)
+            return true;
+    return false;
+}
+
 bool IsReadableRange(const void* apData, size_t aSize) noexcept
 {
     if (!apData || aSize == 0)
@@ -189,6 +1005,12 @@ bool IsReadableRange(const void* apData, size_t aSize) noexcept
     if (begin > std::numeric_limits<uintptr_t>::max() - aSize)
         return false;
     const auto end = begin + aSize;
+
+    constexpr uintptr_t cPageMask = ~uintptr_t{0xFFF};
+    const bool cached = s_readablePages.Active;
+    if (cached && ((end - 1) & cPageMask) - (begin & cPageMask) <= 0x1000 &&
+        IsCachedReadablePage(begin & cPageMask) && IsCachedReadablePage((end - 1) & cPageMask))
+        return true;
 
     auto cursor = begin;
     while (cursor < end)
@@ -219,6 +1041,18 @@ bool IsReadableRange(const void* apData, size_t aSize) noexcept
         if (regionEnd <= cursor)
             return false;
         cursor = (std::min)(end, regionEnd);
+    }
+    if (cached)
+    {
+        for (auto page = begin & cPageMask; page <= ((end - 1) & cPageMask); page += 0x1000)
+        {
+            if (IsCachedReadablePage(page))
+                continue;
+            s_readablePages.Pages[s_readablePages.Next] = page;
+            s_readablePages.Next = (s_readablePages.Next + 1) % s_readablePages.Pages.size();
+            s_readablePages.Count = (std::min)(s_readablePages.Count + 1,
+                static_cast<uint32_t>(s_readablePages.Pages.size()));
+        }
     }
     return true;
 }
@@ -306,6 +1140,190 @@ std::string ReadNativeString(const char* apText, bool& arReadable, size_t aLimit
         result.push_back(value);
     }
     return result;
+}
+
+// On-demand only. CommonLib NiAVObject/BSGeometry/NiSkinInstance/BipedAnim layouts,
+// checked against 1.7.104: 14073A760 (Actor+268 biped), 140EFC810 (geometry skin
+// +130 and bounds +E4), 140F09CB0 (skin data/root/bone transforms), 140217E30
+// (42 biped entries, stride 78). No equip, update, cull, or reload calls here.
+std::string DescribeActorVisuals(Actor* apActor)
+{
+    const auto readAt = [](const void* apBase, size_t aOffset, auto& arValue)
+    {
+        return apBase && ReadNative(static_cast<const uint8_t*>(apBase) + aOffset, arValue);
+    };
+    const auto floats = [](const auto& acValues)
+    {
+        std::string result = "[";
+        for (const auto value : acValues)
+        {
+            if (result.size() > 1)
+                result += ",";
+            result += std::isfinite(value) ? fmt::format("{}", value) : "null";
+        }
+        return result + "]";
+    };
+    const auto formId = [&](const void* apForm)
+    {
+        uint32_t result{};
+        readAt(apForm, 0x14, result);
+        return result;
+    };
+    auto* pRoot = apActor->GetNiNode();
+    std::string nodes = "[";
+    std::vector<const NiAVObject*> visited;
+    bool truncated = false;
+    bool treeReadable = pRoot != nullptr;
+    std::function<void(NiAVObject*, int, bool)> walk = [&](NiAVObject* apNode, int aDepth, bool aParentHidden)
+    {
+        if (!apNode || std::find(visited.begin(), visited.end(), apNode) != visited.end())
+            return;
+        if (aDepth > 24 || visited.size() >= 256)
+        {
+            truncated = true;
+            return;
+        }
+        visited.push_back(apNode);
+        const char* pName{};
+        uint32_t flags{};
+        std::array<float, 4> bound{}, world{};
+        const bool readable = readAt(apNode, 0x10, pName) && readAt(apNode, 0xF4, flags) &&
+            readAt(apNode, 0xE4, bound) && readAt(apNode, 0xA0, world);
+        bool nameReadable{};
+        const auto name = ReadNativeString(pName, nameReadable);
+        const bool hidden = aParentHidden || (flags & 1) != 0;
+        if (nodes.size() > 1)
+            nodes += ",";
+        nodes += fmt::format("{{\"address\":\"{:X}\",\"name\":\"{}\",\"depth\":{},\"readable\":{},"
+            "\"flags\":{},\"appCulled\":{},\"inheritedAppCulled\":{},\"notVisible\":{},\"world\":{},\"bound\":{}",
+            reinterpret_cast<uintptr_t>(apNode), EscapeJson(name), aDepth, JsonBool(readable && nameReadable),
+            flags, JsonBool((flags & 1) != 0), JsonBool(hidden), JsonBool((flags & (1u << 20)) != 0),
+            floats(world), floats(bound));
+        if (!readable)
+        {
+            treeReadable = false;
+            nodes += "}";
+            return;
+        }
+        // NiRTTI has a name and parent pointer. Do not interpret NiNode memory
+        // as a BSGeometry, or legacy NiGeometry skin offsets as BSGeometry ones.
+        struct RttiView { const char* Name; const void* Parent; };
+        const void* pType = apNode->GetRTTI();
+        bool geometry = false;
+        for (int i = 0; pType && i < 16; ++i)
+        {
+            RttiView type{};
+            if (!ReadNative(pType, type))
+                break;
+            bool typeReadable{};
+            if (ReadNativeString(type.Name, typeReadable) == "BSGeometry" && typeReadable)
+            {
+                geometry = true;
+                break;
+            }
+            pType = type.Parent;
+        }
+        if (geometry)
+        {
+            const void* pSkin{}, *pShader{}, *pRenderer{}, *pData{}, *pPartition{}, *pSkinRoot{}, *pMatrices{};
+            uint32_t boneCount{}, matrixCount{}, frame{};
+            const void* const* pTransforms{};
+            bool skinReadable = readAt(apNode, 0x130, pSkin) && readAt(apNode, 0x128, pShader) &&
+                readAt(apNode, 0x138, pRenderer);
+            if (pSkin)
+                skinReadable = skinReadable && readAt(pSkin, 0x10, pData) && readAt(pSkin, 0x18, pPartition) &&
+                    readAt(pSkin, 0x20, pSkinRoot) && readAt(pSkin, 0x30, pTransforms) &&
+                    readAt(pSkin, 0x38, frame) && readAt(pSkin, 0x3C, matrixCount) &&
+                    readAt(pSkin, 0x48, pMatrices) && readAt(pData, 0x58, boneCount);
+            uint32_t nullTransforms{}, sampledTransforms{};
+            if (pSkin && skinReadable && pTransforms && boneCount <= 512)
+            {
+                for (; sampledTransforms < boneCount; ++sampledTransforms)
+                {
+                    const void* pTransform{};
+                    if (!ReadNative(pTransforms + sampledTransforms, pTransform))
+                        break;
+                    nullTransforms += pTransform == nullptr;
+                }
+            }
+            nodes += fmt::format(",\"skin\":{{\"present\":{},\"readable\":{},\"address\":\"{:X}\","
+                "\"data\":\"{:X}\",\"partition\":\"{:X}\",\"root\":\"{:X}\",\"boneCount\":{},"
+                "\"sampledTransforms\":{},\"nullTransforms\":{},\"matrixCount\":{},\"matrices\":\"{:X}\","
+                "\"frame\":{},\"shader\":\"{:X}\",\"renderer\":\"{:X}\"}}",
+                JsonBool(pSkin != nullptr), JsonBool(skinReadable), reinterpret_cast<uintptr_t>(pSkin),
+                reinterpret_cast<uintptr_t>(pData), reinterpret_cast<uintptr_t>(pPartition),
+                reinterpret_cast<uintptr_t>(pSkinRoot), boneCount, sampledTransforms, nullTransforms,
+                matrixCount, reinterpret_cast<uintptr_t>(pMatrices), frame,
+                reinterpret_cast<uintptr_t>(pShader), reinterpret_cast<uintptr_t>(pRenderer));
+        }
+        nodes += "}";
+        if (auto* pNode = apNode->AsNode())
+        {
+            const auto count = (std::min)(pNode->children.length, uint16_t{256});
+            truncated |= pNode->children.length > count;
+            for (uint16_t i = 0; i < count; ++i)
+            {
+                NiAVObject* pChild{};
+                if (pNode->children.data && ReadNative(pNode->children.data + i, pChild))
+                    walk(pChild, aDepth + 1, hidden);
+                else
+                    treeReadable = false;
+            }
+        }
+    };
+    bool parentHidden = false;
+    auto* pParent = pRoot ? pRoot->parent : nullptr;
+    for (int depth = 0; pParent && depth < 32; ++depth)
+    {
+        uint32_t flags{};
+        if (!readAt(pParent, 0xF4, flags))
+            break;
+        parentHidden |= (flags & 1) != 0;
+        NiAVObject* pNext{};
+        if (!readAt(pParent, 0x30, pNext) || pNext == pParent)
+            break;
+        pParent = pNext;
+    }
+    walk(pRoot, 0, parentHidden);
+    nodes += "]";
+    static_assert(offsetof(Actor, actorWeightData) == 0x268);
+    const void* pBiped{};
+    const bool bipedReadable = ReadNative(&apActor->actorWeightData, pBiped);
+    const NiAVObject* pBipedRoot{};
+    const bool bipedRootReadable = readAt(pBiped, 8, pBipedRoot);
+    const bool bipedRootInActorTree = pBipedRoot && std::find(visited.begin(), visited.end(), pBipedRoot) != visited.end();
+    std::string slots = "[";
+    for (uint32_t i = 0; pBiped && i < 42; ++i)
+    {
+        const auto* pEntry = static_cast<const uint8_t*>(pBiped) + 0x10 + i * 0x78;
+        const void* pItem{}, *pAddon{}, *pClone{};
+        uint8_t skinned{};
+        const bool readable = readAt(pEntry, 0, pItem) && readAt(pEntry, 8, pAddon) &&
+            readAt(pEntry, 0x20, pClone) && readAt(pEntry, 0x68, skinned);
+        if (readable && !pItem && !pClone)
+            continue;
+        if (slots.size() > 1)
+            slots += ",";
+        const void* pCloneParent{};
+        const bool cloneParentReadable = readAt(pClone, 0x30, pCloneParent);
+        const bool cloneInActorTree = pClone &&
+            std::find(visited.begin(), visited.end(), static_cast<const NiAVObject*>(pClone)) != visited.end();
+        slots += fmt::format("{{\"index\":{},\"readable\":{},\"item\":{},\"addon\":{},"
+            "\"clone\":\"{:X}\",\"skinned\":{},\"cloneParent\":\"{:X}\",\"cloneParentReadable\":{},\"cloneInActorTree\":{}}}",
+            i, JsonBool(readable), formId(pItem), formId(pAddon), reinterpret_cast<uintptr_t>(pClone), JsonBool(skinned != 0),
+            reinterpret_cast<uintptr_t>(pCloneParent), JsonBool(cloneParentReadable), JsonBool(cloneInActorTree));
+    }
+    const void* pBipedAfter{};
+    const bool bipedUnchanged = ReadNative(&apActor->actorWeightData, pBipedAfter) && pBipedAfter == pBiped;
+    const bool rootUnchanged = apActor->GetNiNode() == pRoot;
+    return fmt::format("{{\"sampleTimeMs\":{},\"bipedReadable\":{},\"biped\":\"{:X}\","
+        "\"bipedRoot\":\"{:X}\",\"bipedRootReadable\":{},\"bipedRootInActorTree\":{},"
+        "\"slots\":{}],\"nodes\":{},\"truncated\":{},\"treeReadable\":{},\"treeComplete\":{},"
+        "\"rootUnchanged\":{},\"bipedUnchanged\":{},\"nonAtomic\":true}}",
+        GetTickCount64(), JsonBool(bipedReadable),
+        reinterpret_cast<uintptr_t>(pBiped), reinterpret_cast<uintptr_t>(pBipedRoot), JsonBool(bipedRootReadable),
+        JsonBool(bipedRootInActorTree), slots, nodes, JsonBool(truncated), JsonBool(treeReadable),
+        JsonBool(treeReadable && !truncated), JsonBool(rootUnchanged), JsonBool(bipedUnchanged));
 }
 
 void HashBytes(uint64_t& arHash, const void* apData, size_t aSize) noexcept
@@ -1107,7 +2125,7 @@ GameTestService::GameTestService(World& aWorld) noexcept
         pEvents->triggerEnterEvent.RegisterSink(this);
         pEvents->triggerLeaveEvent.RegisterSink(this);
     }
-    spdlog::info("In-game test bridge starting at \\\\.\\pipe\\SkyrimSEMultiplayer.Test");
+    spdlog::info("In-game test bridge starting: farm={} pid={} capability={}", FarmMode::Enabled(), GetCurrentProcessId(), FarmMode::BuildMarker);
 }
 
 GameTestService::~GameTestService() noexcept
@@ -1121,7 +2139,7 @@ GameTestService::~GameTestService() noexcept
     if (m_pipeThread.joinable())
         CancelSynchronousIo(static_cast<HANDLE>(m_pipeThread.native_handle()));
     // Wake a blocking ConnectNamedPipe during orderly shutdown.
-    if (const HANDLE pipe = CreateFileW(cTestPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+    if (const HANDLE pipe = CreateFileW(FarmMode::Pipe(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
             OPEN_EXISTING, 0, nullptr); pipe != INVALID_HANDLE_VALUE)
         CloseHandle(pipe);
     if (m_pipeThread.joinable())
@@ -1167,7 +2185,7 @@ void GameTestService::PipeMain() noexcept
 {
     while (!m_stopping)
     {
-        const HANDLE pipe = CreateNamedPipeW(cTestPipeName, PIPE_ACCESS_DUPLEX,
+        const HANDLE pipe = CreateNamedPipeW(FarmMode::Pipe(), PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | cPipeRejectRemoteClients,
             1, 64 * 1024, 64 * 1024, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE)
@@ -1249,7 +2267,9 @@ void GameTestService::OnWindowThread() noexcept
 
 void GameTestService::OnGameThread() noexcept
 {
+    DrainArmorAttachmentTrace();
     InstallVirtualMachineDiagnostic();
+    if (!HarnessService::OwnsDriver()) IntroDriver::Tick();
     if (const uint32_t formId = m_testCorpseDisplaceFormId.exchange(0,
             std::memory_order_acq_rel))
     {
@@ -1288,6 +2308,7 @@ void GameTestService::OnGameThread() noexcept
     }
     const auto now = GetTickCount64();
     const auto* pTitleUI = UI::Get();
+    HostFrameCost::Report(m_world, now);
     const bool titleMenuOpen = pTitleUI && pTitleUI->GetMenuOpen(BSFixedString("TitleSequence Menu"));
     if (titleMenuOpen != m_titleSequenceMenuOpen)
     {
@@ -1390,13 +2411,90 @@ void GameTestService::OnGameThread() noexcept
             cartSample.Present[i] = stats.Samples != 0;
             std::copy(std::begin(stats.Position), std::end(stats.Position),
                 cartSample.Position[i].begin());
+            if (auto* pCart = Cast<TESObjectREFR>(TESForm::GetById(cartIds[i])); pCart && pCart->loadedState)
+                cartSample.Rotation[i] = {pCart->rotation.x, pCart->rotation.y, pCart->rotation.z};
             auto* pHorse = Cast<Actor>(TESForm::GetById(horseIds[i]));
             if (pHorse && pHorse->loadedState)
             {
                 cartSample.HorsePresent[i] = true;
+                if (auto* horseRoot = pHorse->GetNiNode())
+                    cartSample.HorseNodeZ[i] = horseRoot->world.translate.z;
+                if (const auto* pProcess = pHorse->currentProcess)
+                {
+                    ReadNative(reinterpret_cast<const uint8_t*>(pProcess) + 0x137, cartSample.HorseLevel[i]);
+                    cartSample.HorseController[i] = pProcess->middleProcess &&
+                        *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(pProcess->middleProcess) + 0x250);
+                    if (cartSample.HorseController[i])
+                    {
+                        const auto* controller = *reinterpret_cast<const uint8_t* const*>(
+                            reinterpret_cast<const uint8_t*>(pProcess->middleProcess) + 0x250);
+                        ReadNative(controller + 0x218, cartSample.HorseControllerFlags[i]);
+                        ReadNative(controller + 0x200, cartSample.HorseControllerState[i]);
+                        ReadNative(controller + 0x1A0, cartSample.HorseSupported[i]);
+                        ReadNative(controller + 0x244, cartSample.CtrlFallTime[i]);
+                        ReadNative(controller + 0x240, cartSample.CtrlFallStart[i]);
+                        ReadNative(controller + 0x188, cartSample.CtrlDeltaZ[i]);
+                        {
+                            alignas(16) float pos[4]{};
+                            using GetPositionFn = void(const void*, float*, bool);
+                            auto** vtable = *reinterpret_cast<GetPositionFn** const*>(controller);
+                            vtable[2](controller, pos, false);
+                            cartSample.CtrlZ[i] = pos[2] * 69.99125f;
+                        }
+                        const uint8_t* support{};
+                        if (ReadNative(controller + 0x2B0, support) && support)
+                        {
+                            cartSample.SupportBody[i] = reinterpret_cast<uint64_t>(support);
+                            uint8_t motion{};
+                            float z{};
+                            if (ReadNative(support + 0x160, motion))
+                                cartSample.SupportMotion[i] = motion;
+                            if (ReadNative(support + 0x170 + 14 * sizeof(float), z))
+                                cartSample.SupportZ[i] = z * 69.99125f;
+                            // Cart root body: node -> collisionObject -> +0x20 wrapper -> +0x10 hkpRigidBody.
+                            if (auto* pCart = Cast<TESObjectREFR>(TESForm::GetById(cartIds[i])); pCart && pCart->GetNiNode())
+                            {
+                                const uint8_t* wrapper{};
+                                const void* body{};
+                                if (pCart->GetNiNode()->collisionObject &&
+                                    ReadNative(reinterpret_cast<const uint8_t*>(pCart->GetNiNode()->collisionObject) + 0x20, wrapper) &&
+                                    wrapper && ReadNative(wrapper + 0x10, body))
+                                    cartSample.SupportIsCart[i] = body == support;
+                            }
+                        }
+                    }
+                }
                 cartSample.HorsePosition[i] = {pHorse->position.x,
                     pHorse->position.y, pHorse->position.z};
             }
+        }
+        if (auto* camera = PlayerCamera::Get(); camera && camera->cameraNode)
+        {
+            const auto& w = camera->cameraNode->world;
+            const float fx = w.rotate.entry[0][1], fy = w.rotate.entry[1][1], fz = w.rotate.entry[2][1];
+            const float fl = std::sqrt(fx * fx + fy * fy + fz * fz);
+            cartSample.CameraFov = camera->GetWorldFov();
+            auto angleTo = [&](const NiPoint3& p) -> float
+            {
+                const float dx = p.x - w.translate.x, dy = p.y - w.translate.y, dz = p.z - w.translate.z;
+                const float dl = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (fl < 1e-4f || dl < 1e-4f)
+                    return -1.f;
+                const float c = (std::clamp)((fx * dx + fy * dy + fz * dz) / (fl * dl), -1.f, 1.f);
+                return std::acos(c) * 57.29578f;
+            };
+            for (size_t i = 0; i < std::size(cartIds); ++i)
+            {
+                if (auto* pCart = Cast<TESObjectREFR>(TESForm::GetById(cartIds[i])))
+                    cartSample.CartViewAngle[i] = angleTo(pCart->position);
+                if (auto* pHorse = Cast<Actor>(TESForm::GetById(horseIds[i])))
+                    cartSample.HorseViewAngle[i] = angleTo(pHorse->position);
+            }
+        }
+        {
+            const auto probe = ObjectService::GetReferencePhaseDiagnostic();
+            cartSample.ProbeInputZ = probe.SetPositionInputZ;
+            cartSample.ProbeCalls = probe.SetPositionCalls;
         }
         m_hitchCartNext = (m_hitchCartNext + 1) % m_hitchCartHistory.size();
         m_hitchCartCount = (std::min)(m_hitchCartCount + 1,
@@ -1464,6 +2562,7 @@ void GameTestService::OnGameThread() noexcept
     ArmDiagnosticCapture();
     try
     {
+        ReadablePageCacheScope readableCache;
         std::string snapshot = "{";
         std::array<uint32_t, 7> snapshotPhaseUs{};
         auto phaseStarted = std::chrono::steady_clock::now();
@@ -3553,7 +4652,14 @@ std::string GameTestService::GetHitchSnapshot() const
             "{{\"tick\":{},\"present\":[{},{}],"
             "\"position\":[[{},{},{}],[{},{},{}]],"
             "\"horsePresent\":[{},{}],"
-            "\"horsePosition\":[[{},{},{}],[{},{},{}]]}}",
+            "\"horsePosition\":[[{},{},{}],[{},{},{}]],"
+            "\"rotation\":[[{},{},{}],[{},{},{}]],"
+            "\"horseLevel\":[{},{}],\"horseController\":[{},{}],"
+            "\"horseFlags\":[{},{}],\"horseState\":[{},{}],\"horseSupported\":[{},{}],"
+            "\"supportMotion\":[{},{}],\"supportZ\":[{},{}],\"supportIsCart\":[{},{}],\"supportBody\":[{},{}],"
+            "\"horseNodeZ\":[{},{}],\"probeInputZ\":{},\"probeCalls\":{},"
+            "\"cartView\":[{},{}],\"horseView\":[{},{}],\"fov\":{},"
+            "\"ctrlZ\":[{},{}],\"ctrlFallTime\":[{},{}],\"ctrlFallStart\":[{},{}],\"ctrlDeltaZ\":[{},{}]}}",
             sample.WorldTick, JsonBool(sample.Present[0]),
             JsonBool(sample.Present[1]),
             sample.Position[0][0], sample.Position[0][1],
@@ -3563,7 +4669,22 @@ std::string GameTestService::GetHitchSnapshot() const
             JsonBool(sample.HorsePresent[1]),
             sample.HorsePosition[0][0], sample.HorsePosition[0][1],
             sample.HorsePosition[0][2], sample.HorsePosition[1][0],
-            sample.HorsePosition[1][1], sample.HorsePosition[1][2]);
+            sample.HorsePosition[1][1], sample.HorsePosition[1][2],
+            sample.Rotation[0][0], sample.Rotation[0][1], sample.Rotation[0][2],
+            sample.Rotation[1][0], sample.Rotation[1][1], sample.Rotation[1][2],
+            sample.HorseLevel[0], sample.HorseLevel[1],
+            JsonBool(sample.HorseController[0]), JsonBool(sample.HorseController[1]),
+            sample.HorseControllerFlags[0], sample.HorseControllerFlags[1],
+            sample.HorseControllerState[0], sample.HorseControllerState[1],
+            sample.HorseSupported[0], sample.HorseSupported[1],
+            sample.SupportMotion[0], sample.SupportMotion[1], sample.SupportZ[0], sample.SupportZ[1],
+            JsonBool(sample.SupportIsCart[0]), JsonBool(sample.SupportIsCart[1]),
+            sample.SupportBody[0], sample.SupportBody[1],
+            sample.HorseNodeZ[0], sample.HorseNodeZ[1], sample.ProbeInputZ, sample.ProbeCalls,
+            sample.CartViewAngle[0], sample.CartViewAngle[1], sample.HorseViewAngle[0], sample.HorseViewAngle[1],
+            sample.CameraFov,
+            sample.CtrlZ[0], sample.CtrlZ[1], sample.CtrlFallTime[0], sample.CtrlFallTime[1],
+            sample.CtrlFallStart[0], sample.CtrlFallStart[1], sample.CtrlDeltaZ[0], sample.CtrlDeltaZ[1]);
     }
     hitch += "],\"events\":[";
     for (uint32_t i = 0; i < data->MotionCount; ++i)
@@ -3598,6 +4719,20 @@ std::string GameTestService::GetCachedGameSnapshot() const noexcept
     return m_gameSnapshot;
 }
 
+std::string GameTestService::HarnessDriverTick(const std::string& aRequest)
+{
+    if (!aRequest.empty())
+    {
+        std::scoped_lock lock(IntroDriver::mutex);
+        if (!IntroDriver::pending.empty()) throw std::runtime_error("driver already has a pending action");
+        IntroDriver::pending = aRequest;
+        ++IntroDriver::queuedSequence;
+    }
+    IntroDriver::Tick();
+    std::scoped_lock lock(IntroDriver::mutex);
+    return "{" + IntroDriver::published + "}";
+}
+
 std::string GameTestService::Execute(const std::string& acLine) noexcept
 {
     const uint64_t id = GetJsonId(acLine);
@@ -3607,13 +4742,92 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         if (command == "ping")
             return Result(id, fmt::format("\"pid\":{},\"protocol\":2", GetCurrentProcessId()));
 
+        if (command == "farm_connect" || command == "farm_create_party" || command == "farm_state")
+        {
+            if (!FarmMode::Enabled() || !HarnessService::IsEnabled())
+                return Error(id, "farm requires a harness build, SSC_FARM_TOKEN, SSC_FARM_ROOT and enabled harness.json");
+            if (command == "farm_connect")
+            {
+                if (m_world.GetTransport().IsOnline()) return Error(id, "already connected");
+                const auto portText = GetJsonString(acLine, "port");
+                if (portText.empty() || portText.find_first_not_of("0123456789") != std::string::npos)
+                    return Error(id, "decimal loopback port required");
+                const auto port = std::stoul(portText);
+                if (port < 1024 || port > 65535) return Error(id, "invalid loopback port");
+                auto* settings = INISettingCollection::Get();
+                auto* savePath = settings ? settings->GetSetting("sLocalSavePath:General") : nullptr;
+                auto* characterPath = settings ? settings->GetSetting("sLocalCharacterDataPath:General") : nullptr;
+                if (!savePath || !characterPath) return Error(id, "native save path settings unavailable");
+                // AL109356/109357 read this string on every path construction.
+                // AL75619 (Utility.SetINIString's setter) owns allocation and the
+                // lowercase s -> managed S transition; never lend it a CRT buffer.
+                using SetString = Setting*(Setting*, const char*);
+                POINTER_SKYRIMSE(SetString, setString, 75619);
+                setString.Get()(savePath, FarmMode::SaveRelative().c_str());
+                setString.Get()(characterPath, (FarmMode::SaveRelative() + "Character\\").c_str());
+                if (!savePath->data || FarmMode::SaveRelative() != reinterpret_cast<const char*>(savePath->data) ||
+                    !characterPath->data || FarmMode::SaveRelative() + "Character\\" != reinterpret_cast<const char*>(characterPath->data))
+                    return Error(id, "native save isolation failed");
+                m_world.GetTransport().SetServerPassword(GetJsonString(acLine, "password"));
+                m_world.GetTransport().Connect(fmt::format("127.0.0.1:{}", port).c_str());
+            }
+            else if (command == "farm_create_party")
+            {
+                if (!m_world.GetTransport().IsOnline() || m_world.GetPartyService().IsInParty())
+                    return Error(id, "requires authenticated client without a party");
+                m_world.GetPartyService().CreateParty();
+            }
+            auto* settings = INISettingCollection::Get();
+            auto* savePath = settings ? settings->GetSetting("sLocalSavePath:General") : nullptr;
+            auto* characterPath = settings ? settings->GetSetting("sLocalCharacterDataPath:General") : nullptr;
+            const bool isolated = savePath && savePath->data &&
+                FarmMode::SaveRelative() == reinterpret_cast<const char*>(savePath->data) &&
+                characterPath && characterPath->data &&
+                FarmMode::SaveRelative() + "Character\\" == reinterpret_cast<const char*>(characterPath->data);
+            auto* active = settings ? settings->GetSetting("bAlwaysActive:General") : nullptr;
+            auto* window = BSGraphics::GetMainWindow();
+            RECT client{}, outer{};
+            if (window && window->hWnd) { GetClientRect(window->hWnd, &client); GetWindowRect(window->hWnd, &outer); }
+            spdlog::default_logger()->flush();
+            return Result(id, fmt::format("\"pid\":{},\"playerId\":{},\"farm\":true,\"token\":\"{}\",\"saveIsolated\":{},"
+                "\"alwaysActive\":{},\"width\":{},\"height\":{},\"x\":{},\"y\":{},\"foreground\":{}",
+                GetCurrentProcessId(), m_world.GetTransport().GetLocalPlayerId(), FarmMode::Token(), isolated,
+                active && (active->data & 0xFF), client.right, client.bottom, outer.left, outer.top,
+                window && window->hWnd && GetForegroundWindow() == window->hWnd));
+        }
+
+        if (command == "harness_start" || command == "harness_status" || command == "harness_stop")
+            return Result(id, "\"harness\":" + m_world.ctx().at<HarnessService>().Command(acLine));
+
+        if (command == "intro_status")
+        {
+            std::scoped_lock lock(IntroDriver::mutex);
+            return Result(id, IntroDriver::published + fmt::format(",\"queuedSequence\":{},\"pending\":{}",
+                IntroDriver::queuedSequence, JsonBool(IntroDriver::queuedSequence != IntroDriver::appliedSequence)));
+        }
+        if (command == "creator_finish" || command == "walk_to" || command == "follow_objective" || command == "walk_cancel" || command == "jump_toward")
+        {
+            if (command == "creator_finish")
+            {
+                const auto name = GetJsonString(acLine, "name");
+                if (name.empty() || name.size() > 64 || name.find_first_of("\r\n\t") != std::string::npos)
+                    return Error(id, "name must contain 1..64 bytes without control characters");
+            }
+            std::scoped_lock lock(IntroDriver::mutex);
+            if (!IntroDriver::pending.empty()) return Error(id, "intro command already pending");
+            IntroDriver::pending = acLine;
+            return Result(id, fmt::format("\"queued\":true,\"sequence\":{},\"statusCommand\":\"intro_status\"",
+                ++IntroDriver::queuedSequence));
+        }
+
         if (command == "capabilities")
             return Result(id, "\"protocol\":2,\"commands\":[\"ping\",\"capabilities\",\"snapshot\","
                 "\"game_snapshot\",\"hitch_snapshot\",\"request_game_snapshot\",\"cancel_game_snapshot\",\"game_snapshot_at\",\"game_pose_snapshot\",\"watch_quest\",\"set_pose_probe\",\"set_pose_probe_actor\",\"test_displace_remote_corpse\",\"capture_bundle\",\"screenshot\",\"open_options\","
-                "\"set_visual_pose_apply\",\"set_visual_root_diagnostic\",\"set_native_vehicle_trial\",\"set_remote_process_trial\",\"set_presentation_delay\",\"set_camera_position_probe\",\"set_skip_next_post_respawn_knock\","
+                "\"set_visual_pose_apply\",\"set_visual_root_diagnostic\",\"set_native_vehicle_trial\",\"set_remote_process_trial\",\"set_presentation_delay\",\"profile_host_frames\",\"set_camera_position_probe\",\"set_skip_next_post_respawn_knock\","
                 "\"open_coop\",\"party_state\",\"set_session_open\",\"join_friend\",\"set_ready\",\"start_new_campaign\",\"start_continue_campaign\",\"create_test_checkpoint\",\"test_checkpoint_status\","
                 "\"close_options\",\"controller\",\"race_menu_key\",\"gameplay_key\",\"race_menu_state\",\"confirm_character_native\",\"confirm_character_native_status\","
-                "\"toggle_window\",\"confirm_display\",\"setting\"]");
+                "\"creator_finish\",\"walk_to\",\"follow_objective\",\"walk_cancel\",\"jump_toward\",\"intro_status\","
+                "\"toggle_window\",\"confirm_display\",\"setting\",\"world_reference_state\"]");
 
         if (command == "watch_quest")
         {
@@ -3894,6 +5108,20 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Result(id, fmt::format("\"formId\":{}", formId));
         }
 
+        if (command == "profile_host_frames")
+        {
+            const auto durationText = GetJsonString(acLine, "seconds");
+            if (durationText.empty() || durationText.size() > 3 ||
+                durationText.find_first_not_of("0123456789") != std::string::npos)
+                return Error(id, "seconds must be a decimal string (0-120); zero stops profiling");
+            const auto duration = std::strtoul(durationText.c_str(), nullptr, 10);
+            if (duration > 120)
+                return Error(id, "seconds must be 0-120");
+            HostFrameCost::s_untilMs.store(duration ? GetTickCount64() + duration * 1000 : 0,
+                std::memory_order_relaxed);
+            return Result(id, fmt::format("\"seconds\":{},\"hostOnly\":false", duration));
+        }
+
         if (command == "set_presentation_delay")
         {
             const auto delayText = GetJsonString(acLine, "delay_ms");
@@ -3984,6 +5212,18 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 ObjectService::GetReferencePhaseDiagnostic().SelectedFormId));
         }
 
+        if (command == "world_reference_state")
+        {
+            const auto formText = GetJsonString(acLine, "form_id");
+            if (formText.empty() || formText.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+                return Error(id, "form_id must be a hexadecimal string");
+            const auto value = std::strtoull(formText.c_str(), nullptr, 16);
+            if (!value || value > UINT32_MAX) return Error(id, "form_id out of range");
+            // The window callback only reads a mailbox; the native main-loop
+            // phase samples the reference. Poll pending=true with the same ID.
+            return Result(id, WorldStateService::Diagnostic(static_cast<uint32_t>(value)));
+        }
+
         if (command == "native_reference_address")
         {
             const auto formText = GetJsonString(acLine, "form_id");
@@ -4042,9 +5282,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         {
             const auto& party = m_world.GetPartyService();
             return Result(id, fmt::format(
-                "\"inParty\":{},\"leader\":{},\"memberCount\":{},\"readyCount\":{},\"sessionState\":{},\"startEpoch\":{}",
+                "\"inParty\":{},\"leader\":{},\"memberCount\":{},\"readyCount\":{},\"sessionState\":{},\"startEpoch\":{},\"online\":{}",
                 JsonBool(party.IsInParty()), JsonBool(party.IsLeader()), party.GetPartyMembers().size(),
-                party.GetReadyPlayerCount(), party.GetSessionState(), party.GetStartEpoch()));
+                party.GetReadyPlayerCount(), party.GetSessionState(), party.GetStartEpoch(), JsonBool(m_world.GetTransport().IsOnline())));
         }
         if (command == "create_test_checkpoint")
             return Error(id, "direct save is disabled after a paired cinematic hang; use gameplay_key quicksave after control handoff");
@@ -4193,9 +5433,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             worn += "]";
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
-                "\"has3D\":{},\"bodies\":{},\"worn\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
-                CorpseRagdollService::DescribeRagdollBodies(pActor), worn));
+                CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor)));
         }
         if (command == "ref_bodies")
         {
@@ -4273,6 +5513,115 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const bool enabled = GetJsonString(acLine, "enabled") != "false";
             ObjectService::SetCartPhysicsEnabled(enabled);
             return Result(id, fmt::format("\"enabled\":{}", enabled));
+        }
+        if (command == "cart_node_refresh")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                ObjectService::SetCartNodeRefresh(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsCartNodeRefresh()));
+        }
+        if (command == "force_seen")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                AnimationSystem::SetForceSeen(enabled != "false");
+            return Result(id, AnimationSystem::ForceSeenJson());
+        }
+        if (command == "wide_cull")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                AnimationSystem::SetWideCull(enabled != "false");
+            return Result(id, AnimationSystem::WideCullJson());
+        }
+        if (command == "render_all")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                ObjectService::SetRenderAll(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsRenderAll()));
+        }
+        if (command == "horse_writeback")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                ObjectService::SetHorseWriteback(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsHorseWriteback()));
+        }
+        if (command == "set_fov")
+        {
+            // Diagnosis without the owner's eyes: widen the host view so almost everything is "in view".
+            auto* camera = PlayerCamera::Get();
+            if (!camera)
+                return Error(id, "no camera");
+            if (const auto fov = GetJsonString(acLine, "fov"); !fov.empty())
+                camera->SetWorldFov(static_cast<float>(std::strtod(fov.c_str(), nullptr)));
+            return Result(id, fmt::format("\"fov\":{}", camera->GetWorldFov()));
+        }
+        if (command == "scene_update_mode")
+        {
+            if (const auto mode = GetJsonString(acLine, "mode"); !mode.empty())
+                ObjectService::SetSceneUpdateMode(static_cast<uint32_t>(std::strtoul(mode.c_str(), nullptr, 10)));
+            return Result(id, fmt::format("\"mode\":{}", ObjectService::GetSceneUpdateMode()));
+        }
+        if (command == "sync_level")
+        {
+            // {"batch_ms":"0","delay_ms":"100"}: pose/movement batch interval (0 = every frame) and presentation
+            // delay; always returns bytes/messages sent since the last sync_level read.
+            extern std::atomic<uint32_t> g_syncBatchMs;
+            extern std::atomic<uint64_t> g_transportBytesSent;
+            extern std::atomic<uint64_t> g_transportMessagesSent;
+            if (const auto batch = GetJsonString(acLine, "batch_ms"); !batch.empty())
+                g_syncBatchMs.store(static_cast<uint32_t>(std::strtoul(batch.c_str(), nullptr, 10)));
+            if (const auto delay = GetJsonString(acLine, "delay_ms"); !delay.empty())
+                m_world.GetCharacterService().SetPresentationDelayMs(
+                    static_cast<uint32_t>((std::clamp)(std::strtoul(delay.c_str(), nullptr, 10), 16ul, 500ul)));
+            static uint64_t lastBytes{}, lastMessages{}, lastMs{};
+            const auto nowMs = GetTickCount64();
+            const auto bytes = g_transportBytesSent.load(), messages = g_transportMessagesSent.load();
+            const double seconds = lastMs ? (nowMs - lastMs) / 1000.0 : 0.0;
+            const auto out = fmt::format("\"batchMs\":{},\"delayMs\":{},\"bytesPerSec\":{:.0f},\"messagesPerSec\":{:.1f},\"windowS\":{:.1f}",
+                g_syncBatchMs.load(), m_world.GetCharacterService().GetPresentationDelayMs(),
+                seconds > 0 ? (bytes - lastBytes) / seconds : 0.0, seconds > 0 ? (messages - lastMessages) / seconds : 0.0, seconds);
+            lastBytes = bytes; lastMessages = messages; lastMs = nowMs;
+            return Result(id, out);
+        }
+        if (command == "turn_player")
+        {
+            // Scenario "host looks away": rotate the local player's heading by degrees (camera follows in
+            // first person). Owner repro: looking away from NPCs broke their simulation.
+            const auto degreesText = GetJsonString(acLine, "degrees");
+            const double degrees = degreesText.empty() ? 180.0 : std::strtod(degreesText.c_str(), nullptr);
+            auto* player = PlayerCharacter::Get();
+            if (!player)
+                return Error(id, "no player");
+            const float z = player->rotation.z + static_cast<float>(degrees * 3.14159265358979 / 180.0);
+            player->SetRotation(player->rotation.x, player->rotation.y, z);
+            return Result(id, fmt::format("\"yaw\":{}", z));
+        }
+        if (command == "offscreen_simulate")
+        {
+            const auto enabled = GetJsonString(acLine, "enabled");
+            if (!enabled.empty())
+            {
+                AnimationSystem::SetOffscreenSimulate(enabled != "false");
+                spdlog::info("Offscreen simulate: {}", enabled != "false");
+            }
+            return Result(id, AnimationSystem::OffscreenSimulateJson());
+        }
+        if (command == "native_local_set_position")
+        {
+            extern std::atomic<bool> g_nativeLocalSetPosition;
+            const auto enabled = GetJsonString(acLine, "enabled");
+            if (!enabled.empty())
+            {
+                g_nativeLocalSetPosition.store(enabled != "false", std::memory_order_relaxed);
+                spdlog::info("Native local SetPosition: {}", enabled != "false");
+            }
+            return Result(id, fmt::format("\"enabled\":{}", g_nativeLocalSetPosition.load()));
+        }
+        if (command == "cart_replay")
+        {
+            const auto enabled = GetJsonString(acLine, "enabled");
+            if (!enabled.empty())
+                ObjectService::SetCartReplayEnabled(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsCartReplayEnabled()));
         }
         if (command == "visual_lag_frame")
         {
@@ -4373,6 +5722,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         // Steam session tests: the lobby as the UI sees it, direct invites, answering invites.
         if (command == "steam_state")
             return Result(id, fmt::format("\"steam\":{}", m_world.GetSteamLobbyService().TestStateJson()));
+        if (command == "steam_host" || command == "steam_leave")
+        {
+            if (command == "steam_host") m_world.GetSteamLobbyService().QueueHostSession();
+            else m_world.GetSteamLobbyService().QueueLeaveSession();
+            return Result(id, "\"queued\":true");
+        }
         if (command == "steam_invite")
         {
             const auto steamId = GetJsonString(acLine, "steamId");

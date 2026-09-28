@@ -18,6 +18,7 @@
 #include <cmath>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
@@ -28,7 +29,9 @@ constexpr size_t kRingSize = 12;
 // A captured pose older than this is not sent (the actor is no longer being animated here).
 constexpr uint64_t kCaptureFreshMs = 250;
 // An unbracketed living pose must not freeze a distant actor between low-rate packets.
-constexpr uint64_t kLivingHoldMs = 75;
+// One pose interval plus jitter (Muse diag-stutter cause 1): 75 ms was shorter than the measured 95 ms owner
+// gap, so living copies kept falling back to the local graph and blending back: the visible stutter.
+constexpr uint64_t kLivingHoldMs = 150;
 constexpr uint64_t kLivingBlendMs = 150;
 
 enum class Role : uint8_t
@@ -98,7 +101,7 @@ std::atomic<uint32_t> s_localMirror{0};
 std::mutex s_simulatingLock;
 std::unordered_map<uint32_t, bool> s_ragdollSimulating;
 std::unordered_map<uint32_t, bool> s_ragdollPending;
-Vector<void*> s_controlledDrivers;
+std::unordered_set<void*> s_controlledDrivers;
 struct RagdollRenderPose
 {
     void* Driver{};
@@ -106,9 +109,10 @@ struct RagdollRenderPose
     std::vector<QsTransform> Bones;
 };
 std::unordered_map<const void*, RagdollRenderPose> s_ragdollRenderPoses;
+std::unordered_map<void*, const void*> s_ragdollRenderKeys;
 
 // 58291 / 140AC6FB0 normally replaces controller targets and body motion types from the
-// local graph. Streamed copies place keyframed bodies at the native physics step instead.
+// local graph. Streamed copies steer dynamic bodies at the native physics step instead.
 using TDriveToPose = void(void*, float, void*, void*);
 TDriveToPose* RealDriveToPose{};
 using TReadRagdollPose = void(void*, void*, void*);
@@ -143,7 +147,7 @@ void HookSetWorldFromModel(void* apGraph, const QsTransform* apTransform)
 bool ControlledDriver(void* apDriver)
 {
     std::lock_guard lock(s_simulatingLock);
-    return std::find(s_controlledDrivers.begin(), s_controlledDrivers.end(), apDriver) != s_controlledDrivers.end();
+    return s_controlledDrivers.contains(apDriver);
 }
 
 void HookDriveToPose(void* apDriver, float aDeltaTime, void* apContext, void* apOutput)
@@ -157,9 +161,9 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
 {
     if (!ControlledDriver(apDriver))
         return RealReadRagdollPose(apDriver, apContext, apOutput);
-    CorpseRagdollService::PlaceForReadback(apDriver);
+    // Readback can run inside solver listeners. Never mutate bodies in this phase.
     // 58293 / 140AC8B80 skips physics readback when +CB says every bone belongs to
-    // animation, or +C7/+C8 report no controller. Our bodies are keyframed to the OWNER,
+    // animation, or +C7/+C8 report no controller. Our bodies are steered to the OWNER,
     // so run native mapping back to the rendered skeleton without the local blend-out.
     auto* bytes = static_cast<uint8_t*>(apDriver);
     uint8_t flags[6];
@@ -196,19 +200,24 @@ void HookReadRagdollPose(void* apDriver, void* apContext, void* apOutput)
         {
             const auto* pose = reinterpret_cast<const QsTransform*>(tracks + offset);
             std::lock_guard lock(s_simulatingLock);
-            auto& rendered = s_ragdollRenderPoses[character + 0xA0]; // graph +160 boneNodes
-            if (rendered.Driver != apDriver)
+            // Removal may invalidate authority while native readback runs.
+            if (s_controlledDrivers.contains(apDriver))
             {
-                spdlog::info("Ragdoll driver {}: current-transform physics readback, {} rendered bones paired with world-from-model (async was {})",
-                    fmt::ptr(apDriver), count, asynchronous);
-                rendered.Bones.clear();
+                s_ragdollRenderKeys[apDriver] = character + 0xA0;
+                auto& rendered = s_ragdollRenderPoses[character + 0xA0]; // graph +160 boneNodes
+                if (rendered.Driver != apDriver)
+                {
+                    spdlog::info("Ragdoll driver {}: current-transform physics readback, {} rendered bones paired with world-from-model (async was {})",
+                        fmt::ptr(apDriver), count, asynchronous);
+                    rendered.Bones.clear();
+                }
+                rendered.Driver = apDriver;
+                std::memcpy(&rendered.WorldFromModel, tracks + rootOffset, sizeof(QsTransform));
+                // Like the native node copy, a short LOD pass leaves other bones alone.
+                if (rendered.Bones.size() < static_cast<size_t>(count))
+                    rendered.Bones.resize(count);
+                std::copy_n(pose, count, rendered.Bones.begin());
             }
-            rendered.Driver = apDriver;
-            std::memcpy(&rendered.WorldFromModel, tracks + rootOffset, sizeof(QsTransform));
-            // Like the native node copy, a short LOD pass leaves other bones alone.
-            if (rendered.Bones.size() < static_cast<size_t>(count))
-                rendered.Bones.resize(count);
-            std::copy_n(pose, count, rendered.Bones.begin());
         }
     }
     bytes[0x1D] = asynchronous;
@@ -486,12 +495,34 @@ void SetRagdollPending(uint32_t aFormId, bool aPending) noexcept
 void SetControlledRagdollDrivers(const Vector<void*>& acDrivers) noexcept
 {
     std::lock_guard lock(s_simulatingLock);
-    s_controlledDrivers = acDrivers;
+    s_controlledDrivers.clear();
+    s_controlledDrivers.insert(acDrivers.begin(), acDrivers.end());
     for (auto it = s_ragdollRenderPoses.begin(); it != s_ragdollRenderPoses.end();)
         if (std::find(acDrivers.begin(), acDrivers.end(), it->second.Driver) == acDrivers.end())
             it = s_ragdollRenderPoses.erase(it);
         else
             ++it;
+}
+
+void SetControlledRagdollDriver(void* apDriver, bool aControlled) noexcept
+{
+    if (!apDriver) return;
+    std::lock_guard lock(s_simulatingLock);
+    if (aControlled)
+        s_controlledDrivers.insert(apDriver);
+    else
+    {
+        s_controlledDrivers.erase(apDriver);
+        // A driver belongs to one graph: event invalidation is O(1), including
+        // calls from native removal. Retire its root and bones together.
+        if (const auto key = s_ragdollRenderKeys.find(apDriver); key != s_ragdollRenderKeys.end())
+        {
+            const auto pose = s_ragdollRenderPoses.find(key->second);
+            if (pose != s_ragdollRenderPoses.end() && pose->second.Driver == apDriver)
+                s_ragdollRenderPoses.erase(pose);
+            s_ragdollRenderKeys.erase(key);
+        }
+    }
 }
 
 void ClearRagdollAuthority() noexcept
@@ -501,6 +532,7 @@ void ClearRagdollAuthority() noexcept
     s_ragdollPending.clear();
     s_controlledDrivers.clear();
     s_ragdollRenderPoses.clear();
+    s_ragdollRenderKeys.clear();
 }
 
 void RefreshRegistry(World& aWorld) noexcept

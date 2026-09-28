@@ -1,0 +1,1323 @@
+{
+  "name": "helgen-intro",
+  "description": "Collision-on qualification: same-cell ESM staging, native trigger walks, actual tower crossing and real keep-door vote. No TCL.",
+  "steps": [
+    {
+      "op": "watch",
+      "actor_aliases": [{"quest": "3372B", "alias": 47}],
+      "refs": [
+        "6CF54"
+      ],
+      "actors": [
+        "14",
+        "654FB",
+        "2BF9E",
+        "2BFA2"
+      ],
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "cart",
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_menu",
+      "menu": "RaceSex Menu",
+      "open": true,
+      "timeout": 590,
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "creator",
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "creator_finish",
+      "timeout": 120,
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_menu",
+      "menu": "RaceSex Menu",
+      "open": false,
+      "timeout": 120,
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "execution",
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101",
+      "stage": 100,
+      "timeout": 590,
+      "preconditions": {
+        "MQ101": 0,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "dragon",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "god_mode",
+      "enabled": true,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "AA7A3",
+      "timeout": 20,
+      "dy": 420,
+      "source": "esm.sqlite ref AA7A3",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "ref": "AA7A3",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 20,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "F5381",
+      "timeout": 20,
+      "source": "esm.sqlite ref F5381",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 14777.0322265625,
+      "y": -82934.46875,
+      "z": 8297.18359375,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 25,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 50,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "tower-entry",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "CD697",
+      "dx": 60.39511924521327,
+      "dy": 21.17615572657789,
+      "timeout": 30,
+      "source": "esm.sqlite CD697 floor marker +64u along 1093B4 outward thin-axis normal",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "x": 14654.275511409241,
+      "y": -83435.32884732911,
+      "z": 8813.8916015625,
+      "radius": 8,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "source": "esm.sqlite CD697 floor marker inset40u along 1093B4 thin-axis normal; local trigger entry required",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      },
+      "until_trigger": "1093B4",
+      "party_trigger": true,
+      "party_wait": {
+        "x": 14692.0224609375,
+        "y": -83422.09375,
+        "z": 8813.8916015625,
+        "radius": 8,
+        "source": "esm.sqlite CD697 supported floor marker outside 1093B4 contact"
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 35,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "CD697",
+      "timeout": 20,
+      "source": "esm.sqlite ref CD697",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "ref": "CD6AE",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 40,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 103,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "tower-wall",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "jump",
+      "ref": "E24C3",
+      "radius": 128,
+      "timeout": 45,
+      "source": "E24C3 inn objective, real tower crossing",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "ref": "CD6AD",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 120,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "inn-landing",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "1095D8",
+      "timeout": 20,
+      "dx": -919.8802083333,
+      "dy": 67.6302083333,
+      "dz": -458.96126302083,
+      "source": "esm.sqlite NAVM FECF2 triangle55 centroid; explicit same-cell position onto lower inn floor",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 16448,
+      "y": -83815.765625,
+      "z": 8399.41478080534,
+      "source": "esm.sqlite NAVM 2AB79 triangle107 interpolated floor; native grid crossing",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "1095D8",
+      "timeout": 20,
+      "dx": 177.7278645833,
+      "dy": 142.5234375,
+      "dz": -402.76432291667,
+      "source": "esm.sqlite NAVM 2AB79 triangle81 centroid east of 1095D8; same-cell staging",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 17179.171875,
+      "y": -83815.765625,
+      "z": 8401.11625244052,
+      "source": "esm.sqlite NAVM 2AB79 triangle80 floor at 1095D8 center; leader local entry required",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      },
+      "until_trigger": "1095D8",
+      "party_trigger": true,
+      "party_wait": {
+        "x": 17354.5123697917,
+        "y": -83630.4427083333,
+        "z": 8443.841796875,
+        "radius": 8,
+        "source": "esm.sqlite NAVM 2AB79 triangle78 centroid; edge-adjacent to staging triangle81, outside trigger"
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 130,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "D7D7E",
+      "timeout": 20,
+      "dy": -320,
+      "source": "esm.sqlite ref D7D7E",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "ref": "D7D7E",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 18074.908203125,
+      "y": -81334.2421875,
+      "z": 8330.21484375,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 155,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "D8C81",
+      "timeout": 20,
+      "dy": -200,
+      "dz": -163.2490234375,
+      "source": "esm.sqlite ref D8C81",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 17970.81640625,
+      "y": -80446.6875,
+      "z": 8256.7236328125,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 160,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "E77F8",
+      "timeout": 20,
+      "dy": -96,
+      "source": "esm.sqlite ref E77F8",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 18767.5390625,
+      "y": -79741.125,
+      "z": 8432.0,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 164,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "ED5FE",
+      "timeout": 20,
+      "source": "esm.sqlite ref ED5FE",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 18967.337890625,
+      "y": -79115.296875,
+      "z": 8442.9130859375,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 170,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "E151B",
+      "timeout": 20,
+      "dx": 240,
+      "dz": -121.548828125,
+      "source": "esm.sqlite ref E151B",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "x": 17352.0,
+      "y": -78400.0,
+      "z": 8352.3154296875,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 190,
+      "done": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 192,
+      "done": true,
+      "timeout": 180,
+      "source": "esm.sqlite SCEN DEDBB phase3 completion; Hadvar-specific trigger 10D966",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": ["BECD4", "CD68E"],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": ["D0594", "AA7DF"]
+      }
+    },
+    {
+      "op": "wait_stage",
+      "quest": "MQ101DragonAttack",
+      "stage": 174,
+      "done": true,
+      "timeout": 180,
+      "source": "esm.sqlite SCEN DEDBB phase7 Fragment_0; phase3 requires stages190 and192",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": ["BECD4", "CD68E"],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": ["D0594", "AA7DF"]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "keep-courtyard",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "E24C5",
+      "timeout": 20,
+      "source": "esm.sqlite ref E24C5",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "ref": "A9DE2",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "teleport",
+      "ref": "25FAE",
+      "timeout": 20,
+      "dx": 68.9716796875,
+      "dy": -294.125,
+      "dz": 35.2626953125,
+      "source": "esm.sqlite ref 25FAE",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "keep-door-approach",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "walk",
+      "ref": "25FAE",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true,
+      "timeout": 90,
+      "until_cell": "5DE24",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": false,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "wait_cell",
+      "cell": "5DE24",
+      "door_vote": true,
+      "timeout": 180,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "capture",
+      "tag": "keep",
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": false,
+        "combat_clear": false,
+        "load_complete": false,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    },
+    {
+      "op": "finish",
+      "cell": "5DE24",
+      "door_vote": true,
+      "preconditions": {
+        "MQ101": 100,
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
+        "scene_idle": true,
+        "combat_clear": true,
+        "load_complete": true,
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
+      }
+    }
+  ],
+  "metric": "collision-on"
+}

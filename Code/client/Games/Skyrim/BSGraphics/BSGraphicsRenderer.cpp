@@ -1,6 +1,7 @@
 
 #include "Services/InputService.h"
 #include "Services/GameTestService.h"
+#include "Services/FarmMode.h"
 #include "Systems/RenderSystemD3D11.h"
 
 #include "World.h"
@@ -23,6 +24,18 @@ static RendererData* g_RendererData = nullptr;
 static Renderer* g_Renderer = nullptr;
 
 static constexpr char kTogetherWindowName[]{"Skyrim Together"};
+
+// Renderer::Init AL77226/141007B70 explicitly shows, foregrounds and focuses
+// the game. Farm processes must never activate it, including at startup.
+static decltype(&SetForegroundWindow) RealSetForegroundWindow = &SetForegroundWindow;
+static decltype(&SetFocus) RealSetFocus = &SetFocus;
+static decltype(&ShowWindow) RealShowWindow = &ShowWindow;
+BOOL WINAPI FarmSetForegroundWindow(HWND) { return FALSE; }
+HWND WINAPI FarmSetFocus(HWND) { return nullptr; }
+BOOL WINAPI FarmShowWindow(HWND window, int command)
+{
+    return RealShowWindow(window, command == SW_HIDE ? SW_HIDE : SW_SHOWNOACTIVATE);
+}
 
 } // namespace
 RendererWindow* GetMainWindow()
@@ -72,6 +85,13 @@ void (*Renderer_Init)(Renderer*, BSGraphics::RendererInitOSData*, const BSGraphi
 // WNDPROC seems to be part of the renderer
 LRESULT CALLBACK Hook_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    if (FarmMode::Enabled() && uMsg == WM_WINDOWPOSCHANGING && lParam)
+    {
+        auto* placement = reinterpret_cast<WINDOWPOS*>(lParam);
+        placement->x = placement->y = -16000;
+        placement->flags = (placement->flags & ~SWP_NOMOVE) | SWP_NOACTIVATE;
+    }
+    if (FarmMode::Enabled() && uMsg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     if (uMsg == cGameTestWakeMessage && entt::locator<World>::has_value())
     {
         World::Get().GetGameTestService().OnWindowThread();
@@ -130,6 +150,15 @@ void Hook_Renderer_Init(Renderer* self, BSGraphics::RendererInitOSData* aOSData,
         }
     }
 
+    BSGraphics::ApplicationWindowProperties farmProperties{};
+    if (FarmMode::Enabled() && aFBData)
+    {
+        farmProperties = *aFBData;
+        farmProperties.uiWidth = 640; farmProperties.uiHeight = 360;
+        farmProperties.iX = farmProperties.iY = -16000;
+        farmProperties.bFullScreen = farmProperties.bBorderlessWindow = false;
+        aFBData = &farmProperties;
+    }
     Renderer_Init(self, aOSData, aFBData, aOut);
 
     g_sRs = &World::Get().ctx().at<RenderSystemD3D11>();
@@ -157,6 +186,12 @@ void Hook_StopTimer(int type)
 static TiltedPhoques::Initializer s_viewportHooks(
     []()
     {
+        if (FarmMode::Enabled())
+        {
+            TP_HOOK_IMMEDIATE(&RealSetForegroundWindow, &FarmSetForegroundWindow);
+            TP_HOOK_IMMEDIATE(&RealSetFocus, &FarmSetFocus);
+            TP_HOOK_IMMEDIATE(&RealShowWindow, &FarmShowWindow);
+        }
         const VersionDbPtr<void> initWindowLoc(77226);
         // patch dwStyle in BSGraphics::InitWindows
         TiltedPhoques::Put(mem::pointer(initWindowLoc.GetPtr()) + 0x174 + 1, WS_OVERLAPPEDWINDOW);

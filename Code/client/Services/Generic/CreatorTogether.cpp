@@ -1,4 +1,5 @@
 #include <Services/CreatorTogether.h>
+#include <Services/Generic/BoundPoseKeeper.h>
 
 #include <World.h>
 #include <Components.h>
@@ -122,6 +123,8 @@ UI_MESSAGE_RESULTS HookProcessCreatorMessage(IMenu* apMenu, UIMessage& aMessage)
     if (!s_releasing.load() && ((s_holding.load() && s_done.load()) || s_viewingOther.load()) &&
         (aMessage.eType == UIMessage::kScaleformEvent || aMessage.eType == UIMessage::kUserEvent))
         return UI_MESSAGE_RESULTS::kHandled;
+    // BoundPoseKeeper observes the shared native rebuild (52391), including
+    // preset changes that do not pass through the initial-preview gate.
     return s_realProcessCreatorMessage(apMenu, aMessage);
 }
 
@@ -443,6 +446,8 @@ void OnMainFrame() noexcept
 {
     if (!entt::locator<World>::has_value())
         return;
+    auto* pMenu = GetCreatorMenu();
+    BoundPoseKeeper::OnMainFrame(pMenu != nullptr, s_participating.load());
     std::unordered_map<uint32_t, NotifyPlayerAppearance> pending;
     std::unordered_map<uint32_t, uint32_t> remoteActors;
     {
@@ -455,6 +460,7 @@ void OnMainFrame() noexcept
         const auto actor = remoteActors.find(aEntry.first);
         return actor == remoteActors.end() || actor->second != aEntry.second.ServerId;
     });
+    size_t rebuildBudget = 2;
     for (const auto& [formId, appearance] : pending)
     {
         std::lock_guard appearanceLock(s_appearanceLock);
@@ -471,7 +477,8 @@ void OnMainFrame() noexcept
         // A native rebuild removes parts before queuing work. Defer while physics owns this body.
         if (!pActor->GetNiNode() || !pActor->currentProcess || !pActor->currentProcess->middleProcess ||
             !pActor->currentProcess->unk8 ||
-            ((pActor->actorState.flags1 >> 21) & 0x7F) != 0)
+            ((pActor->actorState.flags1 >> 21) & 0x7F) != 0 || !rebuildBudget ||
+            !BoundPoseKeeper::CanRebuildNow(pActor))
         {
             std::lock_guard lock(s_lock);
             s_pendingAppearances.try_emplace(formId, appearance);
@@ -481,9 +488,21 @@ void OnMainFrame() noexcept
         if (previous != s_appliedAppearances.end() && previous->second.ServerId == appearance.ServerId &&
             previous->second.AppearanceBuffer == appearance.AppearanceBuffer &&
             previous->second.ChangeFlags == appearance.ChangeFlags && previous->second.FaceTints == appearance.FaceTints)
+        {
+            // A final packet can carry identical cosmetics. Still consume its
+            // creator lifecycle flag so later ordinary looks cannot rebind it.
+            previous->second.InCreator = appearance.InCreator;
             continue;
+        }
 
+        --rebuildBudget;
         SetHidden(pActor, false);
+        // Shared New Game creator looks obey the same vanilla restoration as
+        // their owner even when this replica missed its initial bound event.
+        // Later cosmetic menus only preserve an actually observed bound pose.
+        const bool creatorRebuild = s_participating.load() && (appearance.InCreator ||
+            (previous != s_appliedAppearances.end() && previous->second.InCreator));
+        const auto boundPose = creatorRebuild ? BoundPoseKeeper::Pose{} : BoundPoseKeeper::ReadPose(pActor);
         const auto oldSex = pNpc->actorData.actorBaseFlags & 1;
         auto* pOldRace = pActor->race;
         if (!pNpc->Deserialize(appearance.AppearanceBuffer, appearance.ChangeFlags))
@@ -515,6 +534,7 @@ void OnMainFrame() noexcept
         using TReset3D = void(Actor*, bool);
         POINTER_SKYRIMSE(TReset3D, s_reset3D, 40255);
         s_reset3D.Get()(pActor, true);
+        BoundPoseKeeper::AfterRebuild(pActor, boundPose, "replica appearance", creatorRebuild);
         world.GetRunner().Queue([formId, serverId = appearance.ServerId, tints = appearance.FaceTints]() {
             auto& world = World::Get();
             auto actors = world.view<FormIdComponent, RemoteComponent, PlayerComponent>();
@@ -532,7 +552,6 @@ void OnMainFrame() noexcept
             pActor->GetFaceGenNiNode() != nullptr, pNpc->formID);
     }
 
-    auto* pMenu = GetCreatorMenu();
     const auto input = PollCreatorInput(pMenu && s_holding.load() && !s_releasing.load());
     if (input.Previous || input.Next)
     {

@@ -1,6 +1,7 @@
 ﻿#include <Components.h>
 #include <GameServer.h>
 #include <Packet.hpp>
+#include <Messages/NotifyChatMessageBroadcast.h>
 
 #include <Events/AdminPacketEvent.h>
 #include <Events/CharacterRemoveEvent.h>
@@ -22,6 +23,96 @@
 #include <console/ConsoleRegistry.h>
 #include <resources/ResourceCollection.h>
 #include <CampaignLedger.h>
+#include <unordered_map>
+#include <vector>
+
+namespace
+{
+// BEGIN SERVER SEND SCRATCH
+TiltedPhoques::ScratchAllocator& ServerSendAllocator()
+{
+    static thread_local TiltedPhoques::ScratchAllocator allocator{1 << 21};
+    return allocator;
+}
+
+uint32_t& ServerSendDepth()
+{
+    static thread_local uint32_t depth{};
+    return depth;
+}
+
+template <class TMessage, class TSend>
+void WithEncodedServerMessage(const TMessage& acMessage, TSend&& aSend)
+{
+    // A nested send must not reset or overwrite an outer packet's arena.
+    auto& depth = ServerSendDepth();
+    struct ScopedDepth
+    {
+        uint32_t& Value;
+        ScopedDepth(uint32_t& aValue) : Value(aValue) { ++Value; }
+        ~ScopedDepth() { --Value; }
+    };
+    const auto encode = [&] {
+        Buffer buffer(1 << 20);
+        Buffer::Writer writer(&buffer);
+        writer.WriteBits(0, 8);
+        acMessage.Serialize(writer);
+        TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), static_cast<uint32_t>(writer.Size()));
+        aSend(packet);
+    };
+    if (depth)
+    {
+        TiltedPhoques::ScopedAllocator scope{*TiltedPhoques::Allocator::GetDefault()};
+        encode();
+        return;
+    }
+    ScopedDepth nesting{depth};
+    // The arena must fit the 1 MiB buffer plus allocator metadata. Like the
+    // client path, destroy the buffer and scope before resetting the arena.
+    auto& allocator = ServerSendAllocator();
+    struct ScopedReset
+    {
+        TiltedPhoques::ScratchAllocator& Allocator;
+        ~ScopedReset() { Allocator.Reset(); }
+    } reset{allocator};
+    TiltedPhoques::ScopedAllocator scope{allocator};
+    encode();
+}
+
+// This cache lives for one identical-message broadcast only. Different string
+// cache baselines never share bytes; recipient filtering and send order stay at
+// the call sites. Server::Send compresses in place, including the packet length.
+struct ServerBroadcast
+{
+    const TiltedPhoques::Server& Server;
+    const ServerMessage& Message;
+    std::unordered_map<uint32_t, std::vector<char>> BytesByBaseline;
+
+    void Send(const Player* apPlayer)
+    {
+        auto [it, inserted] = BytesByBaseline.try_emplace(apPlayer->GetStringCacheId());
+        auto& bytes = it->second;
+        if (inserted)
+        {
+            WithEncodedServerMessage(Message, [&](auto& packet)
+            {
+                Server.Send(apPlayer->GetConnectionId(), &packet);
+                // Keep the post-compression envelope and size together.
+                bytes.assign(packet.GetData() - 1, packet.GetData() - 1 + packet.GetTotalSize());
+            });
+            return;
+        }
+        const auto envelope = bytes.front();
+        TiltedPhoques::PacketView packet(bytes.data(), static_cast<uint32_t>(bytes.size()));
+        // PacketView initializes the envelope to kPayload. Restore the cached
+        // compressed envelope before sending already-compressed bytes.
+        bytes.front() = envelope;
+        Server.Send(apPlayer->GetConnectionId(), &packet);
+        bytes.resize(packet.GetTotalSize());
+    }
+};
+// END SERVER SEND SCRATCH
+}
 
 constexpr size_t kMaxServerNameLength = 128u;
 
@@ -47,6 +138,7 @@ Console::Setting bSyncPlayerCalendar{
     "Gameplay:bSyncPlayerCalendar",
     "Syncs up all player calendars to be the same day, month, and year. This uses the date of the player with the furthest ahead date at connection.", false};
 Console::Setting bAutoPartyJoin{"Gameplay:bAutoPartyJoin", "Join parties automatically, as long as there is only one party in the server", true};
+Console::Setting uCrashTimeoutMs{"Gameplay:uCrashTimeoutMs", "Experimental connected timeout in ms (0 keeps transport default; paired loading test required)", 0u};
 // ModPolicy Stuff
 Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Require clients to match the campaign mod manifest", false, Console::SettingsFlags::kLocked};
 Console::Setting bAllowSKSE{"ModPolicy:bAllowSKSE", "Allow clients with SKSE active to join", true, Console::SettingsFlags::kLocked};
@@ -131,7 +223,8 @@ constexpr char kCalendarSyncWarning[]{"Calendar sync is enabled. We generally do
 
 static uint16_t GetUserTickRate()
 {
-    return bPremiumTickrate ? 60 : 30;
+    // Max-sync (owner 2026-09-27): relay at 120 Hz so no update waits up to 33 ms for the next server tick.
+    return 120;
 }
 
 static bool IsMoPoActive()
@@ -284,6 +377,7 @@ void GameServer::BindMessageHandlers()
 
             const auto pRealMessage = CastUnique<T>(std::move(apMessage));
 
+            pPlayer->LastPacketTick = GetTick();
             m_pWorld->GetDispatcher().trigger(PacketEvent<T>(pRealMessage.get(), pPlayer));
         };
 
@@ -617,6 +711,17 @@ void GameServer::OnConsume(const void* apData, const uint32_t aSize, const Conne
 
 void GameServer::OnConnection(const ConnectionId_t aHandle)
 {
+    // Keep the aggressive timeout opt-in until normal long loads and poor routes
+    // have been tested. Application packet age is evidence, not a failure detector.
+    const uint32_t timeout = uCrashTimeoutMs.value_as<uint32_t>();
+    if (timeout && (timeout < 4000 || timeout > 60000 ||
+        !SteamNetworkingUtils()->SetConnectionConfigValueInt32(aHandle, k_ESteamNetworkingConfig_TimeoutConnected, timeout)))
+        spdlog::error("Failed to set connection {:X} experimental silence timeout {}", aHandle, timeout);
+    spdlog::info("Orphan connection: handle={:X} configuredTimeoutMs={} (0=transport default)", aHandle, timeout);
+    // Max-sync relay: lift the 256 KB/s GNS default send rate and buffer for each client connection.
+    SteamNetworkingUtils()->SetConnectionConfigValueInt32(aHandle, k_ESteamNetworkingConfig_SendRateMin, 64 * 1024 * 1024);
+    SteamNetworkingUtils()->SetConnectionConfigValueInt32(aHandle, k_ESteamNetworkingConfig_SendRateMax, 64 * 1024 * 1024);
+    SteamNetworkingUtils()->SetConnectionConfigValueInt32(aHandle, k_ESteamNetworkingConfig_SendBufferSize, 32 * 1024 * 1024);
     spdlog::info("Connection received {:x}", aHandle);
     UpdateTitle();
 }
@@ -633,6 +738,32 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
 
     if (pPlayer)
     {
+        pPlayer->Disconnecting = true;
+        // Leave callbacks clear JoinedPartyId. Retain it before that boundary,
+        // including actors first assigned while the player was still solo.
+        for (auto entity : m_pWorld->view<OwnerComponent>())
+        {
+            auto& owner = m_pWorld->get<OwnerComponent>(entity);
+            if (owner.GetOwner() == pPlayer)
+                owner.PartyId = pPlayer->GetParty().JoinedPartyId;
+        }
+        spdlog::info("Orphan disconnect: player={} reason={} lastPacketAgeMs={}", pPlayer->GetId(),
+            static_cast<uint32_t>(aReason), GetTick() - pPlayer->LastPacketTick);
+        if (aReason == EDisconnectReason::BadConnection || aReason == EDisconnectReason::TimedOut)
+        {
+            NotifyChatMessageBroadcast lost{};
+            lost.MessageType = ChatMessageType::kSystemMessage;
+            lost.ChatMessage = pPlayer->GetUsername() + " lost connection";
+            SendToParty(lost, pPlayer->GetParty(), pPlayer);
+            spdlog::warn("{} lost connection; recovering ownership", pPlayer->GetUsername());
+        }
+        else
+        {
+            NotifyChatMessageBroadcast left{};
+            left.MessageType = ChatMessageType::kSystemMessage;
+            left.ChatMessage = pPlayer->GetUsername() + " left the session";
+            SendToParty(left, pPlayer->GetParty(), pPlayer);
+        }
         if (const auto& cell = pPlayer->GetCellComponent())
         {
             const auto oldCell = cell.Cell;
@@ -647,7 +778,7 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
         notify.Username = pPlayer->GetUsername();
         SendToPlayers(notify);
 
-        entt::entity playerCharacter = pPlayer->GetCharacter().value_or(static_cast<entt::entity>(0));
+        entt::entity playerCharacter = pPlayer->GetCharacter().value_or(entt::null);
 
         // Cleanup all entities that we own
         auto ownerView = m_pWorld->view<OwnerComponent>();
@@ -668,6 +799,13 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
 
         m_pWorld->GetDispatcher().update();
 
+        // InvalidOwners also holds Player pointers. Do not leave freed pointers
+        // in a handoff chain where a future allocation could match them.
+        for (auto entity : m_pWorld->view<OwnerComponent>())
+        {
+            auto& owner = m_pWorld->get<OwnerComponent>(entity);
+            owner.InvalidOwners.erase(std::remove(owner.InvalidOwners.begin(), owner.InvalidOwners.end(), pPlayer), owner.InvalidOwners.end());
+        }
         m_pWorld->GetPlayerManager().Remove(pPlayer);
     }
 
@@ -676,51 +814,31 @@ void GameServer::OnDisconnection(const ConnectionId_t aConnectionId, EDisconnect
 
 void GameServer::Send(const ConnectionId_t aConnectionId, const ServerMessage& acServerMessage) const
 {
-    static thread_local TiltedPhoques::ScratchAllocator s_allocator{1 << 18};
-
-    Buffer buffer(1 << 20);
-    Buffer::Writer writer(&buffer);
-    writer.WriteBits(0, 8); // Skip the first byte as it is used by packet
-
-    acServerMessage.Serialize(writer);
-
-    TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), static_cast<uint32_t>(writer.Size()));
-    Server::Send(aConnectionId, &packet);
-
-    s_allocator.Reset();
+    WithEncodedServerMessage(acServerMessage, [&](auto& packet) { Server::Send(aConnectionId, &packet); });
 }
 
 void GameServer::Send(ConnectionId_t aConnectionId, const ServerAdminMessage& acServerMessage) const
 {
-    static thread_local TiltedPhoques::ScratchAllocator s_allocator{1 << 18};
-
-    Buffer buffer(1 << 20);
-    Buffer::Writer writer(&buffer);
-    writer.WriteBits(0, 8); // Skip the first byte as it is used by packet
-
-    acServerMessage.Serialize(writer);
-
-    TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), static_cast<uint32_t>(writer.Size()));
-    Server::Send(aConnectionId, &packet);
-
-    s_allocator.Reset();
+    WithEncodedServerMessage(acServerMessage, [&](auto& packet) { Server::Send(aConnectionId, &packet); });
 }
 
 void GameServer::SendToLoaded(const ServerMessage& acServerMessage) const
 {
+    ServerBroadcast broadcast{*this, acServerMessage, {}};
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer->GetCellComponent())
-            pPlayer->Send(acServerMessage);
+            broadcast.Send(pPlayer);
     }
 }
 
 void GameServer::SendToPlayers(const ServerMessage& acServerMessage, const Player* apExcludedPlayer) const
 {
+    ServerBroadcast broadcast{*this, acServerMessage, {}};
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer != apExcludedPlayer)
-            pPlayer->Send(acServerMessage);
+            broadcast.Send(pPlayer);
     }
 }
 
@@ -748,10 +866,11 @@ bool GameServer::SendToPlayersInRange(const ServerMessage& acServerMessage, cons
     if (const auto* characterComponent = m_pWorld->try_get<CharacterComponent>(acOrigin))
         isDragon = characterComponent->IsDragon();
 
+    ServerBroadcast broadcast{*this, acServerMessage, {}};
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (cellComponent.IsInRange(pPlayer->GetCellComponent(), isDragon) && pPlayer != apExcludedPlayer)
-            pPlayer->Send(acServerMessage);
+            broadcast.Send(pPlayer);
     }
 
     return true;
@@ -765,6 +884,7 @@ void GameServer::SendToParty(const ServerMessage& acServerMessage, const PartyCo
         return;
     }
 
+    ServerBroadcast broadcast{*this, acServerMessage, {}};
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer == apExcludeSender)
@@ -773,7 +893,7 @@ void GameServer::SendToParty(const ServerMessage& acServerMessage, const PartyCo
         const auto& partyComponent = pPlayer->GetParty();
         if (partyComponent.JoinedPartyId == acPartyComponent.JoinedPartyId)
         {
-            pPlayer->Send(acServerMessage);
+            broadcast.Send(pPlayer);
         }
     }
 }
@@ -797,6 +917,7 @@ void GameServer::SendToPartyInRange(const ServerMessage& acServerMessage, const 
 
     const auto& cellComponent = view.get<CellIdComponent>(*it);
 
+    ServerBroadcast broadcast{*this, acServerMessage, {}};
     for (Player* pPlayer : m_pWorld->GetPlayerManager())
     {
         if (pPlayer == apExcludeSender)
@@ -808,7 +929,7 @@ void GameServer::SendToPartyInRange(const ServerMessage& acServerMessage, const 
         if (pPlayer->GetParty().JoinedPartyId != acPartyComponent.JoinedPartyId)
             continue;
 
-        pPlayer->Send(acServerMessage);
+        broadcast.Send(pPlayer);
     }
 }
 

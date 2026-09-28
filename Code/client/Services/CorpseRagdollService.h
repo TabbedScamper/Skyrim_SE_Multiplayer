@@ -6,6 +6,8 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <deque>
+#include <unordered_map>
 
 struct World;
 struct TransportService;
@@ -14,13 +16,13 @@ struct DisconnectedEvent;
 struct NotifyCorpseRagdoll;
 struct NotifyDismember;
 
-// Ragdolls look the same on every PC, in real time: deaths, knockdowns, shouts, explosions.
+// Owner-authoritative ragdoll synchronization: deaths, knockdowns, shouts, explosions.
 // Each PC used to simulate its own ragdoll for an actor (measured: 18 simulated bodies on both,
 // different transforms; the prisoner shot in the intro fell and spun differently on the follower).
-// The actor's owner streams every ragdoll body (relative to the actor) at 20 Hz while physics owns
+// The actor's owner streams every ragdoll body (relative to the actor) at nominal 30 Hz while physics owns
 // the skeleton and the bodies move, and sends the settled pose afterwards (again every 5 s for
-// late arrivals). Other PCs place keyframed bodies at each physics step. The detached head
-// uses the same placement and the reliable dismember event's tick.
+// late arrivals). Other PCs steer dynamic bodies at each physics step. The detached head
+// uses the same steering and the reliable dismember event's tick.
 class CorpseRagdollService
 {
 public:
@@ -29,16 +31,20 @@ public:
     // Main::Update resolves graph/body bindings and publishes retained step snapshots.
     // Game-thread death/dismember transitions stay here; placement runs at the physics step.
     static void OnMainFrame() noexcept;
-    // ID 61410: before/after the native solver, using a retained snapshot without ECS/graph locks.
+    // IDs 61410 and 61417: before/after the solver, without ECS/graph locks.
     static void OnHavokStep(void* apWorld, float aDeltaTime, bool aAfterStep) noexcept;
-    // Native postPhysics can run inside the solver's listeners, before its return hook.
-    static void PlaceForReadback(void* apDriver) noexcept;
+    static void InvalidateInstance(void* apInstance) noexcept;
+    static void QueueActor(Actor* apActor) noexcept;
+    // Bounded POD physics observations, consumed by the harness on the main thread.
+    static std::string DrainRagdollCapture() noexcept;
+    static void BeginRagdollCapture() noexcept;
     // True until the owner ends its ragdoll stream or authority is released:
     // nothing else may move it (the corpse cell correction reloaded it with MoveTo: naked, then
     // teleported to the owner's final position). Any thread.
     static bool IsFollowingOwner(uint32_t aFormId) noexcept;
     // Testing ground: the actor's ragdoll bodies as JSON (world positions, game units), "[]" if none.
     static std::string DescribeRagdollBodies(Actor* apActor) noexcept;
+    static std::string DescribeRagdollRenderPose(Actor* apActor) noexcept;
     static void RecordDismember(Actor* apActor, bool aCreated) noexcept;
     static bool IsDismemberAuthorized(uint32_t aFormId) noexcept;
 
@@ -66,6 +72,7 @@ private:
         std::array<Sample, 12> Ring{};
         uint32_t RingCount{};
         uint32_t RingNext{};
+        uint64_t Revision{}, PublishedRevision{};
         // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
         bool Knocked{};
         // The owner is dying (it reported the death), not only knocked down: set when this copy is
@@ -73,6 +80,8 @@ private:
         bool OwnerDying{};
         bool CountMismatchLogged{};
         const char* LastSkipReason{};
+        // Times the local actor reference was moved onto the owner origin while following.
+        uint32_t AnchorMoves{};
         uint64_t DismemberTick{};
         uint64_t EndTick{};
         uint64_t RetryTransitionMs{};
@@ -105,6 +114,11 @@ private:
     World& m_world;
     TransportService& m_transport;
     uint64_t m_nextTickMs{};
+    size_t m_discoveryCursor{};
+    std::deque<entt::entity> m_captureQueue;
+    std::unordered_map<entt::entity, uint32_t> m_captureEntities;
+    std::deque<uint64_t> m_remoteQueue;
+    std::deque<uint32_t> m_dismemberQueue;
     Map<uint64_t, OwnedRagdoll> m_owned;
     Map<uint64_t, RemoteRagdoll> m_remote;
     Map<uint64_t, uint64_t> m_ended; // terminal tick survives binding/actor removal

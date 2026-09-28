@@ -28,8 +28,11 @@
 #include <Services/PapyrusService.h>
 #include <Services/PartyService.h>
 #include <Services/ObjectService.h>
+#include <Systems/AnimationSystem.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/TransportService.h>
+#include <Services/Generic/NpcLootService.h>
+#include <Services/Generic/NakedNpcGuard.h>
 
 #include <Forms/ActorValueInfo.h>
 #include <Forms/TESRace.h>
@@ -712,6 +715,19 @@ void Actor::SetActorInventory(const Inventory& acInventory) noexcept
         return;
     }
 
+    if (!GetExtension()->IsPlayer() && (GetExtension()->IsRemote() || IsDead()))
+    {
+        std::string before, requested;
+        for (const auto& item : currentInventory.Entries)
+            if (item.IsWorn()) before += fmt::format(" {:X}:{:X}", item.BaseId.ModId, item.BaseId.BaseId);
+        for (const auto& item : acInventory.Entries)
+            if (item.IsWorn()) requested += fmt::format(" {:X}:{:X}", item.BaseId.ModId, item.BaseId.BaseId);
+        spdlog::info("Worn evidence: full-inventory {:X} remote {} life {} root {} process {} main {} before [{}] requested [{}]",
+            formID, GetExtension()->IsRemote(), (actorState.flags1 >> 21) & 15,
+            static_cast<const void*>(GetNiNode()), static_cast<const void*>(currentProcess),
+            NpcLootService::IsMainThread(), before, requested);
+    }
+
     if (!this->GetExtension()->IsPlayer() && currentInventory.ContainsQuestItems())
         SetInventoryRetainingQuestItems(currentInventory, acInventory);
     else
@@ -742,6 +758,9 @@ void Actor::QueueReset3D(const uint32_t aDelayMs) noexcept
 // it checks whether to use the task queue, so its destructive half ran on whatever thread called it.
 void Actor::FlushPendingReset3D() noexcept
 {
+    NpcLootService::MarkMainThread();
+    World::Get().GetNpcLootService().OnMainFrame();
+    World::Get().GetNakedNpcGuard().UpdateNative();
     const auto now = std::chrono::steady_clock::now();
     std::vector<uint32_t> due;
     {
@@ -1098,6 +1117,10 @@ void Actor::FixVampireLordModel() noexcept
     g_forceAnimation = false;
 }
 
+// A/B switch for the leader's cart horses: E37320 moves local actors through E19790 every frame and the
+// rewrite below drops that call's Havok sync. true = let local actors keep the native call.
+std::atomic<bool> g_nativeLocalSetPosition{false};
+
 char TP_MAKE_THISCALL(HookSetPosition, Actor, NiPoint3& aPosition)
 {
     const auto pExtension = apThis ? apThis->GetExtension() : nullptr;
@@ -1116,8 +1139,21 @@ char TP_MAKE_THISCALL(HookSetPosition, Actor, NiPoint3& aPosition)
         return 1;
 
     // Don't interfere with non actor references, or the player, or if we are calling our self
-    if (apThis->formType != Actor::Type || apThis == PlayerCharacter::Get() || ScopedReferencesOverride::IsOverriden())
+    // A local cart horse keeps the native call: rewriting E37320's per-frame move to SetPosition(pos, false)
+    // dropped its Havok sync, so the horse held its height while walking downhill, then fell ~185 u and
+    // flipped its cart (run 223840 A/B: 4 holds and 64 cart tilts > 25 deg before, none after).
+    // Tethered-horse handling only while hosting a connected co-op session (review P0-2: never alter single-player).
+    const bool hostingSession = World::Get().GetTransport().IsConnected() && World::Get().GetPartyService().IsInParty() &&
+        World::Get().GetPartyService().IsLeader();
+    const bool tetheredHorse = hostingSession && ObjectService::IsTetheredHorse(apThis->formID);
+    if (apThis->formType != Actor::Type || apThis == PlayerCharacter::Get() || ScopedReferencesOverride::IsOverriden() ||
+        g_nativeLocalSetPosition.load(std::memory_order_relaxed) || tetheredHorse)
+    {
+        // (A placement-height override for hitched horses was tried here and removed: it tipped the lead cart at the
+        // Helgen stop in both graded rides that ran it, 20260928-082834 / -083620. The controller z writeback in
+        // ObjectService is the proven float fix.)
         return TiltedPhoques::ThisCall(RealSetPosition, apThis, aPosition);
+    }
 
     ScopedReferencesOverride recursionGuard;
 
@@ -1215,6 +1251,7 @@ void TP_MAKE_THISCALL(HookKillImpl, Actor, Actor* apAttacker, float aDamage, boo
         return;
     }
     TiltedPhoques::ThisCall(RealKillImpl, apThis, apAttacker, aDamage, aSendEvent, aRagdollInstant);
+    CorpseRagdollService::QueueActor(apThis);
 }
 
 // TODO: this is flawed, since it does not account for invulnerable actors
@@ -1575,6 +1612,7 @@ void TP_MAKE_THISCALL(HookKnockExplosion, AIProcess, Actor* apActor,
     }
     TiltedPhoques::ThisCall(RealKnockExplosion, apThis, apActor,
         acLocation, aMagnitude);
+    CorpseRagdollService::QueueActor(apActor);
 }
 
 void Actor::SpeakSound(const char* pFile)
@@ -1603,6 +1641,14 @@ char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
              formId != s_remoteProcessTrialMountFormId.load(std::memory_order_acquire)))
             return 0;
         s_remoteProcessTrialTicks.fetch_add(1, std::memory_order_relaxed);
+    }
+    else if (ObjectService::GetSceneUpdateMode() != 0 && apThis != PlayerCharacter::Get() &&
+             World::Get().GetTransport().IsConnected())
+    {
+        // Diagnostic only (scene_update_mode, default 0): queue a main-thread scene refresh. The host horse float
+        // was NOT this (fixed by the controller z writeback in ObjectService, 2026-09-28); culled-bit clearing and
+        // in-job refreshes were removed after measurement. Never touch engine systems from this job thread.
+        ObjectService::QueueActorSceneUpdate(apThis->formID);
     }
 
     return TiltedPhoques::ThisCall(RealActorProcess, apThis, a2);

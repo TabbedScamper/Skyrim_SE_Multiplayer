@@ -5,6 +5,7 @@
 #include <Messages/RequestScriptedCamera.h>
 #include <Messages/NotifyScriptedCamera.h>
 #include <Services/PartyService.h>
+#include <Services/OwnershipPolicy.h>
 #include <Components.h>
 #include <GameServer.h>
 
@@ -484,6 +485,9 @@ void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) 
         }
         pParty->SessionState = 1;
         pParty->StartEpoch = m_nextStartEpoch++;
+        // Observe the launch boundary without retiring live native identities.
+        spdlog::info("Orphan session: party={} epoch={} retainedNativeIdentities=1",
+            *pPlayer->GetParty().JoinedPartyId, pParty->StartEpoch);
         pParty->LoadedPlayerIds.clear();
         pParty->GameplayReadyPlayerIds.clear();
         pParty->ReadyPlayerIds.clear();
@@ -555,12 +559,13 @@ void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
                 auto& playerPartyComponent = player->GetParty();
                 Party& party = m_parties[*playerPartyComponent.JoinedPartyId];
 
+                // A new member has not participated in this launch barrier.
+                if (party.SessionState == 1 || party.SessionState == 2)
+                    break;
+
                 party.Members.push_back(acEvent.pPlayer);
-                party.ReadyPlayerIds.clear();
-                party.LoadedPlayerIds.clear();
-                party.GameplayReadyPlayerIds.clear();
-                party.SessionState = 0;
-                party.StartEpoch = 0;
+                if (party.SessionState == 0)
+                    party.ReadyPlayerIds.clear();
                 acEvent.pPlayer->GetParty().JoinedPartyId = *playerPartyComponent.JoinedPartyId;
 
                 SendPartyJoinedEvent(party, acEvent.pPlayer);
@@ -650,6 +655,9 @@ void PartyService::OnPartyAcceptInvite(const PacketEvent<PartyAcceptInviteReques
         auto partyId = *inviterPartyComponent.JoinedPartyId;
         Party& party = m_parties[partyId];
 
+        if (party.SessionState == 1 || party.SessionState == 2)
+            return;
+
         if (party.LeaderPlayerId != pInviter->GetId())
         {
             spdlog::debug("[PartyService]: Inviter is not party leader. Cancelling.");
@@ -664,11 +672,8 @@ void PartyService::OnPartyAcceptInvite(const PacketEvent<PartyAcceptInviteReques
         }
 
         party.Members.push_back(pSelf);
-        party.ReadyPlayerIds.clear();
-        party.LoadedPlayerIds.clear();
-        party.GameplayReadyPlayerIds.clear();
-        party.SessionState = 0;
-        party.StartEpoch = 0;
+        if (party.SessionState == 0)
+            party.ReadyPlayerIds.clear();
         selfPartyComponent.JoinedPartyId = partyId;
 
         spdlog::debug("[PartyService]: Added invitee to party, sending events");
@@ -690,6 +695,9 @@ void PartyService::OnPlayerLeave(const PlayerLeaveEvent& acEvent) noexcept
 
 void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
 {
+    for (auto* player : m_world.GetPlayerManager())
+        player->GetParty().Invitations.erase(apPlayer);
+    apPlayer->GetParty().Invitations.clear();
     auto* pPartyComponent = &apPlayer->GetParty();
     spdlog::debug("[PartyService]: Removing player from party.");
 
@@ -700,12 +708,30 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
         Party& party = m_parties[id];
         auto& members = party.Members;
 
-        members.erase(std::find(std::begin(members), std::end(members), apPlayer));
-        party.ReadyPlayerIds.clear();
-        party.LoadedPlayerIds.clear();
-        party.GameplayReadyPlayerIds.clear();
-        party.SessionState = 0;
-        party.StartEpoch = 0;
+        members.erase(std::remove(members.begin(), members.end(), apPlayer), members.end());
+        const auto eraseMember = [apPlayer](auto& aIds)
+        {
+            aIds.erase(std::remove(aIds.begin(), aIds.end(), apPlayer->GetId()), aIds.end());
+        };
+        eraseMember(party.ReadyPlayerIds);
+        eraseMember(party.LoadedPlayerIds);
+        eraseMember(party.GameplayReadyPlayerIds);
+        // A disconnect changes membership, not the running world or its epoch.
+        // Re-evaluate an in-flight barrier against the surviving members.
+        if (!members.empty())
+        {
+            const auto allReady = [&members](const auto& aIds)
+            {
+                return std::all_of(members.begin(), members.end(), [&](const Player* apMember)
+                {
+                    return std::find(aIds.begin(), aIds.end(), apMember->GetId()) != aIds.end();
+                });
+            };
+            party.SessionState = OwnershipPolicy::AfterMemberLeft(party.SessionState, true,
+                allReady(party.LoadedPlayerIds), allReady(party.GameplayReadyPlayerIds));
+            spdlog::info("Orphan party: departed={} survivors={} state={} epoch={}",
+                apPlayer->GetId(), members.size(), party.SessionState, party.StartEpoch);
+        }
 
         if (members.empty())
         {

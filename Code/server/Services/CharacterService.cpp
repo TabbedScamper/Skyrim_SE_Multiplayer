@@ -1,6 +1,7 @@
 #include <Messages/PlayerAppearanceRequest.h>
 #include <Messages/NotifyPlayerAppearance.h>
 #include <Services/CharacterService.h>
+#include <Services/OwnershipPolicy.h>
 #include <Components.h>
 #include <GameServer.h>
 #include <World.h>
@@ -397,48 +398,117 @@ void CharacterService::UpdateParkedActors() const noexcept
     }
 }
 
-// During a shared session the leader simulates every NPC it has in range; a follower only keeps
-// NPCs the leader cannot reach. Assignment races at a new game start otherwise leave followers
-// owning scene NPCs and vehicles (measured: the follower owned a cart horse, pulling against its
-// own host-driven cart, so the leader's cart froze mid-road; and Lokir, stalling the cart scene).
+void CharacterService::StampOwnership(entt::entity aEntity, Player* apPlayer) const noexcept
+{
+    auto& owner = m_world.get<OwnerComponent>(aEntity);
+    owner.LastOwnerId = apPlayer->GetId();
+    owner.PartyId = apPlayer->GetParty().JoinedPartyId;
+    const auto* party = m_world.GetPartyService().GetPlayerParty(apPlayer);
+    owner.PartyEpoch = party ? party->StartEpoch : 0;
+    owner.FinishGrant(m_world.GetPartyService().IsPlayerLeader(apPlayer));
+}
+
+void CharacterService::ReconcileCellOwnership(Player* apPlayer, bool aCellEntry) const noexcept
+{
+    auto& parties = m_world.GetPartyService();
+    auto* party = parties.GetPlayerParty(apPlayer);
+    if (!party || !parties.IsPlayerLeader(apPlayer) || apPlayer->Disconnecting)
+        return;
+    const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
+    for (auto entity : view)
+        ReconcileActorOwnership(apPlayer, entity, aCellEntry);
+}
+
+void CharacterService::ReconcileActorOwnership(Player* apPlayer, entt::entity entity, bool aCellEntry) const noexcept
+{
+    const auto* party = m_world.GetPartyService().GetPlayerParty(apPlayer);
+    if (!party || apPlayer->Disconnecting)
+        return;
+    const auto now = GameServer::Get()->GetTick();
+    auto& owner = m_world.get<OwnerComponent>(entity);
+    const auto& actor = m_world.get<CharacterComponent>(entity);
+    const auto& cell = m_world.get<CellIdComponent>(entity);
+    auto* previous = owner.GetOwner();
+    if (previous == apPlayer || actor.IsPlayer())
+        return;
+    const auto actorParty = previous && !previous->Disconnecting ? previous->GetParty().JoinedPartyId : owner.PartyId;
+    const bool sameParty = actorParty == apPlayer->GetParty().JoinedPartyId;
+    const bool inRange = cell.Cell == GameId{} || apPlayer->GetCellComponent().IsInRange(cell, actor.IsDragon());
+    const bool releaseReady = OwnershipPolicy::ReleaseReady(now, owner.ReleasedAt);
+    // Retry a relinquishing leader once after the grace period, or when a
+    // new cell entry proves its load set changed. Declined grants do not loop.
+    if (sameParty && inRange && (aCellEntry || (owner.RetryLeader && releaseReady)))
+    {
+        owner.InvalidOwners.erase(std::remove(owner.InvalidOwners.begin(), owner.InvalidOwners.end(), apPlayer), owner.InvalidOwners.end());
+        owner.RetryLeader = false;
+    }
+    const bool connected = previous && !previous->Disconnecting &&
+        previous->GetParty().JoinedPartyId == apPlayer->GetParty().JoinedPartyId;
+    const bool declined = std::find(owner.InvalidOwners.begin(), owner.InvalidOwners.end(), apPlayer) != owner.InvalidOwners.end();
+    const bool claim = OwnershipPolicy::ShouldClaim(actor.IsPlayer(), true, inRange, sameParty,
+        party->SessionState >= 1 || !connected, owner.Released, releaseReady, declined);
+    if (aCellEntry && sameParty && inRange)
+        spdlog::info("Orphan reconcile: actor {:X} leader={} owner={} connected={} actorEpoch={} partyEpoch={} declined={} released={} releaseReady={} parked={} ragdoll={} claim={}",
+            World::ToInteger(entity), apPlayer->GetId(), previous ? previous->GetId() : 0, connected,
+            owner.PartyEpoch, party->StartEpoch, declined, owner.Released, releaseReady,
+            m_world.all_of<LeaderParkedActor>(entity), HasActiveRagdoll(m_world, entity), claim);
+    if (!claim)
+        return;
+    const auto oldOwnerId = owner.LastOwnerId;
+    if (TransferOwnership(apPlayer, entity, OwnershipTransferReason::LeaderAssignment))
+    {
+        if (!connected)
+            spdlog::info("Claimed orphan actor {:X} (owner {} gone)", World::ToInteger(entity), oldOwnerId);
+        else
+            spdlog::info("Leader authority: actor {:X} moves from a follower to the leader (previous={})", World::ToInteger(entity), oldOwnerId);
+    }
+}
+
+bool CharacterService::CanReplicateTo(Player* apPlayer, entt::entity aEntity) const noexcept
+{
+    const auto& owner = m_world.get<OwnerComponent>(aEntity);
+    const auto& actor = m_world.get<CharacterComponent>(aEntity);
+    auto* simulator = owner.GetOwner();
+    const auto actorParty = simulator && !simulator->Disconnecting ? simulator->GetParty().JoinedPartyId : owner.PartyId;
+    // A leader only consumes a remote snapshot for a connected cell simulator.
+    const bool connectedMember = simulator && !simulator->Disconnecting &&
+        (actor.IsPlayer() || !actorParty || simulator->GetParty().JoinedPartyId == actorParty);
+    return OwnershipPolicy::CanReplicate(connectedMember, simulator == apPlayer,
+        actor.IsPlayer(), !actorParty || actorParty == apPlayer->GetParty().JoinedPartyId,
+        m_world.GetPartyService().IsPlayerLeader(apPlayer),
+        simulator && simulator->GetCellComponent().IsInRange(m_world.get<CellIdComponent>(aEntity), actor.IsDragon()), owner.Released);
+}
+
 void CharacterService::EnforceLeaderAuthority() const noexcept
 {
-    static auto s_next = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
-    if (now < s_next)
+    if (now < m_nextOwnershipSweep)
         return;
-    s_next = now + std::chrono::seconds(1);
+    m_nextOwnershipSweep = now + std::chrono::seconds(1);
 
-    auto& partyService = m_world.GetPartyService();
-    const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
-    std::vector<std::pair<Player*, entt::entity>> transfers;
-    for (auto entity : view)
+    Vector<entt::entity> retired;
+    // One actor pass independent of player count. Cell-entry reconciliation is
+    // still immediate; active-party identities have no speculative expiry.
+    for (auto entity : m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>())
     {
-        const auto& ownerComponent = view.get<OwnerComponent>(entity);
-        const auto& characterComponent = view.get<CharacterComponent>(entity);
-        Player* pOwner = ownerComponent.GetOwner();
-        if (!pOwner || characterComponent.IsPlayer() || !partyService.IsPlayerInParty(pOwner) || partyService.IsPlayerLeader(pOwner))
+        auto& owner = m_world.get<OwnerComponent>(entity);
+        // Actors can be assigned before their owner joins a party.
+        if (owner.GetOwner() && !owner.GetOwner()->Disconnecting)
+            owner.PartyId = owner.GetOwner()->GetParty().JoinedPartyId;
+        const auto* party = owner.PartyId ? m_world.GetPartyService().GetById(*owner.PartyId) : nullptr;
+        if (!owner.GetOwner() && !party)
+        {
+            retired.push_back(entity);
             continue;
-        auto* pParty = partyService.GetPlayerParty(pOwner);
-        if (!pParty || pParty->SessionState < 1)
-            continue;
-        Player* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
-        if (!pLeader)
-            continue;
-        // A leader that relinquished this actor (not loaded there although its cell is in range)
-        // keeps it relinquished: taking it back every second flipped the owner (and re-sent its
-        // inventory) forever, actor 1F in the intro, epochs 2..94.
-        if (std::find(ownerComponent.InvalidOwners.begin(), ownerComponent.InvalidOwners.end(), pLeader) !=
-            ownerComponent.InvalidOwners.end())
-            continue;
-        const auto& cellIdComponent = view.get<CellIdComponent>(entity);
-        if (cellIdComponent.Cell == GameId{} || pLeader->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
-            transfers.emplace_back(pLeader, entity);
+        }
+        auto* leader = party ? m_world.GetPlayerManager().GetById(party->LeaderPlayerId) : nullptr;
+        if (leader)
+            ReconcileActorOwnership(leader, entity, false);
     }
-    for (const auto& [pLeader, entity] : transfers)
+    for (auto entity : retired)
     {
-        spdlog::info("Leader authority: actor {:X} moves from a follower to the leader", World::ToInteger(entity));
-        TransferOwnership(pLeader, entity, OwnershipTransferReason::LeaderAssignment);
+        spdlog::info("Orphan retired: actor {:X} after party destruction", World::ToInteger(entity));
+        m_world.GetDispatcher().trigger(CharacterRemoveEvent(World::ToInteger(entity)));
     }
 }
 
@@ -490,7 +560,6 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
 {
     auto& message = acMessage.Packet;
     const auto& refId = message.ReferenceId;
-
     const auto isPlayer = (refId.ModId == 0 && refId.BaseId == 0x14);
     const auto isCustom = isPlayer || refId.ModId == std::numeric_limits<uint32_t>::max();
 
@@ -570,11 +639,14 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
 
         const auto itor = std::find_if(
             std::begin(view), std::end(view),
-            [view, refId](auto entity)
+            [view, refId, &acMessage](auto entity)
             {
                 const auto& formIdComponent = view.get<FormIdComponent>(entity);
 
-                return formIdComponent.Id == refId;
+                const auto& owner = view.get<OwnerComponent>(entity);
+                const auto actorParty = owner.GetOwner() && !owner.GetOwner()->Disconnecting
+                    ? owner.GetOwner()->GetParty().JoinedPartyId : owner.PartyId;
+                return formIdComponent.Id == refId && actorParty == acMessage.pPlayer->GetParty().JoinedPartyId;
             });
 
         if (itor != std::end(view))
@@ -583,8 +655,31 @@ void CharacterService::OnAssignCharacterRequest(const PacketEvent<AssignCharacte
 
             auto& ownerComponent = view.get<OwnerComponent>(*itor);
             auto& characterComponent = view.get<CharacterComponent>(*itor);
+            // A new native assignment is load evidence from this requester,
+            // even if another member accepted the preceding handoff.
+            ownerComponent.InvalidOwners.erase(std::remove(ownerComponent.InvalidOwners.begin(), ownerComponent.InvalidOwners.end(), acMessage.pPlayer), ownerComponent.InvalidOwners.end());
+            if ((!ownerComponent.GetOwner() || ownerComponent.Released) && m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer) &&
+                ownerComponent.PartyId == acMessage.pPlayer->GetParty().JoinedPartyId)
+            {
+                auto& cell = view.get<CellIdComponent>(*itor);
+                cell = CellIdComponent{message.CellId, message.WorldSpaceId, GridCellCoords::CalculateGridCellCoords(message.Position)};
+                view.get<MovementComponent>(*itor).Position = message.Position;
+                spdlog::info("Orphan rediscovery: actor {:X} ref {:X}:{:X} leader={} cell={:X}:{:X}",
+                    World::ToInteger(*itor), refId.ModId, refId.BaseId, acMessage.pPlayer->GetId(), message.CellId.ModId, message.CellId.BaseId);
+            }
             const bool isOwner = ownerComponent.GetOwner() == acMessage.pPlayer;
             const bool transferToDiscoverer = !isOwner && CanClaimOwnership(acMessage.pPlayer, *itor, ownerComponent.OwnershipEpoch, OwnershipTransferReason::LeaderAssignment);
+            if (!isOwner && m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer))
+            {
+                const auto& storedCell = view.get<CellIdComponent>(*itor);
+                const auto* party = m_world.GetPartyService().GetPlayerParty(acMessage.pPlayer);
+                spdlog::info("Orphan assignment: actor {:X} ref={:X}:{:X} leader={} owner={} reportedCell={:X}:{:X} storedCell={:X}:{:X} reportedWorld={:X}:{:X} storedWorld={:X}:{:X} released={} claim={} actorEpoch={} partyEpoch={}",
+                    World::ToInteger(*itor), refId.ModId, refId.BaseId, acMessage.pPlayer->GetId(),
+                    ownerComponent.GetOwner() ? ownerComponent.GetOwner()->GetId() : 0,
+                    message.CellId.ModId, message.CellId.BaseId, storedCell.Cell.ModId, storedCell.Cell.BaseId,
+                    message.WorldSpaceId.ModId, message.WorldSpaceId.BaseId, storedCell.WorldSpaceId.ModId, storedCell.WorldSpaceId.BaseId,
+                    ownerComponent.Released, transferToDiscoverer, ownerComponent.PartyEpoch, party ? party->StartEpoch : 0);
+            }
 
             if (!characterComponent.LeveledNpcPickId && message.LeveledNpcPickId != GameId{})
             {
@@ -708,12 +803,14 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
         movementComponent.Sent = true;
     }
 
-    // A normal release starts a fresh search. A declined grant continues the current
-    // search, retaining failed candidates so unloaded clients cannot bounce ownership.
-    if (message.Reason == OwnershipReleaseReason::Relinquish)
-        ownerComponent.InvalidOwners.clear();
-
-    ownerComponent.InvalidOwners.push_back(acMessage.pPlayer);
+    // Keep other members' declines until their cell/native evidence changes.
+    ownerComponent.RecordRelease(acMessage.pPlayer, message.Reason == OwnershipReleaseReason::Relinquish,
+        GameServer::Get()->GetTick(), m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer));
+    const auto* releasedForm = m_world.try_get<FormIdComponent>(cEntity);
+    spdlog::info("Orphan release: actor {:X} player={} reason={} epoch={} cell={:X}:{:X} ref={:X}:{:X}",
+        message.ServerId, acMessage.pPlayer->GetId(), static_cast<uint32_t>(message.Reason), message.OwnershipEpoch,
+        view.get<CellIdComponent>(*it).Cell.ModId, view.get<CellIdComponent>(*it).Cell.BaseId,
+        releasedForm ? releasedForm->Id.ModId : 0, releasedForm ? releasedForm->Id.BaseId : 0);
 
     TransferToNextOwner(cEntity, OwnershipTransferReason::Relinquish);
 }
@@ -721,10 +818,7 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
 void CharacterService::OnOwnershipTransferEvent(const OwnershipTransferEvent& acEvent) const noexcept
 {
     ReleaseParkedActor(acEvent.Entity);
-    // A disconnect starts a fresh search; previously unavailable clients may be ready now.
-    const auto view = m_world.view<OwnerComponent>();
-    if (const auto it = view.find(acEvent.Entity); it != view.end())
-        view.get<OwnerComponent>(*it).InvalidOwners.clear();
+    // Preserve declines until this client supplies new cell/native evidence.
 
     TransferToNextOwner(acEvent.Entity, OwnershipTransferReason::OwnerUnavailable);
 }
@@ -778,9 +872,11 @@ void CharacterService::OnCharacterSpawned(const CharacterSpawnedEvent& acEvent) 
     CharacterSpawnRequest message;
     Serialize(m_world, acEvent.Entity, &message);
 
-    const auto& ownerComp = m_world.get<OwnerComponent>(acEvent.Entity);
-    if (!GameServer::Get()->SendToPlayersInRange(message, acEvent.Entity, ownerComp.GetOwner()))
-        spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
+    const auto& cell = m_world.get<CellIdComponent>(acEvent.Entity);
+    const auto& character = m_world.get<CharacterComponent>(acEvent.Entity);
+    for (auto* player : m_world.GetPlayerManager())
+        if (CanReplicateTo(player, acEvent.Entity) && player->GetCellComponent().IsInRange(cell, character.IsDragon()))
+            player->Send(message);
 
     GameServer::Get()->GetWorld().GetScriptService().HandleCharacterSpawn(acEvent.Entity);
 }
@@ -1179,6 +1275,7 @@ void CharacterService::CreateCharacter(const PacketEvent<AssignCharacterRequest>
     // next epoch. A separated follower keeps the cell simulation lease.
     Player* const pOwner = acMessage.pPlayer;
     m_world.emplace<OwnerComponent>(cEntity, pOwner);
+    StampOwnership(cEntity, pOwner);
 
     auto& cellIdComponent = m_world.emplace<CellIdComponent>(cEntity, message.CellId);
     if (message.WorldSpaceId != GameId{})
@@ -1224,7 +1321,7 @@ void CharacterService::CreateCharacter(const PacketEvent<AssignCharacterRequest>
     {
         auto& provenance = m_world.emplace<TemporaryActorProvenance>(cEntity);
         provenance.CreatedTick = pServer->GetTick();
-        provenance.CreationPosition = static_cast<glm::vec3>(message.Position);
+        provenance.CreationPosition = movementComponent.Position;
         provenance.BoundPlayerIds.push_back(acMessage.pPlayer->GetId());
     }
 
@@ -1369,20 +1466,15 @@ bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aE
         return false;
     };
 
-    if (aExpectedOwnershipEpoch == 0 || ownerComponent.OwnershipEpoch != aExpectedOwnershipEpoch)
+    if (!OwnershipPolicy::AcceptOwnershipEpoch(aExpectedOwnershipEpoch, ownerComponent.OwnershipEpoch))
         return reject("the ownership epoch is stale");
 
-    if (!pCurrentOwner || pCurrentOwner == apPlayer)
+    if (pCurrentOwner == apPlayer)
         return reject("the player already owns the actor");
 
     if (characterComponent.IsPlayer())
         return reject("a player actor cannot be claimed");
 
-    // An actor whose stored cell is unknown was registered by a PC whose cell had not loaded yet
-    // (a follower at the first frame of a new game: Lokir came in at cell 0, position 0,0,0). Nothing
-    // is ever in range of that cell, so the leader's claim was rejected and the follower kept a
-    // scene actor the leader's quest was waiting on (the intro cart scene stalled). The leader may
-    // always claim such an actor.
     const bool unknownCell = cellIdComponent.Cell == GameId{};
     if (!apPlayer->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()) &&
         !(unknownCell && m_world.GetPartyService().IsPlayerLeader(apPlayer)))
@@ -1392,22 +1484,21 @@ bool CharacterService::CanClaimOwnership(Player* apPlayer, const entt::entity aE
     PartyService::Party* const pParty = partyService.GetPlayerParty(apPlayer);
     if (!pParty)
         return reject("the player is not in a party");
+    if (std::find(ownerComponent.InvalidOwners.begin(), ownerComponent.InvalidOwners.end(), apPlayer) != ownerComponent.InvalidOwners.end())
+        return reject("the player declined; waiting for cell entry or native rediscovery");
     if (characterComponent.IsMount() && !partyService.IsPlayerLeader(apPlayer))
         return reject("a follower cannot claim a mount from the leader's simulation");
-    if (std::find(pParty->Members.begin(), pParty->Members.end(), pCurrentOwner) == pParty->Members.end())
+    if (ownerComponent.PartyId && ownerComponent.PartyId != apPlayer->GetParty().JoinedPartyId)
         return reject("the current owner is not in the party");
 
     if (!partyService.IsPlayerLeader(apPlayer))
     {
-        // EnforceLeaderAuthority gives every unknown-cell actor to the leader. Letting a follower
-        // claim it back (nothing is ever "in range" of an unknown cell) flipped the owner every
-        // second, re-sending its inventory each time (actor 20 in the intro, epochs 125..138).
         if (unknownCell)
-            return reject("the actor's cell is unknown; the leader simulates it");
+            return reject("the actor cell is unknown; the leader simulates it");
         auto* pLeader = m_world.GetPlayerManager().GetById(pParty->LeaderPlayerId);
         if (pLeader && pLeader->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
             return reject("the leader is in range and retains simulation authority");
-        if (pCurrentOwner->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
+        if (pCurrentOwner && !pCurrentOwner->Disconnecting && pCurrentOwner->GetCellComponent().IsInRange(cellIdComponent, characterComponent.IsDragon()))
             return reject("the current cell simulator is still in range");
     }
 
@@ -1421,7 +1512,7 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     const char* pReasonName = GetOwnershipTransferReasonName(aReason);
     const auto view = m_world.view<OwnerComponent, CharacterComponent, CellIdComponent>();
     const auto it = view.find(aEntity);
-    if (!apPlayer || it == view.end())
+    if (!apPlayer || apPlayer->Disconnecting || it == view.end())
     {
         spdlog::warn("Cannot transfer ownership of actor {:X} for {} because the target is invalid", World::ToInteger(aEntity), pReasonName);
         return false;
@@ -1429,6 +1520,16 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
 
     auto& ownerComponent = view.get<OwnerComponent>(*it);
     Player* const pOldOwner = ownerComponent.GetOwner();
+    if (pOldOwner && !pOldOwner->Disconnecting)
+        ownerComponent.PartyId = pOldOwner->GetParty().JoinedPartyId;
+    const auto& cell = view.get<CellIdComponent>(*it);
+    const auto& character = view.get<CharacterComponent>(*it);
+    const bool declined = std::find(ownerComponent.InvalidOwners.begin(), ownerComponent.InvalidOwners.end(), apPlayer) != ownerComponent.InvalidOwners.end();
+    if (!OwnershipPolicy::EligibleTarget(!apPlayer->Disconnecting,
+            ownerComponent.PartyId == apPlayer->GetParty().JoinedPartyId,
+            cell.Cell != GameId{}, apPlayer->GetCellComponent().IsInRange(cell, character.IsDragon()),
+            m_world.GetPartyService().IsPlayerLeader(apPlayer), declined))
+        return false;
     if (pOldOwner == apPlayer)
         return true;
 
@@ -1471,6 +1572,7 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
 
     ownerComponent.SetOwner(apPlayer);
     ownerComponent.OwnershipEpoch = newEpoch;
+    StampOwnership(aEntity, apPlayer);
     if (auto* pAnimation = m_world.try_get<AnimationComponent>(aEntity))
     {
         pAnimation->EvaluatedPose = {};
@@ -1485,9 +1587,9 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
         spdlog::error("Failed to broadcast ownership transfer for actor {:X}", notify.ServerId);
 
     // The former owner may already be out of range, so notify it directly as well.
-    if (pOldOwner)
+    if (pOldOwner && !pOldOwner->Disconnecting)
         pOldOwner->Send(notify);
-    if (leaderGrant)
+    if (leaderGrant && !apPlayer->GetCellComponent().IsInRange(cell, character.IsDragon()))
         apPlayer->Send(notify);
 
     spdlog::info(
@@ -1499,10 +1601,13 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
 
 void CharacterService::TransferToNextOwner(const entt::entity aEntity, const OwnershipTransferReason aReason) const noexcept
 {
-    if (m_world.all_of<LeaderParkedActor>(aEntity))
-        return;
     if (aReason == OwnershipTransferReason::OwnerUnavailable)
+    {
+        ReleaseParkedActor(aEntity);
         EndRagdollStreams(m_world, aEntity);
+    }
+    else if (m_world.all_of<LeaderParkedActor>(aEntity))
+        return;
     else if (HasActiveRagdoll(m_world, aEntity))
         return; // A refused transfer must not fall through to entity destruction.
     const char* pReasonName = GetOwnershipTransferReasonName(aReason);
@@ -1524,7 +1629,8 @@ void CharacterService::TransferToNextOwner(const entt::entity aEntity, const Own
     for (int priority = 0; priority < 2; ++priority)
     for (Player* pPlayer : m_world.GetPlayerManager())
     {
-        if (pPlayer == ownerComponent.GetOwner())
+        if (pPlayer == ownerComponent.GetOwner() || pPlayer->Disconnecting ||
+            (ownerComponent.PartyId && pPlayer->GetParty().JoinedPartyId != ownerComponent.PartyId))
             continue;
 
         const bool follower = partyService.IsPlayerInParty(pPlayer) && !partyService.IsPlayerLeader(pPlayer);
@@ -1538,11 +1644,23 @@ void CharacterService::TransferToNextOwner(const entt::entity aEntity, const Own
             continue;
 
         // Retain every owner that declined this handoff chain so the actor cannot bounce between unloaded clients.
+        spdlog::info("Orphan candidate: actor {:X} player={} leader={} packetAgeMs={} cell={:X}:{:X} reason={}",
+            World::ToInteger(aEntity), pPlayer->GetId(), !follower,
+            GameServer::Get()->GetTick() - pPlayer->LastPacketTick, cellIdComponent.Cell.ModId, cellIdComponent.Cell.BaseId, pReasonName);
         if (TransferOwnership(pPlayer, aEntity,
                 follower ? OwnershipTransferReason::CellLease : aReason, false))
             return;
     }
 
+    if (!characterComponent.IsPlayer() && !characterComponent.IsPlayerSummon() && ownerComponent.PartyId &&
+        partyService.GetById(*ownerComponent.PartyId))
+    {
+        // No dangling Player pointer and no stale simulator may publish updates.
+        // Retain identity until native rediscovery or the leader's one-shot retry.
+        ownerComponent.SetOwner(nullptr);
+        spdlog::info("Retained orphan actor {:X} after {} awaiting a loaded owner", World::ToInteger(aEntity), pReasonName);
+        return;
+    }
     spdlog::info("Removing actor {:X} after {} because no eligible owner remains", World::ToInteger(aEntity), pReasonName);
     m_world.GetDispatcher().trigger(CharacterRemoveEvent(World::ToInteger(aEntity)));
 }
@@ -1594,6 +1712,8 @@ void CharacterService::ProcessFactionsChanges() const noexcept
         auto& characterComponent = characterView.get<CharacterComponent>(entity);
         auto& cellIdComponent = characterView.get<CellIdComponent>(entity);
         auto& ownerComponent = characterView.get<OwnerComponent>(entity);
+        if (!ownerComponent.GetOwner() || ownerComponent.GetOwner()->Disconnecting)
+            continue;
 
         // If we have nothing new to send skip this
         if (!characterComponent.IsDirtyFactions())
@@ -1651,6 +1771,8 @@ void CharacterService::ProcessMovementChanges() const noexcept
         auto& movementComponent = characterView.get<MovementComponent>(entity);
         auto& cellIdComponent = characterView.get<CellIdComponent>(entity);
         auto& ownerComponent = characterView.get<OwnerComponent>(entity);
+        if (!ownerComponent.GetOwner() || ownerComponent.GetOwner()->Disconnecting)
+            continue;
         auto& animationComponent = characterView.get<AnimationComponent>(entity);
 
         // If we have nothing new to send skip this

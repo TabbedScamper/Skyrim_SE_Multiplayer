@@ -18,6 +18,7 @@
 #include "utils/Registry.h"
 
 #include <BranchInfo.h>
+#include "../client/Services/FarmMode.h"
 
 // These symbols are defined within the client code skyrimtogetherclient
 extern void InstallStartHook();
@@ -70,7 +71,7 @@ void SetMaxstdio()
 
 int StartUp(int argc, char** argv)
 {
-    bool askSelect = (GetAsyncKeyState(VK_SPACE) & 0x8000);
+    bool askSelect = !FarmMode::Enabled() && (GetAsyncKeyState(VK_SPACE) & 0x8000);
     if (!HandleArguments(argc, argv, askSelect))
         return -1;
 
@@ -78,7 +79,7 @@ int StartUp(int argc, char** argv)
     g_SharedWindowIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(102));
 
 #if (!IS_MASTER)
-    TiltedPhoques::Debug::CreateConsole();
+    if (!FarmMode::Enabled()) TiltedPhoques::Debug::CreateConsole();
 #endif
 
     SetMaxstdio();

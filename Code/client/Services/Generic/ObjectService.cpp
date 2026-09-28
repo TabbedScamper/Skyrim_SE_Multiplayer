@@ -21,6 +21,8 @@
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/NotifyScriptAnimation.h>
 #include <Messages/PhysicsReferencesMoveRequest.h>
+#include <AI/AIProcess.h>
+#include <Misc/MiddleProcess.h>
 #include <Messages/NotifyPhysicsReferencesMove.h>
 
 #include <PlayerCharacter.h>
@@ -49,20 +51,8 @@ std::atomic<uint64_t> s_renderDiagnosticsUntilMs{};
 // resolve these IDs instead of iterating the update thread's ECS storage.
 std::vector<uint32_t> s_renderActorIds;
 uint64_t s_nextRenderActorsMs{};
-// Follower playback of the host's moving dynamic bodies (the Helgen carts first).
-// Two independent Havok simulations of a tethered cart cannot agree: the
-// follower's own step moved cart 0xBB970 100-117 game units in single 16-ms
-// frames while the host's moved under 10 (REFERENCE_RESEARCH.md). A keyframed
-// body follows its scene node, so writing Havok body poses into one is
-// overwritten by the node every step (the earlier kinematic trial's ~1,578-unit
-// drift). Instead the follower makes the body keyframed and drives the
-// *reference* transform from the host's samples, rendered ~100 ms behind the
-// newest sample so it always interpolates between two known poses. The host
-// stops sending once a body is at rest; the follower then holds the last pose.
-// It never hands the body back to local physics while loaded: the first trial
-// did after 1.5 s and the Helgen cart snapped ~14,700 units back to where its
-// stale Havok body still was. The Havok body is moved along with the reference
-// so no invisible collider is left behind.
+// Follower copies remain dynamic. Main-thread publication and native-world locking
+// separate scene graph access from solver writes; packet gaps retain the last target.
 constexpr bool kHostDrivenMovingBodies = true;
 constexpr int64_t kHostDrivenMaxExtrapolationMs = 150;
 constexpr int64_t kHostDrivenHoldAfterMs = 300;
@@ -439,10 +429,22 @@ std::atomic<uint32_t> s_collisionWorldAfterNativeStepUs{};
 thread_local uint32_t s_worldUpdateDepth{};
 std::atomic<uint32_t> s_preStepPlaybackFormId{};
 std::atomic<uint32_t> s_preStepPlaybackMode{};
-// Only the explicitly selected follower probe may change a constrained body
-// to keyframed. Keep the original type for restoration on disable/disconnect.
+// Retired probe state is kept zero for diagnostic API compatibility.
 std::atomic<uint32_t> s_kinematicProbeFormId{};
 std::atomic<uint32_t> s_kinematicOriginalMotionType{};
+// One simulator per object: the follower replays the owner's cart assembly instead of simulating it.
+std::atomic<bool> s_cartReplay{true};
+// "Render them all" (owner 2026-09-28): owned actors and hitched carts carry NiAVObject kAlwaysDraw (1 << 11) and
+// kForceUpdate (1 << 25) on their 3D root while in a co-op session, so the camera cull never marks them not
+// visible and the engine never runs its off-screen shortcuts (stale skeleton placement, skipped controller
+// writeback, reduced animation, far-away physics) for anything a player owns.
+// Default off: kAlwaysDraw|kForceUpdate on owned roots did not reduce floats (paired A/B run 20260928-082058:
+// 2.76 -> 2.41 floats/min, cart jumps 6.6 -> 15.1). Kept as a switch pending the real cull mechanism.
+std::atomic<bool> s_renderAll{false}; // kWasInFrustrum latch: no effect (run 20260928-085006)
+constexpr uint32_t kRenderAllFlags = (1u << 11) | (1u << 25);
+// Host cart scene-node refresh every frame (unproven; paired A/B switch cart_node_refresh).
+// Default off (review P1-4): unproven; the controller z writeback is the proven float fix.
+std::atomic<bool> s_cartNodeRefresh{false};
 std::atomic<uint64_t> s_preStepExpectedEpoch{};
 std::mutex s_preStepTargetPublishMutex;
 std::atomic<uint64_t> s_preStepTargetSequence{};
@@ -474,6 +476,7 @@ std::atomic<uint64_t> s_physicsFollowerSelectedReceived{};
 std::atomic<uint32_t> s_physicsLastSelectedTransitAgeMs{};
 std::atomic<uint32_t> s_physicsLastHostScanDurationUs{};
 std::atomic<uint32_t> s_physicsLastHostReferencesVisited{};
+std::atomic<uint32_t> s_physicsLastLaneReferencesVisited{};
 std::atomic<uint32_t> s_physicsLastHostUpdatesQueued{};
 std::atomic<uint64_t> s_physicsHostScanTotalUs{};
 std::atomic<uint32_t> s_physicsHostScanMaxUs{};
@@ -539,24 +542,83 @@ bool ReadNativeMemory(const void* apSource, void* apDestination, size_t aSize) n
 {
     if (!apSource || !apDestination || aSize == 0)
         return false;
-    const auto address = reinterpret_cast<uintptr_t>(apSource);
-    if (address > std::numeric_limits<uintptr_t>::max() - aSize)
+    __try
+    {
+        std::memcpy(apDestination, apSource, aSize);
+        return true;
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+        EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
         return false;
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(apSource, &info, sizeof(info)) || info.State != MEM_COMMIT ||
-        (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
-        return false;
-    const auto regionEnd = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
-    if (regionEnd < address || regionEnd - address < aSize)
-        return false;
-    std::memcpy(apDestination, apSource, aSize);
-    return true;
+    }
 }
 
 template <class T> bool ReadNativeMemory(const void* apSource, T& arValue) noexcept
 {
     return ReadNativeMemory(apSource, &arValue, sizeof(T));
 }
+
+// Capture already resolves a loaded reference and its current collision chain. Use a guarded
+// copy here instead of three VirtualQuery syscalls per body (and per child). Do not cache raw
+// Havok pointers across frames: Set3D/body replacement can occur without a cell transition.
+bool ReadPhysicsMemory(const void* apSource, void* apDestination, size_t aSize) noexcept
+{
+    if (!apSource)
+        return false;
+    __try
+    {
+        std::memcpy(apDestination, apSource, aSize);
+        return true;
+    }
+    __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+        EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        return false;
+    }
+}
+
+template <class T> bool ReadPhysicsMemory(const void* apSource, T& arValue) noexcept
+{
+    return ReadPhysicsMemory(apSource, &arValue, sizeof(T));
+}
+
+// hkpEntity::Activate, ID 60849 / 0x140B4AFF0: island +0x32 bits 2..3 are activeMark.
+// Unknown/replacing islands must take the sampling path, never silently lose a moving sample.
+bool IsPhysicsBodyAwake(const void* apBody) noexcept
+{
+    const uint8_t* island{};
+    uint8_t flags{};
+    return !ReadPhysicsMemory(static_cast<const uint8_t*>(apBody) + 0x130, island) ||
+        !island || !ReadPhysicsMemory(island + 0x32, flags) || (flags & 0x0C) != 0;
+}
+
+// 77851 and 78089: Skyrim's hkpWorld extension +0x430 owns bhkWorld,
+// whose BSReadWriteLock is +0xC598. Lock order: native world, then targets.
+struct ScopedPhysicsWorld
+{
+    void* Lock{};
+    explicit ScopedPhysicsWorld(void* apWorld) noexcept
+    {
+        uint8_t* wrapper{};
+        if (apWorld && ReadPhysicsMemory(static_cast<uint8_t*>(apWorld) + 0x430, wrapper) && wrapper)
+        {
+            Lock = wrapper + 0xC598;
+            using LockFn = void(void*);
+            POINTER_SKYRIMSE(LockFn, lock, 68234);
+            lock.Get()(Lock);
+        }
+    }
+    ~ScopedPhysicsWorld()
+    {
+        if (Lock)
+        {
+            using LockFn = void(void*);
+            POINTER_SKYRIMSE(LockFn, unlock, 68240);
+            unlock.Get()(Lock);
+        }
+    }
+};
 
 struct DynamicBody
 {
@@ -611,13 +673,14 @@ void QuaternionToNiMatrix(const float* q, NiMatrix3& m) noexcept
 
 // The reference's Havok bodies other than its root, in 3D-tree order (cart wheels, yoke). Only
 // real rigid bodies (valid motion type, in a world): a collision object can also hold a phantom.
-void CollectChildBodies(TESObjectREFR* apReference, std::vector<ChildBody>& arBodies) noexcept
+template <class Container>
+void CollectChildBodies(TESObjectREFR* apReference, Container& arBodies, bool aCapture = false) noexcept
 {
     arBodies.clear();
     auto* pRoot = apReference ? apReference->GetNiNode() : nullptr;
     if (!pRoot)
         return;
-    std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth)
+    auto walk = [&](auto&& self, NiAVObject* apNode, int aDepth) -> void
     {
         if (!apNode || aDepth > 8 || arBodies.size() >= PhysicsReferenceUpdate::kMaxChildBodies)
             return;
@@ -626,18 +689,410 @@ void CollectChildBodies(TESObjectREFR* apReference, std::vector<ChildBody>& arBo
             void* pWrapper = nullptr;
             void* pBody = nullptr;
             ActorPoseDiagnosticViews::RigidBody probe{};
-            if (ReadNativeMemory(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
-                ReadNativeMemory(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody &&
-                ReadNativeMemory(pBody, probe) && probe.world && probe.motionType >= 1 && probe.motionType <= 7)
+            const auto read = [aCapture](const void* source, auto& value)
+            {
+                return aCapture ? ReadPhysicsMemory(source, value) : ReadNativeMemory(source, value);
+            };
+            if (read(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
+                read(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody &&
+                read(pBody, probe) && probe.world && probe.motionType >= 1 && probe.motionType <= 7)
                 arBodies.push_back({apNode, pWrapper, static_cast<ActorPoseDiagnosticViews::RigidBody*>(pBody)});
         }
         if (auto* pNode = apNode->AsNode())
         {
             for (uint16_t i = 0; i < pNode->children.length; ++i)
-                walk(pNode->children.data[i], aDepth + 1);
+                self(self, pNode->children.data[i], aDepth + 1);
         }
     };
-    walk(pRoot, 0);
+    walk(walk, pRoot, 0);
+}
+
+struct CaptureChildren
+{
+    std::array<ChildBody, PhysicsReferenceUpdate::kMaxChildBodies> Bodies;
+    size_t Count{};
+    void clear() noexcept { Count = 0; }
+    size_t size() const noexcept { return Count; }
+    void push_back(ChildBody aBody) noexcept { Bodies[Count++] = aBody; }
+    auto begin() const noexcept { return Bodies.begin(); }
+    auto end() const noexcept { return Bodies.begin() + Count; }
+};
+
+bool IsDynamicMotion(uint32_t aType) noexcept
+{
+    return (aType >= 1 && aType <= 3) || aType == 6;
+}
+
+// Membership is learned from native tether construction, never a world/actor scan.
+// Slots are structural and never compacted by motion/world state. The existing wire
+// format uses model-tree order; a missing slot rejects the entire assembly sample.
+struct CartAssembly
+{
+    std::shared_ptr<NiAVObject> Root, HorseRoot;
+    uint32_t HorseId{};
+    std::array<std::shared_ptr<NiAVObject>, PhysicsReferenceUpdate::kMaxChildBodies> Nodes;
+    std::array<std::shared_ptr<void>, PhysicsReferenceUpdate::kMaxChildBodies> Lifetimes;
+    std::array<uint32_t, PhysicsReferenceUpdate::kMaxChildBodies> Uids{};
+    std::array<bool, PhysicsReferenceUpdate::kMaxChildBodies> Simulated{};
+    void* Tether{};
+    size_t HelperSlot{PhysicsReferenceUpdate::kMaxChildBodies};
+    size_t Count{};
+    bool Complete{};
+    uint64_t ActiveUntil{};
+    uint64_t NextLog{};
+    uint64_t NextSkipLog{};
+    // Replay: last cell/world reconciliation of the cart reference (E19799).
+    uint64_t NextReconcileMs{};
+    glm::vec3 ReconciledAt{};
+};
+std::mutex s_assembliesLock;
+std::unordered_map<uint32_t, CartAssembly> s_assemblies;
+std::unordered_map<uint32_t, uint32_t> s_horseVehicles;
+// Mirror of s_horseVehicles' keys readable without s_assembliesLock (the SetPosition hook runs on engine
+// threads while our own code may hold that lock around position writes).
+std::array<std::atomic<uint32_t>, 16> s_tetheredHorses{};
+// Main thread publishes each tethered horse's expected reference z (controller z + learned offset); the native
+// placement hook (engine job threads) reads it without touching engine systems. NaN = unknown.
+std::array<std::atomic<float>, 16> s_tetheredHorseZ{};
+
+void SetTetheredHorse(uint32_t aFormId, bool aTethered) noexcept
+{
+    for (auto& slot : s_tetheredHorses)
+        if (slot.load(std::memory_order_relaxed) == aFormId)
+        {
+            if (!aTethered)
+                slot.store(0, std::memory_order_release);
+            return;
+        }
+    if (!aTethered)
+        return;
+    for (size_t i = 0; i < s_tetheredHorses.size(); ++i)
+    {
+        uint32_t expected = 0;
+        s_tetheredHorseZ[i].store(std::numeric_limits<float>::quiet_NaN(), std::memory_order_relaxed);
+        if (s_tetheredHorses[i].compare_exchange_strong(expected, aFormId, std::memory_order_acq_rel))
+            return;
+    }
+    spdlog::warn("Tether: horse table full ({} slots); horse {:X} keeps the native path", s_tetheredHorses.size(), aFormId);
+}
+std::unordered_map<void*, uint32_t> s_tetherVehicles;
+std::vector<uint32_t> s_newAssemblies, s_assembliesRefreshing;
+std::atomic<uint64_t> s_assemblyTick{};
+std::atomic<bool> s_assemblyFollower{};
+std::atomic<void*> s_tetherVtable{};
+uint64_t s_assemblyEpoch{}; // main only
+struct VehicleActorPose
+{
+    uint32_t FormId{}, VehicleId{};
+    std::shared_ptr<NiAVObject> Root, VehicleRoot;
+    uint64_t Tick{}, QueuedAt{}, PlacedAt{};
+    NiPoint3 Position{}, Rotation{}, Velocity{}, Angular{};
+};
+std::unordered_map<uint32_t, VehicleActorPose> s_vehicleActorPoses;
+std::vector<VehicleActorPose> s_vehicleActorsApplying; // main only, reused capacity
+std::mutex s_retiredAssemblyNodesLock;
+std::vector<NiAVObject*> s_retiredAssemblyNodes, s_assemblyNodesDraining;
+
+std::shared_ptr<NiAVObject> HoldAssemblyNode(NiAVObject* apNode)
+{
+    apNode->IncRef();
+    return {apNode, [](NiAVObject* node)
+    {
+        std::lock_guard lock(s_retiredAssemblyNodesLock);
+        s_retiredAssemblyNodes.push_back(node);
+    }};
+}
+
+void* AssemblyBody(NiAVObject* apNode) noexcept
+{
+    if (!apNode || !apNode->collisionObject)
+        return nullptr;
+    // E77883 checks AsBhkNiCollisionObject before E20014 checks wrapper RTTI.
+    using AsCollision = void* (*)(void*);
+    auto** vt = *reinterpret_cast<AsCollision**>(apNode->collisionObject);
+    auto* collision = vt[0x12](apNode->collisionObject);
+    if (!collision)
+        return nullptr;
+    using GetBody = void*(void*);
+    POINTER_SKYRIMSE(GetBody, getBody, 20014);
+    auto* wrapper = getBody.Get()(collision);
+    void* body{};
+    return wrapper && ReadPhysicsMemory(static_cast<uint8_t*>(wrapper) + 0x10, body) ? body : nullptr;
+}
+
+using TetherInitFn = void(void*, NiAVObject*, NiAVObject*);
+TetherInitFn* s_originalTetherInit{};
+void HookTetherInit(void* apTether, NiAVObject* apCart, NiAVObject* apHorse)
+{
+    s_originalTetherInit(apTether, apCart, apHorse);
+    s_tetherVtable.store(*static_cast<void**>(apTether), std::memory_order_release);
+    auto* cart = apCart ? static_cast<TESObjectREFR*>(apCart->userData) : nullptr;
+    auto* horse = apHorse ? Cast<Actor>(static_cast<TESForm*>(apHorse->userData)) : nullptr;
+    if (!cart || !horse || cart->GetNiNode() != apCart || horse->GetNiNode() != apHorse)
+        return;
+    CartAssembly assembly;
+    assembly.Root = HoldAssemblyNode(apCart);
+    assembly.HorseRoot = HoldAssemblyNode(apHorse);
+    assembly.HorseId = horse->formID;
+    assembly.Tether = apTether;
+    assembly.Complete = true;
+    size_t visited = 0;
+    auto* rootBody = AssemblyBody(apCart);
+    std::array<void*, PhysicsReferenceUpdate::kMaxChildBodies> bodies{};
+    auto walk = [&](auto&& self, NiAVObject* node, unsigned depth) -> void
+    {
+        if (!node || !assembly.Complete)
+            return;
+        if (++visited > 256 || depth > 32)
+        {
+            assembly.Complete = false;
+            return;
+        }
+        auto* body = AssemblyBody(node);
+        if (body && body != rootBody &&
+            std::find(bodies.begin(), bodies.begin() + assembly.Count, body) == bodies.begin() + assembly.Count)
+        {
+            if (assembly.Count == bodies.size())
+            {
+                assembly.Complete = false;
+                return;
+            }
+            bodies[assembly.Count] = body;
+            ActorPoseDiagnosticViews::RigidBody state{};
+            ReadPhysicsMemory(body, state);
+            assembly.Simulated[assembly.Count] = IsDynamicMotion(state.motionType);
+            if (state.motionType == 4)
+            {
+                // E78162 queries the saved dynamic mass for a parked body. Native
+                // massless helpers remain native; restorable parked wheels are ours.
+                void* wrapper{};
+                ReadPhysicsMemory(static_cast<uint8_t*>(node->collisionObject) + 0x20, wrapper);
+                using GetMass = float(void*);
+                POINTER_SKYRIMSE(GetMass, mass, 78162);
+                assembly.Simulated[assembly.Count] = wrapper && mass.Get()(wrapper) > 0.f;
+            }
+            assembly.Nodes[assembly.Count++] = HoldAssemblyNode(node);
+        }
+        if (auto* branch = node->AsNode())
+            for (uint16_t i = 0; i < branch->children.length && assembly.Complete; ++i)
+                self(self, branch->children.data[i], depth + 1);
+    };
+    walk(walk, apCart, 0);
+    // The tether helper is attached to HorseSpine2, outside the cart tree (E25740).
+    // Stream it explicitly as the final structural slot. It retains its native
+    // motion type; we never keyframe a simulated cart body or convert the massless helper.
+    NiAVObject* helperNode{};
+    ReadNativeMemory(static_cast<uint8_t*>(apTether) + 0x10, helperNode);
+    if (assembly.Count == assembly.Nodes.size() || !helperNode || helperNode->collisionObject != apTether)
+        assembly.Complete = false;
+    else
+    {
+        assembly.HelperSlot = assembly.Count;
+        assembly.Nodes[assembly.Count++] = HoldAssemblyNode(helperNode);
+    }
+    std::lock_guard lock(s_assembliesLock);
+    if (auto it = s_assemblies.find(cart->formID); it != s_assemblies.end())
+    {
+        s_horseVehicles.erase(it->second.HorseId);
+        SetTetheredHorse(it->second.HorseId, false);
+        s_tetherVehicles.erase(it->second.Tether);
+    }
+    s_horseVehicles[horse->formID] = cart->formID;
+    SetTetheredHorse(horse->formID, true);
+    spdlog::info("Tether: horse {:X} hitched to cart {:X}", horse->formID, cart->formID);
+    s_tetherVehicles[apTether] = cart->formID;
+    s_newAssemblies.push_back(cart->formID);
+    s_assemblies.insert_or_assign(cart->formID, std::move(assembly));
+}
+
+using TetherSyncFn = void(void*, void*);
+TetherSyncFn* s_originalTetherSync{};
+void HookTetherSync(void* apCollision, void* apUpdate)
+{
+    // Always run the native tether sync (E25737): it keeps the massless helper (E25740, attached to
+    // HorseSpine2) on the horse. Skipping it on followers and steering the helper from the cart-relative
+    // stream let every cart spike drag the helper, and through the tether the horse's front, far from the
+    // horse (owner report 2026-09-27: "front of the horses stretched across the map").
+    s_originalTetherSync(apCollision, apUpdate);
+}
+
+// E20318 writes the passenger node BEFORE the hooked reference setters. Its native
+// QCanUpdateSync gate has no network ownership policy, so gate the entire update.
+using PassengerUpdateFn = void(void*, float);
+PassengerUpdateFn* s_originalPassengerUpdate{};
+void HookPassengerUpdate(void* apController, float aTime)
+{
+    // Always run the native passenger controller (E20318): it seats each passenger on the LOCAL cart every
+    // frame, as on the host. Gating it for remote passengers and placing them from the owner's world
+    // positions separated them from the separately steered cart (owner report 2026-09-27: passengers "all
+    // over the place" on the follower). Baseline a4efad6a behavior.
+    s_originalPassengerUpdate(apController, aTime);
+}
+
+static TiltedPhoques::Initializer s_cartAssemblyHooks([]()
+{
+    POINTER_SKYRIMSE(TetherInitFn, tether, 25740);
+    s_originalTetherInit = tether.Get();
+    TP_HOOK(&s_originalTetherInit, HookTetherInit);
+    POINTER_SKYRIMSE(PassengerUpdateFn, passenger, 20318);
+    s_originalPassengerUpdate = passenger.Get();
+    TP_HOOK(&s_originalPassengerUpdate, HookPassengerUpdate);
+    POINTER_SKYRIMSE(TetherSyncFn, sync, 78179);
+    s_originalTetherSync = sync.Get();
+    TP_HOOK(&s_originalTetherSync, HookTetherSync);
+});
+
+void RestoreBodyMotion(NiAVObject* apNode) noexcept
+{
+    // E78182 / 0x14105D530: change only this collision body and its sync flag.
+    // Request generic dynamic (1), retaining existing sphere/box/thin-box inertia.
+    using ChangeMotion = void(void*, uint32_t, void*, bool);
+    POINTER_SKYRIMSE(ChangeMotion, change, 78182);
+    if (apNode && apNode->collisionObject)
+        change.Get()(apNode->collisionObject, 1u, nullptr, false);
+}
+
+// Replay: keyframed (4) through the same E78182 path, so local gravity, joints, the tether and seated
+// passengers cannot push the copy. RestoreBodyMotion returns it to dynamic when replay ends.
+void KeyframeBodyMotion(NiAVObject* apNode) noexcept
+{
+    using ChangeMotion = void(void*, uint32_t, void*, bool);
+    POINTER_SKYRIMSE(ChangeMotion, change, 78182);
+    if (apNode && apNode->collisionObject)
+        change.Get()(apNode->collisionObject, 4u, nullptr, false);
+}
+
+// Motion switches requested while ApplyRemotePhysics holds m_remotePhysicsLock, s_assembliesLock and a
+// world lock. E78182 removes and re-adds the body, which can call back into our listeners on this thread
+// and re-lock a held mutex: the follower froze at the first cart keyframe (run 223229, Application Hang).
+// They run at the start of the next ApplyRemotePhysics, before any of our locks are taken.
+std::vector<std::shared_ptr<NiAVObject>> s_pendingKeyframes; // main thread only
+// Restore guarantee (Muse refute-cartreplay): every node replay keyframed, and the nodes replayed this pass.
+// Any keyframed node not replayed in a pass goes back to dynamic at the start of the next, which covers every
+// exit (toggle off, disconnect, epoch/leader change, assembly or pose erase, stream stall) in one place.
+std::unordered_map<NiAVObject*, std::shared_ptr<NiAVObject>> s_replayKeyframed; // main thread only
+std::unordered_set<NiAVObject*> s_replayedThisPass, s_replayedLastPass;           // main thread only
+
+// Replay moves the keyframed cart through its scene nodes: the engine re-keys a keyframed body from its node
+// every frame (run 224555: body placements undone each step, carts frozen 5800 u behind), and carries the
+// body there with a velocity, so riders and contacts see a moving body. aPosition is Havok units, world space.
+void PlaceNodeWorld(NiAVObject* apNode, const glm::vec3& aPosition, const glm::quat& aRotation) noexcept
+{
+    if (!apNode)
+        return;
+    const glm::mat3 world = glm::mat3_cast(glm::normalize(aRotation)); // world[col][row]
+    const glm::vec3 translate = aPosition * kHavokToGameUnits;
+    glm::mat3 parentRotate{1.f};
+    glm::vec3 parentTranslate{};
+    float parentScale = 1.f;
+    if (const auto* parent = apNode->parent)
+    {
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                parentRotate[j][i] = parent->world.rotate.entry[i][j];
+        parentTranslate = {parent->world.translate.x, parent->world.translate.y, parent->world.translate.z};
+        parentScale = parent->world.scale != 0.f ? parent->world.scale : 1.f;
+    }
+    const glm::mat3 inverseParent = glm::transpose(parentRotate);
+    const glm::mat3 local = inverseParent * world;
+    const glm::vec3 localTranslate = inverseParent * (translate - parentTranslate) / parentScale;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            apNode->local.rotate.entry[i][j] = local[j][i];
+    apNode->local.translate.x = localTranslate.x;
+    apNode->local.translate.y = localTranslate.y;
+    apNode->local.translate.z = localTranslate.z;
+    struct NiUpdateData { float Time{}; uint32_t Flags{}; } data{};
+    using UpdateFn = void(NiAVObject*, NiUpdateData*);
+    POINTER_SKYRIMSE(UpdateFn, update, 70251);
+    update.Get()(apNode, &data);
+}
+
+// Replay keeps the cart REFERENCE with its replayed root, as the engine's Havok-moved path (E19826) does for the
+// owner's dynamic cart. Moving only the nodes left the reference at the ride start: ~30 s in, the follower's
+// own cart vanished and its passengers froze (run 225016, BB970 stopped being followed at 22:52:12).
+// Angles invert the reference rotation used above: body = Rx(-x) * Ry(-y) * Rz(-z).
+void SyncReplayReference(TESObjectREFR* apReference, const glm::vec3& aPosition, const glm::quat& aRotation,
+    glm::vec3& arReconciledAt, uint64_t& arNextReconcileMs) noexcept
+{
+    const glm::vec3 translate = aPosition * kHavokToGameUnits;
+    const glm::mat3 m = glm::mat3_cast(glm::normalize(aRotation)); // m[col][row]
+    const float b = std::asin(std::clamp(m[2][0], -1.f, 1.f));
+    const float a = std::atan2(-m[2][1], m[2][2]);
+    const float c = std::atan2(-m[1][0], m[0][0]);
+    if (!std::isfinite(translate.x) || !std::isfinite(translate.y) || !std::isfinite(translate.z) ||
+        !std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c))
+        return;
+    apReference->position.x = translate.x;
+    apReference->position.y = translate.y;
+    apReference->position.z = translate.z;
+    apReference->rotation.x = -a;
+    apReference->rotation.y = -b;
+    apReference->rotation.z = -c;
+    const auto now = GetTickCount64();
+    if (now < arNextReconcileMs && glm::length(translate - arReconciledAt) < 256.f)
+        return;
+    arNextReconcileMs = now + 500;
+    arReconciledAt = translate;
+    auto* cell = apReference->GetParentCellEx();
+    if (!cell)
+        return;
+    using Reconcile = void(TESObjectREFR*, TESObjectCELL*, TESWorldSpace*);
+    POINTER_SKYRIMSE(Reconcile, reconcile, 19799);
+    reconcile.Get()(apReference, cell->worldspace ? nullptr : cell, cell->worldspace);
+}
+
+void DrainPendingKeyframes() noexcept
+{
+    // Restore first: nodes keyframed by replay that the last pass did not replay.
+    s_replayedLastPass.swap(s_replayedThisPass);
+    s_replayedThisPass.clear();
+    for (auto it = s_replayKeyframed.begin(); it != s_replayKeyframed.end();)
+    {
+        if (s_replayedLastPass.contains(it->first))
+        {
+            ++it;
+            continue;
+        }
+        auto* node = it->second.get();
+        // Review P0-3: a node whose 3D was detached (cart unloaded/reloaded) has no parent: just release it.
+        if (!node || !node->parent)
+        {
+            it = s_replayKeyframed.erase(it);
+            continue;
+        }
+        auto* body = AssemblyBody(node);
+        ActorPoseDiagnosticViews::RigidBody state{};
+        if (body && ReadPhysicsMemory(body, state) && state.world && state.motionType == 4)
+        {
+            ScopedPhysicsWorld worldLock(state.world);
+            if (worldLock.Lock && ReadPhysicsMemory(body, state) && state.motionType == 4)
+                RestoreBodyMotion(node);
+        }
+        spdlog::info("Cart replay: restored a part to dynamic ({} still keyframed)", s_replayKeyframed.size() - 1);
+        it = s_replayKeyframed.erase(it);
+    }
+    auto pending = std::move(s_pendingKeyframes);
+    s_pendingKeyframes.clear();
+    for (const auto& node : pending)
+    {
+        auto* body = AssemblyBody(node.get());
+        ActorPoseDiagnosticViews::RigidBody state{};
+        if (!body || !ReadPhysicsMemory(body, state) || !state.world || !IsDynamicMotion(state.motionType))
+            continue;
+        ScopedPhysicsWorld worldLock(state.world);
+        if (!worldLock.Lock || !ReadPhysicsMemory(body, state) || !IsDynamicMotion(state.motionType))
+            continue;
+        KeyframeBodyMotion(node.get());
+        s_replayKeyframed.try_emplace(node.get(), node);
+        // E78182 clears kSetLocal (collision flags +0x18, bit 8) for keyframed motion, so the engine then
+        // copies the static node into the body every frame and our drive was undone (run 223811: 45 placements
+        // in 45 steps, carts 8000 u behind at zero velocity). Set it back: the body stays keyframed (nothing
+        // local can push it) and the node follows the driven body, as it follows a dynamic body on the owner.
+        // RestoreBodyMotion (E78182 to dynamic) sets the bit again itself.
+        if (auto* collision = static_cast<uint8_t*>(static_cast<void*>(node->collisionObject)))
+            *reinterpret_cast<uint16_t*>(collision + 0x18) |= 8;
+    }
 }
 
 // hkTransform rotation columns (transform[0..2], [4..6], [8..10]) to a quaternion (x, y, z, w).
@@ -668,22 +1123,26 @@ void MatrixToQuaternion(const float* t, float* q) noexcept
 }
 
 bool GetDynamicBody(TESObjectREFR* apReference, DynamicBody& arBody,
-    bool aAllowKeyframed = false) noexcept
+    bool aAllowKeyframed = false, bool aCapture = false) noexcept
 {
+    const auto read = [aCapture](const void* source, auto& value)
+    {
+        return aCapture ? ReadPhysicsMemory(source, value) : ReadNativeMemory(source, value);
+    };
     auto* pNode = apReference ? apReference->GetNiNode() : nullptr;
     if (!pNode || !pNode->collisionObject)
         return false;
     const auto collision = reinterpret_cast<uintptr_t>(pNode->collisionObject);
     void* pWrapper = nullptr;
     if (collision > std::numeric_limits<uintptr_t>::max() - 0x28 ||
-        !ReadNativeMemory(reinterpret_cast<const void*>(collision + 0x20), pWrapper) || !pWrapper)
+        !read(reinterpret_cast<const void*>(collision + 0x20), pWrapper) || !pWrapper)
         return false;
     const auto wrapper = reinterpret_cast<uintptr_t>(pWrapper);
     void* pHavokBody = nullptr;
     if (wrapper > std::numeric_limits<uintptr_t>::max() - 0x18 ||
-        !ReadNativeMemory(reinterpret_cast<const void*>(wrapper + 0x10), pHavokBody) ||
-        !ReadNativeMemory(pHavokBody, arBody.State) ||
-        (arBody.State.motionType != 3 &&
+        !read(reinterpret_cast<const void*>(wrapper + 0x10), pHavokBody) ||
+        !read(pHavokBody, arBody.State) ||
+        (!IsDynamicMotion(arBody.State.motionType) &&
             !(aAllowKeyframed && arBody.State.motionType == 4)) ||
         !arBody.State.world)
         return false;
@@ -702,18 +1161,8 @@ bool GetDynamicBody(TESObjectREFR* apReference, DynamicBody& arBody,
 
 void RestoreKinematicProbe() noexcept
 {
-    const auto formId = s_kinematicProbeFormId.exchange(0,
-        std::memory_order_acq_rel);
-    if (!formId)
-        return;
-    const auto originalType = s_kinematicOriginalMotionType.exchange(0,
-        std::memory_order_acq_rel);
-    if (originalType < 1 || originalType > 7)
-        return;
-    if (auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
-        pReference && pReference->loadedState)
-        pReference->SetMotionType(
-            static_cast<TESObjectREFR::MotionType>(originalType), true);
+    s_kinematicProbeFormId.store(0, std::memory_order_release);
+    s_kinematicOriginalMotionType.store(0, std::memory_order_release);
 }
 
 struct ReferencePhaseSample
@@ -973,6 +1422,11 @@ void HookNodeTransformBounds(NiAVObject* apNode, void* apUpdateData)
     }
 }
 
+std::mutex s_movingReferencesLock;
+PhysicsScan::MovementQueue<4096> s_movingReferences;
+std::atomic<bool> s_collectMovingReferences{};
+std::atomic<uint64_t> s_movementOverflows{};
+
 using CollisionSyncFn = void(void*, uint32_t);
 CollisionSyncFn* s_originalCollisionSync{};
 
@@ -991,6 +1445,24 @@ void HookCollisionSync(void* apCollision, uint32_t aFlags)
         ReferencePhaseSample{};
     if (s_originalCollisionSync)
         s_originalCollisionSync(apCollision, aFlags);
+    // 19826 itself resolves this node with 19750 in this same native sync phase.
+    // Publish only identity; discovery/3D capture stays on the main thread.
+    if (s_collectMovingReferences.load(std::memory_order_relaxed))
+    {
+        NiAVObject* node{};
+        if (ReadPhysicsMemory(static_cast<uint8_t*>(apCollision) + 0x10, node) && node)
+        {
+            using FindReferenceFn = TESObjectREFR*(NiAVObject*);
+            POINTER_SKYRIMSE(FindReferenceFn, findReference, 19750);
+            auto* reference = findReference.Get()(node);
+            if (reference && !Cast<Actor>(reference))
+            {
+                std::lock_guard movementLock(s_movingReferencesLock);
+                if (!s_movingReferences.Insert(reference->formID))
+                    s_movementOverflows.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     if (!watched)
         return;
     const auto after = SampleReferencePhase(pReference);
@@ -1038,9 +1510,7 @@ WorldUpdateFn* s_originalWorldUpdate{};
 using NativeStepFn = int(void*, float);
 NativeStepFn* s_originalNativeStep{};
 
-// Host-driven bodies moving with a velocity: placed inside the physics step (its real dt known) so
-// the step lands each exactly where its reference is drawn. The engine seats a rider from the body;
-// placing it from our update with the previous frame's duration left the driver shaking by +-3 units.
+// Publish targets on the main frame and steer dynamic copies on the native stepping thread.
 struct StepTarget
 {
     void* World{};
@@ -1050,28 +1520,90 @@ struct StepTarget
     float Velocity[3]{};  // Havok units per second
     // Dynamic follow: steer a simulated body to this pose instead of placing it.
     bool Dynamic{};
+    bool Assembly{};
+    bool NativeHelper{};
+    // Keyframed replay: drive exactly onto the owner pose (no caps), body is motion type 4.
+    bool Replay{};
     float Rotation[4]{0.f, 0.f, 0.f, 1.f}; // x, y, z, w
     float Angular[3]{};   // radians per second
+    uint32_t BodyUid{};
+    uint64_t HostAgeMs{};
+    std::chrono::steady_clock::time_point PublishedAt{};
+    // Native reference keeps a removed/replaced body alive until the last target retires.
+    std::shared_ptr<void> Lifetime;
 };
+
+// Constraint suppression was speculative. Keep all native joints enabled until paired
+// solver/contact evidence identifies the competing driver; never detach a held item.
+using HavokReferenceFn = void(void*);
+POINTER_SKYRIMSE(HavokReferenceFn, s_holdBody, 57010);
+POINTER_SKYRIMSE(HavokReferenceFn, s_releaseBody, 57011);
+
+// A disconnect callback can destroy the final C++ owner on the VM worker. Defer
+// the native release to main, including removed bodies whose world no longer steps.
+std::mutex s_retiredBodiesLock;
+std::vector<void*> s_retiredBodies;
+std::vector<void*> s_retiredBodiesDraining; // main only, capacity reused
+void RetireBody(void* apBody)
+{
+    std::lock_guard lock(s_retiredBodiesLock);
+    s_retiredBodies.push_back(apBody);
+}
+void DrainRetiredBodies()
+{
+    {
+        std::lock_guard lock(s_retiredBodiesLock);
+        s_retiredBodies.swap(s_retiredBodiesDraining);
+    }
+    for (auto* body : s_retiredBodiesDraining)
+    {
+        ActorPoseDiagnosticViews::RigidBody state{};
+        ReadPhysicsMemory(body, state); // native reference still held, cannot be recycled
+        ScopedPhysicsWorld worldLock(state.world);
+        s_releaseBody.Get()(body);
+    }
+    s_retiredBodiesDraining.clear();
+}
 
 // Dynamic follow: a simulated body reaches the host's pose within this time constant (seconds);
 // farther than this (Havok units) it is placed there at once.
 constexpr float kFollowTimeConstant = 0.1f;
 constexpr float kFollowTeleport = 3.f;
 
-// Follow probe (per body, logged every 5 s): steps, placements (far off or keyframed), largest gap.
+// Solver writes numeric telemetry; the main frame formats and logs it.
 struct FollowProbe
 {
+    uint32_t FormId{};
+    float Gap{}, Speed{};
+    uint64_t HostAgeMs{};
     uint32_t Steps{};
     uint32_t Teleports{};
     uint32_t KeyframedPlacements{};
     float MaxErrorUnits{};
     std::chrono::steady_clock::time_point NextLog{};
+    std::chrono::steady_clock::time_point NextSteerLog{};
 };
 std::unordered_map<void*, FollowProbe> s_followProbes;
 std::mutex s_stepTargetsLock;
 std::vector<StepTarget> s_stepTargets;
 std::vector<StepTarget> s_stepTargetsBuilding;
+bool s_followProbesDirty{}; // Protected by s_stepTargetsLock.
+std::chrono::steady_clock::time_point s_nextFollowReport{}; // Same lock; telemetry only.
+
+// BEGIN FOLLOW PROBE PRUNE
+template <class TProbes, class TTargets>
+void PruneFollowProbes(TProbes& aProbes, const TTargets& acTargets, bool& aDirty)
+{
+    if (!aDirty)
+        return;
+    std::unordered_set<void*> bodies;
+    bodies.reserve(acTargets.size());
+    for (const auto& target : acTargets)
+        bodies.insert(target.Body);
+    std::erase_if(aProbes, [&](const auto& entry) { return !bodies.contains(entry.first); });
+    aDirty = false;
+}
+// END FOLLOW PROBE PRUNE
 
 struct PreStepTarget
 {
@@ -1152,69 +1684,140 @@ bool ReadPreStepTarget(PreStepTarget& arTarget) noexcept
     return false;
 }
 
-bool SetNativeBodyPose(void* apWrapper, const glm::vec3& acPosition,
-    const glm::quat& acRotation) noexcept
-{
-    void** pVtable{};
-    if (!ReadNativeMemory(apWrapper, pVtable) || !pVtable)
-        return false;
-    void* pMethod{};
-    if (!ReadNativeMemory(pVtable + 0x37, pMethod) || !pMethod)
-        return false;
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(pMethod, &info, sizeof(info)) ||
-        info.State != MEM_COMMIT ||
-        ((info.Protect & 0xFF) != PAGE_EXECUTE &&
-            (info.Protect & 0xFF) != PAGE_EXECUTE_READ &&
-            (info.Protect & 0xFF) != PAGE_EXECUTE_READWRITE &&
-            (info.Protect & 0xFF) != PAGE_EXECUTE_WRITECOPY))
-        return false;
-    float position[4]{acPosition.x, acPosition.y, acPosition.z, 0.f};
-    float rotation[4]{acRotation.x, acRotation.y, acRotation.z,
-        acRotation.w};
-    using SetPoseFn = void(__fastcall*)(void*, float*, float*);
-    reinterpret_cast<SetPoseFn>(pMethod)(apWrapper, position, rotation);
-    return true;
-}
-
-int HookNativeStep(void* apWorld, float aDeltaTime)
+template <class NativeStep>
+int RunNativeStep(void* apWorld, float aDeltaTime, NativeStep&& aNativeStep, bool aAssemblyOnly = false)
 {
     const auto started = std::chrono::steady_clock::now();
+    ScopedPhysicsWorld worldLock(s_worldUpdateDepth ? apWorld : nullptr);
+    glm::vec3 predictedTarget{};
+    bool targetSampled = false;
+    bool targetApplied = false;
+    float velocityAfterWrite = -1.f;
     {
         std::lock_guard lock(s_stepTargetsLock);
         for (const auto& target : s_stepTargets)
         {
-            if (target.World != apWorld || !target.Body)
+            if (aAssemblyOnly && !target.Assembly)
+                continue;
+            if (!worldLock.Lock || target.World != apWorld || !target.Body)
+                continue;
+            ActorPoseDiagnosticViews::RigidBody state{};
+            if (!ReadNativeMemory(target.Body, state) || state.world != apWorld)
                 continue;
             auto* pBody = static_cast<ActorPoseDiagnosticViews::RigidBody*>(target.Body);
-            if (pBody->world != apWorld)
-                continue;
             if (target.Dynamic)
             {
+                if (pBody->uid != target.BodyUid || (!IsDynamicMotion(pBody->motionType) &&
+                    !((target.NativeHelper || target.Replay) && pBody->motionType == 4)) ||
+                    !std::isfinite(aDeltaTime) || aDeltaTime <= 0.f)
+                    continue;
+
                 // The host's motion plus a correction that closes the gap within the time constant.
                 const glm::vec3 current{pBody->transform[12], pBody->transform[13], pBody->transform[14]};
                 const glm::vec3 wanted{target.Position[0], target.Position[1], target.Position[2]};
                 const glm::vec3 error = wanted - current;
                 using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
                 POINTER_SKYRIMSE(std::remove_pointer_t<TSetPositionAndRotation>, s_placeBody, 60898);
-                auto& probe = s_followProbes[target.Body];
+                const auto probeIt = s_followProbes.find(target.Body);
+                if (probeIt == s_followProbes.end())
+                    continue;
+                auto& probe = probeIt->second;
+                const float gap = glm::length(error) * kHavokToGameUnits;
+                probe.FormId = target.FormId;
+                probe.Gap = gap;
+                probe.Speed = glm::length(glm::vec3{pBody->linearVelocity[0], pBody->linearVelocity[1],
+                    pBody->linearVelocity[2]}) * kHavokToGameUnits;
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(started - target.PublishedAt).count();
+                probe.HostAgeMs = target.HostAgeMs + static_cast<uint64_t>((std::max)(int64_t{0}, elapsed));
                 ++probe.Steps;
-                probe.MaxErrorUnits = (std::max)(probe.MaxErrorUnits, glm::length(error) * kHavokToGameUnits);
-                if (pBody->motionType == 4)
-                    ++probe.KeyframedPlacements;
-                else if (glm::length(error) > kFollowTeleport)
-                    ++probe.Teleports;
-                if (const auto now = std::chrono::steady_clock::now(); now >= probe.NextLog)
+                probe.MaxErrorUnits = (std::max)(probe.MaxErrorUnits, gap);
+                if (gap > 10.f)
+                    s_nextFollowReport = (std::min)(s_nextFollowReport, probe.NextSteerLog);
+                if (target.Assembly && target.Replay && pBody->motionType == 4)
+                    continue; // keyframed: the engine moves it from the node PlaceNodeWorld set this frame
+                if (target.Assembly && target.Replay)
                 {
-                    if (probe.Steps > 1)
-                        spdlog::info("Follow body {}: {} steps, {} teleports, {} keyframed placements, largest gap {:.1f} u (ref {:X})",
-                            fmt::ptr(target.Body), probe.Steps, probe.Teleports, probe.KeyframedPlacements, probe.MaxErrorUnits,
-                            target.FormId);
-                    probe = FollowProbe{};
-                    probe.NextLog = now + std::chrono::seconds(5);
+                    // Replay: reach the owner pose exactly at the end of this step. Keyframed bodies take the
+                    // drive's velocities as-is, so the engine moves the node from the body as on the owner and
+                    // seated riders ride a genuinely moving body. Place only after a gap far beyond one step.
+                    if (glm::length(error) * kHavokToGameUnits > 150.f)
+                    {
+                        alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
+                        alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
+                        s_placeBody.Get()(target.Body, position, quaternion);
+                        ++probe.Teleports;
+                    }
+                    const glm::vec3 feed{target.Velocity[0], target.Velocity[1], target.Velocity[2]};
+                    const auto goal = wanted + feed * aDeltaTime;
+                    alignas(16) float position[4]{goal.x, goal.y, goal.z, 0.f};
+                    glm::quat want{target.Rotation[3], target.Rotation[0], target.Rotation[1], target.Rotation[2]};
+                    const glm::vec3 angular{target.Angular[0], target.Angular[1], target.Angular[2]};
+                    const float speed = glm::length(angular);
+                    if (speed > 0.0001f)
+                        want = glm::normalize(glm::angleAxis(speed * aDeltaTime, angular / speed) * want);
+                    alignas(16) float rotation[4]{want.x, want.y, want.z, want.w};
+                    using Drive = void(const float*, const float*, float, void*);
+                    POINTER_SKYRIMSE(Drive, drive, 62478);
+                    drive.Get()(position, rotation, 1.f / aDeltaTime, target.Body);
+                    if (target.Body == s_watchedHavokBody.load(std::memory_order_acquire))
+                    {
+                        targetApplied = targetSampled = true;
+                        predictedTarget = wanted;
+                        velocityAfterWrite = glm::length(glm::vec3{pBody->linearVelocity[0],
+                            pBody->linearVelocity[1], pBody->linearVelocity[2]});
+                    }
+                    continue;
                 }
+                if (target.Assembly)
+                {
+                    // E62478 is a COM-aware velocity drive, NOT a motion-type change.
+                    // All assembly members use the same horizon. Never teleport one
+                    // constrained member across its neighbours after a packet/capture stall.
+                    const glm::vec3 feed{target.Velocity[0], target.Velocity[1], target.Velocity[2]};
+                    glm::vec3 correction = error;
+                    const float length = glm::length(correction);
+                    if (length > 10.f / kHavokToGameUnits)
+                        correction *= (10.f / kHavokToGameUnits) / length;
+                    const auto goal = current + correction + feed * aDeltaTime;
+                    alignas(16) float position[4]{goal.x, goal.y, goal.z, 0.f};
+                    glm::quat want{target.Rotation[3], target.Rotation[0], target.Rotation[1], target.Rotation[2]};
+                    const glm::vec3 angular{target.Angular[0], target.Angular[1], target.Angular[2]};
+                    const float speed = glm::length(angular);
+                    if (speed > 0.0001f)
+                        want = glm::angleAxis(speed * aDeltaTime, angular / speed) * want;
+                    alignas(16) float rotation[4]{want.x, want.y, want.z, want.w};
+                    using Drive = void(const float*, const float*, float, void*);
+                    POINTER_SKYRIMSE(Drive, drive, 62478);
+                    drive.Get()(position, rotation, 1.f / aDeltaTime, target.Body);
+                    // Bound commanded movement, including COM rotation. Contacts remain
+                    // authoritative to Havok; this is not a claim about measured max step.
+                    auto* motion = static_cast<uint8_t*>(target.Body) + 0x150;
+                    using VelocityFn = void(*)(void*, const float*);
+                    auto** vt = *reinterpret_cast<VelocityFn**>(motion);
+                    for (unsigned axis = 0; axis < 2; ++axis)
+                    {
+                        auto* values = axis ? pBody->angularVelocity : pBody->linearVelocity;
+                        glm::vec3 velocity{values[0], values[1], values[2]};
+                        const float limit = axis ? 12.f : 25.f / kHavokToGameUnits / aDeltaTime;
+                        const float magnitude = glm::length(velocity);
+                        if (magnitude > limit)
+                            velocity *= limit / magnitude;
+                        alignas(16) float bounded[4]{velocity.x, velocity.y, velocity.z, 0.f};
+                        vt[axis ? 0x11 : 0x10](motion, bounded);
+                    }
+                    if (target.Body == s_watchedHavokBody.load(std::memory_order_acquire))
+                    {
+                        targetApplied = targetSampled = true;
+                        predictedTarget = wanted;
+                        velocityAfterWrite = glm::length(glm::vec3{pBody->linearVelocity[0],
+                            pBody->linearVelocity[1], pBody->linearVelocity[2]});
+                    }
+                    continue;
+                }
+                if (glm::length(error) > kFollowTeleport)
+                    ++probe.Teleports;
                 bool placed = false;
-                if (glm::length(error) > kFollowTeleport || pBody->motionType == 4)
+                if (glm::length(error) > kFollowTeleport)
                 {
                     alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
                     alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
@@ -1233,27 +1836,32 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
                 if (delta.w < 0.f)
                     delta = -delta;
                 const glm::vec3 turn = glm::vec3{delta.x, delta.y, delta.z} * 2.f / kFollowTimeConstant;
-                for (int k = 0; k < 3; ++k)
+                alignas(16) float linearVelocity[4]{linear.x, linear.y, linear.z, 0.f};
+                alignas(16) float angularVelocity[4]{target.Angular[0] + turn.x,
+                    target.Angular[1] + turn.y, target.Angular[2] + turn.z, 0.f};
+                using ActivateFn = void(void*);
+                POINTER_SKYRIMSE(ActivateFn, activate, 60849);
+                activate.Get()(target.Body);
+                auto* motion = static_cast<uint8_t*>(target.Body) + 0x150;
+                using VelocityFn = void(void*, const float*);
+                auto** vtable = *reinterpret_cast<VelocityFn***>(motion);
+                vtable[0x10](motion, linearVelocity);
+                vtable[0x11](motion, angularVelocity);
+                if (target.Body == s_watchedHavokBody.load(std::memory_order_acquire))
                 {
-                    pBody->linearVelocity[k] = linear[k];
-                    pBody->angularVelocity[k] = target.Angular[k] + turn[k];
+                    targetApplied = targetSampled = true;
+                    predictedTarget = wanted;
+                    velocityAfterWrite = glm::length(linear);
+                    s_preStepAttempts.fetch_add(1, std::memory_order_relaxed);
+                    s_preStepApplied.fetch_add(1, std::memory_order_relaxed);
+                    s_preStepLastSourceAgeMs.store(static_cast<uint32_t>((std::min)(uint64_t{UINT32_MAX}, probe.HostAgeMs)),
+                        std::memory_order_relaxed);
+                    s_preStepLastPreError.store(gap, std::memory_order_relaxed);
                 }
-                continue;
             }
-            float rotation[4];
-            MatrixToQuaternion(pBody->transform, rotation);
-            alignas(16) float position[4]{target.Position[0] - target.Velocity[0] * aDeltaTime,
-                target.Position[1] - target.Velocity[1] * aDeltaTime, target.Position[2] - target.Velocity[2] * aDeltaTime, 0.f};
-            alignas(16) float quaternion[4]{rotation[0], rotation[1], rotation[2], rotation[3]};
-            // hkpRigidBody::setPositionAndRotation (60898), unlocked: this is the stepping thread,
-            // before the step starts.
-            using TSetPositionAndRotation = void(__fastcall*)(void*, const float*, const float*);
-            POINTER_SKYRIMSE(std::remove_pointer_t<TSetPositionAndRotation>, s_setPositionAndRotation, 60898);
-            s_setPositionAndRotation.Get()(target.Body, position, quaternion);
-            for (int k = 0; k < 3; ++k)
-                pBody->linearVelocity[k] = target.Velocity[k];
         }
     }
+
     // bhkWorld::GetWorld1 (vtable slot 0x27) returns hkpWorld directly into
     // r13 before this wrapper is called. Its argument is not a bhkWorldM.
     const bool selectedWorld = apWorld &&
@@ -1269,283 +1877,8 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
         ReadNativeMemory(pSelectedBody, before) && before.world == apWorld;
     if (beforeReadable)
         s_selectedStepBodyReads.fetch_add(1, std::memory_order_relaxed);
-    glm::vec3 predictedTarget{};
-    bool targetSampled = false;
-    bool targetApplied = false;
-    float velocityAfterWrite = -1.f;
-    const auto playbackFormId = s_preStepPlaybackFormId.load(
-        std::memory_order_acquire);
-    const auto expectedEpoch = s_preStepExpectedEpoch.load(
-        std::memory_order_acquire);
-    if (beforeReadable && playbackFormId && expectedEpoch)
-    {
-        PreStepTarget target{};
-        if (ReadPreStepTarget(target) && target.FormId == playbackFormId &&
-            target.Epoch == expectedEpoch)
-        {
-            const auto nowNs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    started.time_since_epoch()).count());
-            const auto ageNs = nowNs >= target.ReceivedNs ?
-                nowNs - target.ReceivedNs : UINT64_MAX;
-            s_preStepLastSourceAgeMs.store(static_cast<uint32_t>(
-                (std::min)(uint64_t{UINT32_MAX}, ageNs / 1000000)),
-                std::memory_order_relaxed);
-            if (ageNs <= 250000000 && std::isfinite(aDeltaTime) &&
-                aDeltaTime > 0.f && aDeltaTime <= 0.05f &&
-                std::isfinite(target.Position.x) &&
-                std::isfinite(target.Position.y) &&
-                std::isfinite(target.Position.z) &&
-                std::isfinite(target.Velocity.x) &&
-                std::isfinite(target.Velocity.y) &&
-                std::isfinite(target.Velocity.z))
-            {
-                const float ageSeconds = static_cast<float>(ageNs) / 1e9f;
-                predictedTarget = target.Position +
-                    target.Velocity * (std::min)(ageSeconds, 0.1f);
-                targetSampled = std::isfinite(predictedTarget.x) &&
-                    std::isfinite(predictedTarget.y) &&
-                    std::isfinite(predictedTarget.z);
-                const glm::vec3 current{before.transform[12],
-                    before.transform[13], before.transform[14]};
-                const glm::vec3 error = predictedTarget - current;
-                s_preStepLastPreError.store(glm::length(error) *
-                    kHavokToGameUnits, std::memory_order_relaxed);
-                glm::vec3 correction = error / 0.20f;
-                const float correctionSpeed = glm::length(correction);
-                if (correctionSpeed > 4.f)
-                    correction *= 4.f / correctionSpeed;
-                const glm::vec3 currentVelocity{before.linearVelocity[0],
-                    before.linearVelocity[1], before.linearVelocity[2]};
-                glm::vec3 velocity = currentVelocity +
-                    (target.Velocity + correction - currentVelocity) * 0.5f;
-                const float speed = glm::length(velocity);
-                if (speed > 25.f)
-                    velocity *= 25.f / speed;
-                s_preStepLastVelocityCorrection.store(
-                    glm::length(velocity - currentVelocity),
-                    std::memory_order_relaxed);
-                void* pWrapper = s_watchedBodyWrapper.load(
-                    std::memory_order_acquire);
-                if (pWrapper && pSelectedBody == s_watchedHavokBody.load(
-                        std::memory_order_acquire))
-                {
-                    const auto playbackMode = s_preStepPlaybackMode.load(
-                        std::memory_order_acquire);
-                    if ((playbackMode == 3 || playbackMode == 4) &&
-                        before.motionType == 4 &&
-                        playbackFormId == s_kinematicProbeFormId.load(
-                            std::memory_order_acquire) &&
-                        std::isfinite(target.Quaternion.x) &&
-                        std::isfinite(target.Quaternion.y) &&
-                        std::isfinite(target.Quaternion.z) &&
-                        std::isfinite(target.Quaternion.w) &&
-                        std::isfinite(predictedTarget.x) &&
-                        std::isfinite(predictedTarget.y) &&
-                        std::isfinite(predictedTarget.z) &&
-                        std::all_of(std::begin(before.transform),
-                            std::begin(before.transform) + 12,
-                            [](float value) { return std::isfinite(value); }))
-                    {
-                        const glm::mat3 currentMatrix{
-                            glm::vec3{before.transform[0], before.transform[1],
-                                before.transform[2]},
-                            glm::vec3{before.transform[4], before.transform[5],
-                                before.transform[6]},
-                            glm::vec3{before.transform[8], before.transform[9],
-                                before.transform[10]}};
-                        const glm::quat currentRotation = glm::normalize(
-                            glm::quat_cast(currentMatrix));
-                        const float targetLength = glm::length(target.Quaternion);
-                        if (std::isfinite(currentRotation.x) &&
-                            std::isfinite(currentRotation.y) &&
-                            std::isfinite(currentRotation.z) &&
-                            std::isfinite(currentRotation.w) &&
-                            std::isfinite(targetLength) && targetLength > 0.5f &&
-                            targetLength < 1.5f)
-                        {
-                            const glm::quat targetRotation =
-                                glm::normalize(target.Quaternion);
-                            if (playbackMode == 4)
-                            {
-                                // Drive the keyframed body to the target over
-                                // this Havok substep. Do not teleport it: a
-                                // velocity-driven keyframe retains contact
-                                // motion for other bodies it pushes.
-                                glm::vec3 linear = error / aDeltaTime;
-                                const float speed = glm::length(linear);
-                                if (speed > 25.f)
-                                    linear *= 25.f / speed;
-                                glm::quat delta = glm::normalize(
-                                    targetRotation * glm::inverse(currentRotation));
-                                if (delta.w < 0.f)
-                                    delta = -delta;
-                                const float angle = 2.f * std::acos(
-                                    std::clamp(delta.w, -1.f, 1.f));
-                                const float sinHalf = std::sqrt((std::max)(
-                                    0.f, 1.f - delta.w * delta.w));
-                                glm::vec3 angular = sinHalf > 0.0001f ?
-                                    glm::vec3{delta.x, delta.y, delta.z} *
-                                        (angle / (sinHalf * aDeltaTime)) :
-                                    glm::vec3{0.f};
-                                const float angularSpeed = glm::length(angular);
-                                if (angularSpeed > 20.f)
-                                    angular *= 20.f / angularSpeed;
-                                const float currentSpeed = glm::length(
-                                    glm::vec3{before.linearVelocity[0],
-                                        before.linearVelocity[1],
-                                        before.linearVelocity[2]});
-                                const float currentAngularSpeed = glm::length(
-                                    glm::vec3{before.angularVelocity[0],
-                                        before.angularVelocity[1],
-                                        before.angularVelocity[2]});
-                                const bool needsWrite =
-                                    glm::length(error) * kHavokToGameUnits >
-                                        0.25f || angle > glm::radians(0.25f) ||
-                                    currentSpeed > 0.001f ||
-                                    currentAngularSpeed > 0.001f;
-                                if (needsWrite && std::isfinite(speed) &&
-                                    std::isfinite(angularSpeed) &&
-                                    std::isfinite(currentAngularSpeed))
-                                {
-                                    TP_THIS_FUNCTION(TSetVelocity, void, void,
-                                        const float*);
-                                    POINTER_SKYRIMSE(TSetVelocity,
-                                        setLinearVelocity, 78089);
-                                    POINTER_SKYRIMSE(TSetVelocity,
-                                        setAngularVelocity, 78090);
-                                    const float nativeLinear[4]{linear.x,
-                                        linear.y, linear.z, 0.f};
-                                    const float nativeAngular[4]{angular.x,
-                                        angular.y, angular.z, 0.f};
-                                    s_preStepAttempts.fetch_add(1,
-                                        std::memory_order_relaxed);
-                                    TiltedPhoques::ThisCall(setLinearVelocity,
-                                        pWrapper, nativeLinear);
-                                    TiltedPhoques::ThisCall(setAngularVelocity,
-                                        pWrapper, nativeAngular);
-                                    s_preStepApplied.fetch_add(1,
-                                        std::memory_order_relaxed);
-                                    targetApplied = true;
-                                }
-                            }
-                            else
-                            {
-                                const float alpha = std::clamp(
-                                    1.f - std::exp(-aDeltaTime / 0.05f),
-                                    0.f, 1.f);
-                                const glm::quat nextRotation = glm::normalize(
-                                    glm::slerp(currentRotation, targetRotation,
-                                        alpha));
-                                glm::vec3 positionStep = error * alpha;
-                                const float stepLength = glm::length(positionStep);
-                                const float maxStep = 20.f / kHavokToGameUnits;
-                                if (stepLength > maxStep)
-                                    positionStep *= maxStep / stepLength;
-                                s_preStepAttempts.fetch_add(1,
-                                    std::memory_order_relaxed);
-                                if (std::isfinite(nextRotation.x) &&
-                                    std::isfinite(nextRotation.y) &&
-                                    std::isfinite(nextRotation.z) &&
-                                    std::isfinite(nextRotation.w) &&
-                                    SetNativeBodyPose(pWrapper,
-                                        current + positionStep, nextRotation))
-                                {
-                                    s_preStepPoseWrites.fetch_add(1,
-                                        std::memory_order_relaxed);
-                                    s_preStepApplied.fetch_add(1,
-                                        std::memory_order_relaxed);
-                                    s_preStepLastPoseStep.store(glm::length(
-                                        positionStep) * kHavokToGameUnits,
-                                        std::memory_order_relaxed);
-                                    targetApplied = true;
-                                }
-                            }
-                        }
-                    }
-                    else if (playbackMode == 2 &&
-                        std::isfinite(target.Quaternion.x) &&
-                        std::isfinite(target.Quaternion.y) &&
-                        std::isfinite(target.Quaternion.z) &&
-                        std::isfinite(target.Quaternion.w) &&
-                        std::all_of(std::begin(before.transform),
-                            std::begin(before.transform) + 12,
-                            [](float value) { return std::isfinite(value); }))
-                    {
-                        const glm::mat3 currentMatrix{
-                            glm::vec3{before.transform[0],
-                                before.transform[1], before.transform[2]},
-                            glm::vec3{before.transform[4],
-                                before.transform[5], before.transform[6]},
-                            glm::vec3{before.transform[8],
-                                before.transform[9], before.transform[10]}};
-                        const glm::quat currentRotation = glm::normalize(
-                            glm::quat_cast(currentMatrix));
-                        const float quaternionDot = std::clamp(std::abs(
-                            glm::dot(currentRotation, target.Quaternion)),
-                            0.f, 1.f);
-                        const float angle = 2.f * std::acos(quaternionDot);
-                        const float rotationAlpha = angle > 0.001f ?
-                            (std::min)(0.25f, glm::radians(10.f) / angle) : 1.f;
-                        const glm::quat nextRotation = glm::normalize(
-                            glm::slerp(currentRotation, target.Quaternion,
-                                rotationAlpha));
-                        glm::vec3 positionStep = error * 0.25f;
-                        const float stepLength = glm::length(positionStep);
-                        const float maxStep = 8.f / kHavokToGameUnits;
-                        if (stepLength > maxStep)
-                            positionStep *= maxStep / stepLength;
-                        if (std::isfinite(nextRotation.x) &&
-                            std::isfinite(nextRotation.y) &&
-                            std::isfinite(nextRotation.z) &&
-                            std::isfinite(nextRotation.w) &&
-                            SetNativeBodyPose(pWrapper, current + positionStep,
-                                nextRotation))
-                        {
-                            s_preStepPoseWrites.fetch_add(1,
-                                std::memory_order_relaxed);
-                            s_preStepLastPoseStep.store(glm::length(
-                                positionStep) * kHavokToGameUnits,
-                                std::memory_order_relaxed);
-                        }
-                    }
-                    if (playbackMode != 3 && playbackMode != 4)
-                    {
-                        TP_THIS_FUNCTION(TSetLinearVelocity, void, void,
-                            const float*);
-                        POINTER_SKYRIMSE(TSetLinearVelocity, setLinearVelocity,
-                            78089);
-                        const float nativeVelocity[4]{velocity.x, velocity.y,
-                            velocity.z, 0.f};
-                        s_preStepAttempts.fetch_add(1,
-                            std::memory_order_relaxed);
-                        TiltedPhoques::ThisCall(setLinearVelocity, pWrapper,
-                            nativeVelocity);
-                        s_preStepApplied.fetch_add(1,
-                            std::memory_order_relaxed);
-                        targetApplied = true;
-                    }
-                }
-            }
-            else
-                s_preStepStaleSkips.fetch_add(1,
-                    std::memory_order_relaxed);
-        }
-    }
-    if (targetApplied && pSelectedBody)
-    {
-        ActorPoseDiagnosticViews::RigidBody afterWrite{};
-        if (ReadNativeMemory(pSelectedBody, afterWrite) &&
-            afterWrite.world == apWorld)
-        {
-            const auto& v = afterWrite.linearVelocity;
-            velocityAfterWrite = std::sqrt(v[0] * v[0] + v[1] * v[1] +
-                v[2] * v[2]);
-        }
-    }
     CorpseRagdollService::OnHavokStep(apWorld, aDeltaTime, false);
-    const int result = s_originalNativeStep ?
-        s_originalNativeStep(apWorld, aDeltaTime) : 0;
+    const int result = aNativeStep();
     CorpseRagdollService::OnHavokStep(apWorld, aDeltaTime, true);
     if (beforeReadable && pSelectedBody ==
         s_watchedHavokBody.load(std::memory_order_acquire))
@@ -1624,6 +1957,24 @@ int HookNativeStep(void* apWorld, float aDeltaTime)
     return result;
 }
 
+int HookNativeStep(void* apWorld, float aDeltaTime)
+{
+    return RunNativeStep(apWorld, aDeltaTime, [&]() { return s_originalNativeStep(apWorld, aDeltaTime); });
+}
+
+// E77851 also dispatches simulationType 3 through E61417 (VA 0x140B5B250).
+// Its float is the FOURTH argument, after the world, job queue and thread pool.
+using MultithreadedStepFn = void(void*, void*, void*, float);
+MultithreadedStepFn* s_originalMultithreadedStep{};
+void HookMultithreadedStep(void* apWorld, void* apQueue, void* apPool, float aDeltaTime)
+{
+    RunNativeStep(apWorld, aDeltaTime, [&]()
+    {
+        s_originalMultithreadedStep(apWorld, apQueue, apPool, aDeltaTime);
+        return 0;
+    }, true);
+}
+
 static TiltedPhoques::Initializer s_nativeStepHook(
     []()
     {
@@ -1634,6 +1985,9 @@ static TiltedPhoques::Initializer s_nativeStepHook(
         POINTER_SKYRIMSE(NativeStepFn, s_nativeStep, 61410);
         s_originalNativeStep = s_nativeStep.Get();
         TP_HOOK(&s_originalNativeStep, HookNativeStep);
+        POINTER_SKYRIMSE(MultithreadedStepFn, multithreaded, 61417);
+        s_originalMultithreadedStep = multithreaded.Get();
+        TP_HOOK(&s_originalMultithreadedStep, HookMultithreadedStep);
     });
 
 bool HookWorldUpdate(void* apWorld, uint32_t aFlags)
@@ -1795,32 +2149,6 @@ void MaybeInstallRenderNodePhaseHook(TESObjectREFR* apReference) noexcept
         std::memory_order_release);
 }
 
-bool SetDynamicBodyPosition(const DynamicBody& acBody, const glm::vec3& acGamePosition) noexcept
-{
-    void** pVtable = nullptr;
-    if (!ReadNativeMemory(acBody.Wrapper, pVtable) || !pVtable)
-        return false;
-    void* pMethod = nullptr;
-    if (!ReadNativeMemory(pVtable + 0x35, pMethod) || !pMethod)
-        return false;
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(pMethod, &info, sizeof(info)) || info.State != MEM_COMMIT ||
-        ((info.Protect & 0xFF) != PAGE_EXECUTE &&
-         (info.Protect & 0xFF) != PAGE_EXECUTE_READ &&
-         (info.Protect & 0xFF) != PAGE_EXECUTE_READWRITE &&
-         (info.Protect & 0xFF) != PAGE_EXECUTE_WRITECOPY))
-        return false;
-
-    // hkVector4 is four floats. Live cart samples verified 70 game units per
-    // Havok world unit on this runtime; the fourth lane is not a position.
-    float nativePosition[4]{acGamePosition.x / kHavokToGameUnits,
-        acGamePosition.y / kHavokToGameUnits,
-        acGamePosition.z / kHavokToGameUnits, 0.f};
-    using SetPositionFn = void(__fastcall*)(void*, float*);
-    reinterpret_cast<SetPositionFn>(pMethod)(acBody.Wrapper, nativePosition);
-    return true;
-}
-
 // This stream is for loose, freely simulated clutter. Activators, animated
 // objects, movable statics, doors, and other placed scene machinery may move
 // under Papyrus, packages, constraints, or authored animations. Changing
@@ -1865,7 +2193,7 @@ void ObjectService::SetPreStepBodyPlaybackProbe(uint32_t aFormId,
     s_watchedBodyWrapper.store(nullptr, std::memory_order_release);
     s_watchedHavokBody.store(nullptr, std::memory_order_release);
     s_watchedHavokWorld.store(nullptr, std::memory_order_release);
-    s_preStepPlaybackMode.store(aFormId ? aMode : 0,
+    s_preStepPlaybackMode.store(0,
         std::memory_order_release);
     s_preStepPlaybackFormId.store(aFormId, std::memory_order_release);
 }
@@ -1895,7 +2223,7 @@ ObjectService::GetPreStepPlaybackDiagnostic() noexcept
         s_physicsFollowerSelectedReceived.load(std::memory_order_relaxed),
         s_physicsLastSelectedTransitAgeMs.load(std::memory_order_relaxed),
         s_physicsLastHostScanDurationUs.load(std::memory_order_relaxed),
-        s_physicsLastHostReferencesVisited.load(std::memory_order_relaxed),
+        s_physicsLastLaneReferencesVisited.load(std::memory_order_relaxed),
         s_physicsLastHostUpdatesQueued.load(std::memory_order_relaxed),
         s_physicsHostScanTotalUs.load(std::memory_order_relaxed),
         s_physicsHostScanMaxUs.load(std::memory_order_relaxed),
@@ -2127,6 +2455,340 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     m_physicsMoveConnection = aDispatcher.sink<NotifyPhysicsReferencesMove>().connect<&ObjectService::OnPhysicsReferencesMove>(this);
 
     EventDispatcherManager::Get()->activateEvent.RegisterSink(this);
+    EventDispatcherManager::Get()->objectLoadedEvent.RegisterSink(this);
+    EventDispatcherManager::Get()->cellAttachDetachEvent.RegisterSink(this);
+    EventDispatcherManager::Get()->moveAttachDetachEvent.RegisterSink(this);
+}
+
+// These events are opaque in this fork's EventDispatcher.h. Payloads are the SKSE/CommonLib
+// TESObjectLoadedEvent and TES{Cell,Move}AttachDetachEvent layouts, not new engine offsets.
+BSTEventResult ObjectService::OnEvent(const TESObjectLoadedEvent* apEvent,
+    const EventDispatcher<TESObjectLoadedEvent>*)
+{
+    if (apEvent)
+    {
+        uint32_t formId{};
+        std::memcpy(&formId, apEvent, sizeof(formId));
+        QueuePhysicsRefresh(formId);
+    }
+    return BSTEventResult::kOk;
+}
+
+BSTEventResult ObjectService::OnEvent(const TESCellAttachDetachEvent* apEvent,
+    const EventDispatcher<TESCellAttachDetachEvent>*)
+{
+    TESObjectREFR* reference{};
+    if (apEvent)
+        std::memcpy(&reference, apEvent, sizeof(reference));
+    if (reference)
+        QueuePhysicsRefresh(reference->formID);
+    return BSTEventResult::kOk;
+}
+
+BSTEventResult ObjectService::OnEvent(const TESMoveAttachDetachEvent* apEvent,
+    const EventDispatcher<TESMoveAttachDetachEvent>*)
+{
+    TESObjectREFR* reference{};
+    if (apEvent)
+        std::memcpy(&reference, apEvent, sizeof(reference));
+    if (reference)
+        QueuePhysicsRefresh(reference->formID);
+    return BSTEventResult::kOk;
+}
+
+void ObjectService::QueuePhysicsRefresh(uint32_t aFormId) noexcept
+{
+    if (!aFormId)
+        return;
+    std::lock_guard lock(m_physicsEventsLock);
+    m_physicsDirty.Insert(aFormId);
+}
+
+void ObjectService::RefreshPhysicsReference(uint32_t aFormId) noexcept
+{
+    auto* reference = Cast<TESObjectREFR>(TESForm::GetById(aFormId));
+    auto& drops = m_world.GetSharedDropService();
+    const bool shared = reference && drops.IsShared(aFormId);
+    const bool admitted = reference && reference->loadedState && reference->parentCell &&
+        reference->parentCell->IsAttached() && !Cast<Actor>(reference) &&
+        (shared ? drops.IsOwner(aFormId) : (m_physicsLeader && !reference->IsTemporary()));
+    // Body replacement needs no retained native pointer: admission classifies once, and
+    // capture resolves the current root/collision/body chain each time it samples.
+    bool passive = admitted && !shared && IsPassivePhysicsReference(reference);
+    // Sleeping bodies stay in bounded repair; native motion notifications promote them.
+    bool wasBody{}, referenceMoved{};
+    {
+        std::lock_guard lock(m_hostPhysicsLock);
+        if (const auto it = m_referencePoses.find(aFormId); it != m_referencePoses.end())
+            wasBody = it->second.Body;
+        if (passive)
+            if (const auto it = m_referencePoses.find(aFormId); it != m_referencePoses.end())
+            {
+                const auto delta = reference->position - it->second.Position;
+                const auto turn = reference->rotation - it->second.Rotation;
+                referenceMoved = it->second.Promote || glm::dot(delta, delta) >= 0.01f || glm::dot(turn, turn) >= 0.000001f;
+            }
+    }
+    DynamicBody body{};
+    const bool hasBody = admitted && reference->baseForm &&
+        reference->baseForm->formType != FormType::Door &&
+        GetDynamicBody(reference, body, true, true);
+    if (wasBody || (hasBody && referenceMoved))
+        passive = false;
+    const auto generation = shared ? drops.PhysicsGeneration(aFormId) : 0;
+    std::lock_guard lock(m_hostPhysicsLock);
+    auto it = m_referencePoses.find(aFormId);
+    if (!admitted)
+    {
+        m_physicsBodies.Erase(aFormId);
+        m_physicsUpdateRefs.Erase(aFormId);
+        m_referencePoses.erase(aFormId);
+        return;
+    }
+    if (!passive && !hasBody)
+    {
+        m_physicsBodies.Erase(aFormId);
+        if (it == m_referencePoses.end())
+        {
+            m_physicsUpdateRefs.Erase(aFormId);
+            return;
+        }
+        m_physicsUpdateRefs.Insert(aFormId);
+        if (++it->second.MissingChecks >= 3)
+        {
+            m_physicsUpdateRefs.Erase(aFormId);
+            m_referencePoses.erase(it);
+        }
+        return;
+    }
+    if (hasBody)
+        passive = false; // even sleeping clutter gets a body-space authoritative pose
+    if (it != m_referencePoses.end() && (it->second.Shared != shared ||
+        it->second.Generation != generation))
+    {
+        m_referencePoses.erase(it);
+        it = m_referencePoses.end();
+    }
+    if (it == m_referencePoses.end())
+    {
+        auto& pose = m_referencePoses[aFormId];
+        pose.Shared = shared;
+        pose.Generation = generation;
+        pose.Update.ChildBodies.reserve(PhysicsReferenceUpdate::kMaxChildBodies);
+        // Grow storage only when membership grows, not when a snapshot is captured.
+        const auto capacity = (m_referencePoses.size() + 63) / 64 * 64;
+        m_physicsPromotions.reserve(capacity);
+        for (auto& snapshot : m_physicsSnapshots)
+            if (snapshot.Entries.size() < capacity)
+                snapshot.Entries.resize(capacity);
+    }
+    auto& pose = m_referencePoses.at(aFormId);
+    {
+        std::lock_guard lock(s_assembliesLock);
+        const auto assembly = s_assemblies.find(aFormId);
+        pose.Assembly = assembly != s_assemblies.end() && assembly->second.Complete &&
+            assembly->second.Root.get() == reference->GetNiNode();
+    }
+    pose.MissingChecks = 0;
+    pose.Body = !passive;
+    if (!passive)
+        pose.Promote = false;
+    // Moving/recently changed bodies use the active set. Everything else uses bounded
+    // repair on the same main thread; there is no full passive-set capture pass.
+    const bool mainFrame = !passive &&
+        (pose.Assembly || std::chrono::steady_clock::now() - pose.LastActive < 500ms ||
+            (body.State.motionType != 4 && IsPhysicsBodyAwake(body.HavokBody)));
+    if (!mainFrame)
+    {
+        m_physicsBodies.Erase(aFormId);
+        m_physicsUpdateRefs.Insert(aFormId);
+    }
+    else
+    {
+        m_physicsUpdateRefs.Erase(aFormId);
+        m_physicsBodies.Insert(aFormId);
+    }
+}
+
+void ObjectService::RefreshPhysicsCandidates() noexcept
+{
+    const auto now = std::chrono::steady_clock::now();
+    auto* player = PlayerCharacter::Get();
+    if (!player || !player->parentCell)
+        return;
+    const bool leader = m_world.GetPartyService().IsLeader();
+    const auto epoch = m_world.GetPartyService().GetStartEpoch();
+    if (leader != m_physicsLeader || epoch != m_physicsEpoch)
+    {
+        std::lock_guard lock(m_hostPhysicsLock);
+        m_physicsLeader = leader;
+        m_physicsEpoch = epoch;
+        m_referencePoses.clear();
+        m_ownedPhysicsGenerations.clear();
+        m_physicsBodies.Clear();
+        m_physicsUpdateRefs.Clear();
+        m_physicsPromotions.clear();
+        m_physicsCells.clear();
+        m_physicsSnapshotRead = m_physicsSnapshotCount = 0;
+        m_nextPhysicsSnapshot = {};
+        m_nextPhysicsCells = m_nextOwnedPhysics = m_nextPhysicsMaintenance = {};
+    }
+    m_physicsMovingScratch.clear();
+    {
+        std::lock_guard movementLock(s_movingReferencesLock);
+        m_physicsMovingScratch.reserve(s_movingReferences.Count + s_movingReferences.Overflow.size());
+        s_movingReferences.Drain([&](uint32_t id) { m_physicsMovingScratch.push_back(id); });
+    }
+    for (const auto id : m_physicsMovingScratch)
+    {
+        RefreshPhysicsReference(id);
+        if (auto it = m_referencePoses.find(id); it != m_referencePoses.end())
+        {
+            it->second.LastActive = now;
+            it->second.Promote = true;
+            m_physicsUpdateRefs.Erase(id);
+            m_physicsBodies.Insert(id);
+        }
+    }
+    const auto pruneStarted = std::chrono::steady_clock::now();
+    // Bounded repair of missed detach/ownership notifications. Recheck before the passive
+    // snapshot updates its comparison pose, so a thrown item can move to the main lane.
+    if (now >= m_nextPhysicsMaintenance)
+    {
+        for (size_t i = 0; i < 64; ++i)
+        {
+            uint32_t id{};
+            {
+                std::lock_guard lock(m_hostPhysicsLock);
+                const auto count = m_physicsBodies.Ids.size() + m_physicsUpdateRefs.Ids.size();
+                if (!count || i >= count)
+                    break;
+                const auto index = m_physicsMaintenanceCursor++ % count;
+                id = index < m_physicsBodies.Ids.size() ? m_physicsBodies.Ids[index] :
+                    m_physicsUpdateRefs.Ids[index - m_physicsBodies.Ids.size()];
+            }
+            RefreshPhysicsReference(id);
+        }
+        m_nextPhysicsMaintenance = now + 50ms;
+    }
+    s_hostPruneTiming.Record(HostScanDurationUs(pruneStarted));
+    {
+        std::lock_guard lock(m_physicsEventsLock);
+        if (m_physicsRefresh.Ids.empty())
+            std::swap(m_physicsRefresh, m_physicsDirty);
+    }
+    // Process load/detach/body replacement notifications incrementally. Coalescing resolves
+    // current state, so unload/reload pairs cannot remove a newly attached copy out of order.
+    for (size_t i = 0; i < 128 && !m_physicsRefresh.Ids.empty(); ++i)
+    {
+        const auto id = m_physicsRefresh.Ids.back();
+        m_physicsRefresh.Erase(id);
+        RefreshPhysicsReference(id);
+    }
+    if (!leader)
+        return;
+    const auto gridStarted = std::chrono::steady_clock::now();
+    if (now >= m_nextPhysicsCells)
+    {
+        std::array<uint32_t, 226> cells{};
+        size_t count{};
+        cells[count++] = player->parentCell->formID;
+        auto* tes = TES::Get();
+        auto* grid = tes ? tes->cells : nullptr;
+        if (player->parentCell->worldspace && grid && grid->arr &&
+            grid->dimension > 0 && grid->dimension <= 15)
+            for (uint32_t i = 0; i < grid->dimension * grid->dimension; ++i)
+                if (auto* cell = grid->arr[i]; cell && cell != player->parentCell &&
+                    cell->IsAttached() && cell->worldspace == player->parentCell->worldspace)
+                    cells[count++] = cell->formID;
+        std::erase_if(m_physicsCells, [&](const auto& cell)
+        {
+            return std::find(cells.begin(), cells.begin() + count, cell.FormId) == cells.begin() + count;
+        });
+        for (size_t i = 0; i < count; ++i)
+            if (std::none_of(m_physicsCells.begin(), m_physicsCells.end(), [&](const auto& cell)
+                { return cell.FormId == cells[i]; }))
+                m_physicsCells.push_back({cells[i]});
+        m_nextPhysicsCells = now + 250ms;
+    }
+    s_hostGridDiscoveryTiming.Record(HostScanDurationUs(gridStarted));
+    // Bootstrap/join-in-progress plus a slow repair sweep for mods that replace bodies
+    // without load events. At most 16 cell slots per frame, never a whole cell per scan.
+    const auto started = std::chrono::steady_clock::now();
+    uint32_t visited{};
+    for (size_t i = 0; i < m_physicsCells.size() && visited < 16; ++i)
+    {
+        auto& scan = m_physicsCells[m_physicsCellCursor++ % m_physicsCells.size()];
+        if (now < scan.NextSweep)
+            continue;
+        auto* cell = Cast<TESObjectCELL>(TESForm::GetById(scan.FormId));
+        if (!cell || !cell->IsAttached() || !cell->refData.refArray || cell->refData.capacity > 50000)
+            continue;
+        while (scan.Cursor < cell->refData.capacity && visited < 16)
+        {
+            auto* reference = cell->refData.refArray[scan.Cursor++].Get();
+            ++visited;
+            if (reference)
+                RefreshPhysicsReference(reference->formID);
+        }
+        if (scan.Cursor >= cell->refData.capacity)
+        {
+            scan.Cursor = 0;
+            scan.NextSweep = now + 5s;
+        }
+    }
+    s_hostCurrentDiscoveryTiming.Record(HostScanDurationUs(started));
+}
+
+void ObjectService::FlushPhysicsSnapshots() noexcept
+{
+    for (;;)
+    {
+        {
+            std::lock_guard lock(m_hostPhysicsLock);
+            if (!m_physicsSnapshotCount)
+                return;
+            std::swap(m_physicsSending, m_physicsSnapshots[m_physicsSnapshotRead]);
+            m_physicsSnapshotRead = (m_physicsSnapshotRead + 1) % m_physicsSnapshots.size();
+            --m_physicsSnapshotCount;
+        }
+        if (m_physicsSending.Epoch != m_world.GetPartyService().GetStartEpoch())
+            continue;
+        PhysicsReferencesMoveRequest request;
+        request.Tick = m_physicsSending.Tick;
+        request.Updates.reserve((std::min)(m_physicsSending.Count, PhysicsReferenceUpdate::MaxUpdates));
+        auto& drops = m_world.GetSharedDropService();
+        for (size_t i = 0; i < m_physicsSending.Count; ++i)
+        {
+            const auto& captured = m_physicsSending.Entries[i];
+            PhysicsReferenceUpdate update;
+            update.Id = captured.Id;
+            update.Position = captured.Position;
+            update.Rotation = captured.Rotation;
+            update.MotionType = captured.MotionType;
+            update.LinearVelocity = captured.LinearVelocity;
+            update.BodyTransform = captured.BodyTransform;
+            update.ChildBodies.assign(captured.Children.begin(), captured.Children.begin() + captured.ChildCount);
+            if (captured.Shared)
+            {
+                if (drops.IsOwner(captured.FormId) && drops.PhysicsGeneration(captured.FormId) == captured.Generation)
+                    drops.SendPhysics(captured.FormId, update, request.Tick);
+            }
+            else if (m_world.GetPartyService().IsLeader())
+                request.Updates.push_back(std::move(update));
+            if (request.Updates.size() == PhysicsReferenceUpdate::MaxUpdates)
+            {
+                m_transport.Send(request);
+                s_physicsHostPacketsSent.fetch_add(1, std::memory_order_relaxed);
+                request.Updates.clear();
+            }
+        }
+        if (!request.Updates.empty())
+        {
+            m_transport.Send(request);
+            s_physicsHostPacketsSent.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 bool ObjectService::GetRemotePhysicsDiagnostic(uint32_t aFormId,
@@ -2214,17 +2876,19 @@ bool ShouldSyncObject(const TESObjectREFR* apObject, const Set<const TESObjectRE
 
 void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
+    s_assemblyFollower.store(false, std::memory_order_release);
     RestoreKinematicProbe();
-    // The native step reads these raw bodies; nothing republishes them once playback stops.
+    std::lock_guard remoteLock(m_remotePhysicsLock);
     {
         std::lock_guard stepLock(s_stepTargetsLock);
         s_stepTargets.clear();
+        s_stepTargetsBuilding.clear();
+        s_followProbes.clear();
     }
     s_preStepExpectedEpoch.store(0, std::memory_order_release);
     s_watchedBodyWrapper.store(nullptr, std::memory_order_release);
     s_watchedHavokBody.store(nullptr, std::memory_order_release);
     s_watchedHavokWorld.store(nullptr, std::memory_order_release);
-    m_referencePoses.clear();
     {
         std::lock_guard lock(m_remotePhysicsLock);
         m_remoteReferencePoses.clear();
@@ -2236,10 +2900,23 @@ void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
         s_drawnGapProbes.clear();
         s_nextRenderActorsMs = 0;
     }
-    m_physicsStreamCandidates.clear();
-    m_gridDiscoveryCursor = 0;
-    m_nextCurrentCellDiscovery = {};
-    m_nextPhysicsPosePrune = {};
+    {
+        std::lock_guard lock(m_hostPhysicsLock);
+        m_captureOnMainFrame.store(false, std::memory_order_relaxed);
+        m_referencePoses.clear();
+        m_ownedPhysicsGenerations.clear();
+        m_physicsBodies.Clear();
+        m_physicsUpdateRefs.Clear();
+        m_physicsPromotions.clear();
+        m_physicsSnapshotRead = m_physicsSnapshotCount = 0;
+        m_nextPhysicsSnapshot = {};
+        m_physicsEpoch = 0;
+    }
+    {
+        std::lock_guard lock(m_hostPhysicsLock);
+        m_physicsCells.clear();
+        m_nextPhysicsCells = m_nextOwnedPhysics = m_nextPhysicsMaintenance = {};
+    }
 }
 
 void ObjectService::OnUpdate(const UpdateEvent&) noexcept
@@ -2305,6 +2982,21 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
     {
         m_applyOnMainFrame.store(false, std::memory_order_relaxed);
         m_captureOnMainFrame.store(false, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(m_hostPhysicsLock);
+            if (m_physicsEpoch || !m_referencePoses.empty())
+            {
+                m_physicsEpoch = 0;
+                m_referencePoses.clear();
+                m_physicsBodies.Clear();
+                m_physicsUpdateRefs.Clear();
+                m_physicsPromotions.clear();
+                m_physicsSnapshotRead = m_physicsSnapshotCount = 0;
+                m_nextPhysicsSnapshot = {};
+                m_physicsCells.clear();
+                m_nextPhysicsCells = m_nextOwnedPhysics = m_nextPhysicsMaintenance = {};
+            }
+        }
         RestoreKinematicProbe();
         s_preStepExpectedEpoch.store(0, std::memory_order_release);
         s_watchedBodyWrapper.store(nullptr, std::memory_order_release);
@@ -2316,6 +3008,60 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
     s_preStepExpectedEpoch.store(m_world.GetPartyService().IsLeader() ? 0 :
         m_world.GetPartyService().GetStartEpoch(),
         std::memory_order_release);
+    for (const auto& drop : m_world.GetSharedDropService().TakePhysics())
+    {
+        NotifyPhysicsReferencesMove message;
+        message.AuthorityEpoch = drop.Epoch;
+        message.Tick = drop.Tick;
+        message.Updates.push_back(drop.Physics);
+        s_sharedDropGeneration = drop.Generation;
+        OnPhysicsReferencesMove(message);
+        s_sharedDropGeneration = 0;
+    }
+    if (m_world.GetPartyService().IsLeader() && !m_world.GetSharedDropService().HasRemoteReferences())
+    {
+        // Promoted to leader: no host-driven bodies here any more; the native step must not keep
+        // steering the last published ones.
+        std::lock_guard stepLock(s_stepTargetsLock);
+        s_followProbesDirty |= !s_stepTargets.empty();
+        s_stepTargets.clear();
+    }
+    // Ownership is service data, not scene data. Compare it on the worker and
+    // enqueue only changed identities; never walk every owned drop on the main frame.
+    const auto ownedNow = std::chrono::steady_clock::now();
+    bool pollOwners{};
+    {
+        std::lock_guard hostLock(m_hostPhysicsLock);
+        pollOwners = ownedNow >= m_nextOwnedPhysics;
+        if (pollOwners)
+            m_nextOwnedPhysics = ownedNow + 50ms;
+    }
+    if (pollOwners)
+    {
+        const auto owned = m_world.GetSharedDropService().OwnedReferences();
+        std::unordered_map<uint32_t, uint32_t> generations;
+        generations.reserve(owned.size());
+        for (const auto id : owned)
+            generations.emplace(id, m_world.GetSharedDropService().PhysicsGeneration(id));
+        std::lock_guard hostLock(m_hostPhysicsLock);
+        for (const auto& [id, generation] : generations)
+        {
+            const auto previous = m_ownedPhysicsGenerations.find(id);
+            if (previous == m_ownedPhysicsGenerations.end() || previous->second != generation)
+                QueuePhysicsRefresh(id);
+        }
+        for (const auto& [id, generation] : m_ownedPhysicsGenerations)
+            if (!generations.contains(id))
+                QueuePhysicsRefresh(id);
+        m_ownedPhysicsGenerations.swap(generations);
+    }
+    m_captureOnMainFrame.store(true, std::memory_order_relaxed);
+    m_applyOnMainFrame.store(true, std::memory_order_relaxed);
+    FlushPhysicsSnapshots();
+}
+
+void ObjectService::RefreshPhysicsDiagnostics() noexcept
+{
     const auto phaseFormId = s_referencePhaseFormId.load(
         std::memory_order_acquire);
     const auto playbackFormId = s_preStepPlaybackFormId.load(
@@ -2336,28 +3082,6 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
             MaybeInstallReferencePhaseHook(pReference);
             MaybeInstallRenderNodePhaseHook(pReference);
             DynamicBody selectedBody{};
-            if (kinematicSelected && watchedFormId == playbackFormId &&
-                !s_kinematicProbeFormId.load(std::memory_order_acquire) &&
-                GetDynamicBody(pReference, selectedBody))
-            {
-                const auto originalType = selectedBody.State.motionType;
-                if (pReference->SetMotionType(
-                        TESObjectREFR::MotionType::Keyframed, false))
-                {
-                    DynamicBody changed{};
-                    if (GetDynamicBody(pReference, changed, true) &&
-                        changed.State.motionType == 4)
-                    {
-                        s_kinematicOriginalMotionType.store(originalType,
-                            std::memory_order_release);
-                        s_kinematicProbeFormId.store(playbackFormId,
-                            std::memory_order_release);
-                    }
-                    else
-                        pReference->SetMotionType(
-                            static_cast<TESObjectREFR::MotionType>(originalType), true);
-                }
-            }
             if (GetDynamicBody(pReference, selectedBody, kinematicSelected))
             {
                 s_selectedBodyCacheRefreshes.fetch_add(1,
@@ -2384,102 +3108,82 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         }
     }
 
-    for (const auto& drop : m_world.GetSharedDropService().TakePhysics())
-    {
-        NotifyPhysicsReferencesMove message;
-        message.AuthorityEpoch = drop.Epoch;
-        message.Tick = drop.Tick;
-        message.Updates.push_back(drop.Physics);
-        s_sharedDropGeneration = drop.Generation;
-        OnPhysicsReferencesMove(message);
-        s_sharedDropGeneration = 0;
-    }
-    if (m_world.GetPartyService().IsLeader() && !m_world.GetSharedDropService().HasRemoteReferences())
-    {
-        // Promoted to leader: no host-driven bodies here any more; the native step must not keep
-        // steering the last published ones.
-        std::lock_guard stepLock(s_stepTargetsLock);
-        s_stepTargets.clear();
-    }
-    if (!m_world.GetPartyService().IsLeader())
-    {
-        const bool mainFrame = s_mainFramePlaybackEnabled.load(std::memory_order_relaxed);
-        m_applyOnMainFrame.store(mainFrame, std::memory_order_relaxed);
-        // Owned drops are sampled with playback, before native physics starts. Capturing on
-        // the VM job also took m_remotePhysicsLock while the main frame needed it for carts.
-        m_captureOnMainFrame.store(true, std::memory_order_relaxed);
-        if (!mainFrame)
-            ApplyRemotePhysics();
-        return;
-    }
-    // The leader can be the follower of a drop owned by another party member.
-    m_applyOnMainFrame.store(m_world.GetSharedDropService().HasRemoteReferences(), std::memory_order_relaxed);
-
-    if (s_mainFrameCaptureEnabled.load(std::memory_order_relaxed))
-    {
-        m_captureOnMainFrame.store(true, std::memory_order_relaxed);
-        std::vector<PhysicsReferencesMoveRequest> pending;
-        {
-            std::lock_guard lock(m_remotePhysicsLock);
-            pending.swap(m_pendingPhysicsRequests);
-        }
-        for (const auto& request : pending)
-        {
-            s_physicsHostPacketsSent.fetch_add(1, std::memory_order_relaxed);
-            m_transport.Send(request);
-        }
-        return;
-    }
-    m_captureOnMainFrame.store(false, std::memory_order_relaxed);
-    CaptureHostPhysics(true);
 }
 
-void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
+void ObjectService::CaptureHostPhysics(const bool aUpdateThread) noexcept
 {
-    std::lock_guard physicsLock(m_remotePhysicsLock);
+    const auto started = std::chrono::steady_clock::now();
+    // The optional render probes share maps with playback diagnostics. Ordinary capture
+    // has its own lock and never waits for the follower's playback/receive traversal.
+    std::unique_lock diagnosticLock(m_remotePhysicsLock, std::defer_lock);
+    const bool captureDiagnostics = IsRenderDiagnosticsArmed();
+    if (captureDiagnostics)
+        diagnosticLock.lock();
+    std::unique_lock physicsLock(m_hostPhysicsLock);
     const auto watchedFormId = s_preStepPlaybackFormId.load(std::memory_order_acquire) ?
         s_preStepPlaybackFormId.load(std::memory_order_acquire) : s_referencePhaseFormId.load(std::memory_order_acquire);
     const auto now = std::chrono::steady_clock::now();
-    if (now < m_nextPhysicsSnapshot)
+    const size_t lane = aUpdateThread ? 1 : 0;
+    auto& nextSnapshot = m_nextPhysicsSnapshot[lane];
+    if (now < nextSnapshot)
         return;
-    m_nextPhysicsSnapshot = now + 50ms;
-    s_physicsHostScans.fetch_add(1, std::memory_order_relaxed);
+    if (PhysicsScan::MakeSnapshotRoom(m_physicsSnapshotRead, m_physicsSnapshotCount, m_physicsSnapshots.size()))
+    {
+        // Latest-state transport: capture this tick and advance LastSent normally.
+        // Tick timestamps and the eviction counter expose discarded queued history.
+        ++m_physicsSnapshotEvictions;
+    }
+    auto& snapshot = m_physicsSnapshots[(m_physicsSnapshotRead + m_physicsSnapshotCount) % m_physicsSnapshots.size()];
+    snapshot.Count = 0;
+    snapshot.Epoch = m_physicsEpoch;
+    // A buffer returned by the sender can predate recent admissions.
+    if (snapshot.Entries.size() < m_referencePoses.size())
+        snapshot.Entries.resize((m_referencePoses.size() + 63) / 64 * 64);
 
     auto* pPlayer = PlayerCharacter::Get();
-    if (!pPlayer || !pPlayer->parentCell || !pPlayer->parentCell->refData.refArray)
+    if (!pPlayer || !pPlayer->parentCell)
         return;
 
-    PhysicsReferencesMoveRequest request{};
-    request.Tick = SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick();
-    if (s_physicsStampEnabled.load(std::memory_order_relaxed))
+    snapshot.Tick = SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick();
+    if (!aUpdateThread && s_physicsStampEnabled.load(std::memory_order_relaxed))
     {
-        // Physics mid-step: its state is half old, half new. Read it next frame instead.
-        if (s_worldUpdatesRunning.load(std::memory_order_acquire) > 0)
-        {
-            m_nextPhysicsSnapshot = now;
-            return;
-        }
         const auto nowNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             now.time_since_epoch()).count());
         const auto stepNs = s_worldUpdateLastStartNs.load(std::memory_order_relaxed);
         if (stepNs && nowNs >= stepNs && nowNs - stepNs < 200'000'000ull)
-            request.Tick -= (nowNs - stepNs) / 1'000'000ull;
+            snapshot.Tick -= (nowNs - stepNs) / 1'000'000ull;
     }
-    Set<uint32_t> observed;
+    // The main lane captures every frame: moving bodies (carts, debris) reach the follower at the owner's
+    // frame rate instead of 20 Hz, so fast motion and jolts are not smoothed away between samples. Resting
+    // bodies already go quiet per reference (500 ms / 5 s). The sleeping/repair lane keeps its 20 Hz cadence.
+    if (!aUpdateThread)
+        nextSnapshot = now;
+    else
+    {
+        // Preserve the 20 Hz cadence through frame rounding; do not emit catch-up bursts.
+        if (nextSnapshot.time_since_epoch().count() == 0)
+            nextSnapshot = now;
+        nextSnapshot += 50ms * ((now - nextSnapshot) / 50ms + 1);
+    }
+    const bool reportLane = !aUpdateThread;
+    if (reportLane)
+        s_physicsHostScans.fetch_add(1, std::memory_order_relaxed);
+    uint32_t sampled{};
     uint32_t referencesVisited{};
     auto processReference = [&](TESObjectREFR* pReference)
     {
         if (!pReference || pReference == pPlayer || !pReference->loadedState ||
-            Cast<Actor>(pReference))
+            !pReference->parentCell || !pReference->parentCell->IsAttached() || Cast<Actor>(pReference))
             return;
 
+        const auto poseIt = m_referencePoses.find(pReference->formID);
+        if (poseIt == m_referencePoses.end())
+            return;
+        auto& previous = poseIt->second;
         auto& sharedDrops = m_world.GetSharedDropService();
-        const bool shared = sharedDrops.IsShared(pReference->formID);
+        const bool shared = previous.Shared;
         if (shared ? !sharedDrops.IsOwner(pReference->formID) :
             (!m_world.GetPartyService().IsLeader() || pReference->IsTemporary()))
-            return;
-
-        if (observed.contains(pReference->formID))
             return;
 
         // Reject distant loaded-grid references before walking their native
@@ -2489,14 +3193,15 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
         if (glm::dot(deltaFromPlayer, deltaFromPlayer) > 30000.f * 30000.f)
             return;
 
-        const bool passive = !shared && IsPassivePhysicsReference(pReference);
+        const bool passive = !previous.Body;
         DynamicBody body{};
-        if (!passive && !GetDynamicBody(pReference, body, true))
+        if (!passive && !GetDynamicBody(pReference, body, true, true))
             return;
-        // Keyframed bodies are driven by their node (scene, script, animation) on each PC, so
-        // they are only sent at rest: measured, the Helgen carts are keyframed after the intro
-        // scene and each PC's save parked them up to 34 units and 0.75 rad apart. Doors animate
-        // their body while the reference stays put; leave them to the door sync.
+        ScopedPhysicsWorld worldLock(passive ? nullptr : body.State.world);
+        if (!passive && (!worldLock.Lock || !GetDynamicBody(pReference, body, true, true)))
+            return;
+        // Host scene-driven bodies stream too. Followers stay dynamic. Doors are owned
+        // by the door protocol and are deliberately excluded from this physics stream.
         const bool keyframed = !passive && body.State.motionType == 4;
         if (keyframed && (!pReference->baseForm || pReference->baseForm->formType == FormType::Door))
             return;
@@ -2505,23 +3210,30 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
                 { return std::isfinite(value); }))
             return;
 
-        observed.insert(pReference->formID);
-        // Retain discovered refs through transient native-body failures, and
-        // keep passive items on the fast path after their first discovery.
-        m_physicsStreamCandidates.insert(pReference->formID);
+        const bool inserted = previous.LastSent.time_since_epoch().count() == 0;
+        const bool assemblyStream = previous.Assembly;
+        const bool awake = !passive && !keyframed && IsPhysicsBodyAwake(body.HavokBody);
+        if (awake || assemblyStream)
+            previous.LastActive = now;
+        // Sleep alone is not enough to suppress a final changed pose or a keyframe. Keep
+        // previously dynamic carts subscribed through their scripted keyframed arrival.
+        if (!assemblyStream && !passive && !inserted && !keyframed && !awake &&
+            pReference->position == previous.Position && pReference->rotation == previous.Rotation &&
+            !PhysicsBodyMotionChanged(previous.LastSentBodyTransform, previous.LastSentBodyVelocity,
+                std::to_array(body.State.transform),
+                {body.State.linearVelocity[0], body.State.linearVelocity[1], body.State.linearVelocity[2]}) &&
+            now - previous.LastSent < (previous.HasMoved ? 500ms : 5000ms))
+            return;
+        ++sampled;
         if (pReference->formID == watchedFormId)
-            s_physicsHostSelectedObserved.fetch_add(1,
-                std::memory_order_relaxed);
-        auto [poseIt, inserted] = m_referencePoses.try_emplace(pReference->formID);
-        auto& previous = poseIt->second;
+            s_physicsHostSelectedObserved.fetch_add(1, std::memory_order_relaxed);
         if (inserted)
         {
             previous.Position = pReference->position;
             previous.Rotation = pReference->rotation;
             if (!passive)
             {
-                std::copy(std::begin(body.State.transform),
-                    std::end(body.State.transform),
+                std::copy(std::begin(body.State.transform), std::end(body.State.transform),
                     previous.LastSentBodyTransform.begin());
                 previous.LastSentBodyVelocity = {body.State.linearVelocity[0],
                     body.State.linearVelocity[1], body.State.linearVelocity[2]};
@@ -2551,27 +3263,28 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
             glm::dot(positionDelta, positionDelta) >= 0.01f ||
             glm::dot(rotationDelta, rotationDelta) >= 0.000001f;
         const bool moved = bodyMoved || referenceMoved;
+        if (moved)
+            previous.LastActive = now;
+        if (passive && referenceMoved && !previous.Promote)
+        {
+            previous.Promote = true;
+            m_physicsPromotions.push_back(pReference->formID);
+        }
         previous.Position = pReference->position;
         previous.Rotation = pReference->rotation;
-        if (keyframed && moved && !previous.StreamedDynamic)
-        {
-            // Animating on its own: track it, send nothing until it has rested for 5 s.
-            std::copy(std::begin(body.State.transform), std::end(body.State.transform),
-                previous.LastSentBodyTransform.begin());
-            previous.LastSentBodyVelocity = {body.State.linearVelocity[0], body.State.linearVelocity[1],
-                body.State.linearVelocity[2]};
-            previous.LastSent = now;
-            return;
-        }
         if (moved)
             previous.HasMoved = true;
         // Periodic keyframes recover from a dropped delta or a follower that
         // enters an already-active cell. Resting bodies refresh slowly so a
         // follower that loaded later still converges; moving ones every 500 ms.
-        if (!moved && now - previous.LastSent < (previous.HasMoved ? 500ms : 5000ms))
+        if (!assemblyStream && !inserted && !awake && !moved && now - previous.LastSent < (previous.HasMoved ? 500ms : 5000ms))
             return;
 
-        PhysicsReferenceUpdate update{};
+        auto& update = previous.Update;
+        update.ChildBodies.clear();
+        update.MotionType = 0;
+        update.LinearVelocity = {};
+        update.BodyTransform = {};
         if (shared)
             update.Id = sharedDrops.PhysicsId(pReference->formID);
         else if (!m_world.GetModSystem().GetServerModId(pReference->formID, update.Id))
@@ -2581,7 +3294,7 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
         if (!passive)
         {
             update.MotionType = 3;
-            if (!keyframed)
+            if (awake || (!keyframed && moved))
                 previous.StreamedDynamic = true;
             update.LinearVelocity = {body.State.linearVelocity[0],
                 body.State.linearVelocity[1], body.State.linearVelocity[2]};
@@ -2590,48 +3303,41 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
             if (shared)
                 update.Position = {body.State.transform[12] * kHavokToGameUnits,
                     body.State.transform[13] * kHavokToGameUnits, body.State.transform[14] * kHavokToGameUnits};
-            std::vector<ChildBody> children;
-            CollectChildBodies(pReference, children);
-            // Each child node local transform: on the owner its dynamic body turns the node (the
-            // wheel spins); on a follower the bodies are keyframed and follow their nodes.
-            // Physics writes a dynamic child's WORLD transform and leaves its local at the authored
-            // value (measured: the host wheel local rotation stayed identity while its world turned),
-            // so send the effective local: parent world^-1 * child world.
-            for (const auto& childBody : children)
+            // Only registered tether assemblies pay O(B) child capture cost. Membership
+            // was built once at tether setup, and fixed slots survive motion transitions.
+            if (assemblyStream)
             {
-                const NiAVObject* pParent = childBody.Node->parent;
-                if (!pParent)
-                    continue;
-                const auto& pw = pParent->world;
-                const auto& cw = childBody.Node->world;
-                NiMatrix3 localRotate{};
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                    {
-                        float sum = 0.f;
-                        for (int k = 0; k < 3; ++k)
-                            sum += pw.rotate.entry[k][r] * cw.rotate.entry[k][c];
-                        localRotate.entry[r][c] = sum;
-                    }
-                const float d[3]{cw.translate.x - pw.translate.x, cw.translate.y - pw.translate.y, cw.translate.z - pw.translate.z};
-                const float inverseScale = pw.scale != 0.f ? 1.f / pw.scale : 1.f;
-                std::array<float, 7> entry{};
-                for (int r = 0; r < 3; ++r)
-                    entry[r] = (pw.rotate.entry[0][r] * d[0] + pw.rotate.entry[1][r] * d[1] + pw.rotate.entry[2][r] * d[2]) * inverseScale;
-                NiMatrixToQuaternion(localRotate, entry.data() + 3);
-                update.ChildBodies.push_back(entry);
+                std::lock_guard assemblyLock(s_assembliesLock);
+                const auto assemblyIt = s_assemblies.find(pReference->formID);
+                if (assemblyIt == s_assemblies.end())
+                    return;
+                const auto& assembly = assemblyIt->second;
+                if (!assembly.Complete || assembly.Root.get() != pReference->GetNiNode())
+                    return;
+                for (size_t i = 0; i < assembly.Count; ++i)
+                {
+                    ActorPoseDiagnosticViews::RigidBody child{};
+                    if (!ReadPhysicsMemory(AssemblyBody(assembly.Nodes[i].get()), child) ||
+                        child.world != body.State.world)
+                        return; // no partial/reindexed assembly packets
+                    std::array<float, 7> record{};
+                    for (size_t k = 0; k < 3; ++k)
+                        record[k] = child.transform[12 + k] - body.State.transform[12 + k];
+                    MatrixToQuaternion(child.transform, record.data() + 3);
+                    update.ChildBodies.push_back(record);
+                }
             }
         }
-        if (!passive && IsRenderDiagnosticsArmed())
+        if (!passive && captureDiagnostics)
         {
             s_hostRenderProbes[pReference->formID].LastSeenMs = GetTickCount64();
             auto& probe = s_hostSampleProbes[pReference->formID];
             const glm::vec3 position{update.Position.x, update.Position.y, update.Position.z};
             const float bodySpeed = glm::length(glm::vec3{update.LinearVelocity.x, update.LinearVelocity.y,
                 update.LinearVelocity.z}) * kHavokToGameUnits;
-            if (probe.Has && request.Tick > probe.Tick && request.Tick - probe.Tick < 200)
+            if (probe.Has && snapshot.Tick > probe.Tick && snapshot.Tick - probe.Tick < 200)
             {
-                const float dtMs = static_cast<float>(request.Tick - probe.Tick);
+                const float dtMs = static_cast<float>(snapshot.Tick - probe.Tick);
                 const float implied = glm::length(position - probe.Position) / dtMs * 1000.f;
                 const float error = std::abs(implied - bodySpeed);
                 probe.ErrorSum += error;
@@ -2646,26 +3352,22 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
             probe.Position = position;
             probe.BodyPosition = {update.BodyTransform[12] * kHavokToGameUnits, update.BodyTransform[13] * kHavokToGameUnits,
                 update.BodyTransform[14] * kHavokToGameUnits};
-            probe.Tick = request.Tick;
+            probe.Tick = snapshot.Tick;
             probe.Has = true;
-            if (now >= probe.NextLog && probe.Samples)
-            {
-                if (probe.BodySpeedSum / probe.Samples > 5.f)
-                    spdlog::info("Host sample {:X}: {} samples, body speed {:.0f} u/s, implied-speed error mean {:.1f} max {:.1f} u/s, "
-                        "body-position error mean {:.1f} u/s, tick gap off 50 ms by {:.1f} ms ({} thread)", pReference->formID, probe.Samples,
-                        probe.BodySpeedSum / probe.Samples, probe.ErrorSum / probe.Samples, probe.ErrorMax,
-                        probe.BodyErrorSum / probe.Samples,
-                        probe.GapErrorSum / probe.Samples, aSendNow ? "update" : "main");
-                probe = HostSampleProbe{probe.Position, probe.Tick, true};
-                probe.BodyPosition = {update.BodyTransform[12] * kHavokToGameUnits,
-                    update.BodyTransform[13] * kHavokToGameUnits, update.BodyTransform[14] * kHavokToGameUnits};
-                probe.NextLog = now + std::chrono::seconds(5);
-            }
+
         }
-        if (shared)
-            sharedDrops.SendPhysics(pReference->formID, update, request.Tick);
-        else
-            request.Updates.push_back(update);
+        auto& captured = snapshot.Entries[snapshot.Count++];
+        captured.FormId = pReference->formID;
+        captured.Generation = previous.Generation;
+        captured.Shared = shared;
+        captured.Id = update.Id;
+        captured.Position = update.Position;
+        captured.Rotation = update.Rotation;
+        captured.MotionType = update.MotionType;
+        captured.LinearVelocity = update.LinearVelocity;
+        captured.BodyTransform = update.BodyTransform;
+        captured.ChildCount = update.ChildBodies.size();
+        std::copy(update.ChildBodies.begin(), update.ChildBodies.end(), captured.Children.begin());
         s_physicsHostUpdatesQueued.fetch_add(1, std::memory_order_relaxed);
         if (!passive && bodyMoved && !referenceMoved)
             s_physicsHostBodyOnlyUpdates.fetch_add(1,
@@ -2682,126 +3384,80 @@ void ObjectService::CaptureHostPhysics(const bool aSendNow) noexcept
         }
     };
 
-    // Known drop identities need no cell scan and must send their first falling
-    // sample immediately, even when the regular discovery sweep is not due.
-    for (const auto formId : m_world.GetSharedDropService().OwnedReferences())
-        processReference(Cast<TESObjectREFR>(TESForm::GetById(formId)));
-    if (!m_world.GetPartyService().IsLeader())
+    const auto knownRefreshStarted = std::chrono::steady_clock::now();
+    if (aUpdateThread)
     {
-        std::erase_if(m_referencePoses, [&](const auto& entry) { return !m_world.GetSharedDropService().IsOwner(entry.first); });
-        for (auto it = m_physicsStreamCandidates.begin(); it != m_physicsStreamCandidates.end();)
-            if (!m_world.GetSharedDropService().IsOwner(*it)) it = m_physicsStreamCandidates.erase(it);
-            else ++it;
-        return;
-    }
-
-    auto scanCell = [&](TESObjectCELL* pCell)
-    {
-        if (!pCell || !pCell->refData.refArray ||
-            pCell->refData.capacity > 50000)
-            return;
-        const auto& references = pCell->refData;
-        for (uint32_t i = 0; i < references.capacity; ++i)
+        PhysicsScan::VisitRepair(m_physicsUpdateRefs, m_physicsPassiveCursor, 16, [&](uint32_t id)
         {
             ++referencesVisited;
-            processReference(references.refArray[i].Get());
+            processReference(Cast<TESObjectREFR>(TESForm::GetById(id)));
+        });
+    }
+    else
+    {
+        for (size_t i = 0; i < m_physicsBodies.Ids.size();)
+        {
+            const auto id = m_physicsBodies.Ids[i];
+            ++referencesVisited;
+            processReference(Cast<TESObjectREFR>(TESForm::GetById(id)));
+            const auto pose = m_referencePoses.find(id);
+            if (pose == m_referencePoses.end() || now - pose->second.LastActive >= 500ms)
+            {
+                m_physicsBodies.Erase(id);
+                if (pose != m_referencePoses.end())
+                    m_physicsUpdateRefs.Insert(id);
+            }
+            else
+                ++i;
         }
-    };
-
-    // Refresh known stream objects every snapshot. Resolve by form ID rather
-    // than retaining cell/reference pointers across unloads.
-    const auto knownRefreshStarted = std::chrono::steady_clock::now();
-    for (const auto formId : m_physicsStreamCandidates)
-        processReference(Cast<TESObjectREFR>(TESForm::GetById(formId)));
+    }
     s_hostKnownRefreshTiming.Record(HostScanDurationUs(knownRefreshStarted));
-
-    // Discover new bodies without a 12k-reference full-grid walk on every
-    // frame. The current cell refreshes twice per second; one additional
-    // attached exterior cell is swept per snapshot.
-    if (now >= m_nextCurrentCellDiscovery)
+    const auto scanDurationUs = HostScanDurationUs(started);
+    s_physicsLastLaneReferencesVisited.store(referencesVisited, std::memory_order_relaxed);
+    if (aUpdateThread)
+        m_physicsRepairReportUs += scanDurationUs;
+    if (reportLane)
     {
-        const auto currentDiscoveryStarted = std::chrono::steady_clock::now();
-        scanCell(pPlayer->parentCell);
-        m_nextCurrentCellDiscovery = now + 500ms;
-        s_hostCurrentDiscoveryTiming.Record(
-            HostScanDurationUs(currentDiscoveryStarted));
+        s_physicsLastHostScanDurationUs.store(scanDurationUs,
+            std::memory_order_relaxed);
+        s_physicsHostScanTotalUs.fetch_add(scanDurationUs,
+            std::memory_order_relaxed);
+        auto previousMax = s_physicsHostScanMaxUs.load(std::memory_order_relaxed);
+        while (scanDurationUs > previousMax &&
+            !s_physicsHostScanMaxUs.compare_exchange_weak(previousMax,
+                scanDurationUs, std::memory_order_relaxed)) {}
+        s_physicsLastHostReferencesVisited.store(referencesVisited,
+            std::memory_order_relaxed);
+        s_physicsLastHostCandidateCount.store(static_cast<uint32_t>((std::min)(
+            size_t{UINT32_MAX}, m_physicsBodies.Ids.size() + m_physicsUpdateRefs.Ids.size())),
+            std::memory_order_relaxed);
+        s_physicsLastHostUpdatesQueued.store(static_cast<uint32_t>(snapshot.Count), std::memory_order_relaxed);
     }
-    else
-        s_hostCurrentDiscoveryTiming.Record(0);
-    auto* pTes = TES::Get();
-    auto* pGrid = pTes ? pTes->cells : nullptr;
-    if (pPlayer->parentCell->worldspace && pGrid && pGrid->arr &&
-        pGrid->dimension > 0 && pGrid->dimension <= 15)
+    if (snapshot.Count)
+        ++m_physicsSnapshotCount;
+    // Report the main-frame lane when enabled; the legacy switch reports the update lane.
+    if (reportLane)
     {
-        const uint32_t count = pGrid->dimension * pGrid->dimension;
-        auto* pCell = pGrid->arr[m_gridDiscoveryCursor++ % count];
-        if (pCell && pCell != pPlayer->parentCell &&
-            pCell->IsAttached() &&
-            pCell->worldspace == pPlayer->parentCell->worldspace)
+        m_physicsScanReportTotalUs += scanDurationUs;
+        ++m_physicsScanReportCount;
+        m_physicsScanReportMaxUs = (std::max)(m_physicsScanReportMaxUs, scanDurationUs);
+        if (m_nextPhysicsScanReport.time_since_epoch().count() == 0)
+            m_nextPhysicsScanReport = now + 5s;
+        if (now >= m_nextPhysicsScanReport)
         {
-            const auto gridDiscoveryStarted = std::chrono::steady_clock::now();
-            scanCell(pCell);
-            s_hostGridDiscoveryTiming.Record(
-                HostScanDurationUs(gridDiscoveryStarted));
+            const auto bodies = m_physicsBodies.Ids.size();
+            physicsLock.unlock();
+            spdlog::info("Physics scan: {} bodies {} sampled {:.2f} ms avg {:.2f} ms max (5 s)",
+                bodies, sampled,
+                static_cast<double>(m_physicsScanReportTotalUs) / m_physicsScanReportCount / 1000.,
+                m_physicsScanReportMaxUs / 1000.);
+            spdlog::info("Physics maintenance: {:.2f} ms total, repair capture {:.2f} ms total (5 s); {} snapshot evictions; {} movement queue overflows",
+                m_physicsMaintenanceReportUs / 1000., m_physicsRepairReportUs / 1000., m_physicsSnapshotEvictions,
+                s_movementOverflows.load(std::memory_order_relaxed));
+            m_physicsMaintenanceReportUs = m_physicsRepairReportUs = 0;
+            m_physicsScanReportTotalUs = m_physicsScanReportCount = m_physicsScanReportMaxUs = 0;
+            m_nextPhysicsScanReport = now + 5s;
         }
-        else
-            s_hostGridDiscoveryTiming.Record(0);
-    }
-    else
-        s_hostGridDiscoveryTiming.Record(0);
-    if (now >= m_nextPhysicsPosePrune)
-    {
-        const auto pruneStarted = std::chrono::steady_clock::now();
-        for (auto it = m_physicsStreamCandidates.begin();
-            it != m_physicsStreamCandidates.end();)
-        {
-            auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(*it));
-            if (!pReference || !pReference->loadedState)
-                it = m_physicsStreamCandidates.erase(it);
-            else
-                ++it;
-        }
-        for (auto it = m_referencePoses.begin(); it != m_referencePoses.end();)
-        {
-            auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(it->first));
-            if (!pReference || !pReference->loadedState)
-                it = m_referencePoses.erase(it);
-            else
-                ++it;
-        }
-        m_nextPhysicsPosePrune = now + 5s;
-        s_hostPruneTiming.Record(HostScanDurationUs(pruneStarted));
-    }
-    else
-        s_hostPruneTiming.Record(0);
-    const auto scanDurationUs = HostScanDurationUs(now);
-    s_physicsLastHostScanDurationUs.store(scanDurationUs,
-        std::memory_order_relaxed);
-    s_physicsHostScanTotalUs.fetch_add(scanDurationUs,
-        std::memory_order_relaxed);
-    auto previousMax = s_physicsHostScanMaxUs.load(std::memory_order_relaxed);
-    while (scanDurationUs > previousMax &&
-        !s_physicsHostScanMaxUs.compare_exchange_weak(previousMax,
-            scanDurationUs, std::memory_order_relaxed)) {}
-    s_physicsLastHostReferencesVisited.store(referencesVisited,
-        std::memory_order_relaxed);
-    s_physicsLastHostCandidateCount.store(static_cast<uint32_t>((std::min)(
-        size_t{UINT32_MAX}, m_physicsStreamCandidates.size())),
-        std::memory_order_relaxed);
-    s_physicsLastHostUpdatesQueued.store(static_cast<uint32_t>(
-        (std::min)(size_t{UINT32_MAX}, request.Updates.size())),
-        std::memory_order_relaxed);
-    if (!request.Updates.empty())
-    {
-        if (!aSendNow)
-        {
-            // Two snapshots can wait at most (the update job runs every frame).
-            if (m_pendingPhysicsRequests.size() < 4)
-                m_pendingPhysicsRequests.push_back(std::move(request));
-            return;
-        }
-        s_physicsHostPacketsSent.fetch_add(1, std::memory_order_relaxed);
-        m_transport.Send(request);
     }
 }
 
@@ -2841,7 +3497,9 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             s_sharedDropPoseGenerations[formId] = s_sharedDropGeneration;
         }
 
-        if (update.MotionType == 3 && (shared || !IsPassivePhysicsReference(pReference)))
+        // Items promoted from the passive lane when thrown carry the same authoritative
+        // body stream as carts. Keep accepting that stream after they come to rest.
+        if (update.MotionType == 3)
         {
             if (!std::isfinite(update.LinearVelocity.x) ||
                 !std::isfinite(update.LinearVelocity.y) ||
@@ -2850,6 +3508,14 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
             if (!std::all_of(update.BodyTransform.begin(),
                     update.BodyTransform.end(), [](float value)
                     { return std::isfinite(value); }))
+                continue;
+            if (update.ChildBodies.size() > PhysicsReferenceUpdate::kMaxChildBodies ||
+                !std::all_of(update.ChildBodies.begin(), update.ChildBodies.end(), [](const auto& child)
+                {
+                    const float norm = child[3] * child[3] + child[4] * child[4] + child[5] * child[5] + child[6] * child[6];
+                    return std::all_of(child.begin(), child.end(), [](float v) { return std::isfinite(v); }) &&
+                        norm > 0.5f && norm < 1.5f;
+                }))
                 continue;
             auto& pose = m_remoteReferencePoses[formId];
             if (pose.AuthorityEpoch == acMessage.AuthorityEpoch && acMessage.Tick <= pose.Tick)
@@ -2914,15 +3580,21 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
         if (update.MotionType != 0 || !IsPassivePhysicsReference(pReference))
             continue;
 
-        pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
-        pReference->position.x = update.Position.x;
-        pReference->position.y = update.Position.y;
-        pReference->position.z = update.Position.z;
-        pReference->SetRotation(update.Rotation.x, update.Rotation.y, update.Rotation.z);
-        pReference->Update3DPosition(true);
+        auto& pose = m_remoteReferencePoses[formId];
+        if (pose.AuthorityEpoch == acMessage.AuthorityEpoch && acMessage.Tick <= pose.Tick)
+            continue;
+        pose.Position = update.Position;
+        pose.Rotation = update.Rotation;
+        pose.Tick = acMessage.Tick;
+        pose.AuthorityEpoch = acMessage.AuthorityEpoch;
+        pose.LastReceived = std::chrono::steady_clock::now();
+        pose.BodyDriven = false;
         continue;
     }
 }
+
+void DrainActorSceneUpdates() noexcept;
+void PublishTetheredHorseZ(uint32_t aFormId, float aZ) noexcept;
 
 void ObjectService::OnMainFrame() noexcept
 {
@@ -2930,23 +3602,298 @@ void ObjectService::OnMainFrame() noexcept
     auto* pService = s_objectService.load(std::memory_order_acquire);
     if (!pService)
         return;
+    DrainRetiredBodies();
+    DrainActorSceneUpdates();
+    {
+        std::lock_guard lock(s_retiredAssemblyNodesLock);
+        s_retiredAssemblyNodes.swap(s_assemblyNodesDraining);
+    }
+    for (auto* node : s_assemblyNodesDraining)
+        node->DecRef();
+    s_assemblyNodesDraining.clear();
     pService->m_world.GetSharedDropService().OnMainFrame();
     if (IsRenderDiagnosticsArmed())
     {
         std::lock_guard lock(pService->m_remotePhysicsLock);
         ProbeHostRender();
     }
-    // OnUpdate selects the leader's capture mode; followers always capture their owned
-    // drops here. SharedDropService queues those sends for its normal update-thread drain.
-    if (pService->m_captureOnMainFrame.load(std::memory_order_relaxed))
+    const bool active = pService->m_transport.IsConnected() && pService->m_world.GetPartyService().IsInParty();
+    s_assemblyFollower.store(active && !pService->m_world.GetPartyService().IsLeader(), std::memory_order_release);
     {
-        pService->CaptureHostPhysics(false);
+        // Render all owned (main thread): set or clear kAlwaysDraw|kForceUpdate on owned actor roots and hitched
+        // carts. Tracks what it marked so switching off (or leaving the session) restores the flags exactly.
+        static std::unordered_map<NiAVObject*, uint32_t> s_marked; // root -> bits we added
+        static uint64_t s_renderAllRuns{};
+        const bool want = active && s_renderAll.load(std::memory_order_relaxed);
+        // Latch "in the camera view this frame" on every owned NPC: Actor boolBits (flags1, +0xE8) kWasInFrustrum
+        // (1 << 21) is the per-frame cull RESULT the engine's off-screen shortcuts read (skeleton world update used
+        // by E37320 placement, controller -> reference writeback). Setting cull inputs (NiAVObject kNotVisible /
+        // kAlwaysDraw / kForceUpdate, kFarAway) did not move the float rate (Muse diag-cull, run 20260928-082058).
+        // Plain bit write on the main thread; the cull pass re-evaluates it for drawing every frame.
+        size_t latched = 0;
+        if (want)
+        {
+            auto owned = pService->m_world.view<LocalComponent, FormIdComponent>();
+            for (auto entity : owned)
+            {
+                auto* actor = Cast<Actor>(TESForm::GetById(owned.get<FormIdComponent>(entity).Id));
+                if (actor && actor != PlayerCharacter::Get() && !actor->IsDeleted() && !actor->IsDisabled() && actor->GetNiNode())
+                {
+                    actor->flags1 |= (1u << 21);
+                    ++latched;
+                }
+            }
+        }
+        if (want && (++s_renderAllRuns == 1 || s_renderAllRuns % 3600 == 0))
+            spdlog::info("Render all owned: {} NPCs latched in view", latched);
     }
-    if (!pService->m_applyOnMainFrame.load(std::memory_order_relaxed) ||
-        !s_mainFramePlaybackEnabled.load(std::memory_order_relaxed))
+    // Owner side: hitched horses follow their own character controller vertically. Measured (run 20260928-011041):
+    // off camera the controller keeps stepping down the slope (12474 -> 12330) while the actor reference stays at
+    // 12479.6 and xy still advances; the engine skips the controller->reference z writeback, then catches up in one
+    // ~150 u step that yanks the tether and flips the cart. Normal reference z = controller z - 6.4 (both horses).
+    // Write only the reference/3D (SetPosition without Havok sync); the controller already is where it should be.
+    if (active && pService->m_world.GetPartyService().IsLeader() && ObjectService::IsHorseWriteback())
+    {
+        static std::unordered_map<uint32_t, float> s_refMinusController;
+        struct FrozenZ { float Z{}; uint64_t SinceMs{}; float ControllerZ{}; };
+        static std::unordered_map<uint32_t, FrozenZ> s_frozen;
+        static uint64_t s_writebacks{};
+        std::vector<uint32_t> horses;
+        {
+            std::lock_guard lock(s_assembliesLock);
+            for (const auto& [cartId, assembly] : s_assemblies)
+                horses.push_back(assembly.HorseId);
+        }
+        for (const auto horseId : horses)
+        {
+            auto* horse = Cast<Actor>(TESForm::GetById(horseId));
+            if (!horse || horse->GetExtension()->IsRemote() || !horse->currentProcess || !horse->currentProcess->middleProcess)
+                continue;
+            auto* controller = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(horse->currentProcess->middleProcess) + 0x250);
+            if (!controller)
+                continue;
+            alignas(16) float pos[4]{};
+            using GetPositionFn = void(const void*, float*, bool);
+            (*reinterpret_cast<GetPositionFn***>(controller))[2](controller, pos, false);
+            const float controllerZ = pos[2] * kHavokToGameUnits;
+            if (!std::isfinite(controllerZ))
+                continue;
+            auto& offset = s_refMinusController.try_emplace(horseId, -6.4f).first->second;
+            const float wanted = controllerZ + offset;
+            PublishTetheredHorseZ(horseId, wanted);
+            const float error = horse->position.z - wanted;
+            if (std::abs(error) < 3.f)
+            {
+                offset += 0.1f * ((horse->position.z - controllerZ) - offset); // learn while in sync
+                continue;
+            }
+            // Only the float case: the reference sits ABOVE its controller and has not moved vertically for 150 ms
+            // (the skipped writeback). Correcting every small lag moved the horse node each frame, and the tether
+            // helper on its spine tugged the cart (run 20260928-012104: 3000 writebacks, cart 0 jumps 59/min).
+            auto& frozen = s_frozen[horseId];
+            const auto nowMs = GetTickCount64();
+            if (std::abs(horse->position.z - frozen.Z) > 0.05f)
+            {
+                frozen.Z = horse->position.z;
+                frozen.SinceMs = nowMs;
+                frozen.ControllerZ = controllerZ;
+            }
+            // Offset-independent trigger: frozen for 150 ms while the controller descended > 8 u since the freeze
+            // began (the learned offset can drift during a ride; run 20260928-073658 missed a 21 u hold).
+            const bool controllerLeft = frozen.ControllerZ - controllerZ > 8.f;
+            if ((error < 12.f && !controllerLeft) || error > 400.f || nowMs - frozen.SinceMs < 150)
+                continue;
+            NiPoint3 fixed = horse->position;
+            fixed.z = wanted;
+            horse->SetPosition(fixed, false);
+            if (++s_writebacks <= 10 || s_writebacks % 200 == 0)
+                spdlog::info("Horse {:X}: reference z {:.1f} lagged its controller by {:.1f} u; written back ({} total)",
+                    horseId, horse->position.z, error, s_writebacks);
+        }
+    }
+
+    // (A horse ground-snap was tried here and removed: setting the horse down jerked the tether and threw the
+    // cart around, 66 cart z jumps in 48 s, run 20260928-004116.)
+    // Owner side: keep every hitched cart's scene graph current while it is off camera. E37320 places a cart
+    // horse at a cart node's world translate (NiAVObject +0xA0) every frame; the engine refreshes those node
+    // transforms only in the visible update, so with the host looking away the horse kept a frozen height and
+    // dropped ~185 u when the cart came back into view (owner repro; visibility flags on the horse alone did
+    // not help, runs 232814..234803). Clear the culled bit on the cart tree and update it every frame.
+    if (active && pService->m_world.GetPartyService().IsLeader() && s_cartNodeRefresh.load(std::memory_order_relaxed))
+    {
+        std::vector<std::shared_ptr<NiAVObject>> roots;
+        {
+            std::lock_guard lock(s_assembliesLock);
+            for (const auto& [cartId, assembly] : s_assemblies)
+                if (assembly.Root)
+                    roots.push_back(assembly.Root);
+        }
+        struct NiUpdateData { float Time{}; uint32_t Flags{}; } data{};
+        using UpdateFn = void(NiAVObject*, NiUpdateData*);
+        POINTER_SKYRIMSE(UpdateFn, update, 70251);
+        for (const auto& root : roots)
+        {
+            uint32_t visited = 0;
+            auto walk = [&](auto&& self, NiAVObject* apNode, uint32_t aDepth) -> void
+            {
+                if (!apNode || aDepth > 32 || ++visited > 512)
+                    return;
+                *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(apNode) + 0xF4) &= ~0x100000u;
+                if (auto* node = apNode->AsNode())
+                    for (uint16_t i = 0; i < node->children.length; ++i)
+                        self(self, node->children.data[i], aDepth + 1);
+            };
+            walk(walk, root.get(), 0);
+            update.Get()(root.get(), &data);
+        }
+    }
+    // One presentation clock for the whole assembly: cart bodies, the horse (root via VehiclePresentationTick
+    // and bones via PoseCopyAuthority) and the riders all play the owner's timeline presentationDelay behind now.
+    // A separate "now" clock for the cart put it ~300 ms (about 48 u) ahead of the horse's bones, and the tether
+    // then stretched the horse between the two.
+    const uint64_t frameTick = SmoothClock::NowTick() ? SmoothClock::NowTick() : pService->m_transport.GetClock().GetCurrentTick();
+    const uint64_t presentationDelay = pService->m_world.GetCharacterService().GetPresentationDelayMs();
+    const uint64_t assemblyTick = frameTick > presentationDelay ? frameTick - presentationDelay : 0;
+    s_assemblyTick.store(assemblyTick, std::memory_order_release);
+    {
+        std::lock_guard assemblyLock(s_assembliesLock);
+        const auto epoch = active ? pService->m_world.GetPartyService().GetStartEpoch() : 0;
+        const bool epochChanged = s_assemblyEpoch != epoch;
+        s_assemblyEpoch = epoch;
+        if (epochChanged)
+            s_vehicleActorPoses.clear();
+        s_newAssemblies.swap(s_assembliesRefreshing);
+        std::erase_if(s_assemblies, [&](auto& entry)
+        {
+            auto* cart = Cast<TESObjectREFR>(TESForm::GetById(entry.first));
+            auto* horse = Cast<Actor>(TESForm::GetById(entry.second.HorseId));
+            if (!cart || !horse || cart->GetNiNode() != entry.second.Root.get() ||
+                horse->GetNiNode() != entry.second.HorseRoot.get() ||
+                entry.second.HelperSlot >= entry.second.Count ||
+                entry.second.Nodes[entry.second.HelperSlot]->collisionObject != entry.second.Tether)
+            {
+                s_horseVehicles.erase(entry.second.HorseId);
+                SetTetheredHorse(entry.second.HorseId, false);
+                s_tetherVehicles.erase(entry.second.Tether);
+                return true;
+            }
+            if (epochChanged || !active || pService->m_world.GetPartyService().IsLeader())
+            {
+                entry.second.ActiveUntil = 0;
+                for (auto& body : entry.second.Lifetimes)
+                    body.reset();
+            }
+            return false;
+        });
+        s_vehicleActorsApplying.clear();
+        std::erase_if(s_vehicleActorPoses, [&](auto& entry)
+        {
+            auto& pose = entry.second;
+            auto* actor = Cast<Actor>(TESForm::GetById(entry.first));
+            const auto vehicle = s_assemblies.find(pose.VehicleId);
+            uint32_t handle{};
+            if (actor)
+                ReadNativeMemory(reinterpret_cast<uint8_t*>(actor) + 0x1F0, handle);
+            auto* attached = handle ? TESObjectREFR::GetByHandle(handle) : nullptr;
+            const bool belongs = vehicle != s_assemblies.end() &&
+                (vehicle->second.HorseId == entry.first || (attached && attached->formID == pose.VehicleId));
+            if (!s_assemblyFollower.load(std::memory_order_relaxed) || !actor || actor->actorState.IsDeadState() ||
+                actor->GetNiNode() != pose.Root.get() || !belongs || pose.VehicleRoot != vehicle->second.Root ||
+                GetTickCount64() - pose.QueuedAt > 500)
+                return true;
+            if (GetTickCount64() < vehicle->second.ActiveUntil)
+                s_vehicleActorsApplying.push_back(pose);
+            return false;
+        });
+    }
+    for (auto id : s_assembliesRefreshing)
+        pService->QueuePhysicsRefresh(id);
+    s_assembliesRefreshing.clear();
+    // No registry/native-world lock across actor scene updates. These run before
+    // native Main::Update and its tether/controller jobs, on the same cart clock.
+    for (const auto& pose : s_vehicleActorsApplying)
+    {
+        auto* actor = Cast<Actor>(TESForm::GetById(pose.FormId));
+        if (!actor || actor->GetNiNode() != pose.Root.get())
+            continue;
+        const float seconds = assemblyTick > pose.Tick ?
+            static_cast<float>((std::min)(uint64_t{150}, assemblyTick - pose.Tick)) / 1000.f : 0.f;
+        actor->ForcePosition(pose.Position + pose.Velocity * seconds);
+        const auto rotation = pose.Rotation + pose.Angular * seconds;
+        actor->SetRotation(rotation.x, rotation.y, rotation.z);
+        std::lock_guard lock(s_assembliesLock);
+        if (auto it = s_vehicleActorPoses.find(pose.FormId); it != s_vehicleActorPoses.end() && it->second.Root == pose.Root)
+            it->second.PlacedAt = GetTickCount64();
+    }
+    s_collectMovingReferences.store(active, std::memory_order_relaxed);
+    if (!active)
+    {
+        // Not following anything: nothing is replayed this pass, so every keyframed cart part is restored.
+        // Outside our locks, like the per-pass drain in ApplyRemotePhysics.
+        DrainPendingKeyframes();
+        ObjectService::ResetTetheredHorseState();
+        std::lock_guard remoteLock(pService->m_remotePhysicsLock);
+        pService->m_remoteReferencePoses.clear();
+        s_sharedDropPoseGenerations.clear();
+        std::lock_guard stepLock(s_stepTargetsLock);
+        s_stepTargets.clear();
+        s_stepTargetsBuilding.clear();
+        s_followProbes.clear();
         return;
-    if (!s_loggedMainFrameThread.exchange(true))
-        spdlog::info("Host-driven body playback runs on the main thread {}", GetCurrentThreadId());
+    }
+    pService->RefreshPhysicsDiagnostics();
+    const auto maintenanceStarted = std::chrono::steady_clock::now();
+    {
+        std::lock_guard hostLock(pService->m_hostPhysicsLock);
+        pService->RefreshPhysicsCandidates();
+    }
+    const auto maintenanceUs = HostScanDurationUs(maintenanceStarted);
+    pService->CaptureHostPhysics(false);
+    pService->CaptureHostPhysics(true); // bounded sleeping/repair lane, still on main
+    {
+        std::lock_guard hostLock(pService->m_hostPhysicsLock);
+        for (const auto id : pService->m_physicsPromotions)
+            pService->RefreshPhysicsReference(id);
+        pService->m_physicsPromotions.clear();
+    }
+    // Logger runs after releasing both native-world and target locks.
+    std::vector<FollowProbe> reports, summaries;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard stepLock(s_stepTargetsLock);
+        if (s_followProbesDirty || now >= s_nextFollowReport)
+        {
+            s_nextFollowReport = std::chrono::steady_clock::time_point::max();
+            for (auto& [body, probe] : s_followProbes)
+            {
+                if (probe.Steps && now >= probe.NextSteerLog && probe.Gap > 10.f)
+                {
+                    reports.push_back(probe);
+                    probe.NextSteerLog = now + 2s;
+                }
+                if (probe.NextLog.time_since_epoch().count() == 0)
+                    probe.NextLog = now + 5s;
+                if (now >= probe.NextLog)
+                {
+                    summaries.push_back(probe);
+                    probe.Steps = probe.Teleports = 0;
+                    probe.MaxErrorUnits = 0.f;
+                    probe.NextLog = now + 5s;
+                }
+                s_nextFollowReport = (std::min)(s_nextFollowReport, probe.NextLog);
+                if (probe.Steps && probe.Gap > 10.f)
+                    s_nextFollowReport = (std::min)(s_nextFollowReport, probe.NextSteerLog);
+            }
+        }
+        PruneFollowProbes(s_followProbes, s_stepTargets, s_followProbesDirty);
+    }
+    for (const auto& probe : reports)
+        spdlog::info("Cart steer {:X}: gap {:.1f} u vel {:.1f} host-age {} ms fighter unresolved; {} steps {} teleports",
+            probe.FormId, probe.Gap, probe.Speed, probe.HostAgeMs, probe.Steps, probe.Teleports);
+    for (const auto& probe : summaries)
+        spdlog::info("Follow body {:X}: {} steps, {} teleports, 0 keyframed placements, largest gap {:.1f} u",
+            probe.FormId, probe.Steps, probe.Teleports, probe.MaxErrorUnits);
+    pService->m_physicsMaintenanceReportUs += maintenanceUs;
     pService->ApplyRemotePhysics();
 }
 
@@ -2984,6 +3931,56 @@ bool ObjectService::AttachRider(Actor* apActor, const NiPoint3& acHostPosition, 
     return false;
 }
 
+bool ObjectService::VehiclePresentationTick(Actor* apActor, uint64_t& aTick) noexcept
+{
+    if (!apActor || !s_assemblyFollower.load(std::memory_order_acquire))
+        return false;
+    // Only the HORSE shares the assembly clock (the tether consumes its pose). Passengers are seated on the
+    // local cart by the native passenger controller and keep normal actor syncing (baseline).
+    std::lock_guard lock(s_assembliesLock);
+    const auto horse = s_horseVehicles.find(apActor->formID);
+    if (horse == s_horseVehicles.end())
+        return false;
+    const auto it = s_assemblies.find(horse->second);
+    if (it == s_assemblies.end() || GetTickCount64() >= it->second.ActiveUntil)
+        return false;
+    const auto tick = s_assemblyTick.load(std::memory_order_acquire);
+    if (tick)
+        aTick = tick;
+    return true;
+}
+
+void ObjectService::QueueVehiclePose(Actor* apActor, uint64_t aTick, const NiPoint3& aPosition,
+    const NiPoint3& aRotation, const NiPoint3& aVelocity, const NiPoint3& aAngular) noexcept
+{
+    uint32_t handle{};
+    ReadNativeMemory(reinterpret_cast<uint8_t*>(apActor) + 0x1F0, handle);
+    auto* vehicle = handle ? TESObjectREFR::GetByHandle(handle) : nullptr;
+    std::lock_guard lock(s_assembliesLock);
+    uint32_t id = vehicle ? vehicle->formID : 0;
+    if (auto horse = s_horseVehicles.find(apActor->formID); horse != s_horseVehicles.end())
+        id = horse->second;
+    const auto assembly = s_assemblies.find(id);
+    auto* root = apActor->GetNiNode();
+    if (!root || assembly == s_assemblies.end() || !s_assemblyFollower.load(std::memory_order_acquire))
+        return;
+    auto& pose = s_vehicleActorPoses[apActor->formID];
+    if (pose.Root.get() != root)
+    {
+        pose.Root = HoldAssemblyNode(root);
+        pose.PlacedAt = 0;
+    }
+    pose.FormId = apActor->formID;
+    pose.VehicleId = id;
+    pose.VehicleRoot = assembly->second.Root;
+    pose.Tick = aTick;
+    pose.QueuedAt = GetTickCount64();
+    pose.Position = aPosition;
+    pose.Rotation = aRotation;
+    pose.Velocity = aVelocity;
+    pose.Angular = aAngular;
+}
+
 void ObjectService::ArmRenderDiagnostics() noexcept
 {
     // Ride tests request a snapshot through coop-start-test before waiting up
@@ -3002,10 +3999,160 @@ bool ObjectService::IsRenderDiagnosticsArmed() noexcept
     return until && GetTickCount64() < until;
 }
 
+void PublishTetheredHorseZ(uint32_t aFormId, float aZ) noexcept
+{
+    for (size_t i = 0; i < s_tetheredHorses.size(); ++i)
+        if (s_tetheredHorses[i].load(std::memory_order_relaxed) == aFormId)
+        {
+            s_tetheredHorseZ[i].store(aZ, std::memory_order_release);
+            return;
+        }
+}
+
+void ObjectService::ResetTetheredHorseState() noexcept
+{
+    for (auto& z : s_tetheredHorseZ)
+        z.store(std::numeric_limits<float>::quiet_NaN(), std::memory_order_release);
+}
+
+float ObjectService::TetheredHorseExpectedZ(uint32_t aFormId) noexcept
+{
+    if (!aFormId)
+        return std::numeric_limits<float>::quiet_NaN();
+    for (size_t i = 0; i < s_tetheredHorses.size(); ++i)
+        if (s_tetheredHorses[i].load(std::memory_order_acquire) == aFormId)
+            return s_tetheredHorseZ[i].load(std::memory_order_acquire);
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+bool ObjectService::IsTetheredHorse(uint32_t aFormId) noexcept
+{
+    if (!aFormId)
+        return false;
+    for (const auto& slot : s_tetheredHorses)
+        if (slot.load(std::memory_order_acquire) == aFormId)
+            return true;
+    return false;
+}
+
+namespace
+{
+std::mutex s_sceneUpdateLock;
+std::atomic<uint32_t> s_sceneUpdateMode{0};
+std::atomic<bool> s_horseWriteback{false}; // superseded by AnimationSystem force_seen (cause, not symptom)
+std::vector<uint32_t> s_sceneUpdateQueue, s_sceneUpdateDraining;
+}
+
+void ObjectService::SetHorseWriteback(bool aEnabled) noexcept
+{
+    s_horseWriteback.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Horse writeback: {}", aEnabled);
+}
+
+void ObjectService::SetCartNodeRefresh(bool aEnabled) noexcept
+{
+    s_cartNodeRefresh.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Cart node refresh: {}", aEnabled);
+}
+
+bool ObjectService::IsCartNodeRefresh() noexcept
+{
+    return s_cartNodeRefresh.load(std::memory_order_relaxed);
+}
+
+void ObjectService::SetRenderAll(bool aEnabled) noexcept
+{
+    s_renderAll.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Render all owned: {}", aEnabled);
+}
+
+bool ObjectService::IsRenderAll() noexcept
+{
+    return s_renderAll.load(std::memory_order_relaxed);
+}
+
+bool ObjectService::IsHorseWriteback() noexcept
+{
+    return s_horseWriteback.load(std::memory_order_relaxed);
+}
+
+void ObjectService::SetSceneUpdateMode(uint32_t aMode) noexcept
+{
+    s_sceneUpdateMode.store(aMode, std::memory_order_relaxed);
+    spdlog::info("Scene update mode: {}", aMode);
+}
+
+uint32_t ObjectService::GetSceneUpdateMode() noexcept
+{
+    return s_sceneUpdateMode.load(std::memory_order_relaxed);
+}
+
+void ObjectService::QueueActorSceneUpdate(uint32_t aFormId) noexcept
+{
+    const auto mode = s_sceneUpdateMode.load(std::memory_order_relaxed);
+    if (mode != 1 && mode != 2)
+        return;
+    std::lock_guard lock(s_sceneUpdateLock);
+    if (s_sceneUpdateQueue.size() < 4096)
+        s_sceneUpdateQueue.push_back(aFormId);
+}
+
+// Main thread, no engine job running: refresh owned NPC scene trees so off-camera bones are current (E37320 places
+// an actor from its own skeleton node). Every NPC that is not seated, plus riders (cart drivers are seated and
+// mounted; the hitched horse follows them). Plain seated passengers are skipped: E20318 places them and a refresh
+// made them flash.
+void DrainActorSceneUpdates() noexcept
+{
+    {
+        std::lock_guard lock(s_sceneUpdateLock);
+        s_sceneUpdateDraining.swap(s_sceneUpdateQueue);
+    }
+    std::sort(s_sceneUpdateDraining.begin(), s_sceneUpdateDraining.end());
+    s_sceneUpdateDraining.erase(std::unique(s_sceneUpdateDraining.begin(), s_sceneUpdateDraining.end()),
+        s_sceneUpdateDraining.end());
+    struct NiUpdateData { float Time{}; uint32_t Flags{}; } data{};
+    using UpdateFn = void(NiAVObject*, NiUpdateData*);
+    POINTER_SKYRIMSE(UpdateFn, update, 70251);
+    for (const auto formId : s_sceneUpdateDraining)
+    {
+        auto* actor = Cast<Actor>(TESForm::GetById(formId));
+        auto* extension = actor ? actor->GetExtension() : nullptr;
+        if (!actor || !extension || extension->IsRemote() || actor->IsDeleted() || actor->IsDisabled())
+            continue;
+        auto* root = actor->GetNiNode();
+        if (!root)
+            continue;
+        const uint32_t sitSleepState = (actor->actorState.flags1 >> 14) & 0xF;
+        if (sitSleepState != 0 && s_sceneUpdateMode.load(std::memory_order_relaxed) == 1)
+        {
+            const auto mount = actor->GetNativeMountState();
+            if (!(mount.HorseExtra && mount.HorseHandle))
+                continue;
+        }
+        update.Get()(root, &data);
+    }
+    s_sceneUpdateDraining.clear();
+}
+
+void ObjectService::SetCartReplayEnabled(bool aEnabled) noexcept
+{
+    s_cartReplay.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Cart replay: {}", aEnabled ? "on (follower assemblies keyframed onto the owner pose)" :
+        "off (dynamic steer)");
+}
+
+bool ObjectService::IsCartReplayEnabled() noexcept
+{
+    return s_cartReplay.load(std::memory_order_relaxed);
+}
+
 void ObjectService::SetCartPhysicsEnabled(bool aEnabled) noexcept
 {
-    s_cartPhysicsEnabled.store(aEnabled, std::memory_order_relaxed);
-    spdlog::info("Host-driven bodies {}", aEnabled ? "simulated and steered to the host" : "keyframed to the host");
+    // Compatibility entry point: the retired false mode keyframed follower bodies.
+    // Keep the owner's dynamic-only policy and report rejected requests explicitly.
+    s_cartPhysicsEnabled.store(true, std::memory_order_relaxed);
+    spdlog::info("Cart physics: requested {} effective true; follower bodies remain dynamic and steered{}",
+        aEnabled, aEnabled ? "" : "; disable request ignored because keyframed playback is retired");
 }
 
 void ObjectService::SetVisualLagFrameEnabled(bool aEnabled) noexcept
@@ -3107,18 +4254,23 @@ void ObjectService::OnMainFrameEnd() noexcept
 
 void ObjectService::SetMainFrameCaptureEnabled(bool aEnabled) noexcept
 {
-    s_mainFrameCaptureEnabled.store(aEnabled, std::memory_order_relaxed);
-    spdlog::info("Host body snapshot on the {} thread", aEnabled ? "main" : "update");
+    // The retired worker lane is not a supported alternative to main-frame capture.
+    s_mainFrameCaptureEnabled.store(true, std::memory_order_relaxed);
+    spdlog::info("Main-frame capture: requested {} effective true{}",
+        aEnabled, aEnabled ? "" : "; disable request ignored because worker capture is retired");
 }
 
 void ObjectService::SetMainFramePlaybackEnabled(bool aEnabled) noexcept
 {
-    s_mainFramePlaybackEnabled.store(aEnabled, std::memory_order_relaxed);
-    spdlog::info("Host-driven body playback on the {} thread", aEnabled ? "main" : "update");
+    // Main publishes retained body targets; the solver owns the actual body writes.
+    s_mainFramePlaybackEnabled.store(true, std::memory_order_relaxed);
+    spdlog::info("Main-frame playback: requested {} effective true{}",
+        aEnabled, aEnabled ? "" : "; disable request ignored because worker playback is retired");
 }
 
 void ObjectService::ApplyRemotePhysics() noexcept
 {
+    DrainPendingKeyframes();
     std::lock_guard lock(m_remotePhysicsLock);
     s_stepTargetsBuilding.clear();
     struct PublishStepTargets
@@ -3126,6 +4278,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
         ~PublishStepTargets()
         {
             std::lock_guard stepLock(s_stepTargetsLock);
+            s_followProbesDirty |= s_stepTargets.size() != s_stepTargetsBuilding.size();
             s_stepTargets.swap(s_stepTargetsBuilding);
         }
     } publishStepTargets;
@@ -3137,7 +4290,9 @@ void ObjectService::ApplyRemotePhysics() noexcept
         // not acquire the shared-drop mutex on every playback frame.
         const auto generation = s_sharedDropPoseGenerations.find(it->first);
         const bool shared = generation != s_sharedDropPoseGenerations.end();
-        if (!pReference || Cast<Actor>(pReference) || !pReference->loadedState ||
+        if (!m_transport.IsConnected() || !m_world.GetPartyService().IsInParty() ||
+            !pReference || Cast<Actor>(pReference) || !pReference->loadedState ||
+            !pReference->parentCell || !pReference->parentCell->IsAttached() ||
             (shared && generation->second != m_world.GetSharedDropService().PhysicsGeneration(it->first)) ||
             (shared ? m_world.GetSharedDropService().IsOwner(it->first) : m_world.GetPartyService().IsLeader()) ||
             it->second.AuthorityEpoch != m_world.GetPartyService().GetStartEpoch())
@@ -3147,23 +4302,58 @@ void ObjectService::ApplyRemotePhysics() noexcept
         }
 
         auto& pose = it->second;
-        if (pose.BodyDriven && kHostDrivenMovingBodies && s_hostDrivenPlaybackEnabled.load(std::memory_order_relaxed) &&
-            s_bodyPlaybackFormId.load(std::memory_order_acquire) != it->first)
+        if (!pose.BodyDriven)
+        {
+            DynamicBody body{};
+            if (GetDynamicBody(pReference, body, true))
+            {
+                ScopedPhysicsWorld worldLock(body.State.world);
+                if (worldLock.Lock && GetDynamicBody(pReference, body, true))
+                {
+                    // 19517 -> 0x140EDE280 builds Rx(-x)*Ry(-y)*Rz(-z).
+                    // Rotate the reference-to-body offset as well as the body orientation.
+                    const auto referenceRotation = [](const NiPoint3& angle)
+                    {
+                        return glm::angleAxis(-angle.x, glm::vec3{1.f, 0.f, 0.f}) *
+                            glm::angleAxis(-angle.y, glm::vec3{0.f, 1.f, 0.f}) *
+                            glm::angleAxis(-angle.z, glm::vec3{0.f, 0.f, 1.f});
+                    };
+                    const auto turn = referenceRotation(pose.Rotation) * glm::conjugate(referenceRotation(pReference->rotation));
+                    float bodyQ[4];
+                    MatrixToQuaternion(body.State.transform, bodyQ);
+                    const auto rotation = glm::mat3_cast(turn * glm::quat{bodyQ[3], bodyQ[0], bodyQ[1], bodyQ[2]});
+                    const auto offset = glm::vec3{body.State.transform[12], body.State.transform[13], body.State.transform[14]} -
+                        glm::vec3{pReference->position.x, pReference->position.y, pReference->position.z} / kHavokToGameUnits;
+                    const auto position = glm::vec3{pose.Position.x, pose.Position.y, pose.Position.z} / kHavokToGameUnits + turn * offset;
+                    pose.BodyTransform = {};
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        pose.BodyTransform[12 + axis] = position[axis];
+                        for (int row = 0; row < 3; ++row)
+                            pose.BodyTransform[axis * 4 + row] = rotation[axis][row];
+                    }
+                    pose.BodyDriven = true;
+                    pose.SampleCount = 0;
+                }
+            }
+        }
+
+        if (pose.BodyDriven)
         {
             if (!pose.SampleCount)
             {
-                ++it;
-                continue;
+                auto& sample = pose.Samples[0];
+                sample.Tick = pose.Tick;
+                sample.BodyPosition = {pose.BodyTransform[12], pose.BodyTransform[13], pose.BodyTransform[14]};
+                float q[4];
+                MatrixToQuaternion(pose.BodyTransform.data(), q);
+                sample.BodyRotation = {q[0], q[1], q[2], q[3]};
+                pose.SampleCount = pose.SampleNext = 1;
             }
-            if (s_cartPhysicsEnabled.load(std::memory_order_relaxed))
             {
                 if (!pose.DynamicFollow)
                 {
                     pose.DynamicFollow = true;
-                    // The host's own motion type (box inertia for the intro carts).
-                    if (pose.HostDriven)
-                        pReference->SetMotionType(static_cast<TESObjectREFR::MotionType>(
-                            pose.HostMotionType >= 1 && pose.HostMotionType <= 3 ? pose.HostMotionType : 3), false);
                     pose.HostDriven = false;
                     spdlog::info("Host-driven body {:X}: simulated here, steered to the host's pose", it->first);
                 }
@@ -3171,66 +4361,170 @@ void ObjectService::ApplyRemotePhysics() noexcept
                 const uint32_t size = static_cast<uint32_t>(pose.Samples.size());
                 const auto sample = [&](uint32_t aIndex) -> const RemoteReferencePose::Sample&
                 { return pose.Samples[(pose.SampleNext + size - count + aIndex) % size]; };
-                const double renderTime = (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
+                bool cartAssembly = false;
+                {
+                    std::lock_guard assemblyLock(s_assembliesLock);
+                    const auto found = s_assemblies.find(it->first);
+                    cartAssembly = found != s_assemblies.end() && found->second.Complete &&
+                        found->second.Root.get() == pReference->GetNiNode();
+                }
+                const double renderTime = cartAssembly ? static_cast<double>(s_assemblyTick.load(std::memory_order_acquire)) :
+                    (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
                     static_cast<double>(m_transport.GetClock().GetCurrentTick())) -
                     static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs());
-                const RemoteReferencePose::Sample* pA = &sample(count - 1);
-                const RemoteReferencePose::Sample* pB = pA;
-                float t = 0.f;
-                if (renderTime <= static_cast<double>(sample(0).Tick))
-                    pA = pB = &sample(0);
-                else
-                {
-                    for (uint32_t i = 1; i < count; ++i)
-                    {
-                        const auto& a = sample(i - 1);
-                        const auto& b = sample(i);
-                        if (renderTime > static_cast<double>(b.Tick))
-                            continue;
-                        pA = &a;
-                        pB = &b;
-                        t = b.Tick > a.Tick ? static_cast<float>((renderTime - static_cast<double>(a.Tick)) /
-                            static_cast<double>(b.Tick - a.Tick)) : 1.f;
-                        break;
-                    }
-                }
-                // Past the newest sample, the host stopped sending (at rest): keep steering to that final
-                // pose, with no motion of its own, until it sits there, then place it exactly and stop.
-                // Left to settle on its own, the cart came to rest off the host's, and the driver and
-                // passengers climbed out of a different cart.
-                // A short gap (a hitch on the host) coasts on this PC's physics; only a long one is the
-                // host at rest. Treating every 250 ms gap as the final pose braked the moving cart and
-                // yanked it on at the next sample ("jumpy").
-                const double sinceNewest = renderTime - static_cast<double>(sample(count - 1).Tick);
-                if (sinceNewest > static_cast<double>(kHostDrivenHoldAfterMs) && sinceNewest <= 1500.0)
-                {
-                    ++it;
-                    continue;
-                }
-                const bool atFinalPose = sinceNewest > 1500.0;
-                if (atFinalPose)
+                const auto window = PhysicsScan::SelectPlaybackWindow(count, renderTime,
+                    [&](uint32_t index) { return sample(index).Tick; });
+                const RemoteReferencePose::Sample* pA = &sample(window.A);
+                const RemoteReferencePose::Sample* pB = &sample(window.B);
+                float t = window.Fraction;
+                float prediction = 0.f;
+                // No extrapolation past the newest owner sample: with the assembly on the delayed
+                // presentation clock the window is normally bracketed, and a late packet holds the
+                // newest target (like every other steered body) instead of predicting up to 150 ms ahead.
+                // Missing packets keep the newest target subscribed, with zero feed-forward.
+                const bool atFinalPose = window.Hold;
+                if (atFinalPose && !cartAssembly)
                 {
                     pA = pB = &sample(count - 1);
                     t = 0.f;
-                    if (pose.SettledAtFinalPose)
+                }
+                else
+                    pose.SettledAtFinalPose = false;
+                // Local scripts may park a copy. Restore simulation; follower copies
+                // must keep being steered even when the owner's last target is at rest.
+                DynamicBody body{};
+                if (GetDynamicBody(pReference, body, true) && body.HavokBody && body.State.world)
+                {
+                    ScopedPhysicsWorld worldLock(body.State.world);
+                    if (!worldLock.Lock || !GetDynamicBody(pReference, body, true))
                     {
                         ++it;
                         continue;
                     }
-                }
-                else
-                    pose.SettledAtFinalPose = false;
-                // Keyframed here too (this PC's intro scene takes the cart over on arrival): followed,
-                // placed at the host's pose in the step, since velocity does not move it.
-                DynamicBody body{};
-                if (GetDynamicBody(pReference, body, true) && body.HavokBody && body.State.world)
-                {
+                    const bool replay = cartAssembly && s_cartReplay.load(std::memory_order_relaxed);
+                    if (replay && IsDynamicMotion(body.State.motionType))
+                    {
+                        // Deferred (see s_pendingKeyframes); the exact drive also works on the dynamic body meanwhile.
+                        s_pendingKeyframes.push_back(HoldAssemblyNode(pReference->GetNiNode()));
+                        spdlog::info("Cart replay {:X}: root keyframe queued (motion {})", it->first, body.State.motionType);
+                    }
+                    else if (body.State.motionType == 4 && !replay)
+                    {
+                        if (cartAssembly)
+                            RestoreBodyMotion(pReference->GetNiNode());
+                        else
+                            pReference->SetMotionType(static_cast<TESObjectREFR::MotionType>(
+                                pose.HostMotionType >= 1 && pose.HostMotionType <= 3 ? pose.HostMotionType : 3), false);
+                        if (!GetDynamicBody(pReference, body) || !body.HavokBody || !body.State.world)
+                        {
+                            ++it;
+                            continue;
+                        }
+                    }
+                    std::unique_lock assemblyLock(s_assembliesLock);
+                    const auto assemblyIt = s_assemblies.find(it->first);
+                    CartAssembly* assembly = cartAssembly && assemblyIt != s_assemblies.end() &&
+                        assemblyIt->second.Root.get() == pReference->GetNiNode() ? &assemblyIt->second : nullptr;
+                    std::array<void*, PhysicsReferenceUpdate::kMaxChildBodies> childBodies{};
+                    // Why a followed cart was skipped this frame (logged at most once a second per cart): a skipped
+                    // cart is neither steered nor replayed, and the skip used to be silent.
+                    const char* skipReason = nullptr;
+                    size_t skipIndex = 0;
+                    uint32_t skipMotion = 0;
+                    bool childrenValid = !assembly || (assembly->Count == pA->Children.size() &&
+                        assembly->Count == pB->Children.size() && assembly->HelperSlot < assembly->Count &&
+                        assembly->Nodes[assembly->HelperSlot]->collisionObject == assembly->Tether);
+                    if (assembly && childrenValid)
+                    {
+                        for (size_t i = 0; i < assembly->Count; ++i)
+                        {
+                            auto* node = assembly->Nodes[i].get();
+                            auto* ancestor = node;
+                            auto* expectedRoot = i == assembly->HelperSlot ? assembly->HorseRoot.get() : assembly->Root.get();
+                            for (unsigned depth = 0; ancestor && ancestor != expectedRoot && depth < 32; ++depth)
+                                ancestor = ancestor->parent;
+                            ActorPoseDiagnosticViews::RigidBody child{};
+                            childBodies[i] = AssemblyBody(node);
+                            if (ancestor != expectedRoot || childBodies[i] == body.HavokBody ||
+                                !ReadPhysicsMemory(childBodies[i], child) || child.world != body.State.world)
+                            {
+                                skipReason = ancestor != expectedRoot ? "part left the cart tree" :
+                                    childBodies[i] == body.HavokBody ? "part body is the root body" :
+                                    !childBodies[i] ? "part has no body" : "part body unreadable or in another world";
+                                skipIndex = i;
+                                skipMotion = child.motionType;
+                                childrenValid = false;
+                                break;
+                            }
+                            if (i != assembly->HelperSlot && assembly->Simulated[i])
+                            {
+                                if (replay && IsDynamicMotion(child.motionType))
+                                {
+                                    s_pendingKeyframes.push_back(assembly->Nodes[i]);
+                                    spdlog::info("Cart replay {:X}: part {} keyframe queued (motion {})", it->first, i,
+                                        child.motionType);
+                                }
+                                else if (!replay && child.motionType == 4)
+                                    RestoreBodyMotion(node);
+                            }
+                            if (!ReadPhysicsMemory(childBodies[i], child) ||
+                                (assembly->Simulated[i] && !(replay ? child.motionType == 4 || IsDynamicMotion(child.motionType) :
+                                    IsDynamicMotion(child.motionType))) ||
+                                (i == assembly->HelperSlot && child.motionType != 4))
+                            {
+                                skipReason = i == assembly->HelperSlot ? "tether helper not keyframed" :
+                                    "part motion type not allowed";
+                                skipIndex = i;
+                                skipMotion = child.motionType;
+                                childrenValid = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!childrenValid)
+                    {
+                        if (assembly)
+                        {
+                            assembly->ActiveUntil = 0;
+                            const auto nowMs = GetTickCount64();
+                            if (nowMs >= assembly->NextSkipLog)
+                            {
+                                assembly->NextSkipLog = nowMs + 1000;
+                                spdlog::warn("Cart assembly {:X}: skipped ({}), part {} of {} motion {}, samples {} / {} parts, replay {}",
+                                    it->first, skipReason ? skipReason : "sample part count differs", skipIndex,
+                                    assembly->Count, skipMotion, pA->Children.size(), pB->Children.size(), replay);
+                            }
+                        }
+                        ++it;
+                        continue;
+                    }
                     StepTarget target{body.State.world, body.HavokBody, it->first};
                     target.Dynamic = true;
-                    const glm::vec3 position = pA->BodyPosition + (pB->BodyPosition - pA->BodyPosition) * t;
+                    target.Assembly = assembly != nullptr;
+                    target.Replay = assembly != nullptr && replay;
+                    target.BodyUid = body.State.uid;
+                    target.PublishedAt = now;
+                    const auto hostNow = m_transport.GetClock().GetCurrentTick();
+                    target.HostAgeMs = hostNow >= pose.Tick ? hostNow - pose.Tick : 0;
+                    if (pose.BodyLifetime.get() != body.HavokBody || pose.BodyUid != body.State.uid)
+                    {
+                        s_holdBody.Get()(body.HavokBody);
+                        pose.BodyLifetime = std::shared_ptr<void>(body.HavokBody,
+                            RetireBody);
+                        pose.BodyUid = body.State.uid;
+                    }
+                    target.Lifetime = pose.BodyLifetime;
+                    {
+                        std::lock_guard stepLock(s_stepTargetsLock);
+                        const auto [probe, inserted] = s_followProbes.try_emplace(body.HavokBody);
+                        const auto index = s_stepTargetsBuilding.size();
+                        s_followProbesDirty |= inserted || index >= s_stepTargets.size() ||
+                            s_stepTargets[index].Body != target.Body || s_stepTargets[index].BodyUid != target.BodyUid;
+                    }
+                    glm::vec3 position = pA->BodyPosition + (pB->BodyPosition - pA->BodyPosition) * t;
                     const glm::quat qa{pA->BodyRotation.w, pA->BodyRotation.x, pA->BodyRotation.y, pA->BodyRotation.z};
                     const glm::quat qb{pB->BodyRotation.w, pB->BodyRotation.x, pB->BodyRotation.y, pB->BodyRotation.z};
-                    const glm::quat rotation = glm::normalize(glm::slerp(qa, qb, t));
+                    glm::quat rotation = glm::normalize(glm::slerp(qa, qb, t));
                     const glm::vec3 velocity = (glm::vec3{pA->Velocity.x, pA->Velocity.y, pA->Velocity.z} +
                         (glm::vec3{pB->Velocity.x, pB->Velocity.y, pB->Velocity.z} - glm::vec3{pA->Velocity.x, pA->Velocity.y,
                             pA->Velocity.z}) * t) / kHavokToGameUnits;
@@ -3241,7 +4535,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
                         target.Velocity[0] = target.Velocity[1] = target.Velocity[2] = 0.f;
                         if (glm::length(have - position) < 1.f / kHavokToGameUnits)
                         {
-                            // There (within a unit): this frame's step finishes it; then leave it at rest.
+                            // Record convergence, but keep maintaining the resting target.
                             pose.SettledAtFinalPose = true;
                             if (!pose.LoggedFinalPose)
                             {
@@ -3250,12 +4544,19 @@ void ObjectService::ApplyRemotePhysics() noexcept
                             }
                         }
                     }
-                    else if (pB->Tick > pA->Tick)
+                    if (pB->Tick > pA->Tick)
                     {
                         glm::quat step = qb * glm::conjugate(qa);
                         if (step.w < 0.f)
                             step = -step;
                         angular = glm::vec3{step.x, step.y, step.z} * 2.f / (static_cast<float>(pB->Tick - pA->Tick) / 1000.f);
+                    }
+                    if (assembly)
+                    {
+                        position += velocity * prediction;
+                        const float speed = glm::length(angular);
+                        if (speed > 0.0001f)
+                            rotation = glm::angleAxis(speed * prediction, angular / speed) * rotation;
                     }
                     for (int k = 0; k < 3; ++k)
                     {
@@ -3268,593 +4569,95 @@ void ObjectService::ApplyRemotePhysics() noexcept
                     target.Rotation[2] = rotation.z;
                     target.Rotation[3] = rotation.w;
                     s_stepTargetsBuilding.push_back(target);
-                    // Keyframed here (parked on arrival): a keyframed body follows its scene node, so
-                    // placing only the body left the cart where this PC's scene parked it (21 units off
-                    // the host's, for the whole stop). Put the reference at the host's pose too.
-                    if (body.State.motionType == 4)
+                    if (target.Replay)
                     {
-                        const auto lerpAngle = [](float a, float b, float s)
-                        { return a + std::remainder(b - a, static_cast<float>(TiltedPhoques::Pi * 2)) * s; };
-                        NiPoint3 refPosition;
-                        refPosition.x = pA->Position.x + (pB->Position.x - pA->Position.x) * t;
-                        refPosition.y = pA->Position.y + (pB->Position.y - pA->Position.y) * t;
-                        refPosition.z = pA->Position.z + (pB->Position.z - pA->Position.z) * t;
-                        const glm::vec3 moved{refPosition.x - pReference->position.x, refPosition.y - pReference->position.y,
-                            refPosition.z - pReference->position.z};
-                        if (glm::length(moved) > 0.05f)
+                        PlaceNodeWorld(pReference->GetNiNode(), position, rotation);
+                        s_replayedThisPass.insert(pReference->GetNiNode());
+                        SyncReplayReference(pReference, position, rotation, assembly->ReconciledAt,
+                            assembly->NextReconcileMs);
+                    }
+                    if (assembly)
+                    {
+                        float maxChildGap = 0.f;
+                        const float interval = pB->Tick > pA->Tick ? static_cast<float>(pB->Tick - pA->Tick) / 1000.f : 0.f;
+                        for (size_t i = 0; i < assembly->Count; ++i)
                         {
-                            pReference->position = refPosition;
-                            pReference->SetRotation(lerpAngle(pA->Rotation.x, pB->Rotation.x, t), lerpAngle(pA->Rotation.y, pB->Rotation.y, t),
-                                lerpAngle(pA->Rotation.z, pB->Rotation.z, t));
-                            pReference->Update3DPosition(true);
-                        }
-                    }
-                }
-                ++it;
-                continue;
-            }
-            if (!pose.HostDriven)
-            {
-                pose.DynamicFollow = false;
-                pose.HostDriven = pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
-                spdlog::info("Host-driven body {:X}: following the host's transform (keyframed={})", it->first,
-                    pose.HostDriven);
-            }
-
-            // Oldest-to-newest view of the sample ring.
-            const uint32_t count = pose.SampleCount;
-            const uint32_t size = static_cast<uint32_t>(pose.Samples.size());
-            const auto sample = [&](uint32_t aIndex) -> const RemoteReferencePose::Sample&
-            { return pose.Samples[(pose.SampleNext + size - count + aIndex) % size]; };
-            // Smooth presentation time, read now (see SmoothClock); renderTick is its whole milliseconds.
-            const bool smoothing = s_cartSmoothingEnabled.load(std::memory_order_relaxed);
-            const double renderTime = (SmoothClock::NowMs() > 0.0 ? SmoothClock::NowMs() :
-                static_cast<double>(m_transport.GetClock().GetCurrentTick())) -
-                static_cast<double>(m_world.GetCharacterService().GetPresentationDelayMs());
-            const int64_t renderTick = static_cast<int64_t>(std::floor(renderTime));
-
-            const auto lerpAngle = [](float aFrom, float aTo, float aT)
-            {
-                const float delta = std::remainder(aTo - aFrom, static_cast<float>(TiltedPhoques::Pi * 2));
-                return aFrom + delta * aT;
-            };
-            NiPoint3 position = sample(count - 1).Position;
-            NiPoint3 rotation = sample(count - 1).Rotation;
-            // Child bodies interpolate between the same two samples (never extrapolated).
-            const RemoteReferencePose::Sample* pChildA = &sample(count - 1);
-            const RemoteReferencePose::Sample* pChildB = pChildA;
-            float childT = 0.f;
-            if (renderTick <= static_cast<int64_t>(sample(0).Tick))
-            {
-                position = sample(0).Position;
-                rotation = sample(0).Rotation;
-            }
-            else if (renderTick >= static_cast<int64_t>(sample(count - 1).Tick))
-            {
-                // Past the newest sample: a late packet continues the last motion briefly;
-                // a body the host stopped sending (at rest) holds its last pose exactly.
-                // A body that was moving and then holds is a visible freeze: log it.
-                const int64_t starvedMs = renderTick - static_cast<int64_t>(sample(count - 1).Tick);
-                if (count >= 2 && starvedMs > kHostDrivenHoldAfterMs && starvedMs < kHostDrivenHoldAfterMs + 40 &&
-                    glm::length(glm::vec3{sample(count - 1).Position.x - sample(count - 2).Position.x,
-                        sample(count - 1).Position.y - sample(count - 2).Position.y,
-                        sample(count - 1).Position.z - sample(count - 2).Position.z}) > 1.f)
-                    spdlog::info("Host-driven body {:X} starved: no host sample for {} ms while moving", it->first, starvedMs);
-                if (count >= 2 && renderTick - static_cast<int64_t>(sample(count - 1).Tick) <= kHostDrivenHoldAfterMs)
-                {
-                    const auto& a = sample(count - 2);
-                    const auto& b = sample(count - 1);
-                    const int64_t span = static_cast<int64_t>(b.Tick) - static_cast<int64_t>(a.Tick);
-                    const int64_t ahead = (std::min)(renderTick - static_cast<int64_t>(b.Tick), kHostDrivenMaxExtrapolationMs);
-                    if (span > 0)
-                    {
-                        const float t = 1.f + static_cast<float>(ahead) / static_cast<float>(span);
-                        position = a.Position + (b.Position - a.Position) * t;
-                        rotation = glm::vec3{lerpAngle(a.Rotation.x, b.Rotation.x, t), lerpAngle(a.Rotation.y, b.Rotation.y, t),
-                            lerpAngle(a.Rotation.z, b.Rotation.z, t)};
-                    }
-                }
-            }
-            else
-            {
-                for (uint32_t i = 1; i < count; ++i)
-                {
-                    const auto& a = sample(i - 1);
-                    const auto& b = sample(i);
-                    if (renderTick > static_cast<int64_t>(b.Tick))
-                        continue;
-                    const int64_t span = static_cast<int64_t>(b.Tick) - static_cast<int64_t>(a.Tick);
-                    const float t = span > 0 ? static_cast<float>((renderTime - static_cast<double>(a.Tick)) /
-                        static_cast<double>(span)) : 1.f;
-                    position = a.Position + (b.Position - a.Position) * t;
-                    if (s_hermitePlaybackEnabled.load(std::memory_order_relaxed) && span > 0 && span < 250)
-                    {
-                        const float spanSeconds = static_cast<float>(span) / 1000.f;
-                        const float t2 = t * t;
-                        const float t3 = t2 * t;
-                        const float h00 = 2.f * t3 - 3.f * t2 + 1.f;
-                        const float h10 = t3 - 2.f * t2 + t;
-                        const float h01 = -2.f * t3 + 3.f * t2;
-                        const float h11 = t3 - t2;
-                        position = a.Position * h00 + a.Velocity * (h10 * spanSeconds) + b.Position * h01 +
-                            b.Velocity * (h11 * spanSeconds);
-                    }
-                    rotation = glm::vec3{lerpAngle(a.Rotation.x, b.Rotation.x, t), lerpAngle(a.Rotation.y, b.Rotation.y, t),
-                        lerpAngle(a.Rotation.z, b.Rotation.z, t)};
-                    pChildA = &a;
-                    pChildB = &b;
-                    childT = t;
-                    break;
-                }
-            }
-            // A body at rest (no newer sample past the hold window) keeps the pose already
-            // written; resting bodies are all host-driven, so rewriting them every frame adds up.
-            const uint64_t newestTick = sample(count - 1).Tick;
-            const bool atRest = renderTick - static_cast<int64_t>(newestTick) > kHostDrivenHoldAfterMs;
-            if (atRest && pose.AppliedRestTick == newestTick)
-            {
-                ++it;
-                continue;
-            }
-            pose.AppliedRestTick = atRest ? newestTick : 0;
-            pose.PlaybackTarget = {position.x, position.y, position.z};
-            pose.PlaybackHeading = rotation.z;
-            pose.HasPlaybackTarget = true;
-            // Critically damped smoothing of the root (snap on a real jump, or when switched off).
-            float smoothAlpha = 1.f;
-            if (smoothing && pose.SmoothHas)
-            {
-                const float dtMs = std::chrono::duration<float, std::milli>(now - pose.SmoothAt).count();
-                smoothAlpha = dtMs > 0.f ? 1.f - std::exp(-dtMs / kCartSmoothingMs) : 0.f;
-                const glm::vec3 target{position.x, position.y, position.z};
-                if (glm::length(target - pose.SmoothPosition) > 50.f)
-                    smoothAlpha = 1.f;
-            }
-            if (smoothing && !atRest)
-            {
-                const glm::vec3 target{position.x, position.y, position.z};
-                pose.SmoothPosition = pose.SmoothHas ? pose.SmoothPosition + (target - pose.SmoothPosition) * smoothAlpha : target;
-                for (int k = 0; k < 3; ++k)
-                {
-                    const float targetAngle = (&rotation.x)[k];
-                    pose.SmoothRotation[k] = pose.SmoothHas ? pose.SmoothRotation[k] +
-                        std::remainder(targetAngle - pose.SmoothRotation[k], static_cast<float>(TiltedPhoques::Pi * 2)) * smoothAlpha :
-                        targetAngle;
-                }
-                position.x = pose.SmoothPosition.x;
-                position.y = pose.SmoothPosition.y;
-                position.z = pose.SmoothPosition.z;
-                rotation.x = pose.SmoothRotation.x;
-                rotation.y = pose.SmoothRotation.y;
-                rotation.z = pose.SmoothRotation.z;
-                pose.SmoothHas = true;
-            }
-            else
-            {
-                pose.SmoothPosition = {position.x, position.y, position.z};
-                pose.SmoothRotation = {rotation.x, rotation.y, rotation.z};
-                pose.SmoothHas = true;
-                smoothAlpha = 1.f;
-            }
-            pose.SmoothAt = now;
-            // The motion drawn this frame, for the body's velocity below.
-            {
-                const glm::vec3 drawn{position.x, position.y, position.z};
-                const glm::vec3 drawnRotation{rotation.x, rotation.y, rotation.z};
-                const float dtSeconds = std::chrono::duration<float>(now - pose.LastRenderedAt).count();
-                if (pose.HasLastRendered && dtSeconds > 0.f && dtSeconds < 0.2f && glm::length(drawn - pose.LastRendered) < 50.f)
-                {
-                    pose.RenderVelocity = (drawn - pose.LastRendered) / dtSeconds;
-                    pose.LastFrameSeconds = dtSeconds;
-                    for (int k = 0; k < 3; ++k)
-                        pose.RenderAngular[k] = std::remainder(drawnRotation[k] - pose.LastRenderedRotation[k],
-                            static_cast<float>(TiltedPhoques::Pi * 2)) / dtSeconds;
-                }
-                else
-                {
-                    pose.RenderVelocity = {};
-                    pose.RenderAngular = {};
-                }
-                pose.LastRendered = drawn;
-                pose.LastRenderedRotation = drawnRotation;
-                pose.LastRenderedAt = now;
-                pose.HasLastRendered = true;
-            }
-            // Jitter probe: did anything move the node since our last write, and how even is our
-            // own step (speed change between frames)?
-            if (auto* pProbeNode = pReference->GetNiNode(); pProbeNode && pose.ProbeHas)
-            {
-                const glm::vec3 shown{pProbeNode->world.translate.x, pProbeNode->world.translate.y,
-                    pProbeNode->world.translate.z};
-                const float drift = glm::length(shown - pose.ProbeWritten);
-                if (drift > 0.5f)
-                    ++pose.ProbeMoved;
-                // The child parts (wheels, yoke): does something else move them between our writes?
-                {
-                    std::vector<ChildBody> probeChildren;
-                    CollectChildBodies(pReference, probeChildren);
-                    pose.ProbeChildMotion.clear();
-                    for (size_t i = 0; i < probeChildren.size(); ++i)
-                    {
-                        pose.ProbeChildMotion += std::to_string(probeChildren[i].Body->motionType);
-                        if (i >= pose.ProbeChildWritten.size())
-                            continue;
-                        const auto& w = probeChildren[i].Node->world.translate;
-                        const float childDrift = glm::length(glm::vec3{w.x, w.y, w.z} - pose.ProbeChildWritten[i]);
-                        if (childDrift > 0.5f)
-                            ++pose.ProbeChildMoved;
-                        pose.ProbeChildDriftMax = (std::max)(pose.ProbeChildDriftMax, childDrift);
-                    }
-                }
-                pose.ProbeDriftMax = (std::max)(pose.ProbeDriftMax, drift);
-                const float dtMs = std::chrono::duration<float, std::milli>(now - pose.ProbeLastWrite).count();
-                if (dtMs > 0.f)
-                {
-                    const float speed = glm::length(glm::vec3{position.x, position.y, position.z} - pose.ProbeWritten) /
-                        dtMs * 1000.f;
-                    const float change = std::abs(speed - pose.ProbeLastSpeed);
-                    pose.ProbeSpeedSum += speed;
-                    pose.ProbeSpeedChangeSum += change;
-                    pose.ProbeSpeedChangeMax = (std::max)(pose.ProbeSpeedChangeMax, change);
-                    pose.ProbeLastSpeed = speed;
-                    // Angular speed (deg/s) per axis and its frame-to-frame change.
-                    const glm::vec3 rot{rotation.x, rotation.y, rotation.z};
-                    glm::vec3 angular{};
-                    for (int k = 0; k < 3; ++k)
-                        angular[k] = std::remainder(rot[k] - pose.ProbeLastRotation[k], static_cast<float>(TiltedPhoques::Pi * 2)) /
-                            dtMs * 1000.f * 57.2958f;
-                    const float angularChange = glm::length(angular - pose.ProbeLastAngularSpeed);
-                    pose.ProbeAngularChangeSum += angularChange;
-                    pose.ProbeAngularChangeMax = (std::max)(pose.ProbeAngularChangeMax, angularChange);
-                    pose.ProbeLastAngularSpeed = angular;
-                    pose.ProbeDtMaxMs = (std::max)(pose.ProbeDtMaxMs, dtMs);
-                    ++pose.ProbeFrames;
-                }
-                if (now >= pose.ProbeNextLog && pose.ProbeFrames)
-                {
-                    const float meanSpeed = pose.ProbeSpeedSum / pose.ProbeFrames;
-                    uint32_t mountId = 0;
-                    const float mountLead = MountLead(pReference, pose.RenderVelocity, mountId);
-                    if (meanSpeed > 5.f)
-                        spdlog::info("Host-driven body {:X} rider {:X} lead {:.1f} u", it->first, mountId, mountLead);
-                    if (meanSpeed > 5.f)
-                        spdlog::info("Host-driven body {:X} jitter: {} frames, speed {:.0f} u/s, speed change mean {:.0f} max {:.0f}, "
-                            "turn-rate change mean {:.1f} max {:.1f} deg/s, moved by others {} (max {:.1f} u), children [{}] moved by "
-                            "others {} (max {:.1f} u), longest frame {:.0f} ms; drawn: {}/{} frames moved after the write, "
-                            "root max {:.2f} u {:.2f} deg, child max {:.2f} u {:.2f} deg", it->first, pose.ProbeFrames, meanSpeed,
-                            pose.ProbeSpeedChangeSum / pose.ProbeFrames, pose.ProbeSpeedChangeMax,
-                            pose.ProbeAngularChangeSum / pose.ProbeFrames, pose.ProbeAngularChangeMax, pose.ProbeMoved,
-                            pose.ProbeDriftMax, pose.ProbeChildMotion, pose.ProbeChildMoved, pose.ProbeChildDriftMax, pose.ProbeDtMaxMs, pose.ProbeEndMoved,
-                            pose.ProbeEndFrames, pose.ProbeEndMoveMax, pose.ProbeEndTurnMax, pose.ProbeEndChildMoveMax,
-                            pose.ProbeEndChildTurnMax);
-                    pose.ProbeNextLog = now + std::chrono::seconds(5);
-                    pose.ProbeFrames = pose.ProbeMoved = 0;
-                    pose.ProbeDriftMax = pose.ProbeSpeedSum = pose.ProbeSpeedChangeSum = pose.ProbeSpeedChangeMax = 0.f;
-                    pose.ProbeDtMaxMs = 0.f;
-                    pose.ProbeAngularChangeSum = pose.ProbeAngularChangeMax = pose.ProbeChildDriftMax = 0.f;
-                    pose.ProbeChildMoved = 0;
-                    pose.ProbeEndFrames = pose.ProbeEndMoved = 0;
-                    pose.ProbeEndMoveMax = pose.ProbeEndTurnMax = pose.ProbeEndChildMoveMax = pose.ProbeEndChildTurnMax = 0.f;
-                }
-            }
-            const glm::vec3 jump{position.x - pReference->position.x, position.y - pReference->position.y, position.z - pReference->position.z};
-            // The node shows the previous frame's pose (see s_visualLagFrameEnabled).
-            NiPoint3 drawnPosition = position;
-            NiPoint3 drawnRotation = rotation;
-            if (s_visualLagFrameEnabled.load(std::memory_order_relaxed) && pose.HasPreviousDrawn &&
-                glm::length(glm::vec3{position.x, position.y, position.z} - pose.PreviousDrawnPosition) < 50.f)
-            {
-                drawnPosition.x = pose.PreviousDrawnPosition.x;
-                drawnPosition.y = pose.PreviousDrawnPosition.y;
-                drawnPosition.z = pose.PreviousDrawnPosition.z;
-                drawnRotation.x = pose.PreviousDrawnRotation.x;
-                drawnRotation.y = pose.PreviousDrawnRotation.y;
-                drawnRotation.z = pose.PreviousDrawnRotation.z;
-            }
-            pose.PreviousDrawnPosition = {position.x, position.y, position.z};
-            pose.PreviousDrawnRotation = {rotation.x, rotation.y, rotation.z};
-            pose.HasPreviousDrawn = true;
-            pReference->position = drawnPosition;
-            pReference->SetRotation(drawnRotation.x, drawnRotation.y, drawnRotation.z);
-            // The other bodies (cart wheels, yoke): a keyframed body follows its node, so turn the
-            // nodes to the host pose; carried rigidly by the root they never turned.
-            if (!pChildA->Children.empty() && pChildA->Children.size() == pChildB->Children.size())
-            {
-                std::vector<ChildBody> childBodies;
-                CollectChildBodies(pReference, childBodies);
-                if (childBodies.size() == pChildA->Children.size())
-                {
-                    for (size_t i = 0; i < childBodies.size(); ++i)
-                    {
-                        const auto& x = pChildA->Children[i];
-                        const auto& y = pChildB->Children[i];
-                        auto& local = childBodies[i].Node->local;
-                        local.translate.x = x[0] + (y[0] - x[0]) * childT;
-                        local.translate.y = x[1] + (y[1] - x[1]) * childT;
-                        local.translate.z = x[2] + (y[2] - x[2]) * childT;
-                        float dot = 0.f;
-                        for (int k = 0; k < 4; ++k)
-                            dot += x[3 + k] * y[3 + k];
-                        const float sign = dot < 0.f ? -1.f : 1.f;
-                        float q[4];
-                        float norm = 0.f;
-                        for (int k = 0; k < 4; ++k)
-                        {
-                            q[k] = x[3 + k] + (sign * y[3 + k] - x[3 + k]) * childT;
-                            norm += q[k] * q[k];
-                        }
-                        norm = norm > 0.f ? 1.f / std::sqrt(norm) : 1.f;
-                        for (float& value : q)
-                            value *= norm;
-                        // The same smoothing for the part (translation and rotation).
-                        if (pose.SmoothChildren.size() != childBodies.size())
-                            pose.SmoothChildren.assign(childBodies.size(), std::array<float, 7>{0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f});
-                        auto& smooth = pose.SmoothChildren[i];
-                        const bool seeded = smooth[3] != 0.f || smooth[4] != 0.f || smooth[5] != 0.f || smooth[6] != 0.f;
-                        const float a = seeded ? smoothAlpha : 1.f;
-                        smooth[0] += (local.translate.x - smooth[0]) * a;
-                        smooth[1] += (local.translate.y - smooth[1]) * a;
-                        smooth[2] += (local.translate.z - smooth[2]) * a;
-                        float qdot = 0.f;
-                        for (int k = 0; k < 4; ++k)
-                            qdot += smooth[3 + k] * q[k];
-                        const float qsign = qdot < 0.f ? -1.f : 1.f;
-                        float qnorm = 0.f;
-                        for (int k = 0; k < 4; ++k)
-                        {
-                            smooth[3 + k] += (qsign * q[k] - smooth[3 + k]) * a;
-                            qnorm += smooth[3 + k] * smooth[3 + k];
-                        }
-                        qnorm = qnorm > 0.f ? 1.f / std::sqrt(qnorm) : 1.f;
-                        for (int k = 0; k < 4; ++k)
-                        {
-                            smooth[3 + k] *= qnorm;
-                            q[k] = smooth[3 + k];
-                        }
-                        local.translate.x = smooth[0];
-                        local.translate.y = smooth[1];
-                        local.translate.z = smooth[2];
-                        QuaternionToNiMatrix(q, local.rotate);
-                    }
-                }
-            }
-            // Warp (reset render motion history) only on a real jump: warping every frame of a
-            // smoothly rolling cart made it flash under temporal anti-aliasing.
-            pReference->Update3DPosition(glm::dot(jump, jump) > 50.f * 50.f);
-            if (const auto* pProbeNode = pReference->GetNiNode())
-            {
-                pose.ProbeWrittenRotate = pProbeNode->world.rotate;
-                pose.ProbeEndArmed = true;
-                pose.ProbeWritten = {pProbeNode->world.translate.x, pProbeNode->world.translate.y, pProbeNode->world.translate.z};
-                pose.ProbeHas = true;
-                pose.ProbeLastWrite = now;
-                pose.ProbeLastRotation = {rotation.x, rotation.y, rotation.z};
-                std::vector<ChildBody> probeChildren;
-                CollectChildBodies(pReference, probeChildren);
-                pose.ProbeChildWritten.clear();
-                for (const auto& child : probeChildren)
-                    pose.ProbeChildWritten.push_back({child.Node->world.translate.x, child.Node->world.translate.y,
-                        child.Node->world.translate.z});
-                if (!probeChildren.empty())
-                {
-                    pose.ProbeChild0Written = pose.ProbeChildWritten[0];
-                    pose.ProbeChild0Rotate = probeChildren[0].Node->world.rotate;
-                }
-            }
-            // Its riders, at their host offsets from it.
-            for (auto riderIt = s_riders.begin(); riderIt != s_riders.end();)
-            {
-                if (now - riderIt->second.SeenAt > std::chrono::milliseconds(500))
-                {
-                    riderIt = s_riders.erase(riderIt);
-                    continue;
-                }
-                if (riderIt->second.ReferenceId == it->first)
-                {
-                    if (auto* pRider = Cast<Actor>(TESForm::GetById(riderIt->first)); pRider && !pRider->actorState.IsDeadState())
-                    {
-                        const glm::vec3 seat = glm::vec3{position.x, position.y, position.z} + riderIt->second.Offset -
-                            riderIt->second.Drift;
-                        riderIt->second.Placed = glm::vec3{position.x, position.y, position.z} + riderIt->second.Offset;
-                        riderIt->second.HasPlaced = true;
-                        NiPoint3 seatPosition{};
-                        seatPosition.x = seat.x;
-                        seatPosition.y = seat.y;
-                        seatPosition.z = seat.z;
-                        pRider->ForcePosition(seatPosition);
-                        // Seated riders turn with their reference, as the engine seats them on the host.
-                        if (false && riderIt->second.HasHeadingOffset)
-                            pRider->SetRotation(pRider->rotation.x, pRider->rotation.y,
-                                std::remainder(rotation.z + riderIt->second.HeadingOffset, static_cast<float>(TiltedPhoques::Pi * 2)));
-                    }
-                }
-                ++riderIt;
-            }
-            // Writing the position does not move a reference into the exterior cell it
-            // now stands in. Measured: the follower's cart kept its start cell, and when
-            // that cell detached behind the players the cart (and the player riding it)
-            // unloaded mid-road. Hand it to the new cell the way the engine does for a
-            // Havok-moved reference (ID 19826 calls 19799 with the worldspace). MoveTo is
-            // not usable here: it disables and re-enables the reference, reloading its 3D
-            // and body, which measured as 7,000+ unit jumps on every crossing.
-            if (auto* pCell = pReference->parentCell; s_cellHandoffEnabled.load(std::memory_order_relaxed) && pCell && !(pCell->cellFlags & 1))
-            {
-                if (auto* pWorldSpace = pReference->GetWorldSpace())
-                {
-                    const auto gridX = static_cast<int32_t>(std::floor(position.x / 4096.f));
-                    const auto gridY = static_cast<int32_t>(std::floor(position.y / 4096.f));
-                    auto* pTarget = ModManager::Get()->GetCellFromCoordinates(gridX, gridY, pWorldSpace, false);
-                    if (pTarget && pTarget != pCell && pTarget->IsAttached())
-                    {
-                        spdlog::info("Host-driven body {:X} crossed from cell {:X} to {:X}", it->first, pCell->formID,
-                            pTarget->formID);
-                        using TUpdateParentCell = void(TESObjectREFR*, TESObjectCELL*, TESWorldSpace*);
-                        POINTER_SKYRIMSE(TUpdateParentCell, s_updateParentCell, 19799);
-                        s_updateParentCell.Get()(pReference, nullptr, pWorldSpace);
-                    }
-                }
-            }
-            // Keep the (keyframed) Havok body with the reference, at the host's offset between
-            // its body origin and reference position (the centre of mass is not the origin).
-            DynamicBody body{};
-            if (GetDynamicBody(pReference, body, true))
-            {
-                const glm::vec3 hostBody{pose.BodyTransform[12] * kHavokToGameUnits,
-                    pose.BodyTransform[13] * kHavokToGameUnits, pose.BodyTransform[14] * kHavokToGameUnits};
-                const glm::vec3 offset = hostBody - glm::vec3{pose.Position.x, pose.Position.y, pose.Position.z};
-                if (glm::dot(offset, offset) < 1000.f * 1000.f)
-                {
-                    const glm::vec3 rootTarget = glm::vec3{position.x, position.y, position.z} + offset;
-                    if (s_rootBodyWriteEnabled.load(std::memory_order_relaxed))
-                    {
-                        // With the body carrying the drawn velocity, this frame's physics step moves it
-                        // one frame further; place it that far back so it lands where the cart is drawn.
-                        // The engine seats a rider from the body: one frame ahead put the driver 3 units
-                        // in front of his cart (0.0 on the host).
-                        SetDynamicBodyPosition(body, rootTarget);
-                        if (s_bodyVelocityEnabled.load(std::memory_order_relaxed) && body.HavokBody && body.State.world)
-                        {
-                            StepTarget target{body.State.world, body.HavokBody, it->first};
+                            const auto& ca = pA->Children[i];
+                            const auto& cb = pB->Children[i];
+                            const glm::vec3 offsetA{ca[0], ca[1], ca[2]}, offsetB{cb[0], cb[1], cb[2]};
+                            const auto relativeVelocity = interval > 0.f ? (offsetB - offsetA) / interval : glm::vec3{};
+                            const auto childPosition = position + glm::mix(offsetA, offsetB, t) + relativeVelocity * prediction;
+                            const glm::quat childA{ca[6], ca[3], ca[4], ca[5]}, childB{cb[6], cb[3], cb[4], cb[5]};
+                            auto childRotation = glm::normalize(glm::slerp(childA, childB,
+                                t + (interval > 0.f ? prediction / interval : 0.f)));
+                            auto childTurn = childB * glm::conjugate(childA);
+                            if (childTurn.w < 0.f)
+                                childTurn = -childTurn;
+                            const auto childAngular = !atFinalPose && interval > 0.f ?
+                                glm::vec3{childTurn.x, childTurn.y, childTurn.z} * (2.f / interval) : glm::vec3{};
+                            StepTarget childTarget = target;
+                            childTarget.NativeHelper = i == assembly->HelperSlot;
+                            childTarget.Body = childBodies[i];
+                            ActorPoseDiagnosticViews::RigidBody state{};
+                            ReadPhysicsMemory(childBodies[i], state);
+                            childTarget.BodyUid = state.uid;
+                            if (assembly->Lifetimes[i].get() != childBodies[i] || assembly->Uids[i] != state.uid)
+                            {
+                                s_holdBody.Get()(childBodies[i]);
+                                assembly->Lifetimes[i] = std::shared_ptr<void>(childBodies[i], RetireBody);
+                                assembly->Uids[i] = state.uid;
+                            }
+                            childTarget.Lifetime = assembly->Lifetimes[i];
                             for (int k = 0; k < 3; ++k)
                             {
-                                target.Position[k] = rootTarget[k] / kHavokToGameUnits;
-                                target.Velocity[k] = pose.RenderVelocity[k] / kHavokToGameUnits;
+                                childTarget.Position[k] = childPosition[k];
+                                childTarget.Velocity[k] = atFinalPose ? 0.f : velocity[k] + relativeVelocity[k];
+                                childTarget.Angular[k] = childAngular[k];
                             }
-                            s_stepTargetsBuilding.push_back(target);
-                        }
-                        if (s_bodyVelocityEnabled.load(std::memory_order_relaxed) && body.HavokBody)
-                        {
-                            // Linear from the drawn motion; angular about world z from the heading
-                            // (Skyrim's heading turns clockwise, Havok's positive z counterclockwise).
-                            auto* pRigid = static_cast<ActorPoseDiagnosticViews::RigidBody*>(body.HavokBody);
-                            for (int k = 0; k < 3; ++k)
-                                pRigid->linearVelocity[k] = pose.RenderVelocity[k] / kHavokToGameUnits;
-                            pRigid->linearVelocity[3] = 0.f;
-                            pRigid->angularVelocity[0] = 0.f;
-                            pRigid->angularVelocity[1] = 0.f;
-                            pRigid->angularVelocity[2] = -pose.RenderAngular.z;
-                            pRigid->angularVelocity[3] = 0.f;
-                        }
-                    }
-                }
-            }
-            ++it;
-            continue;
-        }
-        if (pose.BodyDriven)
-        {
-            if (s_bodyPlaybackFormId.load(std::memory_order_acquire) == it->first)
-            {
-                const auto sourceAge = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - pose.LastReceived).count();
-                s_bodyPlaybackLastAgeMs.store(static_cast<uint32_t>((std::max)(
-                    int64_t{}, sourceAge)), std::memory_order_relaxed);
-                if (sourceAge <= 350)
-                {
-                    DynamicBody body{};
-                    if (GetDynamicBody(pReference, body))
-                    {
-                        const auto started = std::chrono::steady_clock::now();
-                        const auto currentTick = m_transport.GetClock().GetCurrentTick();
-                        float fraction = 1.f;
-                        if (pose.PriorTick && pose.Tick > pose.PriorTick &&
-                            currentTick >= pose.PriorTick)
-                        {
-                            fraction = std::clamp(
-                                static_cast<float>(currentTick - pose.PriorTick) /
-                                    static_cast<float>(pose.Tick - pose.PriorTick),
-                                0.f, 1.5f);
-                        }
-                        const glm::vec3 prior{pose.PriorPosition.x, pose.PriorPosition.y,
-                            pose.PriorPosition.z};
-                        const glm::vec3 latest{pose.Position.x, pose.Position.y,
-                            pose.Position.z};
-                        const glm::vec3 target = pose.PriorTick ?
-                            prior + (latest - prior) * fraction : latest;
-                        const glm::vec3 current{
-                            body.State.transform[12] * kHavokToGameUnits,
-                            body.State.transform[13] * kHavokToGameUnits,
-                            body.State.transform[14] * kHavokToGameUnits};
-                        s_bodyPlaybackLastPreError.store(glm::length(target - current),
-                            std::memory_order_relaxed);
-                        const float elapsed = pose.LastApplied == std::chrono::steady_clock::time_point{}
-                            ? 1.f / 60.f
-                            : std::clamp(std::chrono::duration<float>(now - pose.LastApplied).count(),
-                                0.f, 0.05f);
-                        pose.LastApplied = now;
-                        const float alpha = 1.f - std::exp(-elapsed / 0.035f);
-                        glm::vec3 step = (target - current) * alpha;
-                        const float distance = glm::length(step);
-                        const float maxStep = 3500.f * elapsed;
-                        if (distance > maxStep && maxStep > 0.f)
-                            step *= maxStep / distance;
-                        if (glm::dot(step, step) > 0.0001f)
-                        {
-                            s_bodyPlaybackAttempts.fetch_add(1,
-                                std::memory_order_relaxed);
-                            s_bodyPlaybackLastStep.store(glm::length(step),
-                                std::memory_order_relaxed);
-                            if (SetDynamicBodyPosition(body, current + step))
+                            childTarget.Rotation[0] = childRotation.x;
+                            childTarget.Rotation[1] = childRotation.y;
+                            childTarget.Rotation[2] = childRotation.z;
+                            childTarget.Rotation[3] = childRotation.w;
+                            maxChildGap = (std::max)(maxChildGap, glm::length(childPosition -
+                                glm::vec3{state.transform[12], state.transform[13], state.transform[14]}) * kHavokToGameUnits);
+                            // Steer only the assembly ROOT. Wheels and other parts are joined to the root by the
+                            // cart's own constraints; steering each part separately fought those joints (follower
+                            // log 2026-09-27: 15-22 u part gaps corrected at 450-810 u/s, visible jitter). The
+                            // constraints carry the parts with the steered root, as on the host. Part gaps are still
+                            // measured above for the two-second log.
+                            if (!replay || i == assembly->HelperSlot || !assembly->Simulated[i])
+                                continue;
+                            // Replay drives every part from the same owner sample: rigid parts cannot fight joints
+                            // that no longer simulate here. The helper stays with the native tether sync.
+                            childTarget.Replay = true;
+                            PlaceNodeWorld(assembly->Nodes[i].get(), childPosition, childRotation);
+                            s_replayedThisPass.insert(assembly->Nodes[i].get());
                             {
-                                s_bodyPlaybackSucceeded.fetch_add(1,
-                                    std::memory_order_relaxed);
-                                DynamicBody after{};
-                                if (GetDynamicBody(pReference, after))
-                                {
-                                    const glm::vec3 observed{
-                                        after.State.transform[12] * kHavokToGameUnits,
-                                        after.State.transform[13] * kHavokToGameUnits,
-                                        after.State.transform[14] * kHavokToGameUnits};
-                                    s_bodyPlaybackLastPostError.store(
-                                        glm::length(target - observed),
-                                        std::memory_order_relaxed);
-                                }
+                                std::lock_guard stepLock(s_stepTargetsLock);
+                                const auto [probe, inserted] = s_followProbes.try_emplace(childBodies[i]);
+                                const auto index = s_stepTargetsBuilding.size();
+                                s_followProbesDirty |= inserted || index >= s_stepTargets.size() ||
+                                    s_stepTargets[index].Body != childTarget.Body || s_stepTargets[index].BodyUid != childTarget.BodyUid;
                             }
+                            s_stepTargetsBuilding.push_back(std::move(childTarget));
                         }
-                        s_bodyPlaybackLastDurationUs.store(static_cast<uint32_t>(
-                            std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now() - started).count()),
-                            std::memory_order_relaxed);
+                        assembly->ActiveUntil = GetTickCount64() + 250;
+                        if (GetTickCount64() >= assembly->NextLog)
+                        {
+                            const float rootGap = glm::length(position - glm::vec3{body.State.transform[12],
+                                body.State.transform[13], body.State.transform[14]}) * kHavokToGameUnits;
+                            // These are local playback-target errors, not paired harness gaps.
+                            // The passenger hook still checks readiness for each controller call.
+                            spdlog::info("Cart assembly {:X}: root gap {:.1f} max child gap {:.1f} controller {}",
+                                it->first, rootGap, maxChildGap,
+                                "gate armed for ready remote passengers; helper streamed; gaps vs playback target");
+                            assembly->NextLog = GetTickCount64() + 2000;
+                        }
                     }
                 }
-                else
-                    s_bodyPlaybackStaleSkips.fetch_add(1,
-                        std::memory_order_relaxed);
                 ++it;
                 continue;
             }
-            ++it;
-            continue;
-        }
-        if (!IsPassivePhysicsReference(pReference))
-        {
-            it = m_remoteReferencePoses.erase(it);
-            continue;
-        }
-        // A render-frame correction keeps Havok's follower proxy kinematic,
-        // but never blocks the game waiting for another network packet.
-        if (!pose.Kinematic)
-            pose.Kinematic = pReference->SetMotionType(TESObjectREFR::MotionType::Keyframed, false);
-        const float elapsed = pose.LastApplied == std::chrono::steady_clock::time_point{}
-            ? 1.f / 60.f
-            : std::clamp(std::chrono::duration<float>(now - pose.LastApplied).count(), 0.f, 0.05f);
-        pose.LastApplied = now;
-        const auto difference = pose.Position - pReference->position;
-        const float distanceSquared = glm::dot(difference, difference);
-        const float responseSeconds = distanceSquared > 2500.f ? 0.035f : 0.08f;
-        const float alpha = 1.f - std::exp(-elapsed / responseSeconds);
-        if (distanceSquared > 0.0001f)
-            pReference->position += difference * alpha;
-
-        const auto rotationDifference = pose.Rotation - pReference->rotation;
-        const float dx = std::remainder(rotationDifference.x, static_cast<float>(TiltedPhoques::Pi * 2));
-        const float dy = std::remainder(rotationDifference.y, static_cast<float>(TiltedPhoques::Pi * 2));
-        const float dz = std::remainder(rotationDifference.z, static_cast<float>(TiltedPhoques::Pi * 2));
-        if (distanceSquared > 0.0001f || dx * dx + dy * dy + dz * dz > 0.000001f)
-        {
-            pReference->SetRotation(pReference->rotation.x + dx * alpha,
-                pReference->rotation.y + dy * alpha, pReference->rotation.z + dz * alpha);
-            pReference->Update3DPosition(true);
         }
         ++it;
     }

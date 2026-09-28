@@ -40,6 +40,8 @@ struct CharacterService
     TP_NOCOPYMOVE(CharacterService);
 
     static void Serialize(World& aRegistry, entt::entity aEntity, CharacterSpawnRequest* apSpawnRequest) noexcept;
+    void ReconcileCellOwnership(Player* apPlayer, bool aCellEntry = true) const noexcept;
+    bool CanReplicateTo(Player* apPlayer, entt::entity aEntity) const noexcept;
 
 protected:
     enum class OwnershipTransferReason : uint8_t
@@ -80,8 +82,10 @@ protected:
     void PopulateAssignmentResponse(entt::entity aEntity, AssignCharacterResponse& aResponse) const noexcept;
     static const char* GetOwnershipTransferReasonName(OwnershipTransferReason aReason) noexcept;
     bool CanClaimOwnership(Player* apPlayer, entt::entity aEntity, uint32_t aExpectedOwnershipEpoch, OwnershipTransferReason aReason) const noexcept;
-    bool TransferOwnership(Player* apPlayer, entt::entity aEntity, OwnershipTransferReason aReason, bool aResetInvalidOwners = true) const noexcept;
+    bool TransferOwnership(Player* apPlayer, entt::entity aEntity, OwnershipTransferReason aReason, bool aResetInvalidOwners = false) const noexcept;
     void TransferToNextOwner(entt::entity aEntity, OwnershipTransferReason aReason) const noexcept;
+    void StampOwnership(entt::entity aEntity, Player* apPlayer) const noexcept;
+    void ReconcileActorOwnership(Player* apPlayer, entt::entity aEntity, bool aCellEntry) const noexcept;
     ActorData BuildActorData(const entt::entity acEntity) const noexcept;
 
     void ProcessFactionsChanges() const noexcept;
@@ -89,6 +93,7 @@ protected:
 
 private:
     World& m_world;
+    mutable std::chrono::steady_clock::time_point m_nextOwnershipSweep{};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_scriptedActorStateConnection;

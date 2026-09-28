@@ -4,6 +4,7 @@
 #include <Services/Generic/QuestItemService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Services/Generic/NakedNpcGuard.h>
+#include <Services/Generic/NpcLootService.h>
 
 #include <Messages/RequestObjectInventoryChanges.h>
 #include <Messages/NotifyObjectInventoryChanges.h>
@@ -15,6 +16,7 @@
 #include <Messages/NotifyDrawWeapon.h>
 
 #include <Events/UpdateEvent.h>
+#include <Events/DisconnectedEvent.h>
 #include <Events/InventoryChangeEvent.h>
 #include <Events/EquipmentChangeEvent.h>
 
@@ -31,6 +33,8 @@
 #include <Games/ActorExtension.h>
 #include <Forms/TESNPC.h>
 #include <DefaultObjectManager.h>
+#include <variant>
+#include <unordered_map>
 
 InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -44,117 +48,11 @@ InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher,
     m_equipmentChangeConnection = m_dispatcher.sink<NotifyEquipmentChanges>().connect<&InventoryService::OnNotifyEquipmentChanges>(this);
 }
 
-namespace
+void InventoryService::OnUpdate(const UpdateEvent&) noexcept
 {
-// Inventory and equipment changes for a remote actor that is dying or dead are held briefly, and a
-// removal cancelled by an equip of the same item is dropped: at a death the owner's engine
-// removes and re-equips clothing, and applying that one message at a time drew the falling intro
-// prisoner naked. Real changes (looting) still apply after the hold.
-constexpr uint64_t kDeathChangeHoldMs = 1500;
-struct HeldInventory
-{
-    uint64_t DueMs{};
-    NotifyInventoryChanges Message;
-};
-struct HeldEquipment
-{
-    uint64_t DueMs{};
-    NotifyEquipmentChanges Message;
-};
-std::vector<HeldInventory> s_heldInventory;
-std::vector<HeldEquipment> s_heldEquipment;
-bool s_replayingHeld{};
-
-bool DyingOrDead(Actor* apActor) noexcept
-{
-    // The owner's death/ragdoll can arrive before the local native death transition.
-    return apActor && (((apActor->actorState.flags1 >> 21) & 0xF) != 0 || apActor->IsDead() ||
-        ActorValueService::IsDeathPending(apActor->formID) || CorpseRagdollService::IsFollowingOwner(apActor->formID));
-}
-
-Actor* RemoteActorFor(World& aWorld, uint32_t aServerId, uint32_t aEpoch) noexcept
-{
-    auto view = aWorld.view<RemoteComponent, FormIdComponent>(entt::exclude<LocalComponent>);
-    for (auto entity : view)
-    {
-        const auto& remote = view.get<RemoteComponent>(entity);
-        if (remote.Id == aServerId && remote.OwnershipEpoch == aEpoch)
-            return Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
-    }
-    return nullptr;
-}
-} // namespace
-
-void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
-{
-    // Held death-time changes: drop removals cancelled by an equip of the same item for the
-    // same actor, then apply the rest once due.
-    if (!s_heldInventory.empty() || !s_heldEquipment.empty())
-    {
-        const auto now = GetTickCount64();
-        for (auto removal = s_heldInventory.begin(); removal != s_heldInventory.end();)
-        {
-            const auto& item = removal->Message.Item;
-            bool cancelled = false;
-            if (item.Count < 0)
-            {
-                for (auto equip = s_heldEquipment.begin(); equip != s_heldEquipment.end(); ++equip)
-                {
-                    if (equip->Message.ServerId == removal->Message.ServerId &&
-                        equip->Message.OwnershipEpoch == removal->Message.OwnershipEpoch && !equip->Message.Unequip &&
-                        equip->Message.ItemId == item.BaseId)
-                    {
-                        spdlog::info("Death-time change for server {:X}: item {:X} removed and re-equipped; left as is",
-                            removal->Message.ServerId, item.BaseId.BaseId);
-                        s_heldEquipment.erase(equip);
-                        cancelled = true;
-                        break;
-                    }
-                }
-            }
-            removal = cancelled ? s_heldInventory.erase(removal) : std::next(removal);
-        }
-        s_replayingHeld = true;
-        for (auto it = s_heldInventory.begin(); it != s_heldInventory.end();)
-        {
-            if (now < it->DueMs)
-            {
-                ++it;
-                continue;
-            }
-            const auto message = it->Message;
-            it = s_heldInventory.erase(it);
-            OnNotifyInventoryChanges(message);
-        }
-        for (auto it = s_heldEquipment.begin(); it != s_heldEquipment.end();)
-        {
-            if (now < it->DueMs)
-            {
-                ++it;
-                continue;
-            }
-            const auto message = it->Message;
-            it = s_heldEquipment.erase(it);
-            // An equip of something the actor already wears changes nothing but re-attaches it.
-            auto* pActor = RemoteActorFor(m_world, message.ServerId, message.OwnershipEpoch);
-            bool alreadyWorn = false;
-            if (pActor && !message.Unequip)
-            {
-                for (const auto& entry : pActor->GetActorInventory().Entries)
-                {
-                    if (entry.BaseId == message.ItemId && entry.IsWorn())
-                        alreadyWorn = true;
-                }
-            }
-            if (alreadyWorn)
-                spdlog::info("Death-time equip for server {:X}: item {:X} already worn; left as is", message.ServerId, message.ItemId.BaseId);
-            else
-                OnNotifyEquipmentChanges(message);
-        }
-        s_replayingHeld = false;
-    }
-    RunWeaponStateUpdates();
     m_world.GetNakedNpcGuard().Update();
+    if (!m_transport.IsConnected()) return;
+    RunWeaponStateUpdates();
 }
 
 void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEvent) noexcept
@@ -266,16 +164,7 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
 
 void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& acMessage) noexcept
 {
-    if (!s_replayingHeld && acMessage.OwnershipEpoch != 0 &&
-        DyingOrDead(RemoteActorFor(m_world, acMessage.ServerId, acMessage.OwnershipEpoch)))
-    {
-        s_heldInventory.push_back({GetTickCount64() + kDeathChangeHoldMs, acMessage});
-        spdlog::info("Death-time inventory held for server {:X}: item {:X}, count {}, quest {}",
-            acMessage.ServerId, acMessage.Item.BaseId.BaseId, acMessage.Item.Count, acMessage.Item.IsQuestItem);
-        return;
-    }
-    // Quest notifications also mutate the actor's inventory. Let the death hold run
-    // first; surviving messages still use the quest service when replayed.
+    if (m_world.GetNakedNpcGuard().Defer(acMessage)) return;
     if (m_world.ctx().at<QuestItemService>().HandleInventoryNotify(acMessage))
         return;
     if (acMessage.OwnershipEpoch != 0)
@@ -329,13 +218,7 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
 
 void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& acMessage) noexcept
 {
-    if (!s_replayingHeld && DyingOrDead(RemoteActorFor(m_world, acMessage.ServerId, acMessage.OwnershipEpoch)))
-    {
-        s_heldEquipment.push_back({GetTickCount64() + kDeathChangeHoldMs, acMessage});
-        spdlog::info("Death-time equipment held for server {:X}: item {:X}, unequip {}",
-            acMessage.ServerId, acMessage.ItemId.BaseId, acMessage.Unequip);
-        return;
-    }
+    if (m_world.GetNakedNpcGuard().Defer(acMessage)) return;
     auto view = m_world.view<RemoteComponent, FormIdComponent>(entt::exclude<LocalComponent>);
     const auto it = std::find_if(view.begin(), view.end(), [view, &acMessage](const entt::entity aEntity)
     {

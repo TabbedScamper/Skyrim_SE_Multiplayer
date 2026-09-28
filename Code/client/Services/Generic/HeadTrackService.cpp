@@ -17,9 +17,17 @@
 #include <Structs/Movement.h>
 
 #include <cmath>
+#include <chrono>
+#include <atomic>
+
 
 namespace
 {
+struct HeadTrackCost
+{
+    std::chrono::steady_clock::time_point Started{HostFrameCost::Begin()};
+    ~HeadTrackCost() { HostFrameCost::End(2, Started); }
+};
 constexpr float kPi = static_cast<float>(TiltedPhoques::Pi);
 constexpr float kTau = 2.f * kPi;
 constexpr uint64_t kStaleMs = 1000;
@@ -52,8 +60,6 @@ constexpr float kLookStrength = 0.75f; // TDM's default; retain native bone/cone
 // changes facial expressions, not the skeletal camera target.
 using TProcessTracking = void(Actor*, float, NiAVObject*);
 TProcessTracking* s_processTracking = nullptr;
-using TGetLookAt = bool(Actor*);
-TGetLookAt* s_getLookAt = nullptr;
 
 // References: https://github.com/alandtse/CommonLibSSE-NG/blob/master/include/RE/B/BSLookAtModifier.h
 // https://github.com/adamhynek/activeragdoll/blob/master/src/main.cpp (modifier phase)
@@ -106,6 +112,7 @@ struct GraphOverride
 };
 std::mutex s_graphLock;
 std::unordered_map<uint32_t, GraphOverride> s_graphOverrides;
+std::atomic<uint64_t> s_remoteTrackingPasses{}, s_remoteTargetsSubmitted{};
 
 void HookModifyLookAt(LookAtModifier* apModifier, const void* apContext, void* apOutput)
 {
@@ -116,15 +123,22 @@ void HookModifyLookAt(LookAtModifier* apModifier, const void* apContext, void* a
     // Observe the actual native modifier, not just a successful SetVariable.
     // Do not enlarge its cone to 180 degrees: TDM bounds the requested look.
     s_modifyLookAt(apModifier, apContext, apOutput);
+    HeadTrackCost cost;
+    if (!HostFrameCost::Session())
+        return;
     // The same generator-output gates used by 63278 before modifyInternal.
     const auto* pOutput = apOutput ? *static_cast<const uint8_t* const*>(apOutput) : nullptr;
     if (pCharacter && pOutput && *reinterpret_cast<const int32_t*>(pOutput + 4) > 2 &&
         *reinterpret_cast<const int16_t*>(pOutput + 0x32) > 0)
     {
         const auto now = GetTickCount64();
-        std::lock_guard lock(s_graphLock);
-        for (auto& [id, state] : s_graphOverrides)
+        std::unique_lock lock(s_graphLock, std::try_to_lock);
+        if (!lock)
+            return;
+        const auto it = s_graphOverrides.find(0x14);
+        if (it != s_graphOverrides.end())
         {
+            auto& state = it->second;
             if (state.Character == pCharacter && now - state.SubmittedAt <= kStaleMs)
             {
                 const auto& target = state.Target;
@@ -135,7 +149,6 @@ void HookModifyLookAt(LookAtModifier* apModifier, const void* apContext, void* a
                     std::abs(apModifier->TargetLocation[1] - target.y) < 0.1f &&
                     std::abs(apModifier->TargetLocation[2] - target.z) < 0.1f)
                     state.AppliedAt = now;
-                break;
             }
         }
     }
@@ -230,7 +243,7 @@ NiPoint3 CameraTarget(const Actor* apActor, const NiPoint3& aHead, const glm::ve
     return target;
 }
 
-void RestoreGraph(Actor* apActor) noexcept
+void RestoreGraph(Actor* apActor, bool aClearTarget = true) noexcept
 {
     GraphOverride previous;
     {
@@ -251,7 +264,7 @@ void RestoreGraph(Actor* apActor) noexcept
     apActor->animationGraphHolder.SetVariableBool(&s_spine, previous.Spine);
     apActor->actorState.flags2 = (apActor->actorState.flags2 & ~(1u << 3)) |
         (previous.HeadTracking ? (1u << 3) : 0u);
-    if (apActor->currentProcess && !NativeTargetWins(apActor))
+    if (aClearTarget && apActor->currentProcess && !NativeTargetWins(apActor))
     {
         // 39889 / 140723580 clears the native channel's target-present bit.
         // Remote actors do not run native targeting to clear a stale camera
@@ -271,35 +284,21 @@ bool ApplyCameraTarget(Actor* apActor)
     if (apActor == PlayerCharacter::Get())
     {
         if (!LocalCameraLook(look, false))
-        {
-            RestoreGraph(apActor);
             return false;
-        }
     }
     else
     {
-        const auto* pExtension = apActor->GetExtension();
-        if (!pExtension || !pExtension->IsRemotePlayer() || !CanTrack(apActor) || NativeTargetWins(apActor))
-        {
-            RestoreGraph(apActor);
+        // Restore the remote-player branch present at 25fa030d. This runs
+        // only from native ProcessTracking, never from the 37964 getter.
+        const auto* extension = apActor->GetExtension();
+        if (!extension || !extension->IsRemotePlayer() || !CanTrack(apActor) || NativeTargetWins(apActor))
             return false;
-        }
-        bool present = false;
-        {
-            std::lock_guard lock(s_presentedLock);
-            const auto it = s_presented.find(apActor->formID);
-            if (it != s_presented.end() && it->second.Present &&
-                GetTickCount64() - it->second.ReceivedAt <= kStaleMs)
-            {
-                look = it->second.Look;
-                present = true;
-            }
-        }
-        if (!present)
-        {
-            RestoreGraph(apActor);
+        std::lock_guard lock(s_presentedLock);
+        const auto it = s_presented.find(apActor->formID);
+        if (it == s_presented.end() || !it->second.Present ||
+            GetTickCount64() - it->second.ReceivedAt > kStaleMs)
             return false;
-        }
+        look = it->second.Look;
     }
 
     // TDM's disable mode yields when the camera is behind the character.
@@ -331,6 +330,8 @@ bool ApplyCameraTarget(Actor* apActor)
         return false;
     }
     previous.HeadTracking = (apActor->actorState.flags2 & (1u << 3)) != 0;
+    const bool needsNPC = !previous.IsNPC;
+    const bool needsSpine = previous.Spine;
     BSAnimationGraphManager* pManager{};
     if (!apActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
     {
@@ -367,8 +368,8 @@ bool ApplyCameraTarget(Actor* apActor)
     // TDM exposes this as an option. Use head/neck only on both peers: the
     // remote pose stream owns the spine and excludes only head/neck bones.
     // Allocating pitch to the spine here would discard it at pose copy.
-    if (!apActor->animationGraphHolder.SetVariableBool(&s_isNPC, true) ||
-        !apActor->animationGraphHolder.SetVariableBool(&s_spine, false))
+    if ((needsNPC && !apActor->animationGraphHolder.SetVariableBool(&s_isNPC, true)) ||
+        (needsSpine && !apActor->animationGraphHolder.SetVariableBool(&s_spine, false)))
     {
         RestoreGraph(apActor);
         return false;
@@ -380,26 +381,25 @@ bool ApplyCameraTarget(Actor* apActor)
     return true;
 }
 
-bool HookGetLookAt(Actor* apActor)
-{
-    // Research handoff for docs/REFERENCE_RESEARCH.md (outside this task's
-    // write scope): 37964 / 1406AF230 reads MiddleHighProcess+326. Its sole
-    // caller, ActorLookAtChannel 42782 / 1407C6FF0, supplies bHeadTracking.
-    // Manager update 63358 / 140BC0680 samples channels before copying them
-    // into each graph and before behavior evaluation (63587 / 140BCEDB0).
-    // Unlike ProcessTracking this also runs for our remote graph-only path,
-    // after received animation variables have been restored. Reapply the
-    // native point target/IsNPC here, without re-enabling remote AI.
-    ApplyCameraTarget(apActor);
-    return s_getLookAt(apActor);
-}
-
 void HookProcessTracking(Actor* apActor, float aDelta, NiAVObject* apObject)
 {
-    // Keep the override stable while active, as TDM does. RestoreGraph only
-    // runs when yielding (first person, native target, combat, stale packet).
+    HeadTrackCost cost; // Inclusive native pass, restoration and camera work.
+    // Baseline order: native tracking sees the original flags and retains
+    // priority. Camera overrides follow the native pass for both players.
+    if (apActor)
+        RestoreGraph(apActor, false);
     s_processTracking(apActor, aDelta, apObject);
-    ApplyCameraTarget(apActor);
+    const bool applied = ApplyCameraTarget(apActor);
+    if (const auto session = HostFrameCost::Session(); session && apActor)
+    {
+        const auto* extension = apActor->GetExtension();
+        if (extension && extension->IsRemotePlayer())
+        {
+            s_remoteTrackingPasses.fetch_add(1, std::memory_order_relaxed);
+            if (applied)
+                s_remoteTargetsSubmitted.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 static TiltedPhoques::Initializer s_headTrackHooks([]()
@@ -409,9 +409,6 @@ static TiltedPhoques::Initializer s_headTrackHooks([]()
     POINTER_SKYRIMSE(TProcessTracking, s_tracking, 38009);
     s_processTracking = s_tracking.Get();
     TP_HOOK(&s_processTracking, HookProcessTracking);
-    POINTER_SKYRIMSE(TGetLookAt, s_lookAt, 37964);
-    s_getLookAt = s_lookAt.Get();
-    TP_HOOK(&s_getLookAt, HookGetLookAt);
     // BSLookAtModifier::modify, vtable slot 23, ID 63278 / 140BBA0C0.
     // PLANCK also intercepts this phase; offsets above come from this exe.
     POINTER_SKYRIMSE(TModifyLookAt, s_modify, 63278);
@@ -430,6 +427,7 @@ HeadTrackService::HeadTrackService(World& aWorld, entt::dispatcher& aDispatcher)
 
 void HeadTrackService::FillLocalMovement(Movement& aMovement) noexcept
 {
+    HeadTrackCost cost;
     glm::vec2 look{};
     aMovement.HasLookDirection = LocalCameraLook(look, true);
     aMovement.LookDirection = 0;
@@ -452,8 +450,7 @@ bool HeadTrackService::IsCameraTracking(const Actor* apActor) noexcept
     const auto it = s_graphOverrides.find(apActor->formID);
     return it != s_graphOverrides.end() && it->second.ActorPtr == apActor &&
         it->second.Process == apActor->currentProcess &&
-        it->second.AppliedAt != 0 &&
-        GetTickCount64() - it->second.AppliedAt <= kStaleMs;
+        GetTickCount64() - it->second.SubmittedAt <= kStaleMs;
 }
 
 void HeadTrackService::OnMovement(const ServerReferencesMoveRequest& acMessage) noexcept
@@ -535,17 +532,36 @@ void HeadTrackService::OnDisconnected(const DisconnectedEvent&) noexcept
     m_tracks.clear();
     std::lock_guard lock(s_presentedLock);
     s_presented.clear();
-    // RestoreGraph runs on each actor's next tracking/channel pass. Do not
+    // RestoreGraph runs on each actor's next native tracking pass. Do not
     // dereference engine actors from the network disconnect callback.
 }
 
 void HeadTrackService::OnUpdate(const UpdateEvent&) noexcept
 {
+    HeadTrackCost cost;
     const auto now = GetTickCount64();
+    if (const auto session = HostFrameCost::Session(); session)
+    {
+        static uint64_t lastSession{}, next{};
+        if (lastSession != session)
+        {
+            lastSession = session;
+            next = now + 5000;
+            s_remoteTrackingPasses.exchange(0, std::memory_order_relaxed);
+            s_remoteTargetsSubmitted.exchange(0, std::memory_order_relaxed);
+        }
+        if (now >= next)
+        {
+            spdlog::info("Head track phase: remotePasses={} targetsSubmitted={} wallMs={} (interval, native 38009 only, zero means no native opportunity)",
+                s_remoteTrackingPasses.exchange(0, std::memory_order_relaxed),
+                s_remoteTargetsSubmitted.exchange(0, std::memory_order_relaxed), now);
+            next = now + 5000;
+        }
+    }
     static uint64_t s_pitchLoggedAt{};
     glm::vec2 look{};
     auto* pPlayer = PlayerCharacter::Get();
-    if (pPlayer && now - s_pitchLoggedAt >= 2000 && ReadCameraLook(look, true) &&
+    if (HostFrameCost::Session() && pPlayer && now - s_pitchLoggedAt >= 2000 && ReadCameraLook(look, true) &&
         std::abs(look.x) > kPi / 6.f)
     {
         auto head = pPlayer->position;
@@ -601,7 +617,7 @@ void HeadTrackService::OnUpdate(const UpdateEvent&) noexcept
         });
         for (auto& [id, state] : s_graphOverrides)
         {
-            if (id == 0x14 || now - state.LoggedAt < 2000 ||
+            if (!HostFrameCost::Session() || id == 0x14 || now - state.LoggedAt < 2000 ||
                 now - state.SubmittedAt > kStaleMs || std::abs(state.Look.x) <= kPi / 6.f)
                 continue;
             spdlog::info("Head track remote {:X}: pitch {} target {:.0f},{:.0f},{:.0f} applied={}",

@@ -391,6 +391,9 @@ public:
 };
 
 static_assert(offsetof(Actor, currentProcess) == 0xF8);
+// CommonLib Actor::boolBits (SE 0x0E0, +8 on this runtime): kWasInFrustrum = 1 << 21 is the latched per-frame
+// camera-cull result the engine's off-screen shortcuts read.
+static_assert(offsetof(Actor, flags1) == 0xE8);
 static_assert(offsetof(Actor, flags1) == 0xE8);
 static_assert(offsetof(Actor, actorValueOwner) == 0xB8);
 static_assert(offsetof(Actor, actorState) == 0xC0);

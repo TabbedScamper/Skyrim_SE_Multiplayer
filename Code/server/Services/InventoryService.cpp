@@ -10,14 +10,80 @@
 #include <Messages/RequestEquipmentChanges.h>
 #include <Messages/NotifyEquipmentChanges.h>
 #include <Messages/DrawWeaponRequest.h>
+#include <Messages/RequestNpcWorn.h>
+#include <Messages/NotifyNpcWorn.h>
+#include <Messages/RequestNpcLoot.h>
+#include <Messages/NotifyNpcLoot.h>
+
+namespace
+{
+struct NpcWornCache { NpcWornData Data; };
+}
+struct NpcInventoryRelay
+{
+    World& WorldRef;
+    entt::scoped_connection WornConnection, LootConnection;
+
+    NpcInventoryRelay(World& world, entt::dispatcher& dispatcher) : WorldRef(world)
+    {
+        WornConnection = dispatcher.sink<PacketEvent<RequestNpcWorn>>().connect<&NpcInventoryRelay::Worn>(this);
+        LootConnection = dispatcher.sink<PacketEvent<RequestNpcLoot>>().connect<&NpcInventoryRelay::Loot>(this);
+    }
+    void Worn(const PacketEvent<RequestNpcWorn>& event)
+    {
+        const auto& request = event.Packet;
+        if (!event.pPlayer || !request.Valid()) return;
+        const auto entity = static_cast<entt::entity>(request.ServerId);
+        const auto* owner = WorldRef.try_get<OwnerComponent>(entity);
+        const auto* character = WorldRef.try_get<CharacterComponent>(entity);
+        const auto* cell = WorldRef.try_get<CellIdComponent>(entity);
+        if (!owner || !owner->GetOwner() || !character || character->IsPlayer() || !cell ||
+            owner->OwnershipEpoch != request.OwnershipEpoch) return;
+        auto* party = WorldRef.GetPartyService().GetPlayerParty(event.pPlayer);
+        if (!party || event.pPlayer->GetParty().JoinedPartyId != owner->GetOwner()->GetParty().JoinedPartyId) return;
+        if (!request.Sequence)
+        {
+            if (!event.pPlayer->GetCellComponent().IsInRange(*cell, character->IsDragon())) return;
+            if (auto* cached = WorldRef.try_get<NpcWornCache>(entity); cached && cached->Data.OwnershipEpoch == request.OwnershipEpoch)
+            {
+                NotifyNpcWorn reply; static_cast<NpcWornData&>(reply) = cached->Data; event.pPlayer->Send(reply);
+            }
+            return;
+        }
+        if (owner->GetOwner() != event.pPlayer) return;
+        auto& cache = WorldRef.get_or_emplace<NpcWornCache>(entity);
+        if (cache.Data.OwnershipEpoch == request.OwnershipEpoch && cache.Data.Sequence >= request.Sequence) return;
+        cache.Data = request;
+        NotifyNpcWorn notify; static_cast<NpcWornData&>(notify) = request;
+        for (auto* member : party->Members)
+            if (member != event.pPlayer && member->GetCellComponent().IsInRange(*cell, character->IsDragon())) member->Send(notify);
+    }
+    void Loot(const PacketEvent<RequestNpcLoot>& event)
+    {
+        // The transaction adapter is disabled on both ends. Do not mutate stock,
+        // trust a shadow lease, or leave a caller waiting for an owner response.
+        if (!event.pPlayer || !event.Packet.Valid() ||
+            (event.Packet.Op != NpcLootOp::Fetch && event.Packet.Op != NpcLootOp::Transfer)) return;
+        NotifyNpcLoot reply;
+        static_cast<NpcLootData&>(reply) = event.Packet;
+        reply.Op = event.Packet.Op == NpcLootOp::Fetch ? NpcLootOp::FetchResult : NpcLootOp::TransferResult;
+        reply.Accepted = reply.ContentsKnown = false; reply.Contents = {};
+        event.pPlayer->Send(reply);
+    }
+};
 
 InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
+    , m_npcRelay(std::make_unique<NpcInventoryRelay>(aWorld, aDispatcher))
 {
+    // Constructing another context value here invalidates EnTT's in-progress
+    // InventoryService insertion. Keep the relay alive with its owning service.
     m_inventoryChangeConnection = aDispatcher.sink<PacketEvent<RequestInventoryChanges>>().connect<&InventoryService::OnInventoryChanges>(this);
     m_equipmentChangeConnection = aDispatcher.sink<PacketEvent<RequestEquipmentChanges>>().connect<&InventoryService::OnEquipmentChanges>(this);
     m_drawWeaponConnection = aDispatcher.sink<PacketEvent<DrawWeaponRequest>>().connect<&InventoryService::OnWeaponDrawnRequest>(this);
 }
+
+InventoryService::~InventoryService() = default;
 
 void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChanges>& acMessage) noexcept
 {

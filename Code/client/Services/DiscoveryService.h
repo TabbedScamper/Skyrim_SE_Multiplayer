@@ -88,6 +88,10 @@ private:
 
     //! @brief Cached actor forms detected in the previous frame.
     Set<uint32_t> m_forms;
+    Map<uint32_t, uint64_t> m_seenForms;
+    uint64_t m_census{};
+    Vector<uint32_t> m_addedForms;
+    Vector<uint32_t> m_removedForms;
     /**
      * The center grid coordinates are the coordinates of the cell in the cell grid
      * where the cells around it in a 5 by 5 grid (by default) are loaded.

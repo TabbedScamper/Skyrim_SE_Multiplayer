@@ -1,4 +1,5 @@
 #pragma once
+#include <Messages/Harness.h>
 #include <Messages/NotifyPlayerControlState.h>
 #include <Messages/NotifyBusyLock.h>
 
@@ -81,6 +82,10 @@
 
 #include <Messages/NotifyDialogueListen.h>
 #include <Messages/NotifySharedDrop.h>
+#include <Messages/NotifyWorldState.h>
+
+#include <Messages/NotifyNpcWorn.h>
+#include <Messages/NotifyNpcLoot.h>
 
 using TiltedPhoques::UniquePtr;
 
@@ -90,7 +95,7 @@ struct ServerMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<NotifyPlayerControlState, NotifySharedDrop, NotifyDialogueListen, NotifyBusyLock, NotifyPlayerCombatState, NotifyQuestItems, NotifyScriptedCamera, NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<NotifyHarness, NotifyNpcWorn, NotifyNpcLoot, NotifyWorldState, NotifyPlayerControlState, NotifySharedDrop, NotifyDialogueListen, NotifyBusyLock, NotifyPlayerCombatState, NotifyQuestItems, NotifyScriptedCamera, NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
             NotifyScriptedActorState, AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate, NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite,
             NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
             NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,

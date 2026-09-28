@@ -22,6 +22,23 @@
 namespace
 {
 Console::Setting fGoldLossFactor{"Gameplay:fGoldLossFactor", "Factor of the amount of gold lost on death", 0.0f};
+
+bool SnapshotEligible(World& aWorld, Player* apPlayer, entt::entity aEntity)
+{
+    const bool allowed = aWorld.GetCharacterService().CanReplicateTo(apPlayer, aEntity);
+    const auto& actor = aWorld.get<CharacterComponent>(aEntity);
+    if (!actor.IsPlayer() && aWorld.GetPartyService().IsPlayerLeader(apPlayer))
+    {
+        const auto& owner = aWorld.get<OwnerComponent>(aEntity);
+        const auto* simulator = owner.GetOwner();
+        const auto& cell = aWorld.get<CellIdComponent>(aEntity);
+        spdlog::info("Orphan snapshot: actor {:X} leader={} owner={} released={} actorEpoch={} cell={:X}:{:X} packetAgeMs={} replicate={}",
+            World::ToInteger(aEntity), apPlayer->GetId(), simulator ? simulator->GetId() : 0,
+            owner.Released, owner.PartyEpoch, cell.Cell.ModId, cell.Cell.BaseId,
+            simulator ? GameServer::Get()->GetTick() - simulator->LastPacketTick : 0, allowed);
+    }
+    return allowed;
+}
 }
 
 PlayerService::PlayerService(World& aWorld, entt::dispatcher& aDispatcher) noexcept
@@ -58,15 +75,12 @@ void PlayerService::HandleGridCellShift(const PacketEvent<ShiftGridCellRequest>&
     pPlayer->SetCellComponent(cell);
 
     m_world.GetDispatcher().trigger(PlayerLeaveCellEvent(oldCell));
+    m_world.GetCharacterService().ReconcileCellOwnership(pPlayer);
 
     auto characterView = m_world.view<CellIdComponent, CharacterComponent, OwnerComponent>();
     for (auto character : characterView)
     {
-        const auto& ownedComponent = characterView.get<OwnerComponent>(character);
         const auto& characterCellComponent = characterView.get<CellIdComponent>(character);
-
-        if (ownedComponent.GetOwner() == pPlayer)
-            continue;
 
         const auto& characterComponent = characterView.get<CharacterComponent>(character);
         // An actor's parent cell can be temporary and absent from the client's cell list.
@@ -77,6 +91,9 @@ void PlayerService::HandleGridCellShift(const PacketEvent<ShiftGridCellRequest>&
         {
             continue;
         }
+
+        if (!SnapshotEligible(m_world, pPlayer, character))
+            continue;
 
         CharacterSpawnRequest spawnMessage;
         CharacterService::Serialize(m_world, character, &spawnMessage);
@@ -102,6 +119,7 @@ void PlayerService::HandleExteriorCellEnter(const PacketEvent<EnterExteriorCellR
         }
 
         pPlayer->SetCellComponent(cell);
+        m_world.GetCharacterService().ReconcileCellOwnership(pPlayer);
 
         SendPlayerCellChanged(pPlayer);
     }
@@ -119,6 +137,7 @@ void PlayerService::HandleInteriorCellEnter(const PacketEvent<EnterInteriorCellR
     pPlayer->SetCellComponent(cell);
 
     m_world.GetDispatcher().trigger(PlayerLeaveCellEvent(oldCell));
+    m_world.GetCharacterService().ReconcileCellOwnership(pPlayer);
 
     if (pPlayer->GetCharacter())
     {
@@ -133,12 +152,11 @@ void PlayerService::HandleInteriorCellEnter(const PacketEvent<EnterInteriorCellR
     auto characterView = m_world.view<CellIdComponent, CharacterComponent, OwnerComponent>();
     for (auto character : characterView)
     {
-        const auto& ownedComponent = characterView.get<OwnerComponent>(character);
-
-        if (ownedComponent.GetOwner() == pPlayer)
-            continue;
 
         if (message.CellId != characterView.get<CellIdComponent>(character).Cell)
+            continue;
+
+        if (!SnapshotEligible(m_world, pPlayer, character))
             continue;
 
         CharacterSpawnRequest spawnMessage;

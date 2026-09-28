@@ -31,6 +31,10 @@ protected:
 
     void ToggleGameWeatherSystem(bool aToggle) noexcept;
     void SetCachedWeather() noexcept;
+    // Leader: send weather + sky state when it changes (and every 500 ms during a blend).
+    void SendSkyState(uint32_t aWeatherId) noexcept;
+    // Follower: hold the local sky on the host's blend and wind.
+    void ApplyHostSky() noexcept;
 
 private:
     World& m_world;
@@ -42,6 +46,19 @@ private:
     * For non-leaders, it is used to reapply the server weather if it changes.
     */
     uint32_t m_cachedWeatherId{};
+
+    // Leader: last sky state sent. Follower: host sky state being held.
+    struct SkyState
+    {
+        bool Valid{};
+        uint32_t LastWeatherId{};
+        float Percent{1.f};
+        float WindSpeed{};
+        float WindAngle{};
+    };
+    SkyState m_sentSky{};
+    uint64_t m_nextSkySendMs{};
+    SkyState m_hostSky{};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_disconnectConnection;

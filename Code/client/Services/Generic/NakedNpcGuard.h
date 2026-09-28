@@ -1,65 +1,80 @@
 #pragma once
 
 #include <Structs/Inventory.h>
+#include <Messages/NotifyInventoryChanges.h>
+#include <Messages/NotifyEquipmentChanges.h>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
+#include <variant>
 
 struct World;
 struct AssignCharacterResponse;
 struct CharacterSpawnRequest;
+struct NotifyNpcWorn;
 struct NotifyOwnershipTransfer;
-struct NotifyEquipmentChanges;
-struct NotifyInventoryChanges;
 struct EquipmentChangeEvent;
 struct InventoryChangeEvent;
 struct DisconnectedEvent;
 
 struct NakedNpcGuard
 {
-    NakedNpcGuard(World& aWorld, entt::dispatcher& aDispatcher) noexcept;
-    // Run after InventoryService has replayed its held death-time changes.
+    NakedNpcGuard(World&, entt::dispatcher&) noexcept;
     void Update() noexcept;
+    void UpdateNative() noexcept;
+    void Reset() noexcept;
+    void WornSnapshot(uint32_t, uint32_t, const Inventory&) noexcept;
+    // Route remote NPC deltas through one ordered main-thread queue, before
+    // quest-item interception. Returns false for players and local inventory.
+    bool Defer(const NotifyInventoryChanges&) noexcept;
+    bool Defer(const NotifyEquipmentChanges&) noexcept;
 
 private:
-    struct WornSet
+    struct Target { uint32_t Form{}, Id{}, Epoch{}; bool Local{}; };
+    struct Snapshot { uint32_t Id{}, Epoch{}; uint64_t Sequence{}; Inventory Worn; bool Contents{}; };
+    struct Transfer { uint32_t Id{}, Epoch{}; };
+    struct StockChange { NotifyInventoryChanges Message; int64_t OwnerCount{}; bool Known{}; };
+    using Change = std::variant<StockChange, NotifyEquipmentChanges>;
+    using Input = std::variant<Snapshot, Transfer, NotifyInventoryChanges, NotifyEquipmentChanges>;
+    struct State
     {
         uint32_t Epoch{};
-        bool Known{}; // A known empty set means intentionally unequipped.
+        uint64_t Sequence{}, SettleUntil{}, NextCheck{}, LastSeen{}, RootSince{};
+        const void* Root{}; // Comparison only; reacquire live objects each frame.
         Inventory Worn;
-        Vector<GameId> FormOnly; // Equipment deltas do not identify an extra-data instance.
-        uint64_t SettleUntil{};
-        uint64_t LastSeen{};
+        // Absolute owner stock plus ordered deltas disambiguate a delayed
+        // delivery from a genuinely new second item. No native pointers retained.
+        Inventory OwnerStock;
+        Inventory FailedSupply; // Stop repeating an addition the native reader could not identify.
+        Vector<GameId> FormOnly;
+        Vector<Change> Changes;
+        bool Complete{}, StockKnown{}, Unmapped{}, Observe{}, Held{}, LoggedWait{};
+        uint8_t Life{0xff};
+        // Worn sequence held when this copy died, and until when to wait for the owner's post-death list.
+        uint64_t DeathSequence{}, DeathHoldUntil{};
     };
-    struct Copy
-    {
-        entt::entity Entity{entt::null};
-        uint32_t ServerId{};
-        uint32_t Epoch{};
-        uint64_t NextCheck{};
-        uint64_t LastSeen{};
-    };
-
-    void Remember(uint32_t aServerId, uint32_t aEpoch, const Inventory& acInventory) noexcept;
-    void Equipment(uint32_t aServerId, uint32_t aEpoch, GameId aItem, bool aUnequip) noexcept;
-    void Removed(uint32_t aServerId, uint32_t aEpoch, const Inventory::Entry& acItem) noexcept;
-    void OnAssign(const AssignCharacterResponse& acMessage) noexcept;
-    void OnSpawn(const CharacterSpawnRequest& acMessage) noexcept;
-    void OnTransfer(const NotifyOwnershipTransfer& acMessage) noexcept;
-    void OnEquipment(const NotifyEquipmentChanges& acMessage) noexcept;
-    void OnInventory(const NotifyInventoryChanges& acMessage) noexcept;
-    void OnLocalEquipment(const EquipmentChangeEvent& acEvent) noexcept;
-    void OnLocalInventory(const InventoryChangeEvent& acEvent) noexcept;
+    bool RemoteNpc(uint32_t, uint32_t) const noexcept;
+    void Push(Input) noexcept;
+    void OnAssign(const AssignCharacterResponse&) noexcept;
+    void OnSpawn(const CharacterSpawnRequest&) noexcept;
+    void OnWorn(const NotifyNpcWorn&) noexcept;
+    void OnTransfer(const NotifyOwnershipTransfer&) noexcept;
     void OnDisconnected(const DisconnectedEvent&) noexcept;
+    void ApplyInput(const Input&, uint64_t) noexcept;
 
     World& m_world;
-    std::unordered_map<uint32_t, WornSet> m_wornSets;
-    std::unordered_map<uint32_t, Copy> m_copies;
-    uint64_t m_nextScan{};
-    entt::scoped_connection m_assignConnection;
-    entt::scoped_connection m_spawnConnection;
-    entt::scoped_connection m_transferConnection;
-    entt::scoped_connection m_equipmentConnection;
-    entt::scoped_connection m_inventoryConnection;
-    entt::scoped_connection m_localEquipmentConnection;
-    entt::scoped_connection m_localInventoryConnection;
-    entt::scoped_connection m_disconnectConnection;
+    // Only value transfer uses this lock. Never held across native calls.
+    std::mutex m_lock;
+    Vector<Input> m_input;
+    Vector<Target> m_targets;
+    bool m_active{};
+    uint64_t m_session{}, m_nextTargets{};
+    std::atomic_uint64_t m_generation{1};
+    // The remaining fields belong exclusively to HookMainLoop.
+    uint64_t m_nativeGeneration{}, m_nextHeartbeat{};
+    uint32_t m_checkedActors{};
+    size_t m_cursor{};
+    std::unordered_map<uint32_t, State> m_states;
+    entt::scoped_connection m_assign, m_spawn, m_worn, m_transfer;
+    entt::scoped_connection m_disconnect;
 };

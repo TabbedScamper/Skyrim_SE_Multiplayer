@@ -11,6 +11,7 @@
 
 #include "utils/ComUtils.h"
 #include "utils/Registry.h"
+#include "../../client/Services/FarmMode.h"
 
 namespace oobe
 {
@@ -84,6 +85,7 @@ bool SelectInstall(bool aForceSelect)
     bool result = true;
     if (!std::filesystem::exists(titlePath) || !std::filesystem::exists(exePath) || aForceSelect)
     {
+        if (FarmMode::Enabled()) return false;
         constexpr int kSelectionAttempts = 3;
 
         for (int i = 0; i < kSelectionAttempts; i++)

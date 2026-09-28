@@ -52,6 +52,12 @@ void TESNPC::Serialize(String* apSaveBuffer) const noexcept
 
 bool TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
 {
+    // Unchanged static NPC bases have no appearance payload. In particular,
+    // spawning an FF copy must not run LoadGame on its shared base for a no-op.
+    // A body-weight trailer is nonempty and still takes the normal path below.
+    if (acBuffer.empty())
+        return aChangeFlags == 0;
+
     // Network appearance must never load into the local player or its face template.
     // Checking the actor's ref ID alone does not protect a replica using the same base.
     auto* pPlayer = PlayerCharacter::Get();

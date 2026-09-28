@@ -81,8 +81,22 @@
 #include <Games/TES.h>
 #include <Combat/CombatController.h>
 
+
 namespace
 {
+struct PlayerFrameCost
+{
+    bool Enabled;
+    std::chrono::steady_clock::time_point Started;
+    explicit PlayerFrameCost(bool aEnabled) : Enabled(aEnabled),
+        Started(aEnabled ? HostFrameCost::Begin() : std::chrono::steady_clock::time_point{}) {}
+    ~PlayerFrameCost()
+    {
+        if (Enabled)
+            HostFrameCost::End(7, Started);
+    }
+};
+
 // This binding has identity, but must never consume a follower's presentation.
 struct LeaderNativeClaim
 {
@@ -864,6 +878,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 
 void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept
 {
+    Utils::InitializeEntityIndex(m_world);
     // Go through all the forms that were previously detected
     auto view = m_world.view<FormIdComponent>(entt::exclude<ObjectComponent>);
     Vector<entt::entity> entities(view.begin(), view.end());
@@ -1352,14 +1367,103 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
 
     for (const auto& [serverId, update] : acMessage.Updates)
     {
-        auto itor = std::find_if(std::begin(view), std::end(view), [serverId = serverId, view](entt::entity entity) { return view.get<RemoteComponent>(entity).Id == serverId; });
+        const auto itor = Utils::FindMovementEntityByServerId(serverId);
 
-        if (itor == std::end(view))
+        if (!itor)
             continue;
 
         auto& interpolationComponent = view.get<InterpolationComponent>(*itor);
         auto& animationComponent = view.get<RemoteAnimationComponent>(*itor);
         const auto& movement = update.UpdatedMovement;
+
+        // Read-only interval diagnostics, per player/ownership lifetime. No
+        // event deduplication by name: repeated same-tick actions can be valid.
+        if (const auto session = HostFrameCost::Session(); session && m_world.all_of<PlayerComponent>(*itor))
+        {
+            struct StreamStats
+            {
+                uint32_t Epoch{};
+                uint64_t Start{}, LastReceipt{}, LastTick{}, LastPose{};
+                uint64_t Packets{}, ReceiptTotal{}, ReceiptMax{}, TickTotal{}, TickCount{};
+                uint64_t Poses{}, PoseGapMax{}, RepeatedPoses{}, Reordered{}, Actions{}, RepeatedActions{};
+                uint64_t AgeMax{}, AgeOver150{}, AgeOver300{}, FutureTicks{};
+            };
+            static std::unordered_map<uint32_t, StreamStats> streams;
+            static uint64_t lastSession{}, nextPrune{};
+            if (lastSession != session)
+            {
+                streams.clear();
+                lastSession = session;
+                nextPrune = 0;
+            }
+            const auto received = GetTickCount64();
+            if (received >= nextPrune)
+            {
+                std::erase_if(streams, [received](const auto& entry) { return received - entry.second.LastReceipt > 10000; });
+                nextPrune = received + 5000;
+            }
+            auto& stats = streams[serverId];
+            const auto epoch = view.get<RemoteComponent>(*itor).OwnershipEpoch;
+            if (!stats.Start || stats.Epoch != epoch)
+                stats = StreamStats{epoch, received};
+            if (stats.LastReceipt)
+            {
+                const auto gap = received - stats.LastReceipt;
+                stats.ReceiptTotal += gap;
+                stats.ReceiptMax = (std::max)(stats.ReceiptMax, gap);
+            }
+            if (stats.LastTick && acMessage.Tick > stats.LastTick)
+            {
+                stats.TickTotal += acMessage.Tick - stats.LastTick;
+                ++stats.TickCount;
+            }
+            else if (stats.LastTick)
+                ++stats.Reordered;
+            const auto clockTick = m_transport.GetClock().GetCurrentTick();
+            if (clockTick >= acMessage.Tick)
+            {
+                const auto age = clockTick - acMessage.Tick;
+                stats.AgeMax = (std::max)(stats.AgeMax, age);
+                stats.AgeOver150 += age > 150 ? 1 : 0;
+                stats.AgeOver300 += age > 300 ? 1 : 0;
+            }
+            else
+                ++stats.FutureTicks;
+            stats.LastReceipt = received;
+            stats.LastTick = acMessage.Tick;
+            ++stats.Packets;
+            if (!update.EvaluatedPose.Bones.empty())
+            {
+                const auto poseTick = update.EvaluatedPose.SourceTick;
+                if (poseTick && poseTick == stats.LastPose)
+                    ++stats.RepeatedPoses;
+                if (stats.LastPose && poseTick > stats.LastPose)
+                    stats.PoseGapMax = (std::max)(stats.PoseGapMax, poseTick - stats.LastPose);
+                stats.LastPose = poseTick;
+                ++stats.Poses;
+            }
+            const ActionEvent* previous = &animationComponent.LastReceivedAction;
+            for (const auto& action : update.ActionEvents)
+            {
+                stats.RepeatedActions += action == *previous ? 1 : 0;
+                previous = &action;
+                ++stats.Actions;
+            }
+            if (received - stats.Start >= 5000)
+            {
+                // Join receive evidence to the form-keyed playback/action logs
+                // without a heavyweight game_snapshot during a marked hitch.
+                const auto* form = m_world.try_get<FormIdComponent>(*itor);
+                spdlog::info("Remote player stream: id={} form={:X} epoch={} sourceTick={} windowMs={} packets={} meanReceiptMs={:.2f} maxReceiptMs={} meanSourceMs={:.2f} poses={} maxPoseGapMs={} repeatedPoses={} nonIncreasingTicks={} actions={} consecutiveIdenticalActions={} delayMs={} maxClockAgeMs={} ageOver150={} ageOver300={} futureClockTicks={} wallMs={}",
+                    serverId, form ? form->Id : 0, epoch, acMessage.Tick, received - stats.Start, stats.Packets,
+                    stats.Packets > 1 ? double(stats.ReceiptTotal) / (stats.Packets - 1) : 0.0,
+                    stats.ReceiptMax, stats.TickCount ? double(stats.TickTotal) / stats.TickCount : 0.0,
+                    stats.Poses, stats.PoseGapMax, stats.RepeatedPoses, stats.Reordered, stats.Actions,
+                    stats.RepeatedActions, GetPresentationDelayMs(), stats.AgeMax, stats.AgeOver150,
+                    stats.AgeOver300, stats.FutureTicks, received);
+                stats = StreamStats{epoch, received};
+            }
+        }
 
         if (acMessage.Tick >= interpolationComponent.AuthorityTick)
         {
@@ -1610,7 +1714,7 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
 
             m_world.remove<LocalAnimationComponent, LocalComponent>(cEntity);
             if (m_world.all_of<RemoteComponent>(cEntity))
-                m_world.get<RemoteComponent>(cEntity).OwnershipEpoch = acMessage.OwnershipEpoch;
+                m_world.patch<RemoteComponent>(cEntity, [&](auto& remote) { remote.OwnershipEpoch = acMessage.OwnershipEpoch; });
             else if (cachedRefId != 0)
                 m_world.emplace<RemoteComponent>(cEntity, acMessage.ServerId, cachedRefId, acMessage.OwnershipEpoch);
 
@@ -1657,9 +1761,9 @@ void CharacterService::OnOwnershipTransfer(const NotifyOwnershipTransfer& acMess
         if (!m_world.all_of<RemoteAnimationComponent>(cEntity))
             AnimationSystem::Setup(m_world, cEntity);
     }
-    else if (auto* pRemoteComponent = m_world.try_get<RemoteComponent>(cEntity))
+    else if (m_world.all_of<RemoteComponent>(cEntity))
     {
-        pRemoteComponent->OwnershipEpoch = acMessage.OwnershipEpoch;
+        m_world.patch<RemoteComponent>(cEntity, [&](auto& remote) { remote.OwnershipEpoch = acMessage.OwnershipEpoch; });
     }
 
     ReconcileActorData(cEntity, pActor, acMessage.OwnershipEpoch, acMessage.CurrentActorData, pActor && pActor->GetNiNode(), false);
@@ -3022,16 +3126,26 @@ void CharacterService::ProcessLeveledConforms() noexcept
     }
 }
 
+// Max-sync (owner 2026-09-27: "no waits, sync as much as possible"): pose/movement batches every frame by
+// default. Live-tunable through the sync_level bridge command to back off if bandwidth or the server lags.
+std::atomic<uint32_t> g_syncBatchMs{0};
+
 void CharacterService::RunLocalUpdates() const noexcept
 {
-    static std::chrono::steady_clock::time_point lastSendTimePoint;
-    constexpr auto cDelayBetweenSnapshots = 50ms;
+    static std::chrono::steady_clock::time_point nextSendTimePoint;
+    const auto cDelayBetweenSnapshots = std::chrono::milliseconds(g_syncBatchMs.load(std::memory_order_relaxed));
 
     const auto now = std::chrono::steady_clock::now();
-    if (now - lastSendTimePoint < cDelayBetweenSnapshots)
+    if (now < nextSendTimePoint)
         return;
 
-    lastSendTimePoint = now;
+    // Preserve the 20 Hz deadline across frame rounding (50 ms is often just
+    // over three frames). After a stall send one current sample, never a burst.
+    if (nextSendTimePoint == std::chrono::steady_clock::time_point{} ||
+        now - nextSendTimePoint >= cDelayBetweenSnapshots)
+        nextSendTimePoint = now + cDelayBetweenSnapshots;
+    else
+        nextSendTimePoint += cDelayBetweenSnapshots;
 
     ClientReferencesMoveRequest message;
     message.Tick = m_transport.GetClock().GetCurrentTick();
@@ -3046,6 +3160,11 @@ void CharacterService::RunLocalUpdates() const noexcept
     static std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> lastPoseAttempt;
     Set<entt::entity> selectedPoseActors;
     {
+        struct SelectionCost
+        {
+            std::chrono::steady_clock::time_point Started{HostFrameCost::Begin()};
+            ~SelectionCost() { HostFrameCost::End(8, Started); }
+        } cost;
         struct Candidate
         {
             float Distance;
@@ -3063,7 +3182,7 @@ void CharacterService::RunLocalUpdates() const noexcept
             if (formId == 0x14)
                 continue;
             if (auto* pActor = Cast<Actor>(TESForm::GetById(formId));
-                pActor && pActor->GetExtension()->IsRemote() && IsLoadedActor(pActor))
+                pActor && pActor->GetExtension() && pActor->GetExtension()->IsRemote() && IsLoadedActor(pActor))
                 playerActors.push_back(pActor);
         }
         for (auto entity : animatedLocalView)
@@ -3089,13 +3208,26 @@ void CharacterService::RunLocalUpdates() const noexcept
         // each tier so an unlucky ECS iteration order cannot starve an NPC.
         for (auto& candidate : distances)
         {
-            const double interval = candidate.Distance <= 2048.f * 2048.f ? 50.0 :
-                candidate.Distance <= 16384.f * 16384.f ? 100.0 :
-                candidate.Distance <= 32768.f * 32768.f ? 200.0 : 1000.0;
+            // Max-sync: everything within 16384 u is due every batch (every frame by default); the 32-slot
+            // cap per message (64 KB transport buffer) rotates oldest-first, so ~40 nearby NPCs still get
+            // 45-60 poses/s. Far actors keep a 100 ms floor.
+            const double batch = (std::max)(1.0, static_cast<double>(g_syncBatchMs.load(std::memory_order_relaxed)));
+            const double interval = candidate.Distance <= 16384.f * 16384.f ? batch : 100.0;
             const auto it = lastPoseAttempt.try_emplace(candidate.FormId, now - 1s).first;
-            candidate.Overdue = std::chrono::duration<double, std::milli>(now - it->second).count() / interval;
+            // Batches fire on whole frames, so without half a batch of slack a 50 ms actor missed every other
+            // batch (follower measured a 95 ms mean gap, 856 gaps over 150 ms in run 215706) and its copy fell
+            // back to the local graph between samples. The slack was reverted once because seated passengers
+            // lifted the follower's dynamic carts (run 221018); replayed carts are keyframed and cannot be pushed.
+            const double elapsed = std::chrono::duration<double, std::milli>(now - it->second).count() +
+                std::chrono::duration<double, std::milli>(cDelayBetweenSnapshots).count() * 0.5;
+            candidate.Overdue = elapsed / interval;
         }
-        std::sort(distances.begin(), distances.end(), [](const auto& a, const auto& b) {
+        // Only the 32 eligible winners need ordering. Preserve the previous
+        // priority among eligible candidates, including distant overflow slots.
+        std::partial_sort(distances.begin(), distances.begin() + (std::min)(cPoseActors, distances.size()),
+            distances.end(), [](const auto& a, const auto& b) {
+            if ((a.Overdue >= 1.0) != (b.Overdue >= 1.0))
+                return a.Overdue >= 1.0;
             const bool aNear = a.Distance <= 2048.f * 2048.f;
             const bool bNear = b.Distance <= 2048.f * 2048.f;
             if (aNear != bNear)
@@ -3144,7 +3276,42 @@ void CharacterService::RunLocalUpdates() const noexcept
         {
             const auto update = message.Updates.find(localComponent.Id);
             if (update != message.Updates.end())
+            {
                 HeadTrackService::FillLocalMovement(update.value().UpdatedMovement);
+                if (const auto session = HostFrameCost::Session(); session)
+                {
+                    static uint64_t start{}, previousSend{}, previousPose{}, packets{}, poses{}, repeats{}, maxGap{};
+                    static uint64_t lastSession{};
+                    if (lastSession != session)
+                    {
+                        lastSession = session;
+                        start = previousSend = previousPose = packets = poses = repeats = maxGap = 0;
+                    }
+                    const auto sendNow = GetTickCount64();
+                    if (!start)
+                        start = sendNow;
+                    if (previousSend)
+                        maxGap = (std::max)(maxGap, sendNow - previousSend);
+                    previousSend = sendNow;
+                    ++packets;
+                    const auto& pose = update.value().EvaluatedPose;
+                    if (!pose.Bones.empty())
+                    {
+                        ++poses;
+                        repeats += pose.SourceTick == previousPose ? 1 : 0;
+                        previousPose = pose.SourceTick;
+                    }
+                    if (sendNow - start >= 5000)
+                    {
+                        spdlog::info("Local player stream: id={} sourceTick={} poseSourceTick={} windowMs={} packets={} poses={} repeatedPoseTicks={} maxSendGapMs={} wallMs={} targetMs=50",
+                            localComponent.Id, message.Tick, pose.SourceTick, sendNow - start,
+                            packets, poses, repeats, maxGap, sendNow);
+                        start = sendNow;
+                        packets = poses = repeats = maxGap = 0;
+                        previousSend = 0;
+                    }
+                }
+            }
         }
         if (capturePose)
         {
@@ -3214,7 +3381,53 @@ void CharacterService::RunRemoteUpdates() noexcept
             pActor = Cast<Actor>(pForm);
         }
 
-        InterpolationSystem::Update(pActor, interpolationComponent, tick);
+        {
+            const bool player = pActor && pActor->GetExtension() && pActor->GetExtension()->IsRemotePlayer();
+            PlayerFrameCost cost(player);
+            InterpolationSystem::Update(pActor, interpolationComponent, tick);
+            if (const auto session = HostFrameCost::Session(); session && player)
+            {
+                struct PlaybackStats
+                {
+                    uint64_t Start{}, Frames{}, Unbracketed{}, GraphFallback{}, MaxQueue{}, MaxUnderrunMs{}, LastSeen{};
+                    uint32_t ServerId{}, Epoch{};
+                };
+                static std::unordered_map<uint32_t, PlaybackStats> stats;
+                static uint64_t lastSession{}, nextPrune{};
+                if (lastSession != session)
+                {
+                    stats.clear();
+                    lastSession = session;
+                    nextPrune = 0;
+                }
+                const auto wallNow = GetTickCount64();
+                if (wallNow >= nextPrune)
+                {
+                    std::erase_if(stats, [wallNow](const auto& entry) { return wallNow - entry.second.LastSeen > 10000; });
+                    nextPrune = wallNow + 5000;
+                }
+                auto& sample = stats[pActor->formID];
+                const auto& remote = interpolatedEntities.get<RemoteComponent>(entity);
+                if (!sample.Start || sample.ServerId != remote.Id || sample.Epoch != remote.OwnershipEpoch)
+                    sample = {wallNow, 0, 0, 0, 0, 0, wallNow, remote.Id, remote.OwnershipEpoch};
+                sample.LastSeen = wallNow;
+                ++sample.Frames;
+                const auto& points = interpolationComponent.TimePoints;
+                sample.Unbracketed += points.size() < 2 || tick < points.front().Tick || tick > points.back().Tick ? 1 : 0;
+                if (!points.empty() && tick > points.back().Tick)
+                    sample.MaxUnderrunMs = (std::max)(sample.MaxUnderrunMs, tick - points.back().Tick);
+                sample.GraphFallback += PoseCopyAuthority::NeedsLocalGraph(pActor->formID) ? 1 : 0;
+                sample.MaxQueue = (std::max)(sample.MaxQueue, static_cast<uint64_t>(points.size()));
+                if (wallNow - sample.Start >= 5000)
+                {
+                    spdlog::info("Remote player playback: form={:X} id={} epoch={} windowMs={} presentationTick={} newestMovementTick={} frames={} unbracketedMovement={} poseFallbackFrames={} maxMovementQueue={} delayMs={} maxUnderrunMs={} wallMs={}",
+                        pActor->formID, remote.Id, remote.OwnershipEpoch, wallNow - sample.Start, tick,
+                        points.empty() ? 0 : points.back().Tick, sample.Frames, sample.Unbracketed,
+                        sample.GraphFallback, sample.MaxQueue, delay, sample.MaxUnderrunMs, wallNow);
+                    sample = {wallNow, 0, 0, 0, 0, 0, wallNow, remote.Id, remote.OwnershipEpoch};
+                }
+            }
+        }
 
         // Dead remote actors no longer receive per-frame ForcePosition: that
         // fought their ragdolls. Reconcile only a settled owner corpse that
@@ -3358,7 +3571,7 @@ void CharacterService::RunRemoteUpdates() noexcept
             animationComponent.DesiredCombatTargetServerId != 0xFFFFFFFFu &&
             pActor->pCombatController &&
             (animationComponent.LastCombatTargetApplyTick == 0 ||
-                now - animationComponent.LastCombatTargetApplyTick >= 100))
+                now - animationComponent.LastCombatTargetApplyTick >= 16)) // max-sync: one frame (was 100 ms)
         {
             Actor* pDesiredTarget = animationComponent.DesiredCombatTargetServerId ?
                 Utils::GetByServerId<Actor>(
@@ -3383,12 +3596,21 @@ void CharacterService::RunRemoteUpdates() noexcept
                         pActor->pCombatController->targetHandle));
                     animationComponent.LastCombatTargetApplyAfterFormId =
                         pAfterTarget ? pAfterTarget->formID : 0;
+                    spdlog::info("Combat target apply {:X}: host target server {:X} -> {:X}, native before {:X} after {:X}",
+                        pActor->formID, animationComponent.DesiredCombatTargetServerId,
+                        pDesiredTarget ? pDesiredTarget->formID : 0,
+                        animationComponent.LastCombatTargetApplyBeforeFormId,
+                        animationComponent.LastCombatTargetApplyAfterFormId);
                     animationComponent.LastCombatTargetApplyTick = now;
                 }
             }
         }
 
-        AnimationSystem::Update(m_world, pActor, animationComponent, tick);
+        {
+            const auto* extension = pActor->GetExtension();
+            PlayerFrameCost cost(extension && extension->IsRemotePlayer());
+            AnimationSystem::Update(m_world, pActor, animationComponent, tick);
+        }
         // The opt-in presenter writes only after the native graph update.
         // A second write here ran before later native animation jobs and
         // caused host/local pose oscillation and severe per-frame work.

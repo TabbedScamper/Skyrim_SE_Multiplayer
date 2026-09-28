@@ -50,6 +50,17 @@ BGSLoadFormBuffer::BGSLoadFormBuffer(const uint32_t aChangeFlags)
 
     TiltedPhoques::ThisCall(ctor, this);
 
+    // 35993 constructs only BGSLoadGameBuffer (0x28 bytes). Native form loads
+    // also construct BGSLoadFormData at +0x28 (35984 / 0x140637370).
+    // Otherwise +0x48 contains stack garbage: TESNPC::LoadGame treats bit 3
+    // as kConstructedForm and requests a full 3D reload for every actor using
+    // that NPC, even when the received appearance did not change.
+    static_assert(offsetof(BGSLoadFormBuffer, formId) == 0x28);
+    static_assert(offsetof(BGSLoadFormBuffer, unk48) == 0x48);
+    using TConstructFormData = void*(void*);
+    POINTER_SKYRIMSE(TConstructFormData, constructFormData, 35984);
+    constructFormData.Get()(&formId);
+
     changeFlags = aChangeFlags;
     loadFlag = 0x40;
     position = 0;

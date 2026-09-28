@@ -39,6 +39,7 @@ void SetRagdollSimulating(uint32_t aFormId, bool aSimulating) noexcept;
 void SetRagdollPending(uint32_t aFormId, bool aPending) noexcept;
 // These drivers are controlled by streamed rigid-body targets. Their local animation drive is skipped.
 void SetControlledRagdollDrivers(const Vector<void*>& acDrivers) noexcept;
+void SetControlledRagdollDriver(void* apDriver, bool aControlled) noexcept;
 void ClearRagdollAuthority() noexcept;
 [[nodiscard]] uint64_t GetCurrentTick() noexcept;
 // Whether the presentation timeline needs the living actor's local graph. Physics

@@ -11,6 +11,20 @@ struct ClientReferencesMoveRequest;
  */
 struct AnimationSystem
 {
+    // Owned actors near a remote player keep a fully simulated character controller off-camera.
+    static void SetOffscreenSimulate(bool aEnabled) noexcept;
+    static std::string OffscreenSimulateJson() noexcept;
+    // Owned actor near any player (host or follower), per the published interest table.
+    static bool IsNearAnyPlayer(uint32_t aFormId) noexcept;
+    // Widen the camera cull frustum while connected (wide_cull switch).
+    static void SetWideCull(bool aEnabled) noexcept;
+    // Treat owned actors as seen by the host camera (HighActorCuller result, force_seen switch).
+    static void SetForceSeen(bool aEnabled) noexcept;
+    static std::string ForceSeenJson() noexcept;
+    static std::string WideCullJson() noexcept;
+    static bool IsOffscreenSimulateEnabled() noexcept;
+    static void CountOffscreenClear() noexcept;
+
     /**
      * @brief Ran periodically to check for new animations to apply.
      * @param aWorld The registry where the actor in question lives.

@@ -1,0 +1,2531 @@
+{
+  "schema": 1,
+  "method": "Offline paired captures; normalized quaternion shortest arc; body translation *70; rendered translation already game units.",
+  "authorityFilesRead": 534,
+  "workerProcesses": 32,
+  "limits": [
+    "Historical captures span different builds; they are not measurements of the changed build or necessarily commit 25fa030d.",
+    "Matching body indices/counts and bone-map checksum establish correspondence; they are not rendered skeleton bone indices.",
+    "Snapshot sample ticks are not proof of identical presentation time. Moving does not prove initial fall; no continuous fall trajectory is available.",
+    "Settled means both sampled velocity sets below 0.03 Havok units/s and 0.05 rad/s; this does not prove sustained rest.",
+    "A keyframed follower of dynamic owner bodies violates the owner rule even when pose error is zero; it is not dynamic-steering success.",
+    "Rendered samples are bounded subsets of bones, not complete skeletons; padded/unmapped bone samples may repeat root transforms.",
+    "No game, process attachment, harness run, deployment, or in-game validation was performed."
+  ],
+  "samples": [
+    {
+      "source": "C:\\Users\\mwalt\\SkyrimSeamlessCoop\\Tools\\InGameTests\\artifacts\\authority-20260924-101351.json",
+      "capturedAt": "2026-09-24T10:13:50.8147535-05:00",
+      "actorFormId": "0x000F94B6",
+      "bothDead": true,
+      "phase": "settled_velocity_snapshot",
+      "poseSampleTickDifferenceMs": 0,
+      "sampling": {
+        "hostWorldTick": 234474922,
+        "followerWorldTick": 234474922,
+        "tickDifferenceMs": 0,
+        "hostSampleTimeMs": 234474906,
+        "followerSampleTimeMs": 100642046
+      },
+      "boneMapChecksum": "8a0cb80a4da17254",
+      "hostConstraintCount": 17,
+      "followerConstraintCount": 17,
+      "followerKeyframesOwnerDynamicBodies": false,
+      "bodyErrors": [
+        {
+          "bodyIndex": 0,
+          "positionErrorGameUnits": 91.34458967187174,
+          "rotationErrorDegrees": 177.84584823559612,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 1,
+          "positionErrorGameUnits": 101.72065103170031,
+          "rotationErrorDegrees": 171.77365269097197,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 2,
+          "positionErrorGameUnits": 81.84980695914847,
+          "rotationErrorDegrees": 162.31888063687248,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 3,
+          "positionErrorGameUnits": 92.32412907414805,
+          "rotationErrorDegrees": 178.03539267144248,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 4,
+          "positionErrorGameUnits": 81.6327485648361,
+          "rotationErrorDegrees": 159.50605659739486,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 5,
+          "positionErrorGameUnits": 125.37661221198407,
+          "rotationErrorDegrees": 167.42758727108753,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 6,
+          "positionErrorGameUnits": 89.55285534016421,
+          "rotationErrorDegrees": 179.6714284757404,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 7,
+          "positionErrorGameUnits": 143.58987331396096,
+          "rotationErrorDegrees": 158.91461702347536,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 8,
+          "positionErrorGameUnits": 81.33151808185926,
+          "rotationErrorDegrees": 156.78307914399943,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 9,
+          "positionErrorGameUnits": 87.19015311015526,
+          "rotationErrorDegrees": 178.0954702252688,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 10,
+          "positionErrorGameUnits": 103.5521971388496,
+          "rotationErrorDegrees": 167.8577869379602,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 11,
+          "positionErrorGameUnits": 78.87085183133469,
+          "rotationErrorDegrees": 179.91042732460025,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 12,
+          "positionErrorGameUnits": 62.65362878704074,
+          "rotationErrorDegrees": 170.90354765286904,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 13,
+          "positionErrorGameUnits": 77.42927062836301,
+          "rotationErrorDegrees": 178.99334767000718,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 14,
+          "positionErrorGameUnits": 140.68435121135474,
+          "rotationErrorDegrees": 151.5864661842005,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 15,
+          "positionErrorGameUnits": 50.15489922217362,
+          "rotationErrorDegrees": 120.21353189277055,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 16,
+          "positionErrorGameUnits": 161.87166717194367,
+          "rotationErrorDegrees": 151.01188227949552,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 17,
+          "positionErrorGameUnits": 22.993761488711723,
+          "rotationErrorDegrees": 130.58993225612818,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        }
+      ],
+      "bodySummary": {
+        "count": 18,
+        "positionErrorGameUnits": {
+          "mean": 93.00686471331113,
+          "max": 161.87166717194367
+        },
+        "rotationErrorDegrees": {
+          "mean": 163.4132741761045,
+          "max": 179.91042732460025
+        }
+      },
+      "renderedBoneErrors": [
+        {
+          "boneIndex": 0,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 5,
+          "positionErrorGameUnits": 9.76820445373431,
+          "rotationErrorDegrees": 163.3183252809674
+        },
+        {
+          "boneIndex": 10,
+          "positionErrorGameUnits": 65.83111012280015,
+          "rotationErrorDegrees": 174.94373735332093
+        },
+        {
+          "boneIndex": 20,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 30,
+          "positionErrorGameUnits": 89.54713289100891,
+          "rotationErrorDegrees": 167.779049344389
+        },
+        {
+          "boneIndex": 40,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 50,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 60,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 70,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 80,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 90,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        },
+        {
+          "boneIndex": 98,
+          "positionErrorGameUnits": 1.2368463930479865,
+          "rotationErrorDegrees": 163.31832680952678
+        }
+      ],
+      "renderedBoneSummary": {
+        "count": 12,
+        "positionErrorGameUnits": {
+          "mean": 14.689838750414605,
+          "max": 89.54713289100891
+        },
+        "rotationErrorDegrees": {
+          "mean": 164.65883777203487,
+          "max": 174.94373735332093
+        }
+      },
+      "rootFrameClosure": null,
+      "evaluatedLocalPoseComparison": {
+        "sampledBones": 99,
+        "meanLocalTranslationError": 0.09343717635254893,
+        "maxLocalTranslationError": 7.250720156796644,
+        "meanLocalRotationErrorDeg": 9.159037846142867,
+        "maxLocalRotationErrorDeg": 179.99868546793957
+      }
+    },
+    {
+      "source": "C:\\Users\\mwalt\\SkyrimSeamlessCoop\\Tools\\InGameTests\\artifacts\\authority-20260925-075329.json",
+      "capturedAt": "2026-09-25T07:53:29.0488535-05:00",
+      "actorFormId": "0x000654FB",
+      "bothDead": true,
+      "phase": "moving_snapshot_fall_not_independently_confirmed",
+      "poseSampleTickDifferenceMs": 3,
+      "sampling": {
+        "hostWorldTick": 51909168,
+        "followerWorldTick": 51909165,
+        "tickDifferenceMs": -3,
+        "hostSampleTimeMs": 51909156,
+        "followerSampleTimeMs": 178619140
+      },
+      "boneMapChecksum": "8a0cb80a4da17254",
+      "hostConstraintCount": 17,
+      "followerConstraintCount": 17,
+      "followerKeyframesOwnerDynamicBodies": false,
+      "bodyErrors": [
+        {
+          "bodyIndex": 0,
+          "positionErrorGameUnits": 441.22624833423583,
+          "rotationErrorDegrees": 101.16366081380333,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 239.51848319641013,
+          "followerLinearSpeedGameUnitsPerSecond": 67.32828780301567,
+          "hostAngularSpeedRadiansPerSecond": 2.442686391404716,
+          "followerAngularSpeedRadiansPerSecond": 3.1898632718848656
+        },
+        {
+          "bodyIndex": 1,
+          "positionErrorGameUnits": 447.3326657001132,
+          "rotationErrorDegrees": 90.85466344790137,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 215.22094080315497,
+          "followerLinearSpeedGameUnitsPerSecond": 39.011553685872514,
+          "hostAngularSpeedRadiansPerSecond": 3.969898442693967,
+          "followerAngularSpeedRadiansPerSecond": 1.6739683396582452
+        },
+        {
+          "bodyIndex": 2,
+          "positionErrorGameUnits": 435.35202845856116,
+          "rotationErrorDegrees": 125.7630006558854,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 227.06096452215252,
+          "followerLinearSpeedGameUnitsPerSecond": 50.748213376092245,
+          "hostAngularSpeedRadiansPerSecond": 1.7294235176735184,
+          "followerAngularSpeedRadiansPerSecond": 1.0828746942116214
+        },
+        {
+          "bodyIndex": 3,
+          "positionErrorGameUnits": 447.44846426091414,
+          "rotationErrorDegrees": 96.63016362282838,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 238.1021176961037,
+          "followerLinearSpeedGameUnitsPerSecond": 92.74577181503527,
+          "hostAngularSpeedRadiansPerSecond": 2.5907874686833616,
+          "followerAngularSpeedRadiansPerSecond": 3.6147651979842093
+        },
+        {
+          "bodyIndex": 4,
+          "positionErrorGameUnits": 381.27055965495225,
+          "rotationErrorDegrees": 154.3518485721508,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 225.11527333890194,
+          "followerLinearSpeedGameUnitsPerSecond": 21.919852278170666,
+          "hostAngularSpeedRadiansPerSecond": 1.7480038997471745,
+          "followerAngularSpeedRadiansPerSecond": 1.1845433782867694
+        },
+        {
+          "bodyIndex": 5,
+          "positionErrorGameUnits": 444.84467043188124,
+          "rotationErrorDegrees": 83.29739988885122,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 142.23159800747325,
+          "followerLinearSpeedGameUnitsPerSecond": 12.8576483995555,
+          "hostAngularSpeedRadiansPerSecond": 5.105281483204087,
+          "followerAngularSpeedRadiansPerSecond": 0.7760578555309479
+        },
+        {
+          "bodyIndex": 6,
+          "positionErrorGameUnits": 452.0484585067428,
+          "rotationErrorDegrees": 91.8024138141007,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 237.22936953214227,
+          "followerLinearSpeedGameUnitsPerSecond": 134.18476808304814,
+          "hostAngularSpeedRadiansPerSecond": 2.8072188915921714,
+          "followerAngularSpeedRadiansPerSecond": 4.204513471204159
+        },
+        {
+          "bodyIndex": 7,
+          "positionErrorGameUnits": 465.2411556894202,
+          "rotationErrorDegrees": 77.76785129083838,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 79.57742775731947,
+          "followerLinearSpeedGameUnitsPerSecond": 17.682383178607445,
+          "hostAngularSpeedRadiansPerSecond": 4.472647151962006,
+          "followerAngularSpeedRadiansPerSecond": 0.8720560273821416
+        },
+        {
+          "bodyIndex": 8,
+          "positionErrorGameUnits": 332.80326542126915,
+          "rotationErrorDegrees": 158.94259634077525,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 249.27240864676304,
+          "followerLinearSpeedGameUnitsPerSecond": 8.314481167480375,
+          "hostAngularSpeedRadiansPerSecond": 6.700011624492949,
+          "followerAngularSpeedRadiansPerSecond": 0.25459828101826343
+        },
+        {
+          "bodyIndex": 9,
+          "positionErrorGameUnits": 457.5772654151945,
+          "rotationErrorDegrees": 88.46364614259144,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 233.35900031583213,
+          "followerLinearSpeedGameUnitsPerSecond": 195.19400029193176,
+          "hostAngularSpeedRadiansPerSecond": 3.634804686937495,
+          "followerAngularSpeedRadiansPerSecond": 4.87401083051105
+        },
+        {
+          "bodyIndex": 10,
+          "positionErrorGameUnits": 475.3143795161184,
+          "rotationErrorDegrees": 110.36763424887627,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 258.6616818705332,
+          "followerLinearSpeedGameUnitsPerSecond": 200.3395211174824,
+          "hostAngularSpeedRadiansPerSecond": 4.3106782728864905,
+          "followerAngularSpeedRadiansPerSecond": 4.240683490158988
+        },
+        {
+          "bodyIndex": 11,
+          "positionErrorGameUnits": 464.4759374281312,
+          "rotationErrorDegrees": 76.65085784151701,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 236.53426108249514,
+          "followerLinearSpeedGameUnitsPerSecond": 262.5780417958335,
+          "hostAngularSpeedRadiansPerSecond": 4.447091322944828,
+          "followerAngularSpeedRadiansPerSecond": 5.58357593701852
+        },
+        {
+          "bodyIndex": 12,
+          "positionErrorGameUnits": 451.1466687741351,
+          "rotationErrorDegrees": 99.5893212446087,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 179.8905932422314,
+          "followerLinearSpeedGameUnitsPerSecond": 178.23253109937212,
+          "hostAngularSpeedRadiansPerSecond": 6.877418605104194,
+          "followerAngularSpeedRadiansPerSecond": 3.942359843589025
+        },
+        {
+          "bodyIndex": 13,
+          "positionErrorGameUnits": 466.5348390775217,
+          "rotationErrorDegrees": 78.43940325802697,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 255.87401145833908,
+          "followerLinearSpeedGameUnitsPerSecond": 301.6832067611705,
+          "hostAngularSpeedRadiansPerSecond": 4.438861701597977,
+          "followerAngularSpeedRadiansPerSecond": 5.540380445675154
+        },
+        {
+          "bodyIndex": 14,
+          "positionErrorGameUnits": 461.7995977883901,
+          "rotationErrorDegrees": 106.9727932440762,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 277.4550381906702,
+          "followerLinearSpeedGameUnitsPerSecond": 157.2161848561623,
+          "hostAngularSpeedRadiansPerSecond": 3.0748355091107227,
+          "followerAngularSpeedRadiansPerSecond": 4.3122716418745775
+        },
+        {
+          "bodyIndex": 15,
+          "positionErrorGameUnits": 426.8832890899149,
+          "rotationErrorDegrees": 87.57844957589866,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 172.62980661077728,
+          "followerLinearSpeedGameUnitsPerSecond": 113.24042097246253,
+          "hostAngularSpeedRadiansPerSecond": 5.858946163620356,
+          "followerAngularSpeedRadiansPerSecond": 4.015476422722908
+        },
+        {
+          "bodyIndex": 16,
+          "positionErrorGameUnits": 445.80028985712687,
+          "rotationErrorDegrees": 110.53464653356346,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 283.25427220855374,
+          "followerLinearSpeedGameUnitsPerSecond": 142.40178956157547,
+          "hostAngularSpeedRadiansPerSecond": 3.1073089121329245,
+          "followerAngularSpeedRadiansPerSecond": 3.8191415797642185
+        },
+        {
+          "bodyIndex": 17,
+          "positionErrorGameUnits": 424.1597694879241,
+          "rotationErrorDegrees": 95.213360492101,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 183.84552752837928,
+          "followerLinearSpeedGameUnitsPerSecond": 80.4172710175245,
+          "hostAngularSpeedRadiansPerSecond": 6.132413935268342,
+          "followerAngularSpeedRadiansPerSecond": 3.6912017272420576
+        }
+      ],
+      "bodySummary": {
+        "count": 18,
+        "positionErrorGameUnits": {
+          "mean": 440.069975160697,
+          "max": 475.3143795161184
+        },
+        "rotationErrorDegrees": {
+          "mean": 101.91020616824414,
+          "max": 158.94259634077525
+        }
+      },
+      "renderedBoneErrors": [
+        {
+          "boneIndex": 0,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 5,
+          "positionErrorGameUnits": 338.88832068987097,
+          "rotationErrorDegrees": 94.84886207993424
+        },
+        {
+          "boneIndex": 10,
+          "positionErrorGameUnits": 276.74381728053123,
+          "rotationErrorDegrees": 153.53454758304582
+        },
+        {
+          "boneIndex": 20,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 30,
+          "positionErrorGameUnits": 352.6217937691879,
+          "rotationErrorDegrees": 78.9186630083666
+        },
+        {
+          "boneIndex": 40,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 50,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 60,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 70,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 80,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 90,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        },
+        {
+          "boneIndex": 98,
+          "positionErrorGameUnits": 338.0535047921418,
+          "rotationErrorDegrees": 97.02733062748855
+        }
+      ],
+      "renderedBoneSummary": {
+        "count": 12,
+        "positionErrorGameUnits": {
+          "mean": 334.22795623907217,
+          "max": 352.6217937691879
+        },
+        "rotationErrorDegrees": {
+          "mean": 100.04567069322863,
+          "max": 153.53454758304582
+        }
+      },
+      "rootFrameClosure": {
+        "rootPositionErrorGameUnits": 338.0535047921418,
+        "rootRotationErrorDegrees": 97.02733062748855,
+        "rootRelativeErrors": [
+          {
+            "boneIndex": 0,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 5,
+            "positionErrorGameUnits": 2.155376039907874,
+            "rotationErrorDegrees": 2.325143817083895,
+            "articulated": true
+          },
+          {
+            "boneIndex": 10,
+            "positionErrorGameUnits": 30.008997634768882,
+            "rotationErrorDegrees": 74.96760337876269,
+            "articulated": true
+          },
+          {
+            "boneIndex": 20,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 30,
+            "positionErrorGameUnits": 13.55122835684253,
+            "rotationErrorDegrees": 22.933360471307815,
+            "articulated": true
+          },
+          {
+            "boneIndex": 40,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 50,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 60,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 70,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 80,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 90,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 98,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          }
+        ],
+        "rootRelativeSummary": {
+          "count": 12,
+          "positionErrorGameUnits": {
+            "mean": 3.8096335026266073,
+            "max": 30.008997634768882
+          },
+          "rotationErrorDegrees": {
+            "mean": 8.352175638929534,
+            "max": 74.96760337876269
+          }
+        },
+        "articulatedSummary": {
+          "count": 3,
+          "positionErrorGameUnits": {
+            "mean": 15.238534010506429,
+            "max": 30.008997634768882
+          },
+          "rotationErrorDegrees": {
+            "mean": 33.408702555718136,
+            "max": 74.96760337876269
+          }
+        },
+        "scope": "Rigid root-frame closure of sampled nodes only; no node-name identity, writer attribution, or changed-build validation."
+      },
+      "evaluatedLocalPoseComparison": {
+        "sampledBones": 99,
+        "meanLocalTranslationError": 0.021794568300838063,
+        "maxLocalTranslationError": 2.1556206990386446,
+        "meanLocalRotationErrorDeg": 4.082060286923745,
+        "maxLocalRotationErrorDeg": 77.8153217469078
+      }
+    },
+    {
+      "source": "C:\\Users\\mwalt\\SkyrimSeamlessCoop\\Tools\\InGameTests\\artifacts\\authority-20260925-085524.json",
+      "capturedAt": "2026-09-25T08:55:23.5417327-05:00",
+      "actorFormId": "0x00075350",
+      "bothDead": true,
+      "phase": "settled_velocity_snapshot",
+      "poseSampleTickDifferenceMs": 6,
+      "sampling": {
+        "hostWorldTick": 55625372,
+        "followerWorldTick": 55625378,
+        "tickDifferenceMs": 6,
+        "hostSampleTimeMs": 55625359,
+        "followerSampleTimeMs": 182335171
+      },
+      "boneMapChecksum": "61cf59006743b6ee",
+      "hostConstraintCount": 26,
+      "followerConstraintCount": 26,
+      "followerKeyframesOwnerDynamicBodies": false,
+      "bodyErrors": [
+        {
+          "bodyIndex": 0,
+          "positionErrorGameUnits": 1.3878622338033018,
+          "rotationErrorDegrees": 1.1952831047522321e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 1,
+          "positionErrorGameUnits": 1.387982438790205,
+          "rotationErrorDegrees": 2.5269392327350503e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 2,
+          "positionErrorGameUnits": 1.392284514751529,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 3,
+          "positionErrorGameUnits": 1.38756192293872,
+          "rotationErrorDegrees": 9.035490975690204e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 4,
+          "positionErrorGameUnits": 1.3873135127000502,
+          "rotationErrorDegrees": 2.9575586669421963e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 5,
+          "positionErrorGameUnits": 1.3881628326752233,
+          "rotationErrorDegrees": 1.3004292747236516e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 6,
+          "positionErrorGameUnits": 1.388042558565689,
+          "rotationErrorDegrees": 1.4886052178675776e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 7,
+          "positionErrorGameUnits": 1.3970711551248929,
+          "rotationErrorDegrees": 2.4148365394514667e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 8,
+          "positionErrorGameUnits": 1.3927787261392748,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 9,
+          "positionErrorGameUnits": 1.396921866097696,
+          "rotationErrorDegrees": 5.122641877509564e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 10,
+          "positionErrorGameUnits": 1.3927787261392748,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 11,
+          "positionErrorGameUnits": 1.3878622337932762,
+          "rotationErrorDegrees": 5.915117333884393e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 12,
+          "positionErrorGameUnits": 1.3879824388009354,
+          "rotationErrorDegrees": 9.80911239371096e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 13,
+          "positionErrorGameUnits": 1.388042558576846,
+          "rotationErrorDegrees": 5.399738656763832e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 14,
+          "positionErrorGameUnits": 1.392898506850122,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 15,
+          "positionErrorGameUnits": 1.3878622337932762,
+          "rotationErrorDegrees": 1.0663629423853015e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 16,
+          "positionErrorGameUnits": 1.3919848059463293,
+          "rotationErrorDegrees": 9.352621701108683e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 17,
+          "positionErrorGameUnits": 1.3875619229498808,
+          "rotationErrorDegrees": 1.7413633929712578e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 18,
+          "positionErrorGameUnits": 1.3923816466708365,
+          "rotationErrorDegrees": 1.3976876963794275e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 19,
+          "positionErrorGameUnits": 1.38706549953092,
+          "rotationErrorDegrees": 8.189109132934075e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 20,
+          "positionErrorGameUnits": 1.392082310780045,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 21,
+          "positionErrorGameUnits": 1.3978920360240088,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 22,
+          "positionErrorGameUnits": 1.3877644324554474,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 23,
+          "positionErrorGameUnits": 1.3871633501462786,
+          "rotationErrorDegrees": 7.636383641665691e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 24,
+          "positionErrorGameUnits": 1.3874637472702886,
+          "rotationErrorDegrees": 1.5177012312529194e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 25,
+          "positionErrorGameUnits": 1.3869452716021604,
+          "rotationErrorDegrees": 1.183023466776879e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 26,
+          "positionErrorGameUnits": 1.3919848059575346,
+          "rotationErrorDegrees": 1.3004292747236516e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        }
+      ],
+      "bodySummary": {
+        "count": 27,
+        "positionErrorGameUnits": {
+          "mean": 1.3901369736620015,
+          "max": 1.3978920360240088
+        },
+        "rotationErrorDegrees": {
+          "mean": 8.015776068531367e-06,
+          "max": 2.5269392327350503e-05
+        }
+      },
+      "renderedBoneErrors": [
+        {
+          "boneIndex": 0,
+          "positionErrorGameUnits": 1.3927368739258883,
+          "rotationErrorDegrees": 5.45405877783484
+        },
+        {
+          "boneIndex": 5,
+          "positionErrorGameUnits": 3.583335317825957,
+          "rotationErrorDegrees": 5.454070927554034
+        },
+        {
+          "boneIndex": 10,
+          "positionErrorGameUnits": 10.68704075036044,
+          "rotationErrorDegrees": 5.454104998047755
+        },
+        {
+          "boneIndex": 20,
+          "positionErrorGameUnits": 8.458375789713047,
+          "rotationErrorDegrees": 5.454087650889441
+        },
+        {
+          "boneIndex": 30,
+          "positionErrorGameUnits": 9.66746367978557,
+          "rotationErrorDegrees": 5.454070065118414
+        },
+        {
+          "boneIndex": 40,
+          "positionErrorGameUnits": 1.3927368739258883,
+          "rotationErrorDegrees": 5.45405877783484
+        },
+        {
+          "boneIndex": 50,
+          "positionErrorGameUnits": 1.3927368739258883,
+          "rotationErrorDegrees": 5.45405877783484
+        }
+      ],
+      "renderedBoneSummary": {
+        "count": 7,
+        "positionErrorGameUnits": {
+          "mean": 5.224918022780383,
+          "max": 10.68704075036044
+        },
+        "rotationErrorDegrees": {
+          "mean": 5.454072853587737,
+          "max": 5.454104998047755
+        }
+      },
+      "rootFrameClosure": {
+        "rootPositionErrorGameUnits": 1.3927368739258883,
+        "rootRotationErrorDegrees": 5.45405877783484,
+        "rootRelativeErrors": [
+          {
+            "boneIndex": 0,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 5,
+            "positionErrorGameUnits": 1.6268449241154457,
+            "rotationErrorDegrees": 1.1197136397927984e-05,
+            "articulated": true
+          },
+          {
+            "boneIndex": 10,
+            "positionErrorGameUnits": 3.3253156418492544,
+            "rotationErrorDegrees": 4.707383025272754e-05,
+            "articulated": true
+          },
+          {
+            "boneIndex": 20,
+            "positionErrorGameUnits": 1.6188743628946884,
+            "rotationErrorDegrees": 5.074030723859699e-05,
+            "articulated": true
+          },
+          {
+            "boneIndex": 30,
+            "positionErrorGameUnits": 0.13561046243774422,
+            "rotationErrorDegrees": 7.636383641665691e-06,
+            "articulated": true
+          },
+          {
+            "boneIndex": 40,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 50,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          }
+        ],
+        "rootRelativeSummary": {
+          "count": 7,
+          "positionErrorGameUnits": {
+            "mean": 0.9580921987567332,
+            "max": 3.3253156418492544
+          },
+          "rotationErrorDegrees": {
+            "mean": 1.666395107584546e-05,
+            "max": 5.074030723859699e-05
+          }
+        },
+        "articulatedSummary": {
+          "count": 4,
+          "positionErrorGameUnits": {
+            "mean": 1.676661347824283,
+            "max": 3.3253156418492544
+          },
+          "rotationErrorDegrees": {
+            "mean": 2.916191438272955e-05,
+            "max": 5.074030723859699e-05
+          }
+        },
+        "scope": "Rigid root-frame closure of sampled nodes only; no node-name identity, writer attribution, or changed-build validation."
+      },
+      "evaluatedLocalPoseComparison": {
+        "sampledBones": 53,
+        "meanLocalTranslationError": 0.00020991902696374694,
+        "maxLocalTranslationError": 0.0005070376628512628,
+        "meanLocalRotationErrorDeg": 1.3223968365057002,
+        "maxLocalRotationErrorDeg": 12.372516765629692
+      }
+    },
+    {
+      "source": "C:\\Users\\mwalt\\SkyrimSeamlessCoop\\Tools\\InGameTests\\artifacts\\authority-20260925-085524.json",
+      "capturedAt": "2026-09-25T08:55:23.5417327-05:00",
+      "actorFormId": "0x000F94B7",
+      "bothDead": true,
+      "phase": "settled_velocity_snapshot",
+      "poseSampleTickDifferenceMs": 6,
+      "sampling": {
+        "hostWorldTick": 55625372,
+        "followerWorldTick": 55625378,
+        "tickDifferenceMs": 6,
+        "hostSampleTimeMs": 55625359,
+        "followerSampleTimeMs": 182335171
+      },
+      "boneMapChecksum": "8a0cb80a4da17254",
+      "hostConstraintCount": 17,
+      "followerConstraintCount": 17,
+      "followerKeyframesOwnerDynamicBodies": false,
+      "bodyErrors": [
+        {
+          "bodyIndex": 0,
+          "positionErrorGameUnits": 1.214810421417864,
+          "rotationErrorDegrees": 4.182619578303746e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 1,
+          "positionErrorGameUnits": 1.2217689889997372,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 2,
+          "positionErrorGameUnits": 1.21451210368156,
+          "rotationErrorDegrees": 1.8151476701449168e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 3,
+          "positionErrorGameUnits": 1.2223140553802578,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 4,
+          "positionErrorGameUnits": 1.2178998234689327,
+          "rotationErrorDegrees": 9.659346157805868e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 5,
+          "positionErrorGameUnits": 1.2186965824225215,
+          "rotationErrorDegrees": 2.4148365394514667e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 6,
+          "positionErrorGameUnits": 1.218396996215451,
+          "rotationErrorDegrees": 4.182619578303746e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 7,
+          "positionErrorGameUnits": 1.2176026650692808,
+          "rotationErrorDegrees": 5.399738656763832e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 8,
+          "positionErrorGameUnits": 1.214512103689519,
+          "rotationErrorDegrees": 5.399738656763832e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 9,
+          "positionErrorGameUnits": 1.2176026650692808,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 10,
+          "positionErrorGameUnits": 1.2140111119780685,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 11,
+          "positionErrorGameUnits": 1.2217689890095151,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 12,
+          "positionErrorGameUnits": 1.2186965824209663,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 13,
+          "positionErrorGameUnits": 1.214512103689519,
+          "rotationErrorDegrees": 3.818191820832845e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 14,
+          "positionErrorGameUnits": 1.214214116203883,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 15,
+          "positionErrorGameUnits": 1.22231405539074,
+          "rotationErrorDegrees": 2.4148365394514667e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 16,
+          "positionErrorGameUnits": 1.214309552795433,
+          "rotationErrorDegrees": 4.517745487845101e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 17,
+          "positionErrorGameUnits": 1.217899823469068,
+          "rotationErrorDegrees": 2.159895462705536e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        }
+      ],
+      "bodySummary": {
+        "count": 18,
+        "positionErrorGameUnits": {
+          "mean": 1.2175468189095333,
+          "max": 1.22231405539074
+        },
+        "rotationErrorDegrees": {
+          "mean": 4.730844384946267e-06,
+          "max": 2.159895462705536e-05
+        }
+      },
+      "renderedBoneErrors": [
+        {
+          "boneIndex": 0,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 5,
+          "positionErrorGameUnits": 1.301059952498583,
+          "rotationErrorDegrees": 5.592682001660141
+        },
+        {
+          "boneIndex": 10,
+          "positionErrorGameUnits": 2.8060089094663008,
+          "rotationErrorDegrees": 5.592697851335231
+        },
+        {
+          "boneIndex": 20,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 30,
+          "positionErrorGameUnits": 4.04907236289784,
+          "rotationErrorDegrees": 19.28194581263904
+        },
+        {
+          "boneIndex": 40,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 50,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 60,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 70,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 80,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 90,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        },
+        {
+          "boneIndex": 98,
+          "positionErrorGameUnits": 1.2189688265052423,
+          "rotationErrorDegrees": 5.59268155148521
+        }
+      ],
+      "renderedBoneSummary": {
+        "count": 12,
+        "positionErrorGameUnits": {
+          "mean": 1.5939050552841587,
+          "max": 4.04907236289784
+        },
+        "rotationErrorDegrees": {
+          "mean": 6.733454969083442,
+          "max": 19.28194581263904
+        }
+      },
+      "rootFrameClosure": null,
+      "evaluatedLocalPoseComparison": {
+        "sampledBones": 99,
+        "meanLocalTranslationError": 0.020206236053300873,
+        "maxLocalTranslationError": 1.2782045258695383,
+        "meanLocalRotationErrorDeg": 3.665735725267444,
+        "maxLocalRotationErrorDeg": 179.998685097105
+      }
+    },
+    {
+      "source": "C:\\Users\\mwalt\\SkyrimSeamlessCoop\\Tools\\InGameTests\\artifacts\\authority-20260925-085524.json",
+      "capturedAt": "2026-09-25T08:55:23.5417327-05:00",
+      "actorFormId": "0x000F94B6",
+      "bothDead": true,
+      "phase": "settled_velocity_snapshot",
+      "poseSampleTickDifferenceMs": 6,
+      "sampling": {
+        "hostWorldTick": 55625372,
+        "followerWorldTick": 55625378,
+        "tickDifferenceMs": 6,
+        "hostSampleTimeMs": 55625359,
+        "followerSampleTimeMs": 182335171
+      },
+      "boneMapChecksum": "8a0cb80a4da17254",
+      "hostConstraintCount": 17,
+      "followerConstraintCount": 17,
+      "followerKeyframesOwnerDynamicBodies": false,
+      "bodyErrors": [
+        {
+          "bodyIndex": 0,
+          "positionErrorGameUnits": 1.4828448806288712,
+          "rotationErrorDegrees": 1.527276728333139e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 1,
+          "positionErrorGameUnits": 1.4872154021870791,
+          "rotationErrorDegrees": 2.4148365394514667e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 2,
+          "positionErrorGameUnits": 1.4821878086142444,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 3,
+          "positionErrorGameUnits": 1.4828448806282182,
+          "rotationErrorDegrees": 1.01019860158646e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 4,
+          "positionErrorGameUnits": 1.4787251062928126,
+          "rotationErrorDegrees": 6.15664931839995e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 5,
+          "positionErrorGameUnits": 1.4866584442977981,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 6,
+          "positionErrorGameUnits": 1.4868945233616766,
+          "rotationErrorDegrees": 1.1581149199548747e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 7,
+          "positionErrorGameUnits": 1.4783955255641201,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 8,
+          "positionErrorGameUnits": 1.4871170095195545,
+          "rotationErrorDegrees": 1.0933637455190003e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 9,
+          "positionErrorGameUnits": 1.4783955255641201,
+          "rotationErrorDegrees": 2.9575586669421963e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 10,
+          "positionErrorGameUnits": 1.4830747292290019,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 11,
+          "positionErrorGameUnits": 1.4783033225994924,
+          "rotationErrorDegrees": 6.830189170012753e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 12,
+          "positionErrorGameUnits": 1.48680286063784,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 13,
+          "positionErrorGameUnits": 1.4828448806282182,
+          "rotationErrorDegrees": 7.636383641665691e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 14,
+          "positionErrorGameUnits": 1.478494664348879,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 15,
+          "positionErrorGameUnits": 1.4872612495469884,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 3,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 16,
+          "positionErrorGameUnits": 1.4826610355724448,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 17,
+          "positionErrorGameUnits": 1.4867570321017418,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 2,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        }
+      ],
+      "bodySummary": {
+        "count": 18,
+        "positionErrorGameUnits": {
+          "mean": 1.4831932711846167,
+          "max": 1.4872612495469884
+        },
+        "rotationErrorDegrees": {
+          "mean": 4.4841859144677525e-06,
+          "max": 1.527276728333139e-05
+        }
+      },
+      "renderedBoneErrors": [
+        {
+          "boneIndex": 0,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 5,
+          "positionErrorGameUnits": 10.165146383591935,
+          "rotationErrorDegrees": 177.0050477492171
+        },
+        {
+          "boneIndex": 10,
+          "positionErrorGameUnits": 77.30448952680571,
+          "rotationErrorDegrees": 177.0050625017471
+        },
+        {
+          "boneIndex": 20,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 30,
+          "positionErrorGameUnits": 91.62206586843855,
+          "rotationErrorDegrees": 177.00506266153687
+        },
+        {
+          "boneIndex": 40,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 50,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 60,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 70,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 80,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 90,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        },
+        {
+          "boneIndex": 98,
+          "positionErrorGameUnits": 1.482807135132614,
+          "rotationErrorDegrees": 177.00506596485096
+        }
+      ],
+      "renderedBoneSummary": {
+        "count": 12,
+        "positionErrorGameUnits": {
+          "mean": 16.036413832919145,
+          "max": 91.62206586843855
+        },
+        "rotationErrorDegrees": {
+          "mean": 177.0050638830133,
+          "max": 177.00506596485096
+        }
+      },
+      "rootFrameClosure": null,
+      "evaluatedLocalPoseComparison": {
+        "sampledBones": 99,
+        "meanLocalTranslationError": 2.8794087247609666e-05,
+        "maxLocalTranslationError": 0.0002281307519796794,
+        "meanLocalRotationErrorDeg": 6.70169806200498e-06,
+        "maxLocalRotationErrorDeg": 4.4592819037195585e-05
+      }
+    },
+    {
+      "source": "C:\\Users\\mwalt\\SkyrimSeamlessCoop\\Tools\\InGameTests\\artifacts\\authority-20260926-140905.json",
+      "capturedAt": "2026-09-26T14:09:04.7301945-05:00",
+      "actorFormId": "0x000654FB",
+      "bothDead": true,
+      "phase": "settled_velocity_snapshot",
+      "poseSampleTickDifferenceMs": 11,
+      "sampling": {
+        "hostWorldTick": 160848316,
+        "followerWorldTick": 160848305,
+        "tickDifferenceMs": -11,
+        "hostSampleTimeMs": 160848296,
+        "followerSampleTimeMs": 287553312
+      },
+      "boneMapChecksum": "8a0cb80a4da17254",
+      "hostConstraintCount": 17,
+      "followerConstraintCount": 17,
+      "followerKeyframesOwnerDynamicBodies": true,
+      "bodyErrors": [
+        {
+          "bodyIndex": 0,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 1,
+          "positionErrorGameUnits": 0.0007000000002221896,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 2,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 3,
+          "positionErrorGameUnits": 0.0003500000001110948,
+          "rotationErrorDegrees": 8.00910673140078e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 4,
+          "positionErrorGameUnits": 0.0007000000002221896,
+          "rotationErrorDegrees": 1.1326587362040635e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 5,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 2.1395506250453414e-05,
+          "hostMotionType": 3,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 6,
+          "positionErrorGameUnits": 0.0007000000002221896,
+          "rotationErrorDegrees": 1.183023466776879e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 7,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 8,
+          "positionErrorGameUnits": 0.0007000000002221896,
+          "rotationErrorDegrees": 3.4150945850063755e-06,
+          "hostMotionType": 3,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 9,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 1.7075472925031877e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 10,
+          "positionErrorGameUnits": 0.0007000000002221896,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 11,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 2.4148365394514667e-06,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 12,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 13,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 1.9014441926092303e-05,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 14,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 15,
+          "positionErrorGameUnits": 0.0007000000002221896,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 3,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 16,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        },
+        {
+          "bodyIndex": 17,
+          "positionErrorGameUnits": 0.0,
+          "rotationErrorDegrees": 0.0,
+          "hostMotionType": 2,
+          "followerMotionType": 4,
+          "hostInWorld": true,
+          "followerInWorld": true,
+          "hostLinearSpeedGameUnitsPerSecond": 0.0,
+          "followerLinearSpeedGameUnitsPerSecond": 0.0,
+          "hostAngularSpeedRadiansPerSecond": 0.0,
+          "followerAngularSpeedRadiansPerSecond": 0.0
+        }
+      ],
+      "bodySummary": {
+        "count": 18,
+        "positionErrorGameUnits": {
+          "mean": 0.0002527777778580129,
+          "max": 0.0007000000002221896
+        },
+        "rotationErrorDegrees": {
+          "mean": 4.395186408595386e-06,
+          "max": 2.1395506250453414e-05
+        }
+      },
+      "renderedBoneErrors": [
+        {
+          "boneIndex": 0,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 5,
+          "positionErrorGameUnits": 50.66097106254375,
+          "rotationErrorDegrees": 44.795570489743085
+        },
+        {
+          "boneIndex": 10,
+          "positionErrorGameUnits": 28.270105659506598,
+          "rotationErrorDegrees": 44.79556475606174
+        },
+        {
+          "boneIndex": 20,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 30,
+          "positionErrorGameUnits": 78.36549364994679,
+          "rotationErrorDegrees": 44.795555017542355
+        },
+        {
+          "boneIndex": 40,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 50,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 60,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 70,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 80,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 90,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        },
+        {
+          "boneIndex": 98,
+          "positionErrorGameUnits": 47.22779568220476,
+          "rotationErrorDegrees": 44.79557128261059
+        }
+      ],
+      "renderedBoneSummary": {
+        "count": 12,
+        "positionErrorGameUnits": {
+          "mean": 48.52889429265333,
+          "max": 78.36549364994679
+        },
+        "rotationErrorDegrees": {
+          "mean": 44.795569317236875,
+          "max": 44.79557128261059
+        }
+      },
+      "rootFrameClosure": {
+        "rootPositionErrorGameUnits": 47.22779568220476,
+        "rootRotationErrorDegrees": 44.79557128261059,
+        "rootRelativeErrors": [
+          {
+            "boneIndex": 0,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 5,
+            "positionErrorGameUnits": 0.005797312919894277,
+            "rotationErrorDegrees": 2.4148365394514667e-06,
+            "articulated": true
+          },
+          {
+            "boneIndex": 10,
+            "positionErrorGameUnits": 0.013558239401832832,
+            "rotationErrorDegrees": 2.5269392327350503e-05,
+            "articulated": true
+          },
+          {
+            "boneIndex": 20,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 30,
+            "positionErrorGameUnits": 0.007490214767065409,
+            "rotationErrorDegrees": 1.7245382313122758e-05,
+            "articulated": true
+          },
+          {
+            "boneIndex": 40,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 50,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 60,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 70,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 80,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 90,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          },
+          {
+            "boneIndex": 98,
+            "positionErrorGameUnits": 0.0,
+            "rotationErrorDegrees": 0.0,
+            "articulated": false
+          }
+        ],
+        "rootRelativeSummary": {
+          "count": 12,
+          "positionErrorGameUnits": {
+            "mean": 0.0022371472573993766,
+            "max": 0.013558239401832832
+          },
+          "rotationErrorDegrees": {
+            "mean": 3.7441342649937273e-06,
+            "max": 2.5269392327350503e-05
+          }
+        },
+        "articulatedSummary": {
+          "count": 3,
+          "positionErrorGameUnits": {
+            "mean": 0.008948589029597507,
+            "max": 0.013558239401832832
+          },
+          "rotationErrorDegrees": {
+            "mean": 1.4976537059974909e-05,
+            "max": 2.5269392327350503e-05
+          }
+        },
+        "scope": "Rigid root-frame closure of sampled nodes only; no node-name identity, writer attribution, or changed-build validation."
+      },
+      "evaluatedLocalPoseComparison": {
+        "sampledBones": 99,
+        "meanLocalTranslationError": 5.4490260481259024e-06,
+        "maxLocalTranslationError": 2.507270356466376e-05,
+        "meanLocalRotationErrorDeg": 5.75901188196053e-06,
+        "maxLocalRotationErrorDeg": 3.764357620473388e-05
+      }
+    }
+  ],
+  "logs": {
+    "logFilesRead": 173,
+    "uniqueResidualLines": 16643,
+    "uniqueSettleLines": 326,
+    "deduplication": "identical full log lines across copied/rotated logs",
+    "interpretation": "Residual is read immediately after SetBodyPose. This is write-back accuracy, not pre-correction or paired rendered-bone parity. Exact owner settle records the stream flag, not independent follower rest.",
+    "maxReportedPreGapGameUnits": 0.02,
+    "maxReportedPostPlacementResidualGameUnits": 0.0,
+    "maxReportedPostPlacementResidualDegrees": 0.056,
+    "firstResidualEvidence": [
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 4,
+        "actorFormId": "654FB",
+        "limb": 0,
+        "preGapGameUnits": 0.0,
+        "postPlacementResidualGameUnits": 0.0,
+        "postPlacementResidualDegrees": 0.0
+      },
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 10,
+        "actorFormId": "F94B7",
+        "limb": 0,
+        "preGapGameUnits": 0.0,
+        "postPlacementResidualGameUnits": 0.0,
+        "postPlacementResidualDegrees": 0.0
+      },
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 11,
+        "actorFormId": "75350",
+        "limb": 0,
+        "preGapGameUnits": 0.0,
+        "postPlacementResidualGameUnits": 0.0,
+        "postPlacementResidualDegrees": 0.0
+      },
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 12,
+        "actorFormId": "F94B4",
+        "limb": 0,
+        "preGapGameUnits": 0.0,
+        "postPlacementResidualGameUnits": 0.0,
+        "postPlacementResidualDegrees": 0.0
+      }
+    ],
+    "firstSettleEvidence": [
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 4468,
+        "text": "[2026-09-27 04:50:21.485] [info] [tid 36428]  Ragdoll F94B7 limb 0: exact owner settle at tick 213732552 in physics step"
+      },
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 16939,
+        "text": "[2026-09-27 05:08:11.878] [info] [tid 35224]  Ragdoll F94B7 limb 0: exact owner settle at tick 214802970 in physics step"
+      },
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.1.log",
+        "line": 32778,
+        "text": "[2026-09-27 05:30:55.463] [info] [tid 19136]  Ragdoll F94B7 limb 0: exact owner settle at tick 216166602 in physics step"
+      },
+      {
+        "source": "C:\\Tools\\skyrim_re\\agent\\captures\\harness-20260927-103856\\Follower\\tp_client.2.log",
+        "line": 1450,
+        "text": "[2026-09-27 03:53:39.033] [info] [tid 36428]  Ragdoll F94B7 limb 0: exact owner settle at tick 210329973 in physics step"
+      }
+    ]
+  }
+}

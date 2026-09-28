@@ -199,7 +199,8 @@ private:
     World& m_world;
     entt::dispatcher& m_dispatcher;
     TransportService& m_transport;
-    std::atomic<uint32_t> m_presentationDelayMs{300};
+    // 100 ms (was 300): max-sync; live-tunable via set_presentation_delay / sync_level.
+    std::atomic<uint32_t> m_presentationDelayMs{100};
     uint32_t m_lastLeaderScriptedPackage{};
     // Selected actor Serialize includes pose capture and the ordinary movement fields.
     mutable std::atomic<uint64_t> m_localPoseBatches{};

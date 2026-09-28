@@ -1,0 +1,44 @@
+[
+  {
+    "name": "actor interpolation",
+    "path": "Code/client/Systems/InterpolationSystem.cpp",
+    "start": "    float delta = 0.f;",
+    "end": "    float creatorHeading",
+    "sha256": "8c379f35e6e35206d925dfa92c953a2070a9ef61a6948799e28e3be37e60b522"
+  },
+  {
+    "name": "assembly goal",
+    "path": "Code/client/Services/Generic/ObjectService.cpp",
+    "start": "                    glm::vec3 correction = error;",
+    "end": "                    alignas(16) float position[4]",
+    "sha256": "0369e5eee2f95f209dbac550d271a9695c86b4de867487ec25a4788992d4f639"
+  },
+  {
+    "name": "assembly bound",
+    "path": "Code/client/Services/Generic/ObjectService.cpp",
+    "start": "                        const float limit = axis ? 12.f",
+    "end": "                        alignas(16) float bounded",
+    "sha256": "051f5fcde5be6889c7fe93e41000696092b78af643ad67f9e167278aef19466e"
+  },
+  {
+    "name": "dynamic velocity",
+    "path": "Code/client/Services/Generic/ObjectService.cpp",
+    "start": "                const glm::vec3 linear = glm::vec3{target.Velocity",
+    "end": "                float currentRotation",
+    "sha256": "5e6cd77cf1efe3cf37bb0485f4af8917cb05e1f85cec7088e9e527bdfa9c9ffe"
+  },
+  {
+    "name": "ragdoll rotation",
+    "path": "Code/client/Services/Generic/CorpseRagdollService.cpp",
+    "start": "            float dot = 0.f;",
+    "end": "            if (apState)",
+    "sha256": "a155fcd81e3f6bca02adad66ba659502180250df8d85b8d1bd58a1be2125cf42"
+  },
+  {
+    "name": "worn delivery",
+    "path": "Code/client/Services/Generic/NakedNpcGuard.cpp",
+    "start": "constexpr int32_t WornDeliveryCount(",
+    "end": "// Delayed delivery",
+    "sha256": "d869cc9c200c4578ad8b156a9a514718f39f20bbb2f15bbe28888a5594422aed"
+  }
+]

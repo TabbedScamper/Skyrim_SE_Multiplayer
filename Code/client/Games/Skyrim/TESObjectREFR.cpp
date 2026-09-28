@@ -6,6 +6,7 @@
 #include <World.h>
 #include <Services/PapyrusService.h>
 #include <Services/DoorVoteService.h>
+#include <Services/WorldStateService.h>
 #include <Services/Generic/BusyLockService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Events/ActivateEvent.h>
@@ -28,9 +29,11 @@
 #include <EquipManager.h>
 #include <DefaultObjectManager.h>
 #include <BSAnimationGraphManager.h>
+#include <NetImmerse/NiNode.h>
 #include <Havok/BShkbAnimationGraph.h>
 #include <Havok/hkbBehaviorGraph.h>
 #include <Havok/hkbVariableValueSet.h>
+#include <Havok/ActorPoseDiagnosticViews.h>
 #include <Havok/hkbStateMachine.h>
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
@@ -984,14 +987,15 @@ bool TESObjectREFR::PlayAnimationAndWait(BSFixedString* apAnimation, BSFixedStri
     return result;
 }
 
-#define OBJECT_ANIM_SYNC 0
+#define OBJECT_ANIM_SYNC 1
 
 bool TP_MAKE_THISCALL(HookPlayAnimationAndWait, void, uint32_t auiStackID, TESObjectREFR* apSelf, BSFixedString* apAnimation, BSFixedString* apEventName)
 {
+    if (apSelf && apAnimation) WorldStateService::TraceAnimation(apSelf->formID, apAnimation->AsAscii());
     spdlog::debug("Animation: {}, EventName: {}", apAnimation->AsAscii(), apEventName->AsAscii());
 
 #if OBJECT_ANIM_SYNC
-    if (!s_cancelAnimationWaitEvent && (apSelf->formID < 0xFF000000))
+    if (!s_cancelAnimationWaitEvent && apSelf && apSelf->formType == Actor::Type && (apSelf->formID < 0xFF000000))
         World::Get().GetRunner().Trigger(ScriptAnimationEvent(apSelf->formID, apAnimation->AsAscii(), apEventName->AsAscii()));
 #endif
 
@@ -1019,10 +1023,11 @@ bool TESObjectREFR::SendAnimationEvent(BSFixedString* apEventName) noexcept
 
 bool TP_MAKE_THISCALL(HookPlayAnimation, void, uint32_t auiStackID, TESObjectREFR* apSelf, BSFixedString* apEventName)
 {
+    if (apSelf && apEventName) WorldStateService::TraceAnimation(apSelf->formID, apEventName->AsAscii());
     spdlog::debug("EventName: {}", apEventName->AsAscii());
 
 #if OBJECT_ANIM_SYNC
-    if (!s_cancelAnimationEvent && (apSelf->formID < 0xFF000000))
+    if (!s_cancelAnimationEvent && apSelf && apSelf->formType == Actor::Type && (apSelf->formID < 0xFF000000))
         World::Get().GetRunner().Trigger(ScriptAnimationEvent(apSelf->formID, String{}, apEventName->AsAscii()));
 #endif
 
@@ -1148,12 +1153,16 @@ void TP_MAKE_THISCALL(HookRotateZ, TESObjectREFR, float aAngle)
 
 void TP_MAKE_THISCALL(HookLockChange, TESObjectREFR)
 {
+    const auto id = apThis->formID;
     TiltedPhoques::ThisCall(RealLockChange, apThis);
+    // Preserve the immediate, per-call path from 25fa030d. World-state sampling
+    // may coalesce durable values, but must not coalesce these existing events.
     const auto* pLock = apThis->GetLock();
-    if(pLock)
-        World::Get().GetRunner().Trigger(LockChangeEvent(apThis->formID, pLock->IsLocked(), pLock->lockLevel));
+    if (pLock)
+        World::Get().GetRunner().Trigger(LockChangeEvent(id, pLock->IsLocked(), pLock->lockLevel));
     else
-        World::Get().GetRunner().Trigger(LockChangeEvent(apThis->formID, false, 0));
+        World::Get().GetRunner().Trigger(LockChangeEvent(id, false, 0));
+    WorldStateService::ObserveId(id, WorldStateKind::Count);
 }
 
 static TiltedPhoques::Initializer s_objectReferencesHooks(
@@ -1192,3 +1201,378 @@ static TiltedPhoques::Initializer s_objectReferencesHooks(
         TP_HOOK(&RealPlayAnimationAndWait, HookPlayAnimationAndWait);
         TP_HOOK(&RealPlayAnimation, HookPlayAnimation);
     });
+
+
+namespace
+{
+// ABI/callsite audit and limitations are recorded in world_state_encoding.cpp.
+using WorldFlagFn = void(TESObjectREFR*, bool);
+using WorldDamageFn = void(void*, TESObjectREFR*, float, bool);
+using WorldClearFn = void(TESObjectREFR*);
+using WorldFinishedFn = void(TESObjectREFR*, const char*);
+using WorldSet3DFn = void(TESObjectREFR*, NiNode*, bool);
+using WorldOpenFn = bool(TESObjectREFR*, bool, bool);
+using WorldSetOpenFn = void(void*, uint32_t, TESObjectREFR*, bool);
+WorldFlagFn* s_worldDisabled{};
+WorldFlagFn* s_worldDestroyed{};
+WorldDamageFn* s_worldDamage{};
+WorldClearFn* s_worldClear{};
+WorldFinishedFn* s_worldFinished{};
+WorldSet3DFn* s_worldSet3D{};
+WorldSetOpenFn* s_worldSetOpen{};
+WorldOpenFn* s_worldOpen{};
+
+float WorldHealth(TESObjectREFR* ref)
+{
+    using Fn = float(ExtraDataList*);
+    POINTER_SKYRIMSE(Fn, fn, 12004);
+    return fn.Get()(&ref->extraData);
+}
+uint32_t WorldStage(TESObjectREFR* ref)
+{
+    using Fn = uint32_t(TESObjectREFR*);
+    POINTER_SKYRIMSE(Fn, fn, 14170);
+    return fn.Get()(ref);
+}
+uint32_t WorldOpenState(TESObjectREFR* ref)
+{
+    using Fn = uint32_t(TESObjectREFR*);
+    POINTER_SKYRIMSE(Fn, fn, 14288);
+    return fn.Get()(ref);
+}
+const char* WorldFinished(TESObjectREFR* ref)
+{
+    using Fn = const char*(ExtraDataList*);
+    POINTER_SKYRIMSE(Fn, fn, 11730); // ExtraLastFinishedSequence, 140164EB0
+    return fn.Get()(&ref->extraData);
+}
+void HookWorldDisabled(TESObjectREFR* ref, bool disabled)
+{
+    const auto id = ref->formID;
+    s_worldDisabled(ref, disabled);
+    WorldStateService::ObserveId(id, WorldStateKind::Count);
+}
+void HookWorldDestroyed(TESObjectREFR* ref, bool destroyed)
+{
+    const auto id = ref->formID;
+    s_worldDestroyed(ref, destroyed);
+    WorldStateService::ObserveId(id, WorldStateKind::Count);
+}
+void HookWorldDamage(void* destructible, TESObjectREFR* ref, float damage, bool force)
+{
+    const auto id = ref ? ref->formID : 0;
+    s_worldDamage(destructible, ref, damage, force);
+    WorldStateService::ObserveId(id, WorldStateKind::Count);
+}
+void HookWorldClear(TESObjectREFR* ref)
+{
+    const auto id = ref->formID;
+    s_worldClear(ref);
+    WorldStateService::ObserveId(id, WorldStateKind::Count);
+}
+void HookWorldFinished(TESObjectREFR* ref, const char* name)
+{
+    const auto id = ref->formID;
+    s_worldFinished(ref, name);
+    // Observe the engine's finished-sequence property, never a graph start event.
+    WorldStateService::ObserveId(id, WorldStateKind::Count);
+}
+void HookWorldSet3D(TESObjectREFR* ref, NiNode* node, bool queue)
+{
+    const auto id = ref->formID;
+    s_worldSet3D(ref, node, queue);
+    WorldStateService::Attached(id);
+}
+bool HookWorldOpen(TESObjectREFR* ref, bool open, bool snap)
+{
+    const auto id = ref ? ref->formID : 0;
+    const auto result = s_worldOpen(ref, open, snap);
+    if (result) WorldStateService::ObserveId(id, WorldStateKind::Open, open, 1);
+    return result;
+}
+void HookWorldSetOpen(void* vm, uint32_t stack, TESObjectREFR* ref, bool open)
+{
+    const auto id = ref ? ref->formID : 0;
+    s_worldSetOpen(vm, stack, ref, open);
+    // Only script SetOpen; player Activate/DoorVote is already replicated.
+    WorldStateService::ObserveId(id, WorldStateKind::Open, open);
+}
+static TiltedPhoques::Initializer s_worldStateHooks([] {
+    POINTER_SKYRIMSE(WorldFlagFn, disabled, 14646);
+    POINTER_SKYRIMSE(WorldFlagFn, destroyed, 14649);
+    POINTER_SKYRIMSE(WorldDamageFn, damage, 14158);
+    POINTER_SKYRIMSE(WorldClearFn, clear, 14181);
+    POINTER_SKYRIMSE(WorldFinishedFn, finished, 19513);
+    POINTER_SKYRIMSE(WorldSet3DFn, set3D, 19729);
+    POINTER_SKYRIMSE(WorldSetOpenFn, setOpen, 56233);
+    POINTER_SKYRIMSE(WorldOpenFn, open, 14287);
+    s_worldDisabled = disabled.Get(); s_worldDestroyed = destroyed.Get();
+    s_worldDamage = damage.Get(); s_worldClear = clear.Get();
+    s_worldFinished = finished.Get(); s_worldSet3D = set3D.Get(); s_worldSetOpen = setOpen.Get(); s_worldOpen = open.Get();
+    TP_HOOK(&s_worldDisabled, HookWorldDisabled);
+    TP_HOOK(&s_worldDestroyed, HookWorldDestroyed);
+    TP_HOOK(&s_worldDamage, HookWorldDamage);
+    TP_HOOK(&s_worldClear, HookWorldClear);
+    TP_HOOK(&s_worldFinished, HookWorldFinished);
+    TP_HOOK(&s_worldSet3D, HookWorldSet3D);
+    TP_HOOK(&s_worldSetOpen, HookWorldSetOpen);
+    TP_HOOK(&s_worldOpen, HookWorldOpen);
+});
+}
+
+uint32_t WorldStateService::EnableParent(TESObjectREFR* ref) noexcept
+{
+    if (!ref) return UINT32_MAX;
+    const auto* extra = ref->extraData.GetByType(static_cast<ExtraDataType>(0x36));
+    if (!extra) return 0;
+    uint32_t handle{};
+    std::memcpy(&handle, reinterpret_cast<const uint8_t*>(extra) + 0x14, sizeof(handle));
+    using Resolve = bool(uint32_t&, TESObjectREFR*&);
+    POINTER_SKYRIMSE(Resolve, resolve, 17201);
+    TESObjectREFR* parent{};
+    resolve.Get()(handle, parent);
+    // Read BEFORE releasing the smart-pointer ownership returned by 17201.
+    const auto id = parent ? parent->formID : UINT32_MAX;
+    if (parent) parent->handleRefObject.DecRefHandle();
+    return id;
+}
+
+namespace
+{
+// Opt-in, main-tail observations only. No serializer, animation event, motion
+// setter or physics mutation is called. Failed reads stay explicitly unknown.
+template <class T> bool WorldProbeRead(const void* address, T& value)
+{
+    SIZE_T read{};
+    return address && ReadProcessMemory(GetCurrentProcess(), address, &value, sizeof(value), &read) && read == sizeof(value);
+}
+std::string WorldProbeFloats(const float* values, size_t count)
+{
+    std::string result = "[";
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (i) result += ',';
+        result += std::isfinite(values[i]) ? fmt::format("{:.4f}", values[i]) : "null";
+    }
+    return result + ']';
+}
+bool WorldProbeIsRigidCollision(NiObject* object)
+{
+    // NiRTTI has name/parent; 20014 uses the same chain for bhkRigidBody.
+    struct Type { const char* Name; const void* Parent; } type{};
+    auto* current = reinterpret_cast<const void*>(object->GetRTTI());
+    for (unsigned depth = 0; current && depth < 16; ++depth)
+    {
+        if (!WorldProbeRead(current, type)) return false;
+        char name[21]{}; // "bhkNiCollisionObject" including NUL
+        if (WorldProbeRead(type.Name, name) && std::memcmp(name, "bhkNiCollisionObject", sizeof(name)) == 0) return true;
+        current = type.Parent;
+    }
+    return false;
+}
+std::string WorldCollisionDiagnostic(TESObjectREFR* ref)
+{
+    std::string result = "\"collisionNodes\":[";
+    unsigned slots{}, emitted{};
+    bool truncated{};
+    auto walk = [&](auto&& self, NiAVObject* node, const std::string& path, unsigned depth) -> void {
+        if (!node) return;
+        if (depth > 16 || slots >= 128 || emitted >= 32) { truncated = true; return; }
+        ++slots;
+        if (auto* collision = reinterpret_cast<NiObject*>(node->collisionObject))
+        {
+            void* wrapper{};
+            void* body{};
+            ActorPoseDiagnosticViews::RigidBody state{};
+            uint32_t flags{};
+            const bool rigidCollision = WorldProbeIsRigidCollision(collision);
+            if (rigidCollision)
+            {
+                using GetBody = void*(void*);
+                POINTER_SKYRIMSE(GetBody, getBody, 20014);
+                wrapper = getBody.Get()(collision); // native RTTI check rejects phantoms
+                WorldProbeRead(reinterpret_cast<const uint8_t*>(collision) + 0x18, flags);
+            }
+            const bool readable = wrapper && WorldProbeRead(static_cast<const uint8_t*>(wrapper) + 0x10, body) &&
+                WorldProbeRead(body, state) && state.motionType >= 1 && state.motionType <= 7;
+            result += fmt::format("{}{{\"path\":\"{}\",\"rigidCollision\":{},\"bodyReadable\":{},\"flags\":{},"
+                "\"inWorld\":{},\"motionType\":{},\"nodeWorld\":{},\"nodeRotation\":{},\"nodeScale\":{},\"bodyTransformHavok\":{},\"velocityHavok\":{}}}",
+                emitted++ ? "," : "", path, rigidCollision, readable, flags, readable && state.world,
+                readable ? int(state.motionType) : -1, WorldProbeFloats(&node->world.translate.x, 3),
+                WorldProbeFloats(&node->world.rotate.entry[0][0], 9), WorldProbeFloats(&node->world.scale, 1),
+                readable ? WorldProbeFloats(state.transform, 16) : "null",
+                readable ? WorldProbeFloats(state.linearVelocity, 3) : "null");
+        }
+        if (auto* parent = node->AsNode(); parent && parent->children.data)
+            for (uint16_t i = 0; i < parent->children.length; ++i)
+            {
+                // Count null array slots too, so sparse trees cannot evade the budget.
+                if (slots >= 128 || emitted >= 32) { truncated = true; break; }
+                auto* child = parent->children.data[i];
+                if (!child) { ++slots; continue; }
+                self(self, child, path + '/' + std::to_string(i), depth + 1);
+            }
+    };
+    walk(walk, ref->GetNiNode(), "root", 0);
+    return result + fmt::format("],\"collisionSlots\":{},\"collisionTruncated\":{}", slots, truncated);
+}
+std::string WorldGraphDiagnostic(BSAnimationGraphManager* manager)
+{
+    using namespace ActorPoseDiagnosticViews;
+    std::string result = "\"graphs\":[";
+    if (!manager) return result + ']';
+    BSScopedLock<BSRecursiveLock> lock(manager->lock);
+    const auto count = (std::min)(manager->animationGraphs.size, 4u);
+    for (uint32_t graphIndex = 0; graphIndex < count; ++graphIndex)
+    {
+        auto* graph = manager->animationGraphs.Get(graphIndex);
+        BehaviorGraph behavior{};
+        ActiveNodeList nodes{};
+        const bool readable = graph && WorldProbeRead(graph->behaviorGraph, behavior) &&
+            WorldProbeRead(behavior.activeNodes, nodes) && nodes.size >= 0 && nodes.size <= 1024;
+        result += fmt::format("{}{{\"index\":{},\"activeNodesReadable\":{},\"active\":{},\"count\":{},\"truncated\":{},\"states\":[",
+            graphIndex ? "," : "", graphIndex, readable, readable && behavior.isActive,
+            readable ? nodes.size : -1, readable && nodes.size > 64);
+        unsigned emitted{};
+        for (int i = 0; readable && nodes.data && i < (std::min)(nodes.size, 64); ++i)
+        {
+            ActiveNodeInfo info{};
+            StateMachine state{};
+            // RTTI proves the active clone's type before reading StateMachine fields.
+            if (!WorldProbeRead(static_cast<const ActiveNodeInfo*>(nodes.data) + i, info) || !info.nodeClone ||
+                !Cast<hkbStateMachine>(reinterpret_cast<hkbGenerator*>(info.nodeClone)) ||
+                !WorldProbeRead(info.nodeClone, state)) continue;
+            result += fmt::format("{}{{\"nodeId\":{},\"state\":{},\"previous\":{},\"active\":{}}}",
+                emitted++ ? "," : "", state.nodeID, state.currentStateID, state.previousStateID, state.isActive);
+        }
+        result += "]}";
+    }
+    return result + fmt::format("],\"graphsTruncated\":{}", manager->animationGraphs.size > count);
+}
+}
+
+std::string WorldStateService::AnimationDiagnostic(TESObjectREFR* ref) noexcept
+{
+    BSAnimationGraphManager* manager{};
+    ref->animationGraphHolder.GetBSAnimationGraph(&manager);
+    const bool hasGraph = manager != nullptr;
+    const auto graphState = WorldGraphDiagnostic(manager);
+    if (manager) manager->Release();
+    const char* name = WorldFinished(ref);
+    std::string escaped;
+    if (name) for (const unsigned char c : std::string(name))
+    {
+        if (c == '\\' || c == '"') escaped.push_back('\\');
+        if (c >= 0x20) escaped.push_back(static_cast<char>(c));
+    }
+    auto result = fmt::format("\"hasGraph\":{},\"finishedSequence\":\"{}\",\"destructionStage\":{},\"destructionHealth\":{},\"openState\":{}",
+        hasGraph, escaped, ref->baseForm ? WorldStage(ref) : UINT32_MAX, WorldHealth(ref), WorldOpenState(ref));
+    if (const auto* node = ref->GetNiNode())
+        result += fmt::format(",\"rootCollisionPresent\":{},\"rootWorld\":[{},{},{}]", node->collisionObject != nullptr,
+            node->world.translate.x, node->world.translate.y, node->world.translate.z);
+    result += ',' + graphState + ',' + WorldCollisionDiagnostic(ref);
+    return result;
+}
+
+void WorldStateService::Sample(TESObjectREFR* ref) noexcept
+{
+    if (!Eligible(ref)) return;
+    if (!EnableParent(ref)) Observe(ref, WorldStateKind::Disabled, ref->IsDisabled());
+    Observe(ref, WorldStateKind::Destroyed, (ref->flags & 0x800000) != 0);
+    if (ref->flags & 0x1000000)
+        Observe(ref, WorldStateKind::DestructionHealth, WorldStage(ref), WorldHealth(ref));
+    if (ref->baseForm->formType == FormType::Door)
+    {
+        const auto open = WorldOpenState(ref);
+        if (open == 1 || open == 3) Observe(ref, WorldStateKind::Open, open == 1, 3);
+        const auto* lock = ref->GetLock();
+        Observe(ref, WorldStateKind::Lock, lock ? uint32_t(lock->lockLevel) | (lock->IsLocked() ? 0x100u : 0u) : 0u);
+    }
+    // Door animation/activation and lock events keep their existing live paths.
+    // A completed sequence is durable on ordinary animated objects only.
+    if (ref->baseForm->formType != FormType::Door)
+        if (const auto* name = WorldFinished(ref); name && *name)
+            Observe(ref, WorldStateKind::FinishedSequence, 0, 0, name);
+}
+
+bool WorldStateService::Matches(TESObjectREFR* ref, const WorldState& state) noexcept
+{
+    switch (state.Kind)
+    {
+    case WorldStateKind::Disabled: return ref->IsDisabled() == (state.Value != 0);
+    case WorldStateKind::Destroyed: return ((ref->flags & 0x800000) != 0) == (state.Value != 0);
+    case WorldStateKind::DestructionHealth: return WorldStage(ref) == state.Value && std::abs(WorldHealth(ref) - state.Scalar) <= 0.001f;
+    case WorldStateKind::Open:
+    {
+        const auto open = WorldOpenState(ref);
+        return open == (state.Value ? 1u : 3u); // settled open/closed, not opening/closing
+    }
+    case WorldStateKind::Lock:
+    {
+        const auto* lock = ref->GetLock();
+        return (lock ? uint32_t(lock->lockLevel) | (lock->IsLocked() ? 0x100u : 0u) : 0u) == state.Value;
+    }
+    // A matching name is not proof that a freshly attached 3D has its pose.
+    default: return false;
+    }
+}
+
+bool WorldStateService::Apply(TESObjectREFR* ref, const WorldState& state) noexcept
+{
+    if (!IsMainThread()) return false;
+    switch (state.Kind)
+    {
+    case WorldStateKind::Disabled:
+    {
+        if (EnableParent(ref)) return false; // never force an enable-parent child
+        using Enable = void(TESObjectREFR*);
+        using Disable = void(TESObjectREFR*);
+        POINTER_SKYRIMSE(Enable, enable, 19800);
+        POINTER_SKYRIMSE(Disable, disable, 19801);
+        if (!Matches(ref, state))
+        {
+            if (state.Value) disable.Get()(ref);
+            else enable.Get()(ref);
+        }
+        return Matches(ref, state);
+    }
+    case WorldStateKind::Destroyed:
+        s_worldDestroyed(ref, state.Value != 0);
+        return Matches(ref, state);
+    case WorldStateKind::Open:
+        if (!WorldStateTable::ShouldDeliverLive(state) && state.Scalar != 2) return false;
+        if (ref->baseForm->formType != FormType::Door) return false;
+        if (!ref->GetNiNode() || ref->IsDisabled()) return false;
+        // A newly attached node can have a stale pose despite matching flags.
+        if (state.Scalar == 2)
+            return s_worldOpen(ref, state.Value != 0, true) && Matches(ref, state);
+        if (Matches(ref, state)) return true;
+        {
+            const auto open = WorldOpenState(ref);
+            // Do not restart an animation already moving toward the requested state.
+            if (open != (state.Value ? 2u : 4u))
+                s_worldSetOpen(nullptr, 0, ref, state.Value != 0);
+        }
+        // 56233 does not read VM/stack in 1.7.104. Acceptance is not completion.
+        return Matches(ref, state);
+    case WorldStateKind::Lock:
+    {
+        // Same native level + SetLock + LockChange sequence as ObjectService.
+        if (Matches(ref, state)) return true;
+        auto* lock = ref->GetLock();
+        if (!lock) lock = ref->CreateLock();
+        if (!lock) return false;
+        lock->lockLevel = static_cast<uint8_t>(state.Value);
+        lock->SetLock((state.Value & 0x100) != 0);
+        TiltedPhoques::ThisCall(RealLockChange, ref);
+        return Matches(ref, state);
+    }
+    case WorldStateKind::DestructionHealth:
+    case WorldStateKind::FinishedSequence:
+        // Withdraw this task's speculative restore paths. A flag/name or native
+        // return value does not establish graph, replacement-model or collision
+        // convergence. Keep authoritative state pending for a verified adapter.
+        return false;
+    default: return false;
+    }
+}

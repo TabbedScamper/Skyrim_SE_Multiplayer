@@ -8,11 +8,18 @@ struct CorpseRagdollBody
 {
     float Position[3]{};
     float Rotation[4]{0.f, 0.f, 0.f, 1.f};
+    // Native Havok units/s and radians/s; needed for feed-forward between samples.
+    float LinearVelocity[3]{};
+    float AngularVelocity[3]{};
+    uint8_t MotionType{1};
 
     bool operator==(const CorpseRagdollBody& acRhs) const noexcept
     {
         return std::equal(std::begin(Position), std::end(Position), std::begin(acRhs.Position)) &&
-               std::equal(std::begin(Rotation), std::end(Rotation), std::begin(acRhs.Rotation));
+               std::equal(std::begin(Rotation), std::end(Rotation), std::begin(acRhs.Rotation)) &&
+               std::equal(std::begin(LinearVelocity), std::end(LinearVelocity), std::begin(acRhs.LinearVelocity)) &&
+               std::equal(std::begin(AngularVelocity), std::end(AngularVelocity), std::begin(acRhs.AngularVelocity)) &&
+               MotionType == acRhs.MotionType;
     }
 };
 

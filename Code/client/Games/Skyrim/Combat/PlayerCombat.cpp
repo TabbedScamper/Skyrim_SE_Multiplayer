@@ -287,13 +287,17 @@ int32_t DetectionLevel(Actor* apObserver, Actor* apTarget)
     POINTER_SKYRIMSE(RequestLevel, requestLevel, 37764);
     return requestLevel(apObserver, apTarget, 3);
 }
-std::vector<Actor*> Observers()
+// BEGIN OBSERVER SNAPSHOT
+namespace
+{
+thread_local std::vector<Actor*> s_observerScratch;
+
+void CollectObservers(std::vector<Actor*>& actors)
 {
     // ProcessLists::RequestHighestDetectionLevelAgainstActor, ID 41408.
     POINTER_SKYRIMSE(uint8_t*, processLists, 400315);
-    std::vector<Actor*> actors;
     if (!*processLists)
-        return actors;
+        return;
     const auto& handles = *reinterpret_cast<GameArray<uint32_t>*>(*processLists + 0x30);
     for (auto handle : handles)
     {
@@ -304,8 +308,31 @@ std::vector<Actor*> Observers()
             !actor->GetExtension()->IsRemote() && !actor->GetExtension()->IsPlayer())
             actors.push_back(actor);
     }
+}
+}
+
+ObserverSnapshot::ObserverSnapshot()
+{
+    m_actors.swap(s_observerScratch);
+    CollectObservers(m_actors);
+}
+
+ObserverSnapshot::~ObserverSnapshot()
+{
+    // No actor pointer survives into the next snapshot. Preserve the larger
+    // capacity if a nested invocation returned its own buffer in the meantime.
+    m_actors.clear();
+    if (m_actors.capacity() > s_observerScratch.capacity())
+        m_actors.swap(s_observerScratch);
+}
+
+std::vector<Actor*> Observers()
+{
+    std::vector<Actor*> actors;
+    CollectObservers(actors);
     return actors;
 }
+// END OBSERVER SNAPSHOT
 bool HasSnapshot(Actor* apActor)
 {
     std::lock_guard lock(s_mutex);
@@ -313,13 +340,13 @@ bool HasSnapshot(Actor* apActor)
     return it != s_snapshots.end() && it->second.ActorPtr == apActor &&
         GetTickCount64() - it->second.ReceivedAt < 2000;
 }
-void GetAwareness(Actor* apTarget, int32_t& aLevel, uint32_t& aLOSCount)
+void GetAwareness(Actor* apTarget, int32_t& aLevel, uint32_t& aLOSCount, const std::vector<Actor*>& acObservers)
 {
     aLevel = -1000;
     aLOSCount = 0;
     using GetState = const uint8_t*(Actor*, Actor*, uint32_t);
     POINTER_SKYRIMSE(GetState, getState, 37758);
-    for (auto* actor : Observers())
+    for (auto* actor : acObservers)
     {
         // Match the native player's exclusions for teammates and commanded allies.
         if (actor == apTarget || (actor->flags1 & (1u << 26)) || (actor->flags2 & (1u << 26)))

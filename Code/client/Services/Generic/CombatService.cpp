@@ -16,6 +16,7 @@
 #include <Forms/TESAmmo.h>
 #include <Games/ActorExtension.h>
 #include <Combat/PlayerCombat.h>
+#include <Combat/CombatController.h>
 #include <PlayerCharacter.h>
 
 CombatService::CombatService(World& aWorld, TransportService& aTransport, entt::dispatcher& aDispatcher)
@@ -43,14 +44,12 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
 {
     ModSystem& modSystem = m_world.Get().GetModSystem();
 
-    uint32_t shooterFormId = acEvent.ShooterID;
-    auto view = m_world.view<FormIdComponent, LocalComponent>();
-    const auto shooterEntityIt = std::find_if(std::begin(view), std::end(view), [shooterFormId, view](entt::entity entity) { return view.get<FormIdComponent>(entity).Id == shooterFormId; });
+    const auto shooterEntityIt = Utils::FindLocalEntityByFormId(acEvent.ShooterID);
 
-    if (shooterEntityIt == std::end(view))
+    if (!shooterEntityIt)
         return;
 
-    LocalComponent& localComponent = view.get<LocalComponent>(*shooterEntityIt);
+    LocalComponent& localComponent = m_world.get<LocalComponent>(*shooterEntityIt);
 
     ProjectileLaunchRequest request{};
 
@@ -86,6 +85,14 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
     request.UnkBool1 = acEvent.UnkBool1;
     request.UnkBool2 = acEvent.UnkBool2;
 
+    // Evidence for "archers shot the wrong person" on the follower: owner shot, native aim target.
+    auto* pShooter = Cast<Actor>(TESForm::GetById(acEvent.ShooterID));
+    auto* pAimTarget = pShooter && pShooter->pCombatController
+        ? Cast<Actor>(TESObjectREFR::GetByHandle(pShooter->pCombatController->targetHandle)) : nullptr;
+    spdlog::info("Projectile send shooter {:X} server {:X} origin ({:.0f},{:.0f},{:.0f}) angles x {:.3f} z {:.3f} combat target {:X}",
+        acEvent.ShooterID, localComponent.Id, acEvent.Origin.x, acEvent.Origin.y, acEvent.Origin.z, acEvent.XAngle,
+        acEvent.ZAngle, pAimTarget ? pAimTarget->formID : 0);
+
     m_transport.Send(request);
 }
 
@@ -93,16 +100,15 @@ void CombatService::OnNotifyProjectileLaunch(const NotifyProjectileLaunch& acMes
 {
     ModSystem& modSystem = World::Get().GetModSystem();
 
-    auto remoteView = m_world.view<RemoteComponent, FormIdComponent>();
-    const auto remoteIt = std::find_if(std::begin(remoteView), std::end(remoteView), [remoteView, Id = acMessage.ShooterID](auto entity) { return remoteView.get<RemoteComponent>(entity).Id == Id; });
+    const auto remoteIt = Utils::FindRemoteActorByServerId(acMessage.ShooterID);
 
-    if (remoteIt == std::end(remoteView))
+    if (!remoteIt)
     {
         spdlog::warn("Shooter with remote id {:X} not found.", acMessage.ShooterID);
         return;
     }
 
-    FormIdComponent formIdComponent = remoteView.get<FormIdComponent>(*remoteIt);
+    FormIdComponent formIdComponent = m_world.get<FormIdComponent>(*remoteIt);
 
     Projectile::LaunchData launchData{};
 
@@ -159,6 +165,14 @@ void CombatService::OnNotifyProjectileLaunch(const NotifyProjectileLaunch& acMes
 
     BSPointerHandle<Projectile> result;
 
+    auto* pShooterActor = Cast<Actor>(launchData.pShooter);
+    auto* pCopyTarget = pShooterActor && pShooterActor->pCombatController
+        ? Cast<Actor>(TESObjectREFR::GetByHandle(pShooterActor->pCombatController->targetHandle)) : nullptr;
+    const auto& copyPosition = launchData.pShooter->position;
+    spdlog::info("Projectile recv shooter {:X} server {:X} origin ({:.0f},{:.0f},{:.0f}) angles x {:.3f} z {:.3f} copy at ({:.0f},{:.0f},{:.0f}) copy combat target {:X}",
+        formIdComponent.Id, acMessage.ShooterID, acMessage.OriginX, acMessage.OriginY, acMessage.OriginZ, acMessage.XAngle,
+        acMessage.ZAngle, copyPosition.x, copyPosition.y, copyPosition.z, pCopyTarget ? pCopyTarget->formID : 0);
+
     Projectile::Launch(&result, launchData);
 }
 
@@ -213,11 +227,16 @@ void CombatService::RunTargetUpdates(const float) const noexcept
         return;
     nextUpdate = now + 200;
 
+    // BEGIN SCALE COMBAT TIMING
+    const auto scaleStarted = std::chrono::steady_clock::now();
+    // END SCALE COMBAT TIMING
+
     using IsHostile = bool(Actor*, Actor*);
     POINTER_SKYRIMSE(IsHostile, isHostile, 37537);
     POINTER_SKYRIMSE(IsHostile, isCombatTarget, 38571);
     POINTER_SKYRIMSE(IsHostile, canAttack, 37532);
-    const auto observers = PlayerCombat::Observers();
+    const PlayerCombat::ObserverSnapshot observerSnapshot;
+    const auto& observers = observerSnapshot.Get();
     const auto players = m_world.view<RemoteComponent, FormIdComponent, PlayerComponent>();
     for (const auto entity : players)
     {
@@ -251,4 +270,18 @@ void CombatService::RunTargetUpdates(const float) const noexcept
             }
         }
     }
+    // BEGIN SCALE COMBAT TIMING
+    // Read-only batch timing. Do not cache native combat membership across
+    // StartCombat: it can change the shared group used by later candidates.
+    static thread_local uint64_t scaleNextLog{}, scaleCalls{}, scaleTotalUs{}, scaleMaxUs{};
+    const auto scaleUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - scaleStarted).count());
+    ++scaleCalls; scaleTotalUs += scaleUs; scaleMaxUs = (std::max)(scaleMaxUs, scaleUs);
+    if (now >= scaleNextLog)
+    {
+        spdlog::info("Scale cost: combat batches={} total-us={} max-us={} remote-player-pool-bound={} observers={}",
+            scaleCalls, scaleTotalUs, scaleMaxUs, players.size_hint(), observers.size());
+        scaleNextLog = now + 5000; scaleCalls = scaleTotalUs = scaleMaxUs = 0;
+    }
+    // END SCALE COMBAT TIMING
 }

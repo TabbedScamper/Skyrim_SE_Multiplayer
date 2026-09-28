@@ -1,6 +1,7 @@
 #pragma once
 
 #include <include/internal/cef_ptr.h>
+#include <atomic>
 
 namespace TiltedPhoques
 {
@@ -62,6 +63,7 @@ struct OverlayService
     void SetVersion(const std::string& acVersion);
 
     OverlayApp* GetOverlayApp() const noexcept { return m_pOverlay.get(); }
+    bool IsCefInitialized() const noexcept { return m_cefInitialized.load(); }
 
     void SendSystemMessage(const std::string& acMessage);
     // Character creation together: the banner over the creator (whose character is shown, ready or not).
@@ -90,6 +92,7 @@ protected:
     void OnPartyLeftEvent(const PartyLeftEvent& acEvent) noexcept;
 
 private:
+    std::atomic_bool m_cefInitialized{};
     void RunDebugDataUpdates() noexcept;
     void RunPlayerHealthUpdates() noexcept;
 

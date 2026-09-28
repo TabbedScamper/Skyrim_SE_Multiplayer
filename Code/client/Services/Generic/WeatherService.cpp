@@ -134,6 +134,70 @@ void WeatherService::OnWeatherChange(const NotifyWeatherChange& acMessage) noexc
     Sky::Get()->ForceWeather(pWeather);
 
     m_cachedWeatherId = weatherId;
+
+    m_hostSky = {};
+    if (acMessage.HasSky)
+    {
+        m_hostSky.Valid = true;
+        m_hostSky.LastWeatherId = acMessage.LastId ? modSystem.GetGameId(acMessage.LastId) : 0;
+        m_hostSky.Percent = acMessage.Percent;
+        m_hostSky.WindSpeed = acMessage.WindSpeed;
+        m_hostSky.WindAngle = acMessage.WindAngle;
+        ApplyHostSky();
+    }
+}
+
+void WeatherService::ApplyHostSky() noexcept
+{
+    Sky* pSky = Sky::Get();
+    if (!pSky || !m_hostSky.Valid || !pSky->pCurrentWeather || pSky->pCurrentWeather->formID != m_cachedWeatherId)
+        return;
+    // ForceWeather reset the blend to the new weather at 100% and the wind angle is re-rolled locally on a
+    // weather change (ID 26229), so flags, smoke and precipitation followed a different wind than the host.
+    pSky->pLastWeather = m_hostSky.LastWeatherId ? Cast<TESWeather>(TESForm::GetById(m_hostSky.LastWeatherId)) : nullptr;
+    pSky->currentWeatherPct = m_hostSky.Percent;
+    const bool windChanged = pSky->windSpeed != m_hostSky.WindSpeed || pSky->windAngle != m_hostSky.WindAngle;
+    pSky->windSpeed = m_hostSky.WindSpeed;
+    pSky->windAngle = m_hostSky.WindAngle;
+    if (windChanged)
+        pSky->flags |= 0x100000; // kUpdateWind: wind consumers pick up the new values
+}
+
+void WeatherService::SendSkyState(const uint32_t aWeatherId) noexcept
+{
+    Sky* pSky = Sky::Get();
+    if (!pSky)
+        return;
+    SkyState state{};
+    state.Valid = true;
+    state.LastWeatherId = pSky->pLastWeather ? pSky->pLastWeather->formID : 0;
+    state.Percent = pSky->currentWeatherPct;
+    state.WindSpeed = pSky->windSpeed;
+    state.WindAngle = pSky->windAngle;
+    const auto now = GetTickCount64();
+    const bool changed = aWeatherId != m_cachedWeatherId || state.LastWeatherId != m_sentSky.LastWeatherId ||
+        state.WindAngle != m_sentSky.WindAngle || !m_sentSky.Valid;
+    // During a blend the percentage moves every frame: refresh at 2 Hz, not per frame.
+    const bool blending = state.Percent < 1.f && now >= m_nextSkySendMs;
+    if (!changed && !blending)
+        return;
+    RequestWeatherChange request{};
+    auto& modSystem = m_world.GetModSystem();
+    if (!modSystem.GetServerModId(aWeatherId, request.Id))
+    {
+        spdlog::error(__FUNCTION__ ": weather server ID not found, form id: {:X}", aWeatherId);
+        return;
+    }
+    request.HasSky = true;
+    if (state.LastWeatherId && !modSystem.GetServerModId(state.LastWeatherId, request.LastId))
+        request.LastId = {};
+    request.Percent = state.Percent;
+    request.WindSpeed = state.WindSpeed;
+    request.WindAngle = state.WindAngle;
+    m_transport.Send(request);
+    m_cachedWeatherId = aWeatherId;
+    m_sentSky = state;
+    m_nextSkySendMs = now + 500;
 }
 
 void WeatherService::RunWeatherUpdates(const double acDelta) noexcept
@@ -157,29 +221,15 @@ void WeatherService::RunWeatherUpdates(const double acDelta) noexcept
     if (pWeather->formID == 0xA6858)
         return;
 
-    // Have to manually check each frame because there's no singular SetWeather being used in-game.
-    if (pWeather->formID == m_cachedWeatherId)
-        return;
-
     if (m_world.GetPartyService().IsLeader())
     {
-        m_cachedWeatherId = pWeather->formID;
-
-        RequestWeatherChange request{};
-
-        auto& modSystem = m_world.GetModSystem();
-        if (!modSystem.GetServerModId(pWeather->formID, request.Id))
-        {
-            spdlog::error(__FUNCTION__ ": weather server ID not found, form id: {:X}", pWeather->formID);
-            return;
-        }
-
-        m_transport.Send(request);
+        // Weather id, blend and wind (checked each frame: the game has no single SetWeather entry point).
+        SendSkyState(pWeather->formID);
+        return;
     }
-    else
-    {
+    if (pWeather->formID != m_cachedWeatherId)
         SetCachedWeather();
-    }
+    ApplyHostSky();
 }
 
 void WeatherService::ToggleGameWeatherSystem(bool aToggle) noexcept

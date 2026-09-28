@@ -24,8 +24,22 @@ void Forget(uint32_t aFormId);
 void Clear();
 int32_t DetectionLevel(Actor* apObserver, Actor* apTarget);
 std::vector<Actor*> Observers();
+// Own the current snapshot while borrowing only empty vector capacity between
+// calls. Nested calls and other threads never overwrite a live snapshot.
+class ObserverSnapshot
+{
+public:
+    ObserverSnapshot();
+    ~ObserverSnapshot();
+    ObserverSnapshot(const ObserverSnapshot&) = delete;
+    ObserverSnapshot& operator=(const ObserverSnapshot&) = delete;
+    const std::vector<Actor*>& Get() const noexcept { return m_actors; }
+
+private:
+    std::vector<Actor*> m_actors;
+};
 bool HasSnapshot(Actor* apActor);
-void GetAwareness(Actor* apTarget, int32_t& aLevel, uint32_t& aLOSCount);
+void GetAwareness(Actor* apTarget, int32_t& aLevel, uint32_t& aLOSCount, const std::vector<Actor*>& acObservers);
 uint8_t GetMeterLevel(Actor* apTarget, int32_t aDetectionLevel);
 void SetMeter(int32_t aLevel, uint32_t aLOSCount);
 void ApplyDamage(Actor* apVictim, Actor* apAttacker, float aDamage, bool aKillMove);

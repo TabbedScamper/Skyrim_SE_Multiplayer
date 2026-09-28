@@ -9,6 +9,7 @@
 #include <Games/TES.h>
 #include <OverlayApp.hpp>
 #include <Services/OverlayService.h>
+#include <Services/HarnessService.h>
 #include <World.h>
 
 namespace
@@ -509,8 +510,11 @@ void PollMainMenuOptions(IMenu* apMainMenu) noexcept
     // World::Update is gameplay-driven and may be dormant on the title
     // screen. Steam lobby create/join completion still requires
     // SteamAPI_RunCallbacks, so pump it from the main menu's live movie poll.
-    World::Get().GetSteamLobbyService().PumpCallbacks();
-    World::Get().GetTransport().PumpMainMenu();
+    if (!HarnessService::IsEnabled())
+    {
+        World::Get().GetSteamLobbyService().PumpCallbacks();
+        World::Get().GetTransport().PumpMainMenu();
+    }
 
     auto* pWindow = BSGraphics::GetMainWindow();
     if (pWindow && pWindow->pSwapChain)
@@ -580,8 +584,17 @@ void SetMainMenuOverlayActive(bool aActive) noexcept
 
 void LaunchSharedCampaignFromMainMenu(const uint8_t aCampaignMode) noexcept
 {
+    // The focused input poll may never have run in an unattended session.
+    // Resolve the live movie for this launch instead of depending on that poll.
+    s_pMainMenuMovie = nullptr;
+    if (auto* ui = UI::Get())
+        if (auto* menu = ui->FindMenuByName(BSFixedString("Main Menu")))
+            s_pMainMenuMovie = menu->uiMovie;
     if (!s_pMainMenuMovie || (aCampaignMode != 1 && aCampaignMode != 2))
+    {
+        spdlog::warn("Shared campaign launch: no live main-menu movie or unsupported mode {}", aCampaignMode);
         return;
+    }
     auto* pVtable = *reinterpret_cast<uintptr_t**>(s_pMainMenuMovie);
     if (!pVtable)
         return;
@@ -604,8 +617,8 @@ void LaunchSharedCampaignFromMainMenu(const uint8_t aCampaignMode) noexcept
     const char* pCallback = aCampaignMode == 1 ? "StartNewGame" : "ContinueLastSavedGame";
     if (pInvoke && reinterpret_cast<TIsAvailable*>(pVtable[0x0A])(s_pMainMenuMovie, cFadeOutAndCall))
     {
-        pInvoke(s_pMainMenuMovie, cFadeOutAndCall, "%s", pCallback);
-        spdlog::info("Shared campaign launch: start menu fading out into {} (mode {})", pCallback, aCampaignMode);
+        const bool invoked = pInvoke(s_pMainMenuMovie, cFadeOutAndCall, "%s", pCallback);
+        spdlog::info("Shared campaign launch: start menu fading out into {} (mode {}, invoked={})", pCallback, aCampaignMode, invoked);
         return;
     }
 

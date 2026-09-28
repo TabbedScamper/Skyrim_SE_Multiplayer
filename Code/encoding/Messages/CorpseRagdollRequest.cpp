@@ -18,6 +18,11 @@ void WriteBodies(TiltedPhoques::Buffer::Writer& aWriter, const TiltedPhoques::Ve
             TiltedPhoques::Serialization::WriteFloat(aWriter, value);
         for (const float value : acBodies[i].Rotation)
             TiltedPhoques::Serialization::WriteFloat(aWriter, value);
+        for (const float value : acBodies[i].LinearVelocity)
+            TiltedPhoques::Serialization::WriteFloat(aWriter, value);
+        for (const float value : acBodies[i].AngularVelocity)
+            TiltedPhoques::Serialization::WriteFloat(aWriter, value);
+        aWriter.WriteBits(acBodies[i].MotionType, 8);
     }
 }
 
@@ -27,7 +32,7 @@ bool ReadBodies(TiltedPhoques::Buffer::Reader& aReader, TiltedPhoques::Vector<Co
     try { count = CheckedRead::VarInt(aReader); }
     catch (...) { return false; }
     aBodies.clear();
-    if (count > CorpseRagdollRequest::kMaxBodies || CheckedRead::RemainingBits(aReader) < count * 7 * 32)
+    if (count > CorpseRagdollRequest::kMaxBodies || CheckedRead::RemainingBits(aReader) < count * (13 * 32 + 8))
         return false;
     aBodies.resize(count);
     for (auto& body : aBodies)
@@ -36,6 +41,18 @@ bool ReadBodies(TiltedPhoques::Buffer::Reader& aReader, TiltedPhoques::Vector<Co
             value = TiltedPhoques::Serialization::ReadFloat(aReader);
         for (float& value : body.Rotation)
             value = TiltedPhoques::Serialization::ReadFloat(aReader);
+        for (float& value : body.LinearVelocity)
+            value = TiltedPhoques::Serialization::ReadFloat(aReader);
+        for (float& value : body.AngularVelocity)
+            value = TiltedPhoques::Serialization::ReadFloat(aReader);
+        uint64_t motion{};
+        aReader.ReadBits(motion, 8);
+        body.MotionType = static_cast<uint8_t>(motion);
+        const auto finiteVelocity = [](float v) { return std::isfinite(v) && std::abs(v) < 10000.f; };
+        if (motion < 1 || motion > 6 ||
+            !std::all_of(std::begin(body.LinearVelocity), std::end(body.LinearVelocity), finiteVelocity) ||
+            !std::all_of(std::begin(body.AngularVelocity), std::end(body.AngularVelocity), finiteVelocity))
+            return false;
         float norm = 0.f;
         for (float value : body.Rotation)
             norm += value * value;

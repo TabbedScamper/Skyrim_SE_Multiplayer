@@ -28,8 +28,10 @@ void QueueUnseat(const uint32_t aFormId) noexcept
 }
 } // namespace
 
-void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aTick) noexcept
+void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aDefaultTick) noexcept
 {
+    uint64_t aTick = aDefaultTick;
+    const bool vehicleTimeline = ObjectService::VehiclePresentationTick(apActor, aTick);
     World::Get().GetHeadTrackService().UpdateRemote(apActor, aTick);
     auto& movements = aInterpolationComponent.TimePoints;
 
@@ -59,6 +61,15 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
             static_cast<float>(second.Tick - first.Tick);
 
     NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
+    // The native horse tether consumes this actor pose. Predict the active assembly
+    // on the same frame clock as its cart; leave every unrelated actor's delay intact.
+    if (vehicleTimeline && aTick > second.Tick && second.Tick > first.Tick)
+    {
+        const float prediction = static_cast<float>((std::min)(uint64_t{150}, aTick - second.Tick)) /
+            static_cast<float>(second.Tick - first.Tick);
+        position += (second.Position - first.Position) * prediction;
+        delta += prediction;
+    }
     float creatorHeading = 0.f;
     // In the character creator every player's character stands on this player's spot (the one
     // being viewed is visible; see CreatorTogether).
@@ -179,7 +190,8 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                 "sit state {}", apActor->formID, jump, apActor->position.x, apActor->position.y, apActor->position.z, position.x,
                 position.y, position.z, sitSleepState);
     }
-    apActor->ForcePosition(position);
+    if (!vehicleTimeline || creatorPreview)
+        apActor->ForcePosition(position);
     const auto& discrete = aTick >= second.Tick ? second : first;
     apActor->LoadAnimationVariables(discrete.Variables);
 
@@ -202,7 +214,26 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     const auto finalY = TiltedPhoques::Mod(rotA.y + deltaY, float(TiltedPhoques::Pi * 2));
     const auto finalZ = TiltedPhoques::Mod(rotA.z + deltaZ, float(TiltedPhoques::Pi * 2));
 
-    apActor->SetRotation(finalX, finalY, creatorPreview ? creatorHeading : finalZ);
+    if (vehicleTimeline && !creatorPreview)
+    {
+        const float interval = second.Tick > first.Tick ? static_cast<float>(second.Tick - first.Tick) / 1000.f : 0.f;
+        NiPoint3 velocity{}, angular{};
+        if (interval > 0.f)
+        {
+            velocity = (second.Position - first.Position) / interval;
+            angular = glm::vec3{TiltedPhoques::DeltaAngle(rotA.x, rotB.x, true) / interval,
+                TiltedPhoques::DeltaAngle(rotA.y, rotB.y, true) / interval,
+                TiltedPhoques::DeltaAngle(rotA.z, rotB.z, true) / interval};
+        }
+        // Keep the unpredicted host sample. Main applies the 150 ms prediction cap
+        // exactly once, before the native tether jobs and alongside cart targets.
+        const bool newest = aTick >= second.Tick;
+        ObjectService::QueueVehiclePose(apActor, newest ? second.Tick : aTick,
+            newest ? second.Position : position, newest ? second.Rotation : NiPoint3{glm::vec3{finalX, finalY, finalZ}},
+            velocity, angular);
+    }
+    else
+        apActor->SetRotation(finalX, finalY, creatorPreview ? creatorHeading : finalZ);
 }
 
 void InterpolationSystem::AddPoint(InterpolationComponent& aInterpolationComponent, const InterpolationComponent::TimePoint& acPoint) noexcept

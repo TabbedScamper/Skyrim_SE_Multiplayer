@@ -3,6 +3,8 @@
 
 #include <Services/CharacterService.h>
 #include <Services/ObjectService.h>
+#include <Services/WorldStateService.h>
+#include <Services/HarnessService.h>
 #include <Services/QuestService.h>
 #include <Services/QuestItemService.h>
 #include <Services/ServerListService.h>
@@ -52,11 +54,13 @@ World::World()
     ctx().emplace<PlayerService>(*this, m_dispatcher);
     ctx().emplace<CalendarService>(*this, m_dispatcher);
     ctx().emplace<ObjectService>(*this, m_dispatcher);
+    ctx().emplace<WorldStateService>(*this, m_dispatcher);
     auto& modsComponent = ctx().emplace<ModsComponent>(sCampaignModManifestPath.value());
     ctx().emplace<ServerListService>(*this, m_dispatcher);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<QuestItemService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
+    ctx().emplace<HarnessService>(*this, m_dispatcher);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher);
     ctx().emplace<BusyLockService>(*this, m_dispatcher);
