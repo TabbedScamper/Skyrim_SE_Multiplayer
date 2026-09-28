@@ -9,6 +9,7 @@
 #include <Games/Skyrim/Forms/TESObjectCELL.h>
 #include <Forms/SpellItem.h>
 #include <Services/CombatService.h>
+#include <Services/ObjectService.h>
 
 TP_THIS_FUNCTION(TLaunch, BSPointerHandle<Projectile>*, BSPointerHandle<Projectile>, Projectile::LaunchData& arData);
 static TLaunch* RealLaunch = nullptr;
@@ -147,6 +148,38 @@ BSPointerHandle<Projectile>* TP_MAKE_THISCALL(HookLaunch, BSPointerHandle<Projec
     return result;
 }
 
+// Hazard::Create (43954 / 0x1407EDAB0) input, read from the function: base at +0x00, cell +0x08, position +0x10,
+// impact normal +0x1C, actor cause (first dword: the owner actor handle) +0x38, lifetime +0x40, radius +0x44,
+// ignore-spawn-interval +0x4C, permanent +0x4D. Returns nullptr when the global minimum spawn interval
+// (fHazardMinimumSpawnInterval) or the per-base limit refuses it. Probe: the meteor debris (IPCT D07C1 ->
+// HAZD D07BC FXHavokRockHazard, 10 dirt-clod rigid bodies) does not line up between PCs.
+using THazardCreate = void*(void* apParams);
+static THazardCreate* RealHazardCreate = nullptr;
+
+static void* HookHazardCreate(void* apParams)
+{
+    void* pResult = RealHazardCreate(apParams);
+    if (pResult)
+        ObjectService::OnHazardCreated(static_cast<TESObjectREFR*>(pResult)->formID);
+    static std::atomic<uint32_t> s_logs{};
+    if (apParams && s_logs.fetch_add(1, std::memory_order_relaxed) < 400)
+    {
+        const auto* p = static_cast<const uint8_t*>(apParams);
+        const auto* pBase = *reinterpret_cast<TESForm* const*>(p);
+        const auto* pos = reinterpret_cast<const float*>(p + 0x10);
+        const auto* normal = reinterpret_cast<const float*>(p + 0x1C);
+        const auto* pCause = *reinterpret_cast<const uint32_t* const*>(p + 0x38);
+        const auto owner = pCause ? *pCause : 0u;
+        auto* pRef = static_cast<TESObjectREFR*>(pResult);
+        spdlog::info("Hazard create: base {:X} at ({:.0f}, {:.0f}, {:.0f}) normal ({:.2f}, {:.2f}, {:.2f}) owner handle {:X} "
+                     "lifetime {:.2f} radius {:.1f} force {} permanent {} caller {:X} -> {} {:X}",
+            pBase ? pBase->formID : 0, pos[0], pos[1], pos[2], normal[0], normal[1], normal[2], owner,
+            *reinterpret_cast<const float*>(p + 0x40), *reinterpret_cast<const float*>(p + 0x44), p[0x4C], p[0x4D],
+            reinterpret_cast<uintptr_t>(_ReturnAddress()), pRef ? "created" : "refused", pRef ? pRef->formID : 0);
+    }
+    return pResult;
+}
+
 static TiltedPhoques::Initializer s_projectileHooks(
     []()
     {
@@ -155,6 +188,10 @@ static TiltedPhoques::Initializer s_projectileHooks(
         RealLaunch = s_launch.Get();
 
         TP_HOOK(&RealLaunch, HookLaunch);
+
+        POINTER_SKYRIMSE(THazardCreate, s_hazardCreate, 43954);
+        RealHazardCreate = s_hazardCreate.Get();
+        TP_HOOK(&RealHazardCreate, HookHazardCreate);
 
         VersionDbPtr<uint8_t> hookLoc(34452);
 

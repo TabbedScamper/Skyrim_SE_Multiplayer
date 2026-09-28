@@ -5528,6 +5528,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 InterpolationSystem::SetUnseatRemotePlayers(enabled != "false");
             return Result(id, fmt::format("\"enabled\":{}", InterpolationSystem::IsUnseatRemotePlayers()));
         }
+        if (command == "hazard_sync")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                ObjectService::SetHazardSync(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", ObjectService::IsHazardSync()));
+        }
         if (command == "exact_body_drive")
         {
             if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())

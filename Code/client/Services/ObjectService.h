@@ -172,6 +172,10 @@ public:
     // Follower cart replay: Hermite curve through owner samples on the unrounded clock (cart_curve switch).
     // Loose host-driven bodies land exactly on the host pose each step (exact_body_drive switch).
     static void SetExactBodyDrive(bool aEnabled) noexcept;
+    // Impact hazard bodies (meteor dirt clods): the leader streams them, followers steer their own copies onto them.
+    static void OnHazardCreated(uint32_t aFormId) noexcept;
+    static void SetHazardSync(bool aEnabled) noexcept;
+    static bool IsHazardSync() noexcept;
     static bool IsExactBodyDrive() noexcept;
     static void SetCartCurve(bool aEnabled) noexcept;
     static bool IsCartCurve() noexcept;
@@ -427,6 +431,8 @@ private:
     void RefreshPhysicsDiagnostics() noexcept;
     void RefreshPhysicsReference(uint32_t aFormId) noexcept;
     void FlushPhysicsSnapshots() noexcept;
+    void CaptureHazards() noexcept;
+    void SendHazardPackets() noexcept;
 
     entt::entity CreateObjectEntity(const uint32_t acFormId, const uint32_t acServerId) noexcept;
 

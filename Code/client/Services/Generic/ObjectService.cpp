@@ -36,6 +36,7 @@
 #include <Havok/ActorPoseDiagnosticViews.h>
 
 #include <inttypes.h>
+#include <bit>
 #include <atomic>
 #include <cmath>
 #include <intrin.h>
@@ -3184,6 +3185,7 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
     m_captureOnMainFrame.store(true, std::memory_order_relaxed);
     m_applyOnMainFrame.store(true, std::memory_order_relaxed);
     FlushPhysicsSnapshots();
+    SendHazardPackets();
 }
 
 void ObjectService::RefreshPhysicsDiagnostics() noexcept
@@ -3587,6 +3589,432 @@ void ObjectService::CaptureHostPhysics(const bool aUpdateThread) noexcept
     }
 }
 
+namespace
+{
+// Impact hazards: an impact data record can place a hazard (IPCT D07C1 MAGFireSpellmpactROCKS01 -> HAZD D07BC
+// FXHavokRockHazard: ten dirt-clod rigid bodies, 5 s; Hazard::Create 43954). Both PCs create the identical hazard
+// from the relayed projectile (measured 2026-09-28, Alduin's Helgen meteors: 184 of 184 host hazards matched on the
+// follower within 0-5 u, same impact normal, same frame), but the clods are free Havok bodies and part ways within
+// a second (owner: "the fire balls line up perfectly, it's the debris after it that doesn't"). The leader streams
+// its clods on the leader physics lane under their own id space; the follower binds each stream to its own hazard at
+// the same spot and steers its clods through the step solver like any host-driven body. Switch hazard_sync: off
+// still streams, binds and measures the gap (paired A/B), but does not steer.
+constexpr uint32_t kHazardPhysicsModId = UINT32_MAX - 2;
+// The hazard lane's Rotation carries identity, not an angle (floats travel as raw bits): x, y = the hazard base's
+// server GameId (ModId, BaseId), z = the hazard's age on the leader in ms. A follower binds only its own hazard of
+// the same base, created within kHazardBindAgeMs of the leader's and within kHazardBindDistance.
+constexpr float kHazardBindDistance = 20.f;
+constexpr float kHazardBindAgeMs = 1000.f;
+constexpr size_t kHazardBodies = PhysicsReferenceUpdate::kMaxChildBodies + 1; // root body + children
+std::atomic<bool> s_hazardSync{true};
+
+struct HostHazard
+{
+    uint32_t Seq{};
+    uint64_t CreatedMs{};
+    uint32_t RestSamples{};
+    bool Done{};
+};
+
+struct HazardSample
+{
+    uint64_t Tick{};
+    std::chrono::steady_clock::time_point Received{};
+    size_t Count{};
+    std::array<std::array<float, 7>, kHazardBodies> Bodies{}; // absolute Havok position, quaternion (x, y, z, w)
+};
+
+struct FollowedHazard
+{
+    uint32_t FormId{};
+    uint64_t FirstSeenMs{};
+    bool Failed{};
+    bool HasA{}, HasB{};
+    HazardSample A, B;
+    std::array<std::shared_ptr<void>, kHazardBodies> Lifetimes;
+    std::array<uint32_t, kHazardBodies> Uids{};
+    float MaxGap{};
+    float GapSum{};
+    uint32_t GapSamples{};
+    uint32_t Steered{};
+    uint32_t SteeredOn{};
+    uint32_t LocalBodies{};  // last local clod count seen (diagnostic: a count mismatch is never steered)
+    uint32_t LargeGaps{};    // steps where a clod was over 150 u from the host sample
+    bool Had3D{};            // diagnostic: the local hazard ever had its 3D root
+    uint32_t Nodes{};        // diagnostic: children under the local 3D root
+    float PlayerDistance{};  // diagnostic: local hazard to the local player
+};
+
+std::mutex s_hazardLock;                              // guards the three containers below
+std::vector<uint32_t> s_hazardCreated;                // Hazard::Create results, any thread
+std::unordered_map<uint32_t, uint64_t> s_localHazards; // follower: own hazards -> created (ms)
+std::unordered_set<uint32_t> s_boundLocalHazards;      // follower: own hazards already bound to a host stream
+std::unordered_map<uint32_t, HostHazard> s_hostHazards; // leader, main thread
+uint32_t s_nextHazardSeq{1};
+std::mutex s_hazardOutLock;
+std::vector<PhysicsReferencesMoveRequest> s_hazardOut;
+std::unordered_map<uint32_t, FollowedHazard> s_followedHazards; // follower: host seq -> binding (m_remotePhysicsLock)
+std::atomic<uint32_t> s_hazardLogs{};
+
+// Follower, under m_remotePhysicsLock.
+void ReceiveHazard(const PhysicsReferenceUpdate& acUpdate, uint64_t aTick, uint32_t aLocalBase) noexcept
+{
+    if (acUpdate.ChildBodies.size() + 1 > kHazardBodies ||
+        !std::all_of(acUpdate.BodyTransform.begin(), acUpdate.BodyTransform.end(), [](float v) { return std::isfinite(v); }))
+        return;
+    const auto nowMs = GetTickCount64();
+    auto& followed = s_followedHazards[acUpdate.Id.BaseId];
+    if (!followed.FirstSeenMs)
+        followed.FirstSeenMs = nowMs;
+    if (followed.Failed)
+        return;
+    if (!followed.FormId)
+    {
+        // Own hazard at the host's spot (the relayed impact lands within a few units, see above).
+        uint32_t best{};
+        float bestDistance = kHazardBindDistance;
+        const float hostAgeMs = acUpdate.Rotation.z;
+        std::lock_guard lock(s_hazardLock);
+        for (const auto& [formId, created] : s_localHazards)
+        {
+            if (s_boundLocalHazards.contains(formId) || !aLocalBase ||
+                !(std::abs(static_cast<float>(nowMs - created) - hostAgeMs) < kHazardBindAgeMs))
+                continue;
+            auto* pHazard = Cast<TESObjectREFR>(TESForm::GetById(formId));
+            if (!pHazard || pHazard->IsDeleted() || !pHazard->baseForm || pHazard->baseForm->formID != aLocalBase)
+                continue;
+            const float distance = glm::length(glm::vec3{pHazard->position.x - acUpdate.Position.x,
+                pHazard->position.y - acUpdate.Position.y, pHazard->position.z - acUpdate.Position.z});
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = formId;
+            }
+        }
+        if (!best)
+        {
+            if (nowMs - followed.FirstSeenMs > 3000)
+            {
+                followed.Failed = true;
+                if (s_hazardLogs.fetch_add(1, std::memory_order_relaxed) < 60)
+                    spdlog::warn("Hazard sync: host hazard {} (base {:X}) at ({:.0f}, {:.0f}, {:.0f}) has no local hazard "
+                        "of that base within {:.0f} u and {:.0f} ms", acUpdate.Id.BaseId, aLocalBase, acUpdate.Position.x,
+                        acUpdate.Position.y, acUpdate.Position.z, kHazardBindDistance, kHazardBindAgeMs);
+            }
+            return;
+        }
+        followed.FormId = best;
+        s_boundLocalHazards.insert(best);
+        if (s_hazardLogs.fetch_add(1, std::memory_order_relaxed) < 60)
+            spdlog::info("Hazard sync: host hazard {} bound to local {:X} ({:.1f} u apart, {} bodies)", acUpdate.Id.BaseId,
+                best, bestDistance, acUpdate.ChildBodies.size() + 1);
+    }
+    if (followed.HasB && aTick <= followed.B.Tick)
+        return;
+    HazardSample sample{};
+    sample.Tick = aTick;
+    sample.Received = std::chrono::steady_clock::now();
+    sample.Count = acUpdate.ChildBodies.size() + 1;
+    const auto& t = acUpdate.BodyTransform;
+    auto& root = sample.Bodies[0];
+    root[0] = t[12];
+    root[1] = t[13];
+    root[2] = t[14];
+    MatrixToQuaternion(t.data(), root.data() + 3);
+    const auto unit = [](const float* q)
+    { return std::abs(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3] - 1.f) < 0.01f; };
+    if (!unit(root.data() + 3))
+        return;
+    for (size_t i = 0; i < acUpdate.ChildBodies.size(); ++i)
+    {
+        const auto& child = acUpdate.ChildBodies[i];
+        if (!std::all_of(child.begin(), child.end(), [](float v) { return std::isfinite(v); }) || !unit(child.data() + 3))
+            return;
+        auto& body = sample.Bodies[i + 1];
+        for (size_t k = 0; k < 3; ++k)
+            body[k] = root[k] + child[k];
+        for (size_t k = 3; k < 7; ++k)
+            body[k] = child[k];
+    }
+    followed.A = followed.B;
+    followed.HasA = followed.HasB;
+    followed.B = sample;
+    followed.HasB = true;
+}
+
+// Under m_remotePhysicsLock: the session is not following anything.
+void ClearHazardFollows() noexcept
+{
+    s_followedHazards.clear();
+    std::lock_guard lock(s_hazardLock);
+    s_boundLocalHazards.clear();
+}
+
+// Follower, under m_remotePhysicsLock, while the step targets are being built.
+void ApplyHazards(bool aActive) noexcept
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto nowMs = GetTickCount64();
+    for (auto it = s_followedHazards.begin(); it != s_followedHazards.end();)
+    {
+        auto& followed = it->second;
+        auto* pHazard = followed.FormId ? Cast<TESObjectREFR>(TESForm::GetById(followed.FormId)) : nullptr;
+        const bool stale = followed.HasB ? now - followed.B.Received > std::chrono::seconds(2) :
+            nowMs - followed.FirstSeenMs > 5000;
+        if (!aActive || stale || (followed.FormId && (!pHazard || pHazard->IsDeleted() || !pHazard->loadedState)))
+        {
+            if (followed.FormId)
+            {
+                std::lock_guard lock(s_hazardLock);
+                s_boundLocalHazards.erase(followed.FormId);
+                static std::atomic<uint32_t> s_summaryLogs{};
+                if (s_summaryLogs.fetch_add(1, std::memory_order_relaxed) < 600)
+                    spdlog::info("Hazard sync: local {:X} followed host hazard {} for {} steps ({} steered), largest gap "
+                        "{:.1f} u, mean gap {:.1f} u, {} large, bodies local {} host {} (3D {}, {} nodes, {:.0f} u from player)",
+                        followed.FormId, it->first, followed.Steered, followed.SteeredOn, followed.MaxGap,
+                        followed.GapSamples ? followed.GapSum / followed.GapSamples : 0.f, followed.LargeGaps,
+                        followed.LocalBodies, followed.HasB ? followed.B.Count : 0, followed.Had3D, followed.Nodes,
+                        followed.PlayerDistance);
+            }
+            it = s_followedHazards.erase(it);
+            continue;
+        }
+        if (!pHazard || !followed.HasB)
+        {
+            ++it;
+            continue;
+        }
+        std::vector<ChildBody> bodies;
+        CollectChildBodies(pHazard, bodies);
+        followed.LocalBodies = static_cast<uint32_t>(bodies.size());
+        if (auto* pRoot = pHazard->GetNiNode())
+        {
+            followed.Had3D = true;
+            followed.Nodes = pRoot->children.length;
+        }
+        if (auto* pPlayer = PlayerCharacter::Get())
+            followed.PlayerDistance = glm::length(glm::vec3{pHazard->position.x - pPlayer->position.x,
+                pHazard->position.y - pPlayer->position.y, pHazard->position.z - pPlayer->position.z});
+        ActorPoseDiagnosticViews::RigidBody first{};
+        if (bodies.size() != followed.B.Count || !ReadNativeMemory(bodies[0].Body, first) || !first.world)
+        {
+            ++it;
+            continue;
+        }
+        ScopedPhysicsWorld worldLock(first.world);
+        if (!worldLock.Lock)
+        {
+            ++it;
+            continue;
+        }
+        const bool paired = followed.HasA && followed.B.Tick > followed.A.Tick && followed.B.Tick - followed.A.Tick <= 250;
+        const float interval = paired ? static_cast<float>(followed.B.Tick - followed.A.Tick) / 1000.f : 0.f;
+        const float ahead = (std::min)(std::chrono::duration<float>(now - followed.B.Received).count(), 0.15f);
+        const bool steer = s_hazardSync.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < bodies.size(); ++i)
+        {
+            ActorPoseDiagnosticViews::RigidBody state{};
+            if (!ReadNativeMemory(bodies[i].Body, state) || state.world != first.world || !IsDynamicMotion(state.motionType))
+                continue;
+            const auto& b = followed.B.Bodies[i];
+            const glm::vec3 positionB{b[0], b[1], b[2]};
+            const glm::quat rotationB{b[6], b[3], b[4], b[5]};
+            glm::vec3 velocity{}, angular{};
+            if (paired)
+            {
+                const auto& a = followed.A.Bodies[i];
+                velocity = (positionB - glm::vec3{a[0], a[1], a[2]}) / interval;
+                glm::quat step = rotationB * glm::conjugate(glm::quat{a[6], a[3], a[4], a[5]});
+                if (step.w < 0.f)
+                    step = -step;
+                angular = glm::vec3{step.x, step.y, step.z} * 2.f / interval;
+            }
+            const auto position = positionB + velocity * ahead;
+            StepTarget target{state.world, bodies[i].Body, followed.FormId};
+            target.Dynamic = true;
+            target.BodyUid = state.uid;
+            target.PublishedAt = now;
+            if (followed.Lifetimes[i].get() != bodies[i].Body || followed.Uids[i] != state.uid)
+            {
+                s_holdBody.Get()(bodies[i].Body);
+                followed.Lifetimes[i] = std::shared_ptr<void>(bodies[i].Body, RetireBody);
+                followed.Uids[i] = state.uid;
+            }
+            target.Lifetime = followed.Lifetimes[i];
+            for (int k = 0; k < 3; ++k)
+            {
+                target.Position[k] = position[k];
+                target.Velocity[k] = velocity[k];
+                target.Angular[k] = angular[k];
+            }
+            target.Rotation[0] = rotationB.x;
+            target.Rotation[1] = rotationB.y;
+            target.Rotation[2] = rotationB.z;
+            target.Rotation[3] = rotationB.w;
+            // Gap to the host's latest sample (not the extrapolated target): the measure for both switch settings.
+            const float gap = glm::length(positionB - glm::vec3{state.transform[12], state.transform[13],
+                state.transform[14]}) * kHavokToGameUnits;
+            followed.MaxGap = (std::max)(followed.MaxGap, gap);
+            followed.GapSum += gap;
+            ++followed.GapSamples;
+            followed.LargeGaps += gap > 150.f ? 1 : 0;
+            if (!steer)
+                continue;
+            {
+                std::lock_guard stepLock(s_stepTargetsLock);
+                const auto [probe, inserted] = s_followProbes.try_emplace(bodies[i].Body);
+                const auto index = s_stepTargetsBuilding.size();
+                s_followProbesDirty |= inserted || index >= s_stepTargets.size() ||
+                    s_stepTargets[index].Body != target.Body || s_stepTargets[index].BodyUid != target.BodyUid;
+            }
+            s_stepTargetsBuilding.push_back(std::move(target));
+        }
+        ++followed.Steered;
+        followed.SteeredOn += steer ? 1 : 0;
+        ++it;
+    }
+}
+} // namespace
+
+void ObjectService::OnHazardCreated(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_hazardLock);
+    if (s_hazardCreated.size() < 1024)
+        s_hazardCreated.push_back(aFormId);
+}
+
+void ObjectService::SetHazardSync(bool aEnabled) noexcept
+{
+    s_hazardSync.store(aEnabled, std::memory_order_relaxed);
+    spdlog::info("Hazard sync: {}", aEnabled ? "on" : "off");
+}
+
+bool ObjectService::IsHazardSync() noexcept
+{
+    return s_hazardSync.load(std::memory_order_relaxed);
+}
+
+// Main thread: the leader captures its live hazards' bodies every 50 ms; a follower remembers its own hazards.
+void ObjectService::CaptureHazards() noexcept
+{
+    const auto nowMs = GetTickCount64();
+    const auto& party = m_world.GetPartyService();
+    const bool active = m_transport.IsConnected() && party.IsInParty() && party.GetSessionState() >= 2;
+    const bool leader = active && party.IsLeader();
+    std::vector<uint32_t> created;
+    {
+        std::lock_guard lock(s_hazardLock);
+        created.swap(s_hazardCreated);
+        if (active && !leader)
+            for (const auto id : created)
+                s_localHazards[id] = nowMs;
+        std::erase_if(s_localHazards, [&](const auto& entry) { return !active || leader || nowMs - entry.second > 10000; });
+    }
+    if (!leader)
+    {
+        s_hostHazards.clear();
+        return;
+    }
+    for (const auto id : created)
+        s_hostHazards.try_emplace(id, HostHazard{s_nextHazardSeq++, nowMs});
+    static uint64_t s_nextCapture{};
+    if (nowMs < s_nextCapture || s_hostHazards.empty())
+        return;
+    s_nextCapture = nowMs + 50;
+    PhysicsReferencesMoveRequest request;
+    request.Tick = m_transport.GetClock().GetCurrentTick();
+    for (auto it = s_hostHazards.begin(); it != s_hostHazards.end();)
+    {
+        auto& hazard = it->second;
+        auto* pHazard = Cast<TESObjectREFR>(TESForm::GetById(it->first));
+        if (!pHazard || pHazard->IsDeleted() || !pHazard->parentCell || !pHazard->parentCell->IsAttached())
+        {
+            it = s_hostHazards.erase(it);
+            continue;
+        }
+        if (hazard.Done)
+        {
+            ++it;
+            continue;
+        }
+        std::vector<ChildBody> bodies;
+        CollectChildBodies(pHazard, bodies, true);
+        ActorPoseDiagnosticViews::RigidBody first{};
+        if (bodies.empty() || !ReadPhysicsMemory(bodies[0].Body, first) || !first.world)
+        {
+            // No clods (a hazard without bodies), or its 3D is still loading.
+            if (nowMs - hazard.CreatedMs > 1500)
+                it = s_hostHazards.erase(it);
+            else
+                ++it;
+            continue;
+        }
+        ScopedPhysicsWorld worldLock(first.world);
+        PhysicsReferenceUpdate update;
+        update.Id = {kHazardPhysicsModId, hazard.Seq};
+        update.Position = {pHazard->position.x, pHazard->position.y, pHazard->position.z};
+        GameId base{};
+        if (!pHazard->baseForm || !m_world.GetModSystem().GetServerModId(pHazard->baseForm->formID, base))
+        {
+            it = s_hostHazards.erase(it);
+            continue;
+        }
+        update.Rotation = {std::bit_cast<float>(base.ModId), std::bit_cast<float>(base.BaseId),
+            static_cast<float>(nowMs - hazard.CreatedMs)};
+        update.MotionType = 3;
+        bool moving = false, valid = worldLock.Lock != nullptr;
+        for (size_t i = 0; valid && i < bodies.size(); ++i)
+        {
+            ActorPoseDiagnosticViews::RigidBody state{};
+            valid = ReadPhysicsMemory(bodies[i].Body, state) && state.world == first.world &&
+                std::all_of(std::begin(state.transform), std::end(state.transform), [](float v) { return std::isfinite(v); });
+            if (!valid)
+                break;
+            const glm::vec3 velocity{state.linearVelocity[0], state.linearVelocity[1], state.linearVelocity[2]};
+            moving |= glm::length(velocity) * kHavokToGameUnits > 5.f;
+            if (i == 0)
+            {
+                std::copy(std::begin(state.transform), std::end(state.transform), update.BodyTransform.begin());
+                update.LinearVelocity = velocity;
+                std::copy(std::begin(state.transform), std::end(state.transform), first.transform);
+                continue;
+            }
+            std::array<float, 7> record{};
+            for (size_t k = 0; k < 3; ++k)
+                record[k] = state.transform[12 + k] - first.transform[12 + k];
+            MatrixToQuaternion(state.transform, record.data() + 3);
+            update.ChildBodies.push_back(record);
+        }
+        if (!valid)
+        {
+            ++it;
+            continue;
+        }
+        // At rest for half a second: the resting pose has been sent; the follower holds it until the hazard ends.
+        hazard.RestSamples = moving ? 0 : hazard.RestSamples + 1;
+        hazard.Done = hazard.RestSamples > 10;
+        request.Updates.push_back(std::move(update));
+        ++it;
+    }
+    if (!request.Updates.empty())
+    {
+        std::lock_guard lock(s_hazardOutLock);
+        if (s_hazardOut.size() < 8)
+            s_hazardOut.push_back(std::move(request));
+    }
+}
+
+void ObjectService::SendHazardPackets() noexcept
+{
+    std::vector<PhysicsReferencesMoveRequest> outgoing;
+    {
+        std::lock_guard lock(s_hazardOutLock);
+        outgoing.swap(s_hazardOut);
+    }
+    for (const auto& request : outgoing)
+        m_transport.Send(request);
+}
+
 void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& acMessage) noexcept
 {
     std::lock_guard lock(m_remotePhysicsLock);
@@ -3599,6 +4027,13 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
 
     for (const auto& update : acMessage.Updates)
     {
+        if (update.Id.ModId == kHazardPhysicsModId)
+        {
+            if (!party.IsLeader())
+                ReceiveHazard(update, acMessage.Tick, m_world.GetModSystem().GetGameId(
+                    GameId{std::bit_cast<uint32_t>(update.Rotation.x), std::bit_cast<uint32_t>(update.Rotation.y)}));
+            continue;
+        }
         const bool shared = update.Id.ModId == SharedDropData::PhysicsModId;
         if (shared && !s_sharedDropGeneration)
             continue;
@@ -3738,6 +4173,7 @@ void ObjectService::OnMainFrame() noexcept
         node->DecRef();
     s_assemblyNodesDraining.clear();
     pService->m_world.GetSharedDropService().OnMainFrame();
+    pService->CaptureHazards();
     RecordMotionTrace(pService->m_world);
     {
         // Seated-pose probe on the main thread (scene-graph reads never on the update job; a crash in the native
@@ -3976,6 +4412,7 @@ void ObjectService::OnMainFrame() noexcept
         std::lock_guard remoteLock(pService->m_remotePhysicsLock);
         pService->m_remoteReferencePoses.clear();
         s_sharedDropPoseGenerations.clear();
+        ClearHazardFollows();
         std::lock_guard stepLock(s_stepTargetsLock);
         s_stepTargets.clear();
         s_stepTargetsBuilding.clear();
@@ -4879,6 +5316,8 @@ void ObjectService::ApplyRemotePhysics() noexcept
         }
         ++it;
     }
+    ApplyHazards(m_transport.IsConnected() && m_world.GetPartyService().IsInParty() &&
+        !m_world.GetPartyService().IsLeader());
 }
 
 void ObjectService::OnCellChange(const CellChangeEvent& acEvent) noexcept
