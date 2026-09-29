@@ -1,5 +1,6 @@
 #include <Messages/ReviveData.h>
 #include <Structs/CheckedRead.h>
+#include <algorithm>
 
 namespace
 {
@@ -23,6 +24,9 @@ void ReviveData::SerializeData(TiltedPhoques::Buffer::Writer& aWriter) const noe
     Serialization::WriteBool(aWriter, Down);
     Serialization::WriteBool(aWriter, Alive);
     Serialization::WriteBool(aWriter, InCombat);
+    Serialization::WriteBool(aWriter, Dead);
+    Serialization::WriteBool(aWriter, Flung);
+    Serialization::WriteVarInt(aWriter, static_cast<uint32_t>(std::clamp(Bleed, 0.f, 1.f) * 65535.f + 0.5f));
     Cell.Serialize(aWriter);
     WorldSpace.Serialize(aWriter);
     aWriter.WriteBits(Position.Pack(), 64);
@@ -31,7 +35,7 @@ void ReviveData::SerializeData(TiltedPhoques::Buffer::Writer& aWriter) const noe
 void ReviveData::DeserializeData(TiltedPhoques::Buffer::Reader& aReader)
 {
     const auto action = CheckedRead::VarInt(aReader);
-    if (action > static_cast<uint8_t>(ReviveAction::Grant))
+    if (action > static_cast<uint8_t>(ReviveAction::Wipe))
         throw std::runtime_error("invalid revive action");
     Action = static_cast<ReviveAction>(action);
     Epoch = CheckedRead::VarInt(aReader);
@@ -41,6 +45,12 @@ void ReviveData::DeserializeData(TiltedPhoques::Buffer::Reader& aReader)
     Down = CheckedRead::Bool(aReader);
     Alive = CheckedRead::Bool(aReader);
     InCombat = CheckedRead::Bool(aReader);
+    Dead = CheckedRead::Bool(aReader);
+    Flung = CheckedRead::Bool(aReader);
+    const auto bleed = CheckedRead::VarInt(aReader);
+    if (bleed > 65535)
+        throw std::runtime_error("revive bleed exceeds limit");
+    Bleed = static_cast<float>(bleed) / 65535.f;
     Cell.BaseId = ReadU32(aReader);
     Cell.ModId = ReadU32(aReader);
     WorldSpace.BaseId = ReadU32(aReader);
@@ -54,6 +64,6 @@ bool ReviveData::operator==(const ReviveData& aOther) const noexcept
 {
     return Action == aOther.Action && Epoch == aOther.Epoch && Revision == aOther.Revision &&
         PlayerId == aOther.PlayerId && ReviverId == aOther.ReviverId && Down == aOther.Down &&
-        Alive == aOther.Alive && InCombat == aOther.InCombat && Cell == aOther.Cell &&
+        Alive == aOther.Alive && InCombat == aOther.InCombat && Dead == aOther.Dead && Flung == aOther.Flung && Bleed == aOther.Bleed && Cell == aOther.Cell &&
         WorldSpace == aOther.WorldSpace && Position == aOther.Position;
 }

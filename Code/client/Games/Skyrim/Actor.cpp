@@ -1,4 +1,5 @@
 #include <Games/References.h>
+#include <Services/ReviveService.h>
 #include <Games/Skyrim/EquipManager.h>
 #include <atomic>
 #include <AI/AIProcess.h>
@@ -1275,6 +1276,18 @@ bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bo
         }
 
         World::Get().GetRunner().Trigger(HealthChangeEvent(apThis->formID, -realDamage));
+        // Hit measurement (fling/overkill rule): every hit of 10%+ of max health on the local player.
+        if (const float maximum = currentHealth - apThis->healthModifiers.damageModifier; realDamage >= 0.1f * maximum)
+            spdlog::info("Player hit: {:.1f} damage (raw {:.1f}) by {:X}, health {:.1f}/{:.1f}, knock {}, life {}, killmove {}",
+                realDamage, aDamage, apHitter ? apHitter->formID : 0, currentHealth, maximum,
+                (apThis->actorState.flags1 >> 25) & 0x7, (apThis->actorState.flags1 >> 21) & 0xF, aKillMove);
+        // Lethal hits: a knock-down fling or an overkill (one blow of at least 75% of max health, whatever health
+        // was left, owner rule 2026-09-28) kills outright instead of bleeding out (ReviveService).
+        if (wouldKill)
+        {
+            const float maximum = currentHealth - apThis->healthModifiers.damageModifier;
+            ReviveService::NoteLethalHit(maximum > 0.f ? realDamage / maximum : 0.f, apHitter ? apHitter->formID : 0);
+        }
         return TiltedPhoques::ThisCall(RealDamageActor, apThis, aDamage, apHitter, aKillMove);
     }
     else if (pExHittee->IsRemotePlayer())
@@ -1337,6 +1350,11 @@ void PlayerCombat::ApplyDamage(Actor* apVictim, Actor* apAttacker, float aDamage
     // Observe the native result so difficulty, killmove scaling, invulnerability and
     // essential/bleedout clamps are applied once, by the player's own engine.
     const float before = apVictim->GetActorValue(ActorValueInfo::kHealth);
+    if (before - aDamage <= 0.f)
+    {
+        const float maximum = before - apVictim->healthModifiers.damageModifier;
+        ReviveService::NoteLethalHit(maximum > 0.f ? aDamage / maximum : 0.f, apAttacker ? apAttacker->formID : 0);
+    }
     TiltedPhoques::ThisCall(RealDamageActor, apVictim, aDamage, apAttacker, aKillMove);
     const float delta = apVictim->GetActorValue(ActorValueInfo::kHealth) - before;
     if (delta != 0.f)

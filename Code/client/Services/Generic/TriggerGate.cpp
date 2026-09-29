@@ -1,4 +1,5 @@
 #include <Services/TriggerGate.h>
+#include <Services/ReviveService.h>
 
 #include <World.h>
 #include <Components.h>
@@ -426,6 +427,9 @@ struct TriggerGate::State
     uint32_t PlayerHandle{};
     uint64_t SampleTime{};
     std::unordered_map<uint32_t, Location> Players;
+    // Fallen players (spectating, body hidden near whoever they watch): never waited on, and their contacts never
+    // fire triggers.
+    std::unordered_set<uint32_t> FallenHandles;
     std::unordered_map<uint32_t, Held> Pending;
     std::unordered_map<uint32_t, TriggerPartyContact::Occupancy> Inside;
     uint64_t NextNotice{};
@@ -514,6 +518,8 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
     if (!state.Leader)
         return true;
     const auto actorHandle = apActor->GetHandle().handle.iBits;
+    if (actorHandle && state.FallenHandles.contains(actorHandle))
+        return true;
     const bool partyActor = std::any_of(state.Players.begin(), state.Players.end(),
         [actorHandle](const auto& entry) { return actorHandle && entry.second.Handle == actorHandle; });
     if (!partyActor)
@@ -607,18 +613,28 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
     state.Focused = focused;
 
     std::unordered_map<uint32_t, Location> players;
+    std::unordered_set<uint32_t> fallenHandles;
     if (leader && active)
     {
+        const auto& revive = m_world.GetReviveService();
         for (const auto id : party.GetPartyMembers())
-            players.emplace(id, Location{});
-        players[m_transport.GetLocalPlayerId()] = GetLocation(PlayerCharacter::Get());
+            if (!revive.IsFallen(id))
+                players.emplace(id, Location{});
+        if (revive.IsFallen(m_transport.GetLocalPlayerId()))
+            fallenHandles.insert(PlayerCharacter::Get() ? PlayerCharacter::Get()->GetHandle().handle.iBits : 0);
+        else
+            players[m_transport.GetLocalPlayerId()] = GetLocation(PlayerCharacter::Get());
         auto view = m_world.view<PlayerComponent, RemoteComponent, FormIdComponent>();
         for (const auto entity : view)
         {
             const auto id = view.get<PlayerComponent>(entity).Id;
+            auto* actor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
             if (players.contains(id))
-                players[id] = GetLocation(Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id)));
+                players[id] = GetLocation(actor);
+            else if (actor && revive.IsFallen(id))
+                fallenHandles.insert(actor->GetHandle().handle.iBits);
         }
+        fallenHandles.erase(0);
     }
     std::vector<State::Held> release;
     std::vector<uint32_t> staleLeaves;
@@ -651,6 +667,7 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
         state.LeaderId = party.GetLeaderPlayerId();
         state.PlayerHandle = PlayerCharacter::Get() ? PlayerCharacter::Get()->GetHandle().handle.iBits : 0;
         state.Players = std::move(players);
+        state.FallenHandles = std::move(fallenHandles);
         state.SampleTime = now;
         TriggerPhantom::SetAuthority(state.Leader);
         // A despawn/cell change has no guaranteed native leave. Close the last

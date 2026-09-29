@@ -16,6 +16,7 @@
 #include <Services/PlayerService.h>
 #include <Services/PapyrusService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/Generic/HeadTrackService.h>
 #include <World.h>
 #include <GameLoopDiagnostic.h>
 #include <DInputHook.hpp>
@@ -55,6 +56,8 @@
 #include <Services/PartyService.h>
 #include <Services/TransportService.h>
 #include <Services/ObjectService.h>
+#include <Combat/PlayerCombat.h>
+#include <Services/ReviveService.h>
 #include <Services/QuestService.h>
 #include <Messages/PartyStartRequest.h>
 #include <Components.h>
@@ -197,6 +200,8 @@ namespace
 std::mutex s_mainFrameDropLock;
 std::pair<uint32_t, int32_t> s_mainFrameDrop{};
 std::pair<uint32_t, bool> s_mainFrameDisable{}; // set_disabled request (reference, disabled), same lock
+float s_mainFrameDamage{};                      // damage_player request, same lock
+std::pair<uint32_t, uint32_t> s_mainFrameCombat{}; // start_combat request (attacker, target), same lock
 
 // Read-only timing at the caller of the existing automatic-door hook. 40201 /
 // 140738120 is NiTimeController slot 0x27, void(this, NiUpdateData*), and calls +0x58
@@ -2274,6 +2279,37 @@ void GameTestService::OnWindowThread() noexcept
 
 void GameTestService::OnGameThread() noexcept
 {
+    {
+        float damage{};
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            damage = std::exchange(s_mainFrameDamage, 0.f);
+        }
+        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && damage > 0.f)
+        {
+            PlayerCombat::ApplyDamage(pPlayer, nullptr, damage, false);
+            spdlog::info("Test damage_player: {} -> health {} bleeding out {}", damage,
+                pPlayer->GetActorValue(ActorValueInfo::kHealth), pPlayer->actorState.IsBleedingOut());
+        }
+    }
+    {
+        std::pair<uint32_t, uint32_t> combat{};
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            combat = std::exchange(s_mainFrameCombat, {});
+        }
+        auto* pAttacker = combat.first ? Cast<Actor>(TESForm::GetById(combat.first)) : nullptr;
+        auto* pTarget = combat.second ? Cast<Actor>(TESForm::GetById(combat.second)) : nullptr;
+        auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr;
+        if (pAttacker && pTarget && pVM)
+        {
+            // Papyrus Actor.StartCombat (54768 / 140A03090): (VM, stack id, self, target).
+            using TStartCombat = void(void*, uint32_t, Actor*, Actor*);
+            POINTER_SKYRIMSE(TStartCombat, startCombat, 54768);
+            startCombat.Get()(pVM, 0, pAttacker, pTarget);
+            spdlog::info("Test start_combat: {:X} -> {:X}", pAttacker->formID, pTarget->formID);
+        }
+    }
     {
         std::pair<uint32_t, bool> request{};
         {
@@ -5488,6 +5524,71 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             s_mainFrameDisable = {static_cast<uint32_t>(std::stoul(formText, nullptr, 16)), GetJsonString(acLine, "disabled") != "false"};
             return Result(id, "\"queued\":true");
         }
+        // Revive tests: face a point (heading toward x,y), hold Activate, damage this PC's player (game thread).
+        if (command == "face_point")
+        {
+            auto* player = PlayerCharacter::Get();
+            if (!player || GetJsonString(acLine, "x").empty())
+                return Error(id, "player or point missing");
+            const float dx = std::stof(GetJsonString(acLine, "x")) - player->position.x;
+            const float dy = std::stof(GetJsonString(acLine, "y")) - player->position.y;
+            const float z = std::atan2(dx, dy);
+            player->SetRotation(player->rotation.x, player->rotation.y, z);
+            return Result(id, fmt::format("\"yaw\":{}", z));
+        }
+        if (command == "revive_hold")
+        {
+            ReviveService::SetTestHold(GetJsonString(acLine, "enabled") != "false");
+            return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
+        }
+        if (command == "ritual_hold")
+        {
+            ReviveService::SetTestShout(GetJsonString(acLine, "enabled") != "false");
+            return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
+        }
+        if (command == "revive_state")
+            return Result(id, fmt::format("\"revive\":{}", ReviveService::DescribeTest()));
+        if (command == "revive_bleed")
+        {
+            const auto valueText = GetJsonString(acLine, "value");
+            const float value = valueText.empty() ? 0.5f : std::stof(valueText);
+            ReviveService::SetTestBleed(value);
+            return Result(id, fmt::format("\"bleed\":{}", value));
+        }
+        if (command == "start_combat")
+        {
+            // attacker: a form id (hex); target: a form id or "remote_player" (the other player's copy here).
+            const auto attackerText = GetJsonString(acLine, "attacker");
+            const auto targetText = GetJsonString(acLine, "target");
+            uint32_t target = 0;
+            if (targetText == "remote_player")
+            {
+                auto view = m_world.view<FormIdComponent>();
+                for (auto entity : view)
+                {
+                    auto* pCandidate = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                    if (pCandidate && pCandidate->GetExtension() && pCandidate->GetExtension()->IsRemotePlayer())
+                    {
+                        target = pCandidate->formID;
+                        break;
+                    }
+                }
+            }
+            else if (!targetText.empty())
+                target = std::stoul(targetText, nullptr, 16);
+            if (attackerText.empty() || !target)
+                return Error(id, "attacker or target missing");
+            std::lock_guard lock(s_mainFrameDropLock);
+            s_mainFrameCombat = {static_cast<uint32_t>(std::stoul(attackerText, nullptr, 16)), target};
+            return Result(id, fmt::format("\"queued\":true,\"target\":\"{:X}\"", target));
+        }
+        if (command == "damage_player")
+        {
+            const auto amountText = GetJsonString(acLine, "amount");
+            std::lock_guard lock(s_mainFrameDropLock);
+            s_mainFrameDamage = amountText.empty() ? 1000.f : std::stof(amountText);
+            return Result(id, "\"queued\":true");
+        }
         if (command == "drop_item")
         {
             const auto baseText = GetJsonString(acLine, "base");
@@ -5627,13 +5728,14 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
                 "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{},\"health\":{:.1f},\"inCombat\":{},\"combatTarget\":\"{:X}\","
-                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{},\"hidden\":{},\"magicka\":{:.1f},\"look\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
                 CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor),
                 pActor->GetActorValue(ActorValueInfo::kHealth), JsonBool(pActor->IsInCombat()),
                 pActor->GetCombatTarget() ? pActor->GetCombatTarget()->formID : 0,
                 JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote()), items, graph.Calls, graph.LastPostCallMs,
-                GetTickCount64()));
+                GetTickCount64(), JsonBool(pRoot && (pRoot->flags & 1u) != 0),
+                pActor->GetActorValue(ActorValueInfo::kMagicka), HeadTrackService::DescribeLook(pActor)));
         }
         if (command == "ref_bodies")
         {
@@ -5817,8 +5919,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (!player)
                 return Error(id, "no player");
             const float z = player->rotation.z + static_cast<float>(degrees * 3.14159265358979 / 180.0);
-            player->SetRotation(player->rotation.x, player->rotation.y, z);
-            return Result(id, fmt::format("\"yaw\":{}", z));
+            // Optional absolute look pitch in degrees, positive = down (head tracking up/down scenario).
+            const auto pitchText = GetJsonString(acLine, "pitch");
+            const float x = pitchText.empty() ? player->rotation.x :
+                static_cast<float>(std::strtod(pitchText.c_str(), nullptr) * 3.14159265358979 / 180.0);
+            player->SetRotation(x, player->rotation.y, z);
+            return Result(id, fmt::format("\"yaw\":{},\"pitch\":{}", z, x));
         }
         if (command == "offscreen_simulate")
         {

@@ -592,6 +592,25 @@ void OverlayService::PushDialogueListen(const DialogueListenState* aState, uint3
     m_pOverlay->ExecuteAsync("dialogueListen", arguments);
 }
 
+void OverlayService::PushRevive(int aMode, const std::string& acName, const std::string& acKey, double aProgress,
+    const std::string& acHint, const std::string& acNote, const std::string& acButton, const std::string& acModel, bool aGamepad,
+    float aBleed)
+{
+    if (!m_pOverlay) return;
+    auto arguments = CefListValue::Create();
+    arguments->SetInt(0, aMode);
+    arguments->SetString(1, acName.c_str());
+    arguments->SetString(2, acKey.c_str());
+    arguments->SetDouble(3, aProgress);
+    arguments->SetString(4, acHint.c_str());
+    arguments->SetString(5, acNote.c_str());
+    arguments->SetString(6, acButton.c_str());
+    arguments->SetString(7, acModel.c_str());
+    arguments->SetBool(8, aGamepad);
+    arguments->SetDouble(9, static_cast<double>(aBleed));
+    m_pOverlay->ExecuteAsync("revive", arguments);
+}
+
 void OverlayService::ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly)
 {
     if (!m_pOverlay)

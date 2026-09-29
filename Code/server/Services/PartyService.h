@@ -44,6 +44,8 @@ struct PartyService
         uint8_t SessionState{};
         uint64_t StartEpoch{};
         String CheckpointId{};
+        // The newest checkpoint the leader announced in this session (a wipe reloads it).
+        String LatestCheckpointId{};
         bool LobbyOpen{};
         bool PasswordProtected{};
         ServerSettings GameplaySettings{};
@@ -56,6 +58,9 @@ struct PartyService
     TP_NOCOPYMOVE(PartyService);
 
     const Party* GetById(uint32_t aId) const noexcept;
+    // After a party wipe: every member reloads the leader's latest matched checkpoint (the Continue path, new epoch).
+    // False when the session has no checkpoint to reload.
+    bool RestartFromCheckpoint(uint32_t aPartyId) noexcept;
     bool IsPlayerInParty(Player* const apPlayer) const noexcept;
     bool IsPlayerLeader(const Player* const apPlayer) const noexcept;
     Party* GetPlayerParty(Player* const apPlayer) noexcept;

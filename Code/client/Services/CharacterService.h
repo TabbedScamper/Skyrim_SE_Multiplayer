@@ -122,6 +122,9 @@ struct CharacterService
     void OnUpdate(const UpdateEvent& acUpdateEvent) noexcept;
     void OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept;
     void OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept;
+    // Before a checkpoint reload inside a running session (party wipe): release every remote copy as a disconnect
+    // does. A load with copies still tracked crashed the follower in the engine's reference re-parenting (19032).
+    void ReleaseForReload() noexcept { OnDisconnected(DisconnectedEvent{}); }
     void OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept;
     void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept;
     void OnReferencesMoveRequest(const ServerReferencesMoveRequest& acMessage) const noexcept;

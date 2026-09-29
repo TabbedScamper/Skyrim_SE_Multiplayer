@@ -1,4 +1,5 @@
 #include <TiltedOnlinePCH.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Master_Behavior.h>
 
 #include <Games/References.h>
 #include <Games/Overrides.h>
@@ -354,11 +355,32 @@ void TESObjectREFR::LoadAnimationVariables(const AnimationVariables& aVariables)
             if (!pVariableSet)
                 return;
 
+            // Head tracking on a remote player is the receiver's (HeadTrackService aims its look-at at the owner's
+            // camera). The owner is a player, so its IsNPC, head-tracking switches and look-at gains are off; copying
+            // them every update disabled the receiver's BSLookAtModifier outright (2026-09-28: the modifier never
+            // ran for a remote player graph, so the head never pitched; the yaw seen was the body turning).
+            const bool ownHeadTracking = pExtendedActor->IsRemotePlayer() &&
+                pExtendedActor->GraphDescriptorHash == AnimationGraphDescriptor_Master_Behavior::m_key;
+            const auto headTrackVariable = [](uint32_t aIndex)
+            {
+                // Master_Behavior: IsNPC 25, bHeadTracking 151, LookAtOutOfRange 178, bHeadTrackSpine 185,
+                // LookAtOnGain/OffGain/EyeOnGain/EyeOffGain 191-194, bHeadTrackingOn 257, bDisableHeadTrack 271,
+                // bCanHeadTrack 272, bNoHeadTrack 283.
+                switch (aIndex)
+                {
+                case 25: case 151: case 178: case 185: case 191: case 192: case 193: case 194: case 257: case 271:
+                case 272: case 283:
+                    return true;
+                default:
+                    return false;
+                }
+            };
+
             for (size_t i = 0; i < pDescriptor->BooleanLookUpTable.size(); ++i)
             {
                 const auto idx = pDescriptor->BooleanLookUpTable[i];
 
-                if (pVariableSet->size > idx)
+                if (pVariableSet->size > idx && !(ownHeadTracking && headTrackVariable(idx)))
                 {
                     pVariableSet->data[idx] = aVariables.Booleans.size() > i ? aVariables.Booleans[i] : false;
                 }
@@ -368,7 +390,7 @@ void TESObjectREFR::LoadAnimationVariables(const AnimationVariables& aVariables)
             {
                 const auto idx = pDescriptor->FloatLookupTable[i];
 
-                if (pVariableSet->size > idx)
+                if (pVariableSet->size > idx && !(ownHeadTracking && headTrackVariable(idx)))
                 {
                     *reinterpret_cast<float*>(&pVariableSet->data[idx]) = aVariables.Floats.size() > i ? aVariables.Floats[i] : 0.f;
                 }

@@ -442,6 +442,60 @@ void HeadTrackService::FillLocalMovement(Movement& aMovement) noexcept
     aMovement.LookDirection = (packedPitch << 16) | packedYaw;
 }
 
+std::string HeadTrackService::DescribeLook(Actor* apActor) noexcept
+{
+    if (!apActor)
+        return "null";
+    constexpr float kDegrees = 180.f / kPi;
+    std::string result = fmt::format("{{\"canTrack\":{},\"tracking\":{}", CanTrack(apActor) ? "true" : "false",
+        IsCameraTracking(apActor) ? "true" : "false");
+    // Graph bleedout flags (revived remote copy replayed its get-up on the host while the owner's was fine).
+    for (const char* name : {"IsBleedingOut", "bIsSynced", "bAnimationDriven", "IsNPC"})
+    {
+        BSFixedString variable(name);
+        bool value{};
+        if (apActor->animationGraphHolder.GetVariableBool(&variable, &value))
+            result += fmt::format(",\"{}\":{}", name, value ? "true" : "false");
+    }
+    if (apActor == PlayerCharacter::Get())
+    {
+        glm::vec2 look{};
+        auto* pCamera = PlayerCamera::Get();
+        const bool read = ReadCameraLook(look, true);
+        result += fmt::format(",\"cameraState\":{},\"cameraPitch\":{}", pCamera && pCamera->state ? pCamera->state->id : -1,
+            read ? fmt::format("{:.1f}", look.x * kDegrees) : std::string("null"));
+    }
+    else
+    {
+        std::lock_guard lock(s_presentedLock);
+        const auto it = s_presented.find(apActor->formID);
+        result += fmt::format(",\"presentedPitch\":{}", it != s_presented.end() && it->second.Present ?
+            fmt::format("{:.1f}", it->second.Look.x * kDegrees) : std::string("null"));
+    }
+    {
+        std::lock_guard lock(s_graphLock);
+        const auto it = s_graphOverrides.find(apActor->formID);
+        if (it != s_graphOverrides.end())
+            result += fmt::format(",\"overridePitch\":{:.1f},\"overrideAgeMs\":{}", it->second.Look.x * kDegrees,
+                GetTickCount64() - it->second.SubmittedAt);
+    }
+    // The head bone's world forward: NPC Head [Head] local +Y points out of the face in the vanilla skeleton.
+    if (auto* pRoot = apActor->GetNiNode())
+    {
+        static BSFixedString s_head("NPC Head [Head]");
+        if (auto* pHead = pRoot->GetByName(s_head))
+        {
+            const auto& r = pHead->world.rotate;
+            result += fmt::format(",\"headAxes\":[[{:.2f},{:.2f},{:.2f}],[{:.2f},{:.2f},{:.2f}],[{:.2f},{:.2f},{:.2f}]]",
+                r.entry[0][0], r.entry[1][0], r.entry[2][0], r.entry[0][1], r.entry[1][1], r.entry[2][1],
+                r.entry[0][2], r.entry[1][2], r.entry[2][2]);
+            result += fmt::format(",\"headPos\":[{:.0f},{:.0f},{:.0f}]", pHead->world.translate.x, pHead->world.translate.y,
+                pHead->world.translate.z);
+        }
+    }
+    return result + "}";
+}
+
 bool HeadTrackService::IsCameraTracking(const Actor* apActor) noexcept
 {
     if (!CanTrack(apActor))

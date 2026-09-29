@@ -11,6 +11,10 @@ declare namespace SkyrimTogetherTypes {
     highlighted: number, chosen: number, choiceSerial: string, chosenText: string,
     subtitle: string, durationMs: number, lineSerial: string,
   ) => void;
+  /** Revive prompt/meter: mode (0 hidden, 1 prompt, 2 reviving, 3 down), name, keyboard key, progress 0-1, hint,
+   *  note (e.g. in combat), controller button (a/b/x/y/lb/rb/lt/rt), controller model, controller used last. */
+  type ReviveCallback = (mode: number, name: string, key: string, progress: number, hint: string, note: string,
+    button: string, model: string, gamepad: boolean, bleed: number) => void;
   /** Client initialization callback */
   type InitCallback = () => void;
 
@@ -125,6 +129,7 @@ declare const skyrimtogether: SkyrimTogether;
 interface SkyrimTogether {
   /** Add listener to when the UI is first initialized. */
   on(event: 'dialogueListen', callback: SkyrimTogetherTypes.DialogueListenCallback): void;
+  on(event: 'revive', callback: SkyrimTogetherTypes.ReviveCallback): void;
   on(event: 'init', callback: SkyrimTogetherTypes.InitCallback): void;
 
   on(event: 'debugPrompt', callback: SkyrimTogetherTypes.DebugPromptCallback): void;
@@ -272,6 +277,7 @@ interface SkyrimTogether {
 
   /** Remove listener from when the application is first initialized. */
   off(event: 'dialogueListen', callback?: SkyrimTogetherTypes.DialogueListenCallback): void;
+  off(event: 'revive', callback?: SkyrimTogetherTypes.ReviveCallback): void;
   off(event: 'init', callback?: SkyrimTogetherTypes.InitCallback): void;
 
   /** Remove listener from when the UI is activated. */

@@ -16,6 +16,9 @@ struct HeadTrackService
 
     static void FillLocalMovement(Movement& aMovement) noexcept;
     static bool IsCameraTracking(const Actor* apActor) noexcept;
+    // Test bridge (head stuck looking up after a revive): the local camera pitch and state, or a remote player's
+    // presented look pitch, plus whether a camera-look override is live on its graph. Degrees, positive = down.
+    static std::string DescribeLook(Actor* apActor) noexcept;
     // Called on the movement presentation timeline, including stationary players.
     void UpdateRemote(Actor* apActor, uint64_t aTick) noexcept;
 

@@ -52,6 +52,9 @@ struct OverlayService
 
     void Initialize() noexcept;
     void PushDialogueListen(const DialogueListenState* aState, uint32_t aSpeaker);
+    // Revive prompt and meter (ReviveService): mode 0 hidden, 1 prompt, 2 reviving, 3 down.
+    void PushRevive(int aMode, const std::string& acName, const std::string& acKey, double aProgress, const std::string& acHint,
+        const std::string& acNote, const std::string& acButton, const std::string& acModel, bool aGamepad, float aBleed);
 
     void SetActive(bool aActive) noexcept;
     [[nodiscard]] bool GetActive() const noexcept;

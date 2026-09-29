@@ -450,6 +450,7 @@ void PartyService::OnCheckpointSave(const PacketEvent<CheckpointSaveRequest>& ac
         return;
     }
 
+    pParty->LatestCheckpointId = id;
     NotifyCheckpointSave notify{};
     notify.CheckpointId = id;
     notify.AuthorityEpoch = pParty->StartEpoch;
@@ -493,6 +494,28 @@ void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) 
         pParty->ReadyPlayerIds.clear();
     }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
+bool PartyService::RestartFromCheckpoint(uint32_t aPartyId) noexcept
+{
+    auto it = m_parties.find(aPartyId);
+    if (it == m_parties.end() || it->second.SessionState < 2)
+        return false;
+    auto& party = it.value();
+    const String checkpoint = !party.LatestCheckpointId.empty() ? party.LatestCheckpointId : party.CheckpointId;
+    if (checkpoint.empty())
+        return false;
+    party.CampaignMode = PartyStartRequest::kContinue;
+    party.CheckpointId = checkpoint;
+    party.SessionState = 1;
+    party.StartEpoch = m_nextStartEpoch++;
+    party.LoadedPlayerIds.clear();
+    party.GameplayReadyPlayerIds.clear();
+    party.ReadyPlayerIds.clear();
+    spdlog::info("[PartyService]: party {} wiped, reloading checkpoint {} (epoch {})", aPartyId, checkpoint,
+        party.StartEpoch);
+    BroadcastPartyInfo(aPartyId);
+    return true;
 }
 
 void PartyService::OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept

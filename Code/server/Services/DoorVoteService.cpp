@@ -1,4 +1,5 @@
 #include <Services/DoorVoteService.h>
+#include <Services/ReviveService.h>
 #include <World.h>
 #include <Components.h>
 #include <GameServer.h>
@@ -68,6 +69,11 @@ void DoorVoteService::Cancel(Vote& aVote, const char* aReason) const noexcept
 
 void DoorVoteService::Changed(Vote& aVote) noexcept
 {
+    // A fallen member spectates and cannot vote: it is carried through with the party (owner question 2026-09-28).
+    // Downed members still hold the vote, so nobody leaves a bleeding ally behind.
+    for (const auto id : aVote.Members)
+        if (m_world.GetReviveService().IsFallenPlayer(id))
+            aVote.Ready.insert(id);
     aVote.Data.Tick = 0;
     aVote.Deadline = GameServer::Get()->GetTick() + 120000;
     spdlog::info("Door vote: vote {}/{}", aVote.Ready.size(), aVote.Members.size());

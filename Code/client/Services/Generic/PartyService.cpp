@@ -7,6 +7,7 @@
 #include <Messages/NotifyPlayerControlState.h>
 #include <Services/PlayerCollision.h>
 #include <Services/PartyService.h>
+#include <Services/CharacterService.h>
 #include <Services/DoorVoteService.h>
 #include <Forms/TESObjectCELL.h>
 
@@ -748,7 +749,9 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("partyInfo", pArguments);
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("coopLobbyState", pArguments);
         m_world.GetSteamLobbyService().ApplyPartySettings(acPartyInfo.LobbyOpen, acPartyInfo.PasswordProtected);
-        if (previousSessionState == 0 && m_sessionState == 1)
+        // After a party wipe the server restarts a running session from the leader's latest checkpoint.
+        const bool restart = previousSessionState >= 2 && m_sessionState == 1;
+        if ((previousSessionState == 0 || restart) && m_sessionState == 1)
         {
             m_creatorSeen = false;
             m_gameplayReadySent = false;
@@ -759,12 +762,22 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             m_waitingForWorldReady = true;
             // Continue with a named checkpoint loads that save on every PC; without one (or if
             // this PC does not have it) fall back to the game's own Continue.
+            if (restart)
+            {
+                m_world.GetCharacterService().ReleaseForReload();
+                spdlog::info("Party restart: remote copies released before loading checkpoint '{}'", acPartyInfo.CheckpointId);
+            }
             if (m_campaignMode != PartyStartRequest::kContinue || acPartyInfo.CheckpointId.empty() ||
                 !CheckpointSaves::Load(acPartyInfo.CheckpointId))
             {
-                if (m_campaignMode == PartyStartRequest::kContinue)
-                    spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acPartyInfo.CheckpointId);
-                LaunchSharedCampaignFromMainMenu(m_campaignMode);
+                if (restart)
+                    spdlog::error("Party restart: checkpoint '{}' could not be loaded on this PC", acPartyInfo.CheckpointId);
+                else
+                {
+                    if (m_campaignMode == PartyStartRequest::kContinue)
+                        spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acPartyInfo.CheckpointId);
+                    LaunchSharedCampaignFromMainMenu(m_campaignMode);
+                }
             }
         }
         else if (previousSessionState == 1 && m_sessionState == 2)

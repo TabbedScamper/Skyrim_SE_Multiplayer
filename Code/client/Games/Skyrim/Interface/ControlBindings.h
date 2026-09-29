@@ -20,6 +20,10 @@ enum class Device : uint32_t
 // JSON: {"controller":"xbox|playstation|nintendo|none","bindings":[{"event":..,"device":0,"key":..,"remappable":true}]}
 std::string BindingsJson() noexcept;
 
+// Glyph set of the connected controller: xbox-series, dualshock4, dualsense, switch-pro, steam-deck, generic.
+// Enumerates HID devices; callers cache it.
+std::string ConnectedControllerModel() noexcept;
+
 // Arms capture: the next key / mouse button / gamepad button on that device
 // is bound to acEvent. Esc cancels. Must run on the window thread.
 void StartCapture(const std::string& acEvent, Device aDevice) noexcept;

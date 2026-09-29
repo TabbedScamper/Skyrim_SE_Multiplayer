@@ -782,6 +782,19 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 
         const auto result = ActorMediator::Get()->ForceAction(&actionData);
         aAnimationComponent.LastRanActionResult = result != 0;
+        // Revive check (2026-09-28): the host's copy of a revived player replayed its get-up over and over.
+        if (player)
+        {
+            // Only while the owner is out of the alive state, and 15 s after.
+            static uint64_t s_lifeUntil{};
+            static uint32_t s_logs{};
+            const auto life = (first.State1 >> 21) & 0xF;
+            if (life != 0)
+                s_lifeUntil = GetTickCount64() + 15000;
+            if (GetTickCount64() < s_lifeUntil && s_logs++ < 400)
+                spdlog::info("Remote player action: form={:X} event='{}' action={:X} idle={:X} life={} result={}",
+                    apActor->formID, first.EventName, actionId, first.IdleId, (first.State1 >> 21) & 0xF, result);
+        }
         if (player && !result)
             ++sample->Failures;
 
