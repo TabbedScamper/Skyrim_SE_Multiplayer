@@ -871,6 +871,74 @@ void CharacterService::OnOwnershipTransferEvent(const OwnershipTransferEvent& ac
     TransferToNextOwner(acEvent.Entity, OwnershipTransferReason::OwnerUnavailable);
 }
 
+void CharacterService::ReplayToPlayer(Player* apPlayer) const noexcept
+{
+    const auto& cell = apPlayer->GetCellComponent();
+    if (!cell)
+        return;
+    uint32_t sent = 0, outOfRange = 0, refused = 0, players = 0;
+    // The other party members' own characters, whatever their recorded range: a reload inside one worldspace only
+    // shifts the grid (which never sends the mover to others) and their recorded position is still the pre-wipe one
+    // until they move. Their movement stream places the copy.
+    std::vector<entt::entity> sentPlayers;
+    if (const auto* pParty = m_world.GetPartyService().GetPlayerParty(apPlayer))
+        for (auto* pMember : pParty->Members)
+            if (pMember != apPlayer && pMember->GetCharacter() && m_world.valid(*pMember->GetCharacter()))
+            {
+                CharacterSpawnRequest spawn;
+                Serialize(m_world, *pMember->GetCharacter(), &spawn);
+                apPlayer->Send(spawn);
+                sentPlayers.push_back(*pMember->GetCharacter());
+                ++players;
+            }
+    auto view = m_world.view<CellIdComponent, CharacterComponent, OwnerComponent>();
+    for (auto entity : view)
+    {
+        if (std::find(sentPlayers.begin(), sentPlayers.end(), entity) != sentPlayers.end())
+            continue;
+        if (!cell.IsInRange(view.get<CellIdComponent>(entity), view.get<CharacterComponent>(entity).IsDragon()))
+        {
+            ++outOfRange;
+            continue;
+        }
+        if (!CanReplicateTo(apPlayer, entity))
+        {
+            ++refused;
+            continue;
+        }
+        CharacterSpawnRequest spawn;
+        Serialize(m_world, entity, &spawn);
+        apPlayer->Send(spawn);
+        ++sent;
+    }
+    spdlog::info("Party restart: replayed {} players and {} characters to player {} (cell {:X}:{:X} world {:X}:{:X} center {},{}; {} out of range, {} not replicable)",
+        players, sent, apPlayer->GetId(), cell.Cell.ModId, cell.Cell.BaseId, cell.WorldSpaceId.ModId, cell.WorldSpaceId.BaseId,
+        cell.CenterCoords.X, cell.CenterCoords.Y, outOfRange, refused);
+}
+
+size_t CharacterService::DropPartyTemporaries(uint32_t aPartyId) const noexcept
+{
+    const auto* party = m_world.GetPartyService().GetById(aPartyId);
+    if (!party)
+        return 0;
+    std::vector<entt::entity> temporaries;
+    for (auto entity : m_world.view<TemporaryActorProvenance, CharacterComponent, OwnerComponent>())
+    {
+        const auto& character = m_world.get<CharacterComponent>(entity);
+        if (character.IsPlayer() || character.IsPlayerSummon())
+            continue;
+        const auto& owner = m_world.get<OwnerComponent>(entity);
+        const bool ours = owner.GetOwner() ?
+            std::find(party->Members.begin(), party->Members.end(), owner.GetOwner()) != party->Members.end() :
+            owner.PartyId && *owner.PartyId == aPartyId;
+        if (ours)
+            temporaries.push_back(entity);
+    }
+    for (auto entity : temporaries)
+        m_world.GetDispatcher().trigger(CharacterRemoveEvent(World::ToInteger(entity)));
+    return temporaries.size();
+}
+
 void CharacterService::OnCharacterRemoveEvent(const CharacterRemoveEvent& acEvent) const noexcept
 {
     EndRagdollStreams(m_world, static_cast<entt::entity>(acEvent.ServerId));

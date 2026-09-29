@@ -827,6 +827,32 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    // New actors created last frame are in the form table now: the next queued creation may go.
+    m_createdThisFrame = false;
+    if (!m_nextFrameSpawns.empty() && !m_holdSpawns)
+    {
+        auto spawn = m_nextFrameSpawns.front();
+        m_nextFrameSpawns.erase(m_nextFrameSpawns.begin());
+        OnCharacterSpawn(spawn);
+    }
+    // A reload in progress: release the held spawns once the load event has fired and the player stands in a loaded
+    // cell (at most 90 s, so a failed load never strands them). Frame updates do not run during the load itself.
+    if (m_holdSpawns)
+    {
+        auto* pUI = UI::Get();
+        const bool loading = pUI && pUI->GetMenuOpen(BSFixedString("Loading Menu"));
+        auto* pPlayer = PlayerCharacter::Get();
+        const bool inWorld = !loading && pPlayer && pPlayer->parentCell && pPlayer->GetNiNode();
+        if ((m_holdSawLoading && inWorld) || GetTickCount64() - m_holdSince > 90000)
+        {
+            m_holdSpawns = false;
+            auto held = std::move(m_heldSpawns);
+            m_heldSpawns.clear();
+            spdlog::info("Party wipe: reload done, applying {} held spawns", held.size());
+            for (const auto& spawn : held)
+                OnCharacterSpawn(spawn);
+        }
+    }
     RunAnimObjectUpdates();
     RunScriptedActorUpdates();
     EngineFixes::OnFrame();
@@ -958,6 +984,47 @@ void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEve
     }
 
     m_pendingLeveledConforms.clear();
+}
+
+void CharacterService::ReleaseForReload() noexcept
+{
+    // The local player keeps its tracking: it is the same PlayerCharacter and the same server character across the
+    // load, and a load does not re-register it (only a connect does). Dropping it stopped this player's movement
+    // stream, so the other player's copy stayed at its pre-wipe spot outside the loaded area and never appeared.
+    std::optional<entt::entity> self;
+    std::optional<LocalComponent> selfLocal;
+    for (auto entity : m_world.view<FormIdComponent, LocalComponent>())
+        if (m_world.get<FormIdComponent>(entity).Id == 0x14)
+        {
+            self = entity;
+            selfLocal = m_world.get<LocalComponent>(entity);
+        }
+    // The disconnect cleanup: remote player copies deleted, NPC copies back to local simulation, pending maps cleared.
+    OnDisconnected(DisconnectedEvent{});
+    if (self && selfLocal && m_world.valid(*self))
+        m_world.emplace_or_replace<LocalComponent>(*self, *selfLocal);
+    // Then no entity may outlive the world it tracked: OnActorRemoved during the menu teardown would find it and
+    // relinquish ownership, and later updates would resolve its stale form id.
+    std::vector<entt::entity> tracked;
+    for (auto entity : m_world.view<FormIdComponent>())
+        tracked.push_back(entity);
+    for (auto entity : m_world.view<LeaderNativeClaim>())
+        tracked.push_back(entity);
+    for (auto entity : m_world.view<WaitingForAssignmentComponent>())
+        tracked.push_back(entity);
+    std::sort(tracked.begin(), tracked.end());
+    tracked.erase(std::unique(tracked.begin(), tracked.end()), tracked.end());
+    for (auto entity : tracked)
+        if (m_world.valid(entity) && entity != self)
+            m_world.destroy(entity);
+    m_loadedActorLocations.clear();
+    m_parkedActors.clear();
+    m_holdSpawns = true;
+    m_holdSawLoading = false;
+    m_holdSince = GetTickCount64();
+    m_heldSpawns.clear();
+    m_nextFrameSpawns.clear();
+    spdlog::info("Party wipe: {} tracked actors forgotten before the reload", tracked.size());
 }
 
 void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept
@@ -1189,10 +1256,26 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
 
 void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
+    if (m_holdSpawns)
+    {
+        m_heldSpawns.push_back(acMessage);
+        return;
+    }
+    if (acMessage.IsPlayer)
+        spdlog::info("Player spawn: server {:X} form {:X}:{:X} epoch {}", acMessage.ServerId, acMessage.FormId.ModId,
+            acMessage.FormId.BaseId, acMessage.OwnershipEpoch);
     if (acMessage.FormId != GameId{} && IsActorDiscoverySuppressed(m_world.GetModSystem().GetGameId(acMessage.FormId)))
+    {
+        if (acMessage.IsPlayer)
+            spdlog::warn("Player spawn {:X} dropped: discovery suppressed", acMessage.ServerId);
         return;
+    }
     if (const auto existing = Utils::FindEntityByServerId(acMessage.ServerId); existing && m_world.all_of<LocalComponent>(*existing))
+    {
+        if (acMessage.IsPlayer)
+            spdlog::warn("Player spawn {:X} dropped: that server id is a local actor here", acMessage.ServerId);
         return;
+    }
     if (acMessage.OwnershipEpoch == 0)
     {
         spdlog::warn("Ignored spawn for actor {:X} because the ownership epoch is invalid", acMessage.ServerId);
@@ -1214,8 +1297,23 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     // Custom forms
     // A player always needs a private NPC base, even if a peer supplied a BaseId.
-    if (acMessage.IsPlayer || acMessage.FormId == GameId{})
+    // A temporary (FF) reference id is the owner's own and names nothing here: resolving it bound a peer's temporary
+    // Thalmor soldier onto the freshly created copy of the other player, which shares that local FF id (2026-09-29,
+    // after a party reload: the player's copy became the soldier). Temporaries always get their own copy.
+    const bool temporaryForm = acMessage.FormId != GameId{} &&
+        (acMessage.FormId.ModId == std::numeric_limits<uint32_t>::max() ||
+            (m_world.GetModSystem().GetGameId(acMessage.FormId) >> 24) == 0xFF);
+    if (temporaryForm)
+        spdlog::info("Temporary spawn {:X} (owner's form {:X}:{:X}) gets its own copy", acMessage.ServerId,
+            acMessage.FormId.ModId, acMessage.FormId.BaseId);
+    if (acMessage.IsPlayer || acMessage.FormId == GameId{} || temporaryForm)
     {
+        if (m_createdThisFrame)
+        {
+            m_nextFrameSpawns.push_back(acMessage);
+            return;
+        }
+        m_createdThisFrame = true;
         TESNPC* pNpc = nullptr;
 
         entity = m_world.create();

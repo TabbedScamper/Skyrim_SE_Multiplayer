@@ -29,6 +29,8 @@ struct ReviveService
     static std::string DescribeTest() noexcept;
     // A party player that has fallen (bled out, spectating), this one included. Main thread.
     [[nodiscard]] bool IsFallen(uint32_t aPlayerId) const noexcept;
+    // The party wiped and is on its way back to the checkpoint.
+    [[nodiscard]] bool IsWiped() const noexcept { return m_wiped; }
 
 private:
     struct Peer

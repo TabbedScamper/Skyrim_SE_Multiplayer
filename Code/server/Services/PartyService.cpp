@@ -11,6 +11,7 @@
 
 #include <Events/PlayerJoinEvent.h>
 #include <Events/PlayerLeaveEvent.h>
+#include <Events/CharacterRemoveEvent.h>
 #include <Events/UpdateEvent.h>
 
 #include <Messages/NotifyPlayerList.h>
@@ -433,6 +434,12 @@ void PartyService::OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) 
     {
         pParty->SessionState = 3;
         spdlog::info("[PartyService]: Every party member reached the gameplay barrier for epoch {}", pParty->StartEpoch);
+        if (pParty->ReplayOnGameplay)
+        {
+            pParty->ReplayOnGameplay = false;
+            for (auto* pMember : pParty->Members)
+                m_world.GetCharacterService().ReplayToPlayer(pMember);
+        }
     }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
 }
@@ -505,14 +512,20 @@ bool PartyService::RestartFromCheckpoint(uint32_t aPartyId) noexcept
     const String checkpoint = !party.LatestCheckpointId.empty() ? party.LatestCheckpointId : party.CheckpointId;
     if (checkpoint.empty())
         return false;
+    // Full reset (owner choice 2026-09-28) through the ordinary Continue: persistent actors keep their identity and
+    // their owner (the leader), so its reloaded natives rebind to them (dropping them let the follower's faster load
+    // claim the leader's NPCs and crashed the leader's load). Only temporaries, which cannot rebind, are removed.
+    const auto temporaries = m_world.GetCharacterService().DropPartyTemporaries(aPartyId);
+    spdlog::info("[PartyService]: party {} restart dropped {} temporary characters", aPartyId, temporaries);
     party.CampaignMode = PartyStartRequest::kContinue;
     party.CheckpointId = checkpoint;
+    party.ReplayOnGameplay = true;
     party.SessionState = 1;
     party.StartEpoch = m_nextStartEpoch++;
     party.LoadedPlayerIds.clear();
     party.GameplayReadyPlayerIds.clear();
     party.ReadyPlayerIds.clear();
-    spdlog::info("[PartyService]: party {} wiped, reloading checkpoint {} (epoch {})", aPartyId, checkpoint,
+    spdlog::info("[PartyService]: party {} wiped, reloading checkpoint {} in game (epoch {})", aPartyId, checkpoint,
         party.StartEpoch);
     BroadcastPartyInfo(aPartyId);
     return true;
@@ -818,7 +831,10 @@ void PartyService::BroadcastPartyInfo(uint32_t aPartyId) const noexcept
 
     NotifyPartyInfo message;
     message.LeaderPlayerId = party.LeaderPlayerId;
-    message.ReadyPlayerIds = party.ReadyPlayerIds;
+    // While the party loads (state 1) the ready list names who has loaded: followers start their Continue load
+    // only once the leader's world is in (owner rule 2026-09-28: a follower loading first registered its actors
+    // while the leader was still loading, and the leader crashed on their spawn requests).
+    message.ReadyPlayerIds = party.SessionState == 1 ? party.LoadedPlayerIds : party.ReadyPlayerIds;
     message.CampaignMode = party.CampaignMode;
     message.SessionState = party.SessionState;
     message.StartEpoch = party.StartEpoch;

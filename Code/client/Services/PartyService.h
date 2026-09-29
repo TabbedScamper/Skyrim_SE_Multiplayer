@@ -46,6 +46,8 @@ struct PartyService
     void SetSessionSettings(bool aOpen, const String& acPassword) const noexcept;
     void SetGameplaySettings(uint32_t aDifficulty, bool aPvpEnabled) const noexcept;
     void ReachWorldReadyBarrier() noexcept;
+    // TESLoadGameEvent: a pending in-game reload has happened (the barrier may be reported).
+    void NoteGameLoaded() noexcept;
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
@@ -109,4 +111,13 @@ private:
     entt::scoped_connection m_partyInviteConnection;
     entt::scoped_connection m_partyJoinedConnection;
     entt::scoped_connection m_partyLeftConnection;
+    // An in-game checkpoint reload (party wipe) not yet loaded: this PC's world is still the old one.
+    bool m_reloadPending{};
+    // A synced load (session start or wipe reload) keeps the screen black until the gameplay barrier.
+    bool m_wipeFade{};
+    // A follower's Continue load held until the leader's world has loaded.
+    bool m_deferredLaunch{};
+    uint64_t m_deferredSince{};
+    String m_deferredCheckpoint;
+    void LaunchCheckpoint(const String& acCheckpointId) noexcept;
 };

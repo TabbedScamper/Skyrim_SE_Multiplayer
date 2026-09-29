@@ -5541,6 +5541,29 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             ReviveService::SetTestHold(GetJsonString(acLine, "enabled") != "false");
             return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
         }
+        if (command == "remote_entities")
+        {
+            // Every remote character entity: server id, cached form, whether that form exists and is flagged a
+            // remote player, waiting for 3D, the interpolated position, and player id if any.
+            std::string list = "[";
+            int count = 0;
+            auto view = m_world.view<RemoteComponent>();
+            for (auto entity : view)
+            {
+                const auto& remote = view.get<RemoteComponent>(entity);
+                auto* pActor = Cast<Actor>(TESForm::GetById(remote.CachedRefId));
+                const auto* pInterp = m_world.try_get<InterpolationComponent>(entity);
+                const auto* pPlayer = m_world.try_get<PlayerComponent>(entity);
+                list += fmt::format("{}{{\"server\":\"{:X}\",\"form\":\"{:X}\",\"exists\":{},\"remotePlayer\":{},\"formComponent\":{},"
+                    "\"waiting3D\":{},\"player\":{},\"pos\":[{:.0f},{:.0f},{:.0f}]}}",
+                    count++ ? "," : "", remote.Id, remote.CachedRefId, JsonBool(pActor != nullptr),
+                    JsonBool(pActor && pActor->GetExtension() && pActor->GetExtension()->IsRemotePlayer()),
+                    JsonBool(m_world.all_of<FormIdComponent>(entity)), JsonBool(m_world.all_of<WaitingFor3D>(entity)),
+                    pPlayer ? static_cast<int64_t>(pPlayer->Id) : -1,
+                    pInterp ? pInterp->Position.x : 0.f, pInterp ? pInterp->Position.y : 0.f, pInterp ? pInterp->Position.z : 0.f);
+            }
+            return Result(id, fmt::format("\"count\":{},\"entities\":{}]", count, list));
+        }
         if (command == "ritual_hold")
         {
             ReviveService::SetTestShout(GetJsonString(acLine, "enabled") != "false");

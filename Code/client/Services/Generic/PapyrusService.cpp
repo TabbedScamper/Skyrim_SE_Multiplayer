@@ -22,3 +22,15 @@ void PapyrusService::HandlePapyrusFunctionEvent(const PapyrusFunctionRegisterEve
 {
     m_functions[acEvent.Namespace + "::" + acEvent.Name] = acEvent.Function;
 }
+
+const void* ResolvePapyrusFunction(const char* apNamespace, const char* apName) noexcept
+{
+    const void* pFunction = World::Get().ctx().at<PapyrusService>().Get(apNamespace, apName);
+    if (!pFunction)
+    {
+        static std::atomic<uint32_t> s_logs{};
+        if (s_logs.fetch_add(1, std::memory_order_relaxed) < 50)
+            spdlog::warn("Papyrus native {}.{} not registered yet; the call is skipped", apNamespace, apName);
+    }
+    return pFunction;
+}

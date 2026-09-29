@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/DiscoveryService.h>
+#include <Services/RunnerService.h>
 #include <Services/CharacterService.h>
 #include <Games/TES.h>
 
@@ -340,6 +341,9 @@ BSTEventResult DiscoveryService::OnEvent(const TESLoadGameEvent*, const EventDis
 {
     spdlog::info("Finished loading, triggering visit cell");
 
+    RunnerService::NoteGameLoaded();
+    m_world.GetPartyService().NoteGameLoaded();
+    m_world.GetCharacterService().NoteGameLoaded();
     m_world.GetPartyService().ReachWorldReadyBarrier();
 
     if (!IsDefaultModlist(ModManager::Get()->mods))

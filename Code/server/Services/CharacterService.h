@@ -42,6 +42,13 @@ struct CharacterService
     static void Serialize(World& aRegistry, entt::entity aEntity, CharacterSpawnRequest* apSpawnRequest) noexcept;
     void ReconcileCellOwnership(Player* apPlayer, bool aCellEntry = true) const noexcept;
     bool CanReplicateTo(Player* apPlayer, entt::entity aEntity) const noexcept;
+    // Before a party wipe's checkpoint reload: removes the party's temporary (script-spawned, FF) actors, whose ids
+    // change with every load and can never be rebound. Persistent actors keep their identity and owner, so the
+    // leader's reloaded natives rebind to them exactly as on any Continue. Returns how many were removed.
+    size_t DropPartyTemporaries(uint32_t aPartyId) const noexcept;
+    // After a party reload: sends this player every character in its range (the other players included). Clients
+    // forget their copies before the reload, and a reload that stays in the same area shifts no grid cell.
+    void ReplayToPlayer(Player* apPlayer) const noexcept;
 
 protected:
     enum class OwnershipTransferReason : uint8_t

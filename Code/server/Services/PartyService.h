@@ -46,6 +46,8 @@ struct PartyService
         String CheckpointId{};
         // The newest checkpoint the leader announced in this session (a wipe reloads it).
         String LatestCheckpointId{};
+        // A wipe reload in progress: characters are replayed to every member at its gameplay barrier.
+        bool ReplayOnGameplay{};
         bool LobbyOpen{};
         bool PasswordProtected{};
         ServerSettings GameplaySettings{};
@@ -58,8 +60,9 @@ struct PartyService
     TP_NOCOPYMOVE(PartyService);
 
     const Party* GetById(uint32_t aId) const noexcept;
-    // After a party wipe: every member reloads the leader's latest matched checkpoint (the Continue path, new epoch).
-    // False when the session has no checkpoint to reload.
+    // After a party wipe (owner choice: full checkpoint reset, the vanilla death reload): the session restarts in
+    // game from the leader's latest checkpoint (new epoch, both barriers); the leader loads first, followers after.
+    // False when the session has no checkpoint.
     bool RestartFromCheckpoint(uint32_t aPartyId) noexcept;
     bool IsPlayerInParty(Player* const apPlayer) const noexcept;
     bool IsPlayerLeader(const Player* const apPlayer) const noexcept;

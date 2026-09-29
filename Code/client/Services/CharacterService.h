@@ -122,9 +122,24 @@ struct CharacterService
     void OnUpdate(const UpdateEvent& acUpdateEvent) noexcept;
     void OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept;
     void OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept;
-    // Before a checkpoint reload inside a running session (party wipe): release every remote copy as a disconnect
-    // does. A load with copies still tracked crashed the follower in the engine's reference re-parenting (19032).
-    void ReleaseForReload() noexcept { OnDisconnected(DisconnectedEvent{}); }
+    // Before a party wipe's trip to the main menu: forget every tracked actor, as a fresh launch starts, without
+    // releasing ownership (the server keeps the leader as owner, so its reloaded natives rebind). Entities kept across
+    // the menu referenced unloaded forms: a load with them crashed (19032 on the follower, the host at 140639011), and
+    // actors removed by the menu teardown relinquished the leader's NPCs to whichever player loaded first.
+    void ReleaseForReload() noexcept;
+    // Spawn requests that arrive while this PC reloads (after ReleaseForReload, until the loaded world is in) wait:
+    // handled mid-load they resolved references the load was tearing down (host crash at 140639011, 2026-09-28).
+    // TESLoadGameEvent (DiscoveryService): the reload finished; held spawns go out on the next update.
+    void NoteGameLoaded() noexcept { m_holdSawLoading = true; }
+    bool m_holdSpawns{};
+    bool m_holdSawLoading{};
+    uint64_t m_holdSince{};
+    Vector<CharacterSpawnRequest> m_heldSpawns;
+    // One new actor per frame: two Actor::Create calls in one frame were given the same temporary form id (the id is
+    // taken at creation but enters the form table later), and the second spawn took over the first copy (a party
+    // reload's replay: the other player's copy became a Thalmor soldier and was later deleted, 2026-09-29).
+    bool m_createdThisFrame{};
+    Vector<CharacterSpawnRequest> m_nextFrameSpawns;
     void OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept;
     void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept;
     void OnReferencesMoveRequest(const ServerReferencesMoveRequest& acMessage) const noexcept;

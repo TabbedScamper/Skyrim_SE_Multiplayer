@@ -7,6 +7,8 @@
 #include <Messages/NotifyPlayerControlState.h>
 #include <Services/PlayerCollision.h>
 #include <Services/PartyService.h>
+#include <Services/ReviveService.h>
+#include <Games/References.h>
 #include <Services/CharacterService.h>
 #include <Services/DoorVoteService.h>
 #include <Forms/TESObjectCELL.h>
@@ -407,10 +409,25 @@ void PartyService::SetGameplaySettings(const uint32_t aDifficulty, const bool aP
     m_transport.Send(request);
 }
 
+void PartyService::NoteGameLoaded() noexcept
+{
+    m_reloadPending = false;
+    // A load clears the fade; stay black until everyone is in.
+    if (m_wipeFade)
+        FadeOutGame(true, true, 0.f, true, 0.f);
+}
+
 void PartyService::ReachWorldReadyBarrier() noexcept
 {
-    if (!m_waitingForWorldReady || m_sessionState != 1 || m_worldGateHeld)
+    // During an in-game reload the world is the old one until the load event (the in-world fallback below reported
+    // the barrier the instant the reload began, and a waiting follower never reloaded).
+    if (!m_waitingForWorldReady || m_sessionState != 1 || m_worldGateHeld || m_reloadPending)
         return;
+
+    // Owner (2026-09-28): no frozen world while the others load; this PC waits on black and everyone fades in together
+    // at the gameplay barrier.
+    FadeOutGame(true, true, 0.f, true, 0.f);
+    m_wipeFade = true;
 
     if (auto* pUI = UI::Get())
     {
@@ -458,8 +475,31 @@ void SuppressSurvivalPrompt() noexcept
 }
 } // namespace
 
+void PartyService::LaunchCheckpoint(const String& acCheckpointId) noexcept
+{
+    // Continue with a named checkpoint loads that save on every PC; without one (or if
+    // this PC does not have it) fall back to the game's own Continue.
+    if (m_campaignMode != PartyStartRequest::kContinue || acCheckpointId.empty() || !CheckpointSaves::Load(acCheckpointId))
+    {
+        if (m_campaignMode == PartyStartRequest::kContinue)
+            spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acCheckpointId);
+        LaunchSharedCampaignFromMainMenu(m_campaignMode);
+    }
+}
+
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
+    // A follower waiting for the leader's load: never forever (a leader that cannot load must not strand the party).
+    if (m_deferredLaunch && (m_sessionState != 1 || !m_inParty))
+        m_deferredLaunch = false;
+    if (m_reloadPending && (m_sessionState != 1 || !m_inParty))
+        m_reloadPending = false;
+    else if (m_deferredLaunch && GetTickCount64() - m_deferredSince > 120000)
+    {
+        spdlog::warn("Continue: the leader did not load within 120 s, loading anyway");
+        m_deferredLaunch = false;
+        LaunchCheckpoint(m_deferredCheckpoint);
+    }
     {
         static uint64_t s_nextSurvivalCheck{};
         if (const auto nowMs = GetTickCount64(); nowMs >= s_nextSurvivalCheck)
@@ -749,8 +789,20 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("partyInfo", pArguments);
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("coopLobbyState", pArguments);
         m_world.GetSteamLobbyService().ApplyPartySettings(acPartyInfo.LobbyOpen, acPartyInfo.PasswordProtected);
-        // After a party wipe the server restarts a running session from the leader's latest checkpoint.
-        const bool restart = previousSessionState >= 2 && m_sessionState == 1;
+        // A wiped party reloads its checkpoint in game, as vanilla reloads the last save on death: forget every tracked
+        // actor without releasing ownership (the leader keeps its NPCs), then load; the leader first, followers once
+        // the leader's world is in.
+        const bool restart = previousSessionState >= 2 && m_sessionState == 1 && m_world.GetReviveService().IsWiped();
+        if (restart)
+        {
+            // Owner (2026-09-28): straight to black, no standing around while the leader loads; black holds through
+            // the load (reapplied after it) until the gameplay barrier releases everyone together.
+            FadeOutGame(true, true, 0.5f, true, 0.f);
+            m_wipeFade = true;
+            m_reloadPending = true;
+            m_world.GetCharacterService().ReleaseForReload();
+            spdlog::info("Party wipe: reloading checkpoint '{}' in game", acPartyInfo.CheckpointId);
+        }
         if ((previousSessionState == 0 || restart) && m_sessionState == 1)
         {
             m_creatorSeen = false;
@@ -760,25 +812,27 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             // active hides that state transition and keeps its input hook.
             m_world.GetOverlayService().SetActive(false);
             m_waitingForWorldReady = true;
-            // Continue with a named checkpoint loads that save on every PC; without one (or if
-            // this PC does not have it) fall back to the game's own Continue.
-            if (restart)
+            // A follower's Continue waits for the leader's world to load first (the leader registers its actors
+            // before anyone else's copies arrive).
+            const bool leaderLoaded = std::find(acPartyInfo.ReadyPlayerIds.begin(), acPartyInfo.ReadyPlayerIds.end(),
+                m_leaderPlayerId) != acPartyInfo.ReadyPlayerIds.end();
+            if (m_campaignMode == PartyStartRequest::kContinue && !m_isLeader && !leaderLoaded)
             {
-                m_world.GetCharacterService().ReleaseForReload();
-                spdlog::info("Party restart: remote copies released before loading checkpoint '{}'", acPartyInfo.CheckpointId);
+                m_deferredCheckpoint = acPartyInfo.CheckpointId;
+                m_deferredLaunch = true;
+                m_deferredSince = GetTickCount64();
+                spdlog::info("Continue: waiting for the leader to load first");
             }
-            if (m_campaignMode != PartyStartRequest::kContinue || acPartyInfo.CheckpointId.empty() ||
-                !CheckpointSaves::Load(acPartyInfo.CheckpointId))
-            {
-                if (restart)
-                    spdlog::error("Party restart: checkpoint '{}' could not be loaded on this PC", acPartyInfo.CheckpointId);
-                else
-                {
-                    if (m_campaignMode == PartyStartRequest::kContinue)
-                        spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acPartyInfo.CheckpointId);
-                    LaunchSharedCampaignFromMainMenu(m_campaignMode);
-                }
-            }
+            else
+                LaunchCheckpoint(acPartyInfo.CheckpointId);
+        }
+        else if (m_deferredLaunch && m_sessionState == 1 &&
+            std::find(acPartyInfo.ReadyPlayerIds.begin(), acPartyInfo.ReadyPlayerIds.end(), m_leaderPlayerId) !=
+                acPartyInfo.ReadyPlayerIds.end())
+        {
+            spdlog::info("Continue: the leader has loaded after {} ms, loading now", GetTickCount64() - m_deferredSince);
+            m_deferredLaunch = false;
+            LaunchCheckpoint(m_deferredCheckpoint);
         }
         else if (previousSessionState == 1 && m_sessionState == 2)
         {
@@ -804,6 +858,12 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             m_creatorInputReleased = false;
             RefreshFollowerIntroProtection();
             spdlog::info("Shared-campaign gameplay barrier released for epoch {}", m_startEpoch);
+            if (m_wipeFade)
+            {
+                // Everyone is in and synced: fade in together, slowly, like the game's opening.
+                FadeOutGame(false, true, 2.5f, true, 0.f);
+                m_wipeFade = false;
+            }
         }
     }
 }
