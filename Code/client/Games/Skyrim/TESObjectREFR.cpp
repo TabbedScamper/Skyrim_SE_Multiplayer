@@ -733,7 +733,11 @@ ExtraDataList* TESObjectREFR::GetExtraDataFromItem(const Inventory::Entry& arEnt
 
 Inventory TESObjectREFR::GetInventory() const noexcept
 {
-    return GetInventory([](TESForm& aForm) { return true; });
+    // Leveled lists (a base container's LVLI entries, resolved into real items by the engine) are not inventory:
+    // every PC's copy already has them from its own base record, and RemoveAllItems cannot remove them, so sending
+    // them doubled every list on the copies and its loot when the corpse was opened (owner, 2026-09-28; loot_test:
+    // a bandit's LootBanditRandom, LItemBanditWeapon1H and LootGoldChange25 at 2 on the follower, 1 on the host).
+    return GetInventory([](TESForm& aForm) { return aForm.formType != FormType::LeveledItem; });
 }
 
 Inventory TESObjectREFR::GetInventory(std::function<bool(TESForm&)> aFilter) const noexcept
@@ -938,6 +942,9 @@ void TESObjectREFR::AddOrRemoveItem(const Inventory::Entry& arEntry, bool aIsSet
         spdlog::warn("{}: Object to add not found, {:X}:{:X}.", __FUNCTION__, arEntry.BaseId.ModId, arEntry.BaseId.BaseId);
         return;
     }
+    // A leveled list is never an item (see GetInventory); inventories stored before that filter still carry them.
+    if (pObject->formType == FormType::LeveledItem)
+        return;
 
     ExtraDataList* pExtraDataList = GetExtraDataFromItem(arEntry);
 

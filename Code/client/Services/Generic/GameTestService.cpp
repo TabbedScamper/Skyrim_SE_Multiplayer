@@ -5560,23 +5560,28 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 return Error(id, "actor not found");
             const uint32_t flags1 = pActor->actorState.flags1;
             std::string worn = "[";
-            int wornCount = 0;
+            std::string items = "{";
+            int wornCount = 0, itemCount = 0;
             for (const auto& entry : pActor->GetActorInventory().Entries)
             {
+                // Every entry with its count (corpse loot comparisons between PCs).
+                items += fmt::format("{}\"{:X}:{:X}\":{}", itemCount++ ? "," : "", entry.BaseId.ModId, entry.BaseId.BaseId,
+                    entry.Count);
                 if (!entry.IsWorn())
                     continue;
                 worn += fmt::format("{}\"{:X}:{:X}\"", wornCount++ ? "," : "", entry.BaseId.ModId, entry.BaseId.BaseId);
             }
             worn += "]";
+            items += "}";
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
                 "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{},\"health\":{:.1f},\"inCombat\":{},\"combatTarget\":\"{:X}\","
-                "\"remote\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"remote\":{},\"items\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
                 CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor),
                 pActor->GetActorValue(ActorValueInfo::kHealth), JsonBool(pActor->IsInCombat()),
                 pActor->GetCombatTarget() ? pActor->GetCombatTarget()->formID : 0,
-                JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote())));
+                JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote()), items));
         }
         if (command == "ref_bodies")
         {
