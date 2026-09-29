@@ -84,6 +84,15 @@ void ObjectService::OnPhysicsLease(const PacketEvent<PhysicsLeaseRequest>& acMes
             }
             return;
         }
+        // Bounded: one object in hand plus one still settling after a throw. Characters are never leased; their
+        // bodies move with actor ownership (corpse carry).
+        const auto held = std::count_if(leases.begin(), leases.end(),
+            [pPlayer](const auto& aEntry) { return aEntry.second.Holder == pPlayer->GetId(); });
+        if (held >= 2)
+            return;
+        for (auto entity : m_world.view<FormIdComponent, CharacterComponent>())
+            if (m_world.get<FormIdComponent>(entity).Id == request.Id)
+                return;
         leases[request.Id] = {pPlayer->GetId(), pParty->StartEpoch, now};
         BroadcastLease(*pParty, request.Id, pPlayer->GetId());
         spdlog::info("Physics lease: player {} carries {:X}:{:X}", pPlayer->GetId(), request.Id.ModId, request.Id.BaseId);

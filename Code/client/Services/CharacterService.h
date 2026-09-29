@@ -162,6 +162,8 @@ public:
     static void ApplyMovesOnMainFrame() noexcept;
     // A remote NPC copy was killed by sync (any thread): its body goes to the dead-body collision layer on the main loop.
     static void NoteRemoteDeath(uint32_t aFormId) noexcept;
+    // Queued moves and dead-body layers of the old connection name nothing after a disconnect.
+    static void ClearMainFrameWork() noexcept;
 
 private:
     uint64_t m_nextAnimObjectSnapshot{};
@@ -212,7 +214,10 @@ private:
     void ProcessNewEntity(entt::entity aEntity) const noexcept;
 
 private:
-    void MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
+    // aEnableAfter: enable the actor once it stands at the destination (a parked actor resuming).
+    void MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+        bool aEnableAfter = false) const noexcept;
+    void MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
 
     void RequestServerAssignment(entt::entity aEntity) const noexcept;
     void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId) const noexcept;

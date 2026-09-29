@@ -4032,17 +4032,32 @@ void ObjectService::SendHazardPackets() noexcept
 
 // Hold-to-grab physics leases (owner report 2026-09-29: a follower's grab only jiggled the object, because every
 // physics step steered it back to the leader's streamed pose). formId -> carrying player; absent = the leader streams.
+// Threads: the grab hooks run on the main thread and only publish atomics; the lease map is shared under its lock;
+// everything else about the local grab belongs to UpdateGrabLease on the main frame.
 namespace
 {
 std::mutex s_leaseLock;
 std::unordered_map<uint32_t, uint32_t> s_leases;
-// The local grab: the reference, when it was released (0 while held), and when it was last seen moving.
-std::atomic<uint32_t> s_grabbed{};
-std::atomic<bool> s_grabReleased{};
-uint64_t s_releasedAt{};
-uint64_t s_stillSince{};
-NiPoint3 s_lastGrabPosition{};
-bool s_leaseRequested{};
+// Published by the hooks and the network thread.
+std::atomic<uint32_t> s_grabbed{};       // the reference the local player holds now (0 = none)
+std::atomic<bool> s_grabReleased{};      // the engine let go of it
+std::atomic<uint32_t> s_forceRelease{};  // someone else streams it: drop the local grab
+// Main frame only: the grab being tracked (it outlives s_grabbed through the throw).
+struct TrackedGrab
+{
+    uint32_t FormId{};
+    bool Corpse{};
+    GameId Id{};            // loose object
+    uint32_t ServerId{};    // corpse
+    uint32_t Epoch{};       // corpse ownership epoch at pickup
+    bool Requested{};
+    bool Released{};
+    uint64_t ReleasedAt{};
+    uint64_t StillSince{};
+    uint64_t NextCarryRefresh{};
+    NiPoint3 LastPosition{};
+};
+TrackedGrab s_tracked{};
 
 using TGrabObject = void*(PlayerCharacter*, TESObjectREFR*, uint32_t, float, bool);
 TGrabObject* s_realGrabObject{};
@@ -4093,9 +4108,21 @@ void ClearLeases() noexcept
         std::lock_guard lock(s_leaseLock);
         s_leases.clear();
     }
+    // The main frame sees no grab and drops its tracking without sending anything.
     s_grabbed.store(0);
     s_grabReleased.store(false);
-    s_leaseRequested = false;
+    s_forceRelease.store(0);
+}
+
+// Where the thing is drawn: a corpse's pelvis bone (its ragdoll moves the bones), else the reference.
+NiPoint3 GrabPosition(TESObjectREFR* apReference) noexcept
+{
+    static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+    if (Cast<Actor>(apReference))
+        if (auto* pRoot = apReference->GetNiNode())
+            if (auto* pBone = pRoot->GetByName(s_pelvis))
+                return pBone->world.translate;
+    return apReference->position;
 }
 }
 
@@ -4136,6 +4163,7 @@ void ObjectService::OnPhysicsLease(const NotifyPhysicsLease& acMessage) noexcept
     const auto formId = m_world.GetModSystem().GetGameId(acMessage.Id);
     if (!formId)
         return;
+    const auto localId = m_transport.GetLocalPlayerId();
     {
         std::lock_guard lock(s_leaseLock);
         if (acMessage.HolderId)
@@ -4143,14 +4171,11 @@ void ObjectService::OnPhysicsLease(const NotifyPhysicsLease& acMessage) noexcept
         else
             s_leases.erase(formId);
     }
-    if (acMessage.HolderId != m_transport.GetLocalPlayerId() && s_grabbed.load() == formId && !acMessage.HolderId)
-    {
-        // Handed back after this player's release: nothing more to track.
-        s_grabbed.store(0);
-        s_grabReleased.store(false);
-        s_leaseRequested = false;
-    }
-    // The new streamer admits the object; everyone else drops what it streamed (the next scan re-admits nothing).
+    // First holder wins: whoever else is holding it here (a refused grab, or the leader while a follower carries it)
+    // lets go, or its grab spring would fight the carrier's stream (the original jiggle). The main frame does it.
+    if (acMessage.HolderId && acMessage.HolderId != localId && s_grabbed.load() == formId)
+        s_forceRelease.store(formId);
+    // The new streamer admits the object; everyone else drops what it streamed.
     QueuePhysicsRefresh(formId);
     spdlog::info("Physics lease: {:X} streamed by {}", formId, acMessage.HolderId ? fmt::format("player {}", acMessage.HolderId) :
         std::string("the leader"));
@@ -4158,137 +4183,177 @@ void ObjectService::OnPhysicsLease(const NotifyPhysicsLease& acMessage) noexcept
 
 void ObjectService::UpdateGrabLease() noexcept
 {
-    const auto formId = s_grabbed.load();
     const auto& party = m_world.GetPartyService();
-    if (!formId || !m_transport.IsConnected() || !party.IsInParty() || party.GetSessionState() < 2)
+    const auto now = GetTickCount64();
+    const auto grabbed = s_grabbed.load();
+    const bool active = m_transport.IsConnected() && party.IsInParty() && party.GetSessionState() >= 2;
+    auto& tracked = s_tracked;
+
+    // Someone else carries what the local player holds: let go (DestroyMouseSprings), keep nothing.
+    if (const auto force = s_forceRelease.exchange(0); force && force == grabbed)
     {
-        s_leaseRequested = false;
+        if (auto* pPlayer = PlayerCharacter::Get())
+            s_realReleaseGrab(pPlayer);
+        s_grabbed.store(0);
+        s_grabReleased.store(false);
+        if (tracked.FormId == force)
+            tracked = {};
+        spdlog::info("Physics lease: {:X} is carried by another player, local grab dropped", force);
         return;
     }
-    auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
-    const auto now = GetTickCount64();
-    if (auto* pCorpse = Cast<Actor>(pReference))
+
+    // Hand back what is being tracked: to the server as a release (object) or a set-down (corpse).
+    const auto handBack = [&]()
     {
-        // A corpse: its ragdoll belongs to the actor's owner, so the carrier asks for the actor itself (CorpseCarry)
-        // and gives it back once it has set it down and the body lies still.
-        uint32_t serverId{}, epoch{};
-        for (auto entity : m_world.view<FormIdComponent>())
-        {
-            if (m_world.get<FormIdComponent>(entity).Id != formId)
-                continue;
-            if (const auto* pRemote = m_world.try_get<RemoteComponent>(entity))
-            {
-                serverId = pRemote->Id;
-                epoch = pRemote->OwnershipEpoch;
-            }
-            else if (const auto* pLocal = m_world.try_get<LocalComponent>(entity))
-            {
-                serverId = pLocal->Id;
-                epoch = pLocal->OwnershipEpoch;
-            }
-            break;
-        }
-        if (!serverId)
-        {
-            s_grabbed.store(0);
+        if (!tracked.FormId || !tracked.Requested || !active)
             return;
-        }
-        static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
-        auto* pRoot = pCorpse->GetNiNode();
-        auto* pBone = pRoot ? pRoot->GetByName(s_pelvis) : nullptr;
-        const NiPoint3 body = pBone ? pBone->world.translate : pCorpse->position;
-        if (!s_leaseRequested)
-        {
-            s_leaseRequested = true;
-            RequestOwnershipClaim claim{};
-            claim.ServerId = serverId;
-            claim.ExpectedOwnershipEpoch = epoch;
-            claim.Carry = 1;
-            m_transport.Send(claim);
-            s_releasedAt = s_stillSince = 0;
-            s_lastGrabPosition = body;
-            spdlog::info("Corpse carry: picked up {:X} (server {:X}), asked to simulate it", formId, serverId);
-            return;
-        }
-        if (!s_grabReleased.load())
-            return;
-        if (!s_releasedAt)
-            s_releasedAt = now;
-        const auto delta = body - s_lastGrabPosition;
-        s_lastGrabPosition = body;
-        if (glm::dot(delta, delta) > 1.f)
-            s_stillSince = 0;
-        else if (!s_stillSince)
-            s_stillSince = now;
-        if ((s_stillSince && now - s_stillSince >= 1500) || now - s_releasedAt >= 15000)
+        if (tracked.Corpse)
         {
             RequestOwnershipClaim claim{};
-            claim.ServerId = serverId;
+            claim.ServerId = tracked.ServerId;
             claim.Carry = 2;
             m_transport.Send(claim);
-            spdlog::info("Corpse carry: {:X} set down and at rest", formId);
-            s_grabbed.store(0);
-            s_grabReleased.store(false);
-            s_leaseRequested = false;
+            spdlog::info("Corpse carry: {:X} set down", tracked.FormId);
         }
-        return;
-    }
-    GameId id{};
-    if (!pReference || pReference->IsTemporary() || !m_world.GetModSystem().GetServerModId(formId, id))
-    {
-        s_grabbed.store(0);
-        return;
-    }
-    if (!s_leaseRequested)
-    {
-        // The leader already streams every loose object; a follower asks for this one's stream. Taken locally at once
-        // (the grab must not fight the old stream while the grant travels); the server's notice confirms or corrects.
-        s_leaseRequested = true;
-        if (!party.IsLeader())
-        {
-            {
-                std::lock_guard lock(s_leaseLock);
-                s_leases[formId] = m_transport.GetLocalPlayerId();
-            }
-            QueuePhysicsRefresh(formId);
-        }
-        PhysicsLeaseRequest request{};
-        request.Id = id;
-        request.Hold = true;
-        request.Epoch = party.GetStartEpoch();
-        m_transport.Send(request);
-        s_releasedAt = s_stillSince = 0;
-        s_lastGrabPosition = pReference->position;
-        spdlog::info("Physics lease: grabbed {:X}, stream requested", formId);
-        return;
-    }
-    if (!s_grabReleased.load())
-        return;
-    // Released: keep streaming the throw until the object has lain still for a second (or 10 s), then hand it back.
-    if (!s_releasedAt)
-        s_releasedAt = now;
-    const auto delta = pReference->position - s_lastGrabPosition;
-    s_lastGrabPosition = pReference->position;
-    if (glm::dot(delta, delta) > 1.f)
-        s_stillSince = 0;
-    else if (!s_stillSince)
-        s_stillSince = now;
-    if ((s_stillSince && now - s_stillSince >= 1000) || now - s_releasedAt >= 10000)
-    {
-        if (!party.IsLeader())
+        else if (!party.IsLeader())
         {
             PhysicsLeaseRequest request{};
-            request.Id = id;
+            request.Id = tracked.Id;
             request.Hold = false;
             request.Epoch = party.GetStartEpoch();
             m_transport.Send(request);
-            spdlog::info("Physics lease: {:X} at rest after the throw, stream handed back", formId);
+            spdlog::info("Physics lease: {:X} handed back", tracked.FormId);
         }
-        s_grabbed.store(0);
-        s_grabReleased.store(false);
-        s_leaseRequested = false;
+    };
+
+    if (!active)
+    {
+        tracked = {};
+        return;
+    }
+    // A new grab while the previous one was still settling: the previous one is done now.
+    if (grabbed && tracked.FormId && tracked.FormId != grabbed)
+    {
+        handBack();
+        tracked = {};
+    }
+    if (!tracked.FormId)
+    {
+        if (!grabbed)
+            return;
+        auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(grabbed));
+        if (!pReference)
+        {
+            s_grabbed.store(0);
+            return;
+        }
+        tracked.FormId = grabbed;
+        tracked.LastPosition = GrabPosition(pReference);
+        if (auto* pCorpse = Cast<Actor>(pReference))
+        {
+            // A corpse: its ragdoll belongs to the actor's owner, so the carrier asks for the actor itself.
+            tracked.Corpse = true;
+            for (auto entity : m_world.view<FormIdComponent>())
+            {
+                if (m_world.get<FormIdComponent>(entity).Id != grabbed)
+                    continue;
+                if (const auto* pRemote = m_world.try_get<RemoteComponent>(entity))
+                {
+                    tracked.ServerId = pRemote->Id;
+                    tracked.Epoch = pRemote->OwnershipEpoch;
+                }
+                else if (const auto* pLocal = m_world.try_get<LocalComponent>(entity))
+                {
+                    tracked.ServerId = pLocal->Id;
+                    tracked.Epoch = pLocal->OwnershipEpoch;
+                }
+                break;
+            }
+            if (!tracked.ServerId)
+            {
+                tracked = {};
+                s_grabbed.store(0);
+                return;
+            }
+        }
+        else if (pReference->IsTemporary() || !m_world.GetModSystem().GetServerModId(grabbed, tracked.Id))
+        {
+            tracked = {};
+            s_grabbed.store(0);
+            return;
+        }
+    }
+    auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(tracked.FormId));
+    if (!pReference)
+    {
+        tracked = {};
+        return;
+    }
+    if (!tracked.Requested || (tracked.Corpse && !tracked.Released && now >= tracked.NextCarryRefresh))
+    {
+        // Asked at pickup; a corpse's carry is renewed every 20 s while held (the server's protection lasts 60 s).
+        tracked.Requested = true;
+        if (tracked.Corpse)
+        {
+            RequestOwnershipClaim claim{};
+            claim.ServerId = tracked.ServerId;
+            claim.ExpectedOwnershipEpoch = tracked.Epoch;
+            claim.Carry = 1;
+            m_transport.Send(claim);
+            tracked.NextCarryRefresh = now + 20000;
+            spdlog::info("Corpse carry: carrying {:X} (server {:X})", tracked.FormId, tracked.ServerId);
+        }
+        else
+        {
+            // The leader already streams every loose object; a follower asks for this one's stream. Taken locally at
+            // once (the grab must not fight the old stream while the grant travels); the server's notice confirms it,
+            // or names the first holder and this grab is dropped.
+            if (!party.IsLeader())
+            {
+                {
+                    std::lock_guard lock(s_leaseLock);
+                    s_leases[tracked.FormId] = m_transport.GetLocalPlayerId();
+                }
+                QueuePhysicsRefresh(tracked.FormId);
+            }
+            PhysicsLeaseRequest request{};
+            request.Id = tracked.Id;
+            request.Hold = true;
+            request.Epoch = party.GetStartEpoch();
+            m_transport.Send(request);
+            spdlog::info("Physics lease: grabbed {:X}, stream requested", tracked.FormId);
+        }
+        return;
+    }
+    if (!tracked.Released)
+    {
+        if (grabbed == tracked.FormId && !s_grabReleased.load())
+            return;
+        tracked.Released = true;
+        tracked.ReleasedAt = now;
+        if (grabbed == tracked.FormId)
+        {
+            s_grabbed.store(0);
+            s_grabReleased.store(false);
+        }
+    }
+    // Released: keep simulating the throw until it has lain still (object 1 s, body 1.5 s) or 10/15 s pass.
+    const auto position = GrabPosition(pReference);
+    const auto delta = position - tracked.LastPosition;
+    tracked.LastPosition = position;
+    if (glm::dot(delta, delta) > 1.f)
+        tracked.StillSince = 0;
+    else if (!tracked.StillSince)
+        tracked.StillSince = now;
+    const uint64_t rest = tracked.Corpse ? 1500 : 1000;
+    const uint64_t limit = tracked.Corpse ? 15000 : 10000;
+    if ((tracked.StillSince && now - tracked.StillSince >= rest) || now - tracked.ReleasedAt >= limit)
+    {
+        handBack();
+        tracked = {};
     }
 }
+
 
 void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& acMessage) noexcept
 {

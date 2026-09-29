@@ -62,6 +62,42 @@ using TCreateTints = void(__fastcall)(const GameArray<TintMask*>& acTints, NiRen
 
 std::atomic<bool> FaceGenSystem::RestoreLocalTints{true};
 
+namespace
+{
+// Set by a copy's tint job this frame; FlushLocalRestore queues one local redraw after all of them (the job runner
+// 0x14043C9D0 draws its list in order, each job into render target 0xF, the target copy after).
+bool s_localRestorePending{};
+}
+
+void FaceGenSystem::FlushLocalRestore() noexcept
+{
+    if (!s_localRestorePending)
+        return;
+    s_localRestorePending = false;
+    auto* pLocalPlayer = PlayerCharacter::Get();
+    if (!pLocalPlayer || !RestoreLocalTints.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard appearanceLock(CreatorTogether::AppearanceMutex());
+    POINTER_SKYRIMSE(TCreateTints, CreateTints, 27040);
+    // Visible layers only, at most 16: the builder's pass has 16 slots and no bound check (see Update).
+    const auto& local = pLocalPlayer->GetTints();
+    std::vector<TintMask*> visible;
+    for (uint32_t i = 0; i < local.length && visible.size() < 16; ++i)
+        if (local[i] && local[i]->alpha > 0.f)
+            visible.push_back(local[i]);
+    GameArray<TintMask*> tints;
+    tints.capacity = tints.length = static_cast<uint32_t>(visible.size());
+    tints.data = tints.length ? static_cast<TintMask**>(Memory::Allocate(sizeof(TintMask*) * tints.length)) : nullptr;
+    for (uint32_t i = 0; i < tints.length; ++i)
+        tints[i] = visible[i];
+    // No target: the job redraws 0xF only, which the local face reads live (exactly the creator's call in 52396).
+    CreateTints(tints, nullptr);
+    if (tints.data)
+        Memory::Free(tints.data);
+    tints.data = nullptr;
+    tints.capacity = tints.length = 0;
+}
+
 uint64_t FaceGenSystem::HashTintTexture(void* apMaterial) noexcept
 {
     // Ni2DBuffer +0x10 is the D3D11 shader resource view (0x14100DD60 / 0x14100EF50 create it and call its
@@ -241,8 +277,7 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
         // skin tone on the local player's face (owner reports 2026-09-29: "her Nord's face paint and skin tone
         // changed" whenever the host moved a slider). Queue the local player's own tints right after it, with no
         // target, exactly as the creator does: jobs run in order, so 0xF ends each batch holding the local face.
-        if (pLocalPlayer && RestoreLocalTints.load(std::memory_order_relaxed))
-            CreateTints(pLocalPlayer->GetTints(), nullptr);
+        s_localRestorePending = true;
 
         for (auto i = 0u; i < tints.length; ++i)
         {

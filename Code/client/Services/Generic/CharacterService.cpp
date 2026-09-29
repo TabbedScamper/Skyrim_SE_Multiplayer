@@ -383,9 +383,10 @@ void CharacterService::RunScriptedActorUpdates() noexcept
                 ++it;
                 continue;
             }
+            // Resuming: moved first, then enabled at the destination (MoveActor keeps that order across threads).
             if (state.Phase == ScriptedActorPhase::Resume)
-                MoveActor(pActor, state.WorldSpaceId, state.CellId, state.Position);
-            if ((parked.DisabledByUs || state.Phase == ScriptedActorPhase::Resume) && pActor->IsDisabled())
+                MoveActor(pActor, state.WorldSpaceId, state.CellId, state.Position, true);
+            else if (parked.DisabledByUs && pActor->IsDisabled())
                 pActor->EnableImpl();
         }
         else if (state.Phase == ScriptedActorPhase::Park)
@@ -936,6 +937,7 @@ void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const
 void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept
 {
     // Spawns held or queued for the old connection name nothing now (ReleaseForReload re-arms the hold after this).
+    ClearMainFrameWork();
     m_holdSpawns = false;
     m_heldSpawns.clear();
     m_nextFrameSpawns.clear();
@@ -2676,6 +2678,7 @@ struct PendingMove
     GameId WorldSpaceId{};
     GameId CellId{};
     Vector3_NetQuantize Position{};
+    bool EnableAfter{};
 };
 std::mutex s_pendingMovesLock;
 Vector<PendingMove> s_pendingMoves;
@@ -2693,6 +2696,16 @@ namespace
 std::mutex s_deadLayerLock;
 Vector<std::pair<uint32_t, uint64_t>> s_deadLayers; // form id, until (GetTickCount64)
 uint64_t s_nextDeadLayerPass{};
+}
+
+void CharacterService::ClearMainFrameWork() noexcept
+{
+    {
+        std::lock_guard lock(s_deadLayerLock);
+        s_deadLayers.clear();
+    }
+    std::lock_guard lock(s_pendingMovesLock);
+    s_pendingMoves.clear();
 }
 
 void CharacterService::NoteRemoteDeath(uint32_t aFormId) noexcept
@@ -2725,10 +2738,15 @@ void CharacterService::ApplyMovesOnMainFrame() noexcept
         using TSetCollisionLayer = void(NiAVObject*, uint32_t);
         POINTER_SKYRIMSE(TSetCollisionLayer, setCollisionLayer, 77998);
         for (const auto formId : bodies)
-            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)); pActor && pActor->IsDead())
+            // Life state 1 (dying) or 2 (dead): the bits, not the Papyrus IsDead path.
+            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                pActor && (((pActor->actorState.flags1 >> 21) & 0xF) == 1 || ((pActor->actorState.flags1 >> 21) & 0xF) == 2))
                 if (auto* pRoot = pActor->GetNiNode())
                     setCollisionLayer.Get()(pRoot, 32);
     }
+    // Kept (not dropped) until the world exists.
+    if (!entt::locator<World>::has_value())
+        return;
     Vector<PendingMove> moves;
     {
         std::lock_guard lock(s_pendingMovesLock);
@@ -2736,31 +2754,41 @@ void CharacterService::ApplyMovesOnMainFrame() noexcept
             return;
         moves.swap(s_pendingMoves);
     }
-    if (!entt::locator<World>::has_value())
-        return;
     auto& service = World::Get().GetCharacterService();
     for (const auto& move : moves)
         if (auto* pActor = Cast<Actor>(TESForm::GetById(move.FormId)))
-            service.MoveActor(pActor, move.WorldSpaceId, move.CellId, move.Position);
+            service.MoveActor(pActor, move.WorldSpaceId, move.CellId, move.Position, move.EnableAfter);
 }
 
-void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
+void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+    bool aEnableAfter) const noexcept
 {
     if (!apActor)
         return;
-    if (const auto mainThread = s_mainThreadId.load(std::memory_order_relaxed); mainThread && GetCurrentThreadId() != mainThread)
+    // Off the main thread, or before the main loop has named it: wait for the main loop.
+    if (const auto mainThread = s_mainThreadId.load(std::memory_order_relaxed); !mainThread || GetCurrentThreadId() != mainThread)
     {
         std::lock_guard lock(s_pendingMovesLock);
-        // The newest request per actor wins; bounded by the number of actors.
+        // The newest request per actor wins (an enable request is kept); bounded by the number of actors.
         const auto same = std::find_if(s_pendingMoves.begin(), s_pendingMoves.end(),
             [apActor](const PendingMove& acMove) { return acMove.FormId == apActor->formID; });
-        const PendingMove move{apActor->formID, acWorldSpaceId, acCellId, acPosition};
+        PendingMove move{apActor->formID, acWorldSpaceId, acCellId, acPosition, aEnableAfter};
         if (same != s_pendingMoves.end())
+        {
+            move.EnableAfter |= same->EnableAfter;
             *same = move;
+        }
         else
             s_pendingMoves.push_back(move);
         return;
     }
+    MoveActorNow(apActor, acWorldSpaceId, acCellId, acPosition);
+    if (aEnableAfter && apActor->IsDisabled())
+        apActor->EnableImpl();
+}
+
+void CharacterService::MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
+{
     // Never a remote actor that is dying, dead, knocked down or ragdolling (ActorState1 lifeState
     // bits 21-24, knockState 25-27): MoveTo disables and re-enables it, reloading its 3D, which
     // showed as the falling intro prisoner going naked and landing at the owner's final spot. The
@@ -3857,6 +3885,7 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         FaceGenSystem::Update(m_world, pActor, faceGenComponent);
     }
+    FaceGenSystem::FlushLocalRestore();
 
     auto waitingView = m_world.view<FormIdComponent, WaitingFor3D>();
 
