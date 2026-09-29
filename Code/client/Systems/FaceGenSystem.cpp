@@ -149,25 +149,31 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
             return;
         }
 
-        auto& tintsEntries = aFaceGenComponent.FaceTints.Entries;
+        // The native builder (FaceGenSystem::CreateTints, 27040 / 14043C530) writes every layer with alpha > 0 into
+        // a 16-slot pass with no bound check; a 17th visible layer overwrote the pass and crashed the receiver in its
+        // pointer swap (141554FE0), 2026-09-29. Pass only visible layers, at most 16, as the vanilla creator does.
+        std::vector<const Tints::Entry*> visible;
+        for (const auto& entry : aFaceGenComponent.FaceTints.Entries)
+            if (entry.Alpha > 0.f && visible.size() < 16)
+                visible.push_back(&entry);
 
         GameArray<TintMask*> tints;
-        tints.capacity = tints.length = aFaceGenComponent.FaceTints.Entries.size() & 0xFFFFFFFF;
+        tints.capacity = tints.length = static_cast<uint32_t>(visible.size());
         tints.data = (TintMask**)Memory::Allocate(sizeof(TintMask*) * tints.length);
 
         for (auto i = 0u; i < tints.length; ++i)
         {
             tints[i] = Memory::New<TintMask>();
 
-            tints[i]->alpha = tintsEntries[i].Alpha;
-            tints[i]->color = tintsEntries[i].Color;
-            tints[i]->type = tintsEntries[i].Type;
+            tints[i]->alpha = visible[i]->Alpha;
+            tints[i]->color = visible[i]->Color;
+            tints[i]->type = visible[i]->Type;
 
             auto pNewTexture = Memory::New<TESTexture>();
             pNewTexture->Construct();
             pNewTexture->Init();
 
-            pNewTexture->name.Set(tintsEntries[i].Name.c_str());
+            pNewTexture->name.Set(visible[i]->Name.c_str());
 
             tints[i]->texture = pNewTexture;
         }
@@ -207,6 +213,7 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
             spdlog::info("Player {:X}: detached FaceGen material shared with the local player", apActor->formID);
 
         aFaceGenComponent.Generated = true;
+        spdlog::info("Player {:X}: face tint generated, {} layers, texture {}", apActor->formID, tints.length, fmt::ptr(pTexture));
     }
 
     pShaderProperty->DecRef();

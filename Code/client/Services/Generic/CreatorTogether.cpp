@@ -37,6 +37,8 @@ std::atomic<bool> s_done{};
 std::atomic<bool> s_releasing{};
 // This player is looking at another player's character: its own customization panels are hidden.
 std::atomic<bool> s_viewingOther{};
+std::atomic<uint32_t> s_leakedFrames{}; // see LeakedFrames
+std::atomic<uint32_t> s_appliedLooks{};
 
 // RaceSexMenu's begin-closing (ID 52388, VA 14096b7d0; called by ChangeName after Done and the name):
 // Scaleform FadeOut, camera saved, menu byte +0x1a0 = 1 (closing), after which the menu's per-frame
@@ -460,6 +462,39 @@ void OnMainFrame() noexcept
         return;
     auto* pMenu = GetCreatorMenu();
     BoundPoseKeeper::OnMainFrame(pMenu != nullptr, s_participating.load());
+    if (pMenu)
+    {
+        // Read-only: did a character that is not being viewed render last frame (any leaf mesh not hidden)?
+        std::vector<uint32_t> players;
+        size_t view = SIZE_MAX;
+        {
+            std::lock_guard lock(s_lock);
+            if (s_active)
+            {
+                players = s_players;
+                view = s_view;
+            }
+        }
+        for (size_t i = 0; i < players.size() && view < players.size(); ++i)
+        {
+            // Only a copy this creator already hid: the opening frame still shows it as it was in the world.
+            auto* pActor = i == view || !s_hiddenMeshes.contains(players[i]) ? nullptr : Cast<Actor>(TESForm::GetById(players[i]));
+            auto* pRoot = pActor ? pActor->GetNiNode() : nullptr;
+            if (!pRoot || (pRoot->flags & 1))
+                continue;
+            std::vector<NiAVObject*> leaves;
+            CollectLeaves(pRoot, leaves, 0);
+            const auto shown = std::count_if(leaves.begin(), leaves.end(), [](NiAVObject* apLeaf) { return !(apLeaf->flags & 1); });
+            if (shown)
+            {
+                const auto count = ++s_leakedFrames;
+                if (count <= 20 || count % 100 == 0)
+                    spdlog::info("Character creator together: {:X} is not viewed but {} of {} meshes rendered last frame (leak {})",
+                        players[i], shown, leaves.size(), count);
+                break;
+            }
+        }
+    }
     std::unordered_map<uint32_t, NotifyPlayerAppearance> pending;
     std::unordered_map<uint32_t, uint32_t> remoteActors;
     {
@@ -558,6 +593,7 @@ void OnMainFrame() noexcept
                 }
         });
         s_appliedAppearances[formId] = appearance;
+        ++s_appliedLooks;
         spdlog::info("Player {:X}: {} look applied on main thread, rebuild requested (skeleton {}, race {:X}, head {}, NPC {:X})",
             formId, appearance.InCreator ? "live creator" : "final", newSkeleton,
             pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0,
@@ -733,6 +769,16 @@ bool GetDisplay(const uint32_t aFormId, NiPoint3& arPosition, float& arHeading) 
     arPosition = pPlayer->position;
     arHeading = pPlayer->rotation.z;
     return true;
+}
+
+uint32_t LeakedFrames() noexcept
+{
+    return s_leakedFrames.load();
+}
+
+uint32_t AppliedLooks() noexcept
+{
+    return s_appliedLooks.load();
 }
 } // namespace CreatorTogether
 

@@ -37,4 +37,8 @@ std::mutex& AppearanceMutex() noexcept;
 // For InterpolationSystem: where a remote player's character is shown while the creator is open
 // here (on this player's spot, with its heading). False otherwise.
 [[nodiscard]] bool GetDisplay(uint32_t aFormId, NiPoint3& arPosition, float& arHeading) noexcept;
+// Test read-out: creator frames that began with a player character that should be hidden still showing meshes
+// (it rendered on this player's spot), and applied looks.
+[[nodiscard]] uint32_t LeakedFrames() noexcept;
+[[nodiscard]] uint32_t AppliedLooks() noexcept;
 } // namespace CreatorTogether

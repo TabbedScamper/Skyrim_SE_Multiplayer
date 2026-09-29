@@ -32,6 +32,8 @@
 #include <Games/Skyrim/Forms/ActorValueInfo.h>
 #include <Games/Skyrim/Forms/TESQuest.h>
 #include <Games/Skyrim/Forms/TESNPC.h>
+#include <Games/Skyrim/Forms/BGSHeadPart.h>
+#include <Games/Skyrim/Forms/TESRace.h>
 #include <Games/Skyrim/Forms/BGSOutfit.h>
 #include <Games/Skyrim/Forms/TESObjectCELL.h>
 #include <Games/Skyrim/Forms/TESWorldSpace.h>
@@ -46,6 +48,11 @@
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Combat/CombatController.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
+#include <Games/Skyrim/NetImmerse/NiTriBasedGeom.h>
+#include <Games/Skyrim/NetImmerse/NiRenderedTexture.h>
+#include <Games/Skyrim/NetImmerse/BSShaderProperty.h>
+#include <Games/Skyrim/NetImmerse/BSMaskedShaderMaterial.h>
+#include <Games/Skyrim/Misc/TintMask.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
 #include <Games/Skyrim/Havok/AnimationGraphUpdateTrace.h>
@@ -202,6 +209,14 @@ std::pair<uint32_t, int32_t> s_mainFrameDrop{};
 std::pair<uint32_t, bool> s_mainFrameDisable{}; // set_disabled request (reference, disabled), same lock
 float s_mainFrameDamage{};                      // damage_player request, same lock
 std::pair<uint32_t, uint32_t> s_mainFrameCombat{}; // start_combat request (attacker, target), same lock
+// creator_slide call, same lock. Runs from the frame update, not a runner task: a creator rebuild fires animation
+// events that queue runner tasks, and queuing from inside the runner drain aborted the game (2026-09-29 09:12).
+std::function<void()> s_mainFrameCreator;
+void QueueCreatorCall(std::function<void()> aCall)
+{
+    std::lock_guard lock(s_mainFrameDropLock);
+    s_mainFrameCreator = std::move(aCall);
+}
 
 // Read-only timing at the caller of the existing automatic-door hook. 40201 /
 // 140738120 is NiTimeController slot 0x27, void(this, NiUpdateData*), and calls +0x58
@@ -2291,6 +2306,15 @@ void GameTestService::OnGameThread() noexcept
             spdlog::info("Test damage_player: {} -> health {} bleeding out {}", damage,
                 pPlayer->GetActorValue(ActorValueInfo::kHealth), pPlayer->actorState.IsBleedingOut());
         }
+    }
+    {
+        std::function<void()> creatorCall;
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            creatorCall = std::exchange(s_mainFrameCreator, nullptr);
+        }
+        if (creatorCall)
+            creatorCall();
     }
     {
         std::pair<uint32_t, uint32_t> combat{};
@@ -5540,6 +5564,325 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         {
             ReviveService::SetTestHold(GetJsonString(acLine, "enabled") != "false");
             return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
+        }
+        if (command == "appearance_state")
+        {
+            // Character creation slider spill check: this player's and every remote player copy's NPC base, its
+            // face morph storage (pointer + value hash), weight, head data and head parts. Shared pointers between two
+            // characters mean one player's slider writes land on the other.
+            const auto describe = [](Actor* apActor) -> std::string
+            {
+                auto* pNpc = apActor ? Cast<TESNPC>(apActor->baseForm) : nullptr;
+                if (!pNpc)
+                    return "null";
+                uint64_t hash = 1469598103934665603ull;
+                if (pNpc->faceMorphs)
+                {
+                    const auto* bytes = reinterpret_cast<const uint8_t*>(pNpc->faceMorphs);
+                    for (size_t i = 0; i < sizeof(TESNPC::FaceMorphs); ++i)
+                        hash = (hash ^ bytes[i]) * 1099511628211ull;
+                }
+                std::string parts = "[";
+                for (uint8_t i = 0; pNpc->headparts && i < pNpc->headpartsCount; ++i)
+                    parts += fmt::format("{}\"{:X}\"", i ? "," : "", pNpc->headparts[i] ? pNpc->headparts[i]->formID : 0);
+                parts += "]";
+                return fmt::format("{{\"actor\":\"{:X}\",\"npc\":\"{:X}\",\"npcPtr\":\"{}\",\"faceMorphs\":\"{}\",\"morphHash\":\"{:X}\","
+                    "\"morph0\":{:.3f},\"weight\":{:.2f},\"headData\":\"{}\",\"headpartsPtr\":\"{}\",\"headparts\":{},\"faceNPC\":\"{:X}\","
+                    "\"race\":\"{:X}\"}}",
+                    apActor->formID, pNpc->formID, fmt::ptr(pNpc), fmt::ptr(pNpc->faceMorphs), hash,
+                    pNpc->faceMorphs ? pNpc->faceMorphs->option[0] : -1.f, pNpc->weight, fmt::ptr(pNpc->headData),
+                    fmt::ptr(pNpc->headparts), parts, pNpc->faceNPC ? pNpc->faceNPC->formID : 0,
+                    pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0);
+            };
+            // Every lighting material on a character's 3D (feature 4 face tint, 5 skin tint): shared materials between
+            // characters carry one player's creator tint writes onto the other.
+            const auto materials = [](Actor* apActor, std::map<void*, int>& aFeatures)
+            {
+                std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth)
+                {
+                    if (!apNode || aDepth > 24)
+                        return;
+                    if (auto* pGeom = apNode->CastToNiTriBasedGeom())
+                    {
+                        auto* pProperty = reinterpret_cast<BSShaderProperty*>(pGeom->effect.object);
+                        if (pProperty && pProperty->material)
+                        {
+                            const auto getFeature = reinterpret_cast<uint32_t (*)(void*)>((*reinterpret_cast<void***>(pProperty->material))[6]);
+                            aFeatures[pProperty->material] = static_cast<int>(getFeature(pProperty->material));
+                        }
+                    }
+                    if (auto* pNode = apNode->AsNode())
+                        for (uint16_t i = 0; i < pNode->children.length; ++i)
+                            walk(pNode->children.data[i], aDepth + 1);
+                };
+                if (apActor)
+                    walk(apActor->GetNiNode(), 0);
+            };
+            std::map<void*, int> selfMaterials;
+            materials(PlayerCharacter::Get(), selfMaterials);
+            const auto skinColors = [](const std::map<void*, int>& aMaterials)
+            {
+                std::string list;
+                for (const auto& [material, feature] : aMaterials)
+                    if (feature == 5)
+                    {
+                        const auto* color = reinterpret_cast<const float*>(static_cast<const uint8_t*>(material) + 0xA0);
+                        list += fmt::format("{}\"{:.3f},{:.3f},{:.3f}\"", list.empty() ? "" : ",", color[0], color[1], color[2]);
+                    }
+                return "[" + list + "]";
+            };
+            std::string otherSkin = "[]";
+            uint64_t tintHash = 1469598103934665603ull;
+            uint32_t firstTint = 0;
+            if (auto* pSelf = PlayerCharacter::Get())
+            {
+                const auto& tints = pSelf->GetTints();
+                for (uint32_t i = 0; i < tints.length; ++i)
+                    if (tints[i])
+                    {
+                        const uint64_t values[] = {tints[i]->color, static_cast<uint64_t>(tints[i]->alpha * 1000.f), tints[i]->type};
+                        for (const auto value : values)
+                            tintHash = (tintHash ^ value) * 1099511628211ull;
+                        if (i == 0)
+                            firstTint = tints[i]->color;
+                    }
+            }
+            // Face tint texture and its pixel buffer (NiRenderedTexture::buffer): the local player's face renders into
+            // the global render target 0xF (52396 / 14096BE70); a copy whose texture reads that buffer shows this
+            // player's creator tints.
+            const auto faceTexturesOf = [](const std::map<void*, int>& aMaterials)
+            {
+                std::string list;
+                for (const auto& [material, feature] : aMaterials)
+                    if (feature == 4)
+                    {
+                        auto* pTexture = static_cast<NiRenderedTexture*>(static_cast<BSMaskedShaderMaterial*>(material)->renderedTexture.object);
+                        list += fmt::format("{}\"{}/{}\"", list.empty() ? "" : ",", fmt::ptr(pTexture),
+                            fmt::ptr(pTexture ? static_cast<void*>(pTexture->buffer) : nullptr));
+                    }
+                return list;
+            };
+            const std::string faceTextures = faceTexturesOf(selfMaterials);
+            std::string otherFace;
+            std::string others = "[";
+            int count = 0;
+            uint32_t shared = 0;
+            std::string sharedList;
+            auto view = m_world.view<FormIdComponent, PlayerComponent>();
+            for (auto entity : view)
+            {
+                auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                if (!pActor || pActor == PlayerCharacter::Get())
+                    continue;
+                others += (count++ ? "," : "") + describe(pActor);
+                std::map<void*, int> theirs;
+                materials(pActor, theirs);
+                otherSkin = skinColors(theirs);
+                otherFace = faceTexturesOf(theirs);
+                for (const auto& [material, feature] : theirs)
+                    if (selfMaterials.count(material))
+                    {
+                        ++shared;
+                        sharedList += fmt::format("{}\"{}:{}\"", sharedList.empty() ? "" : ",", fmt::ptr(material), feature);
+                    }
+            }
+            std::string selfList;
+            for (const auto& [material, feature] : selfMaterials)
+                if (feature == 4 || feature == 5)
+                    selfList += fmt::format("{}\"{}:{}\"", selfList.empty() ? "" : ",", fmt::ptr(material), feature);
+            return Result(id, fmt::format("\"self\":{},\"others\":{}],\"selfTintHash\":\"{:X}\",\"selfFirstTint\":\"{:06X}\",\"selfFaceTexture\":[{}],\"otherFaceTexture\":[{}],\"selfSkin\":{},\"otherSkin\":{},\"selfTintMaterials\":[{}],\"sharedMaterials\":{},\"shared\":[{}],\"creatorLeaks\":{},\"appliedLooks\":{}",
+                describe(PlayerCharacter::Get()), others, tintHash, firstTint, faceTextures, otherFace, skinColors(selfMaterials), otherSkin,
+                selfList, shared, sharedList, CreatorTogether::LeakedFrames(), CreatorTogether::AppliedLooks()));
+        }
+        if (command == "checkpoint_now")
+        {
+            // A named test checkpoint on this PC: queues the engine save Papyrus Game.RequestSave uses (the
+            // checkpoint service's own path) and copies it to SSC_<name>.ess once written. Run on every PC at the same
+            // moment for a matched set. Saving must be allowed (see set_in_chargen).
+            const auto name = GetJsonString(acLine, "name");
+            if (name.empty() || name.size() > 48 ||
+                !std::all_of(name.begin(), name.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }))
+                return Error(id, "name must be 1-48 letters, digits or underscores");
+            World::Get().GetRunner().Queue([name]() { CheckpointSaves::Begin(String(name.c_str())); });
+            return Result(id, fmt::format("\"queued\":\"{}\"", name));
+        }
+        if (command == "set_in_chargen")
+        {
+            // Game.SetInChargen (55576): the intro disables saving and waiting until the creator is done. Test
+            // checkpoints inside the intro clear it for one save, then restore it. Runs on the game thread.
+            const bool disableSaving = GetJsonString(acLine, "saving") == "false";
+            const bool disableWaiting = GetJsonString(acLine, "waiting") == "false";
+            World::Get().GetRunner().Queue([disableSaving, disableWaiting]() {
+                using TSetInChargen = void(void*, uint32_t, void*, bool, bool, bool);
+                POINTER_SKYRIMSE(TSetInChargen, setInChargen, 55576);
+                if (auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr)
+                {
+                    setInChargen.Get()(pVM, 0, nullptr, disableSaving, disableWaiting, false);
+                    spdlog::info("Test set_in_chargen: saving disabled {}, waiting disabled {}", disableSaving, disableWaiting);
+                }
+            });
+            return Result(id, fmt::format("\"disableSaving\":{},\"disableWaiting\":{}", JsonBool(disableSaving),
+                JsonBool(disableWaiting)));
+        }
+        if (command == "creator_poke")
+        {
+            // Write to this player's own face morph storage and weight, as a creator slider does, to see which
+            // characters change with it (shared storage = slider spill).
+            auto* pPlayer = PlayerCharacter::Get();
+            auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+            if (!pNpc)
+                return Error(id, "no player base");
+            // Every slider-backed value (owner: "mess with every slider"): all face morphs and presets, the weight,
+            // and every tint layer's color and strength (skin tone, warpaint, dirt...). "only" limits it to one group:
+            // morphs, presets, weight, tints.
+            const auto only = GetJsonString(acLine, "only");
+            if (pNpc->faceMorphs && (only.empty() || only == "morphs"))
+                for (auto& option : pNpc->faceMorphs->option)
+                    option = option > 0.f ? -0.8f : 0.8f;
+            if (pNpc->faceMorphs && (only.empty() || only == "presets"))
+                for (auto& preset : pNpc->faceMorphs->presets)
+                    preset = (preset + 1) % 4;
+            if (only.empty() || only == "weight")
+                pNpc->weight = pNpc->weight >= 50.f ? 10.f : 90.f;
+            if (only.empty() || only == "tints")
+            {
+                // Only the layers already shown, as the creator's sliders do (switching every layer on overflowed the
+                // native 16-layer tint pass).
+                const auto& tints = pPlayer->GetTints();
+                for (uint32_t i = 0; i < tints.length; ++i)
+                    if (tints[i] && tints[i]->alpha > 0.f)
+                    {
+                        tints[i]->color = tints[i]->color == 0x0000FF ? 0x00FF00 : 0x0000FF;
+                        tints[i]->alpha = tints[i]->alpha > 0.5f ? 0.3f : 0.9f;
+                    }
+            }
+            return Result(id, fmt::format("\"faceMorphs\":\"{}\",\"morph0\":{:.3f},\"weight\":{:.1f}", fmt::ptr(pNpc->faceMorphs),
+                pNpc->faceMorphs ? pNpc->faceMorphs->option[0] : -1.f, pNpc->weight));
+        }
+        if (command == "creator_slide")
+        {
+            // Drives the RaceSex menu's own slider callbacks (registered in 140968C50), exactly as moving a slider
+            // does, so the native apply code runs (skin tone, face tint texture, weight rebuild). Without "index" it
+            // lists the sliders: slider array = menu+0x140[menu+0x198] entry (0x28) at menu+0x188, data +8, size +0x18;
+            // each slider is 0x138: min +0, max +4, callback name +0x20, tint type +0x124, value +0x130. With "index"
+            // it queues that slider's callback on the game thread with a new value (or "value").
+            auto* pUI = UI::Get();
+            auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))
+                ? reinterpret_cast<uint8_t*>(pUI->FindMenuByName(BSFixedString("RaceSex Menu"))) : nullptr;
+            if (!pMenu)
+                return Error(id, "RaceSex Menu is not open");
+            const auto sliderArray = [](uint8_t* apMenu) -> std::pair<uint8_t*, uint32_t> {
+                auto* pLists = *reinterpret_cast<uint8_t**>(apMenu + 0x140 + *reinterpret_cast<uint32_t*>(apMenu + 0x198) * 0x18);
+                if (!pLists)
+                    return {nullptr, 0};
+                auto* pEntry = pLists + *reinterpret_cast<uint32_t*>(apMenu + 0x188) * 0x28;
+                return {*reinterpret_cast<uint8_t**>(pEntry + 8), *reinterpret_cast<uint32_t*>(pEntry + 0x18)};
+            };
+            // "callback" with "a0"/"a1": call ChangeRace (52351, a0 = race index), ChangeSex (52352, a0 = 0/1) or
+            // ChangeHeadPreset (52359, a0 value, a1 slider) directly; these rebuild the whole character.
+            const auto callbackText = GetJsonString(acLine, "callback");
+            if (!callbackText.empty())
+            {
+                static const std::unordered_map<std::string, uint32_t> s_direct{
+                    {"ChangeRace", 52351}, {"ChangeSex", 52352}, {"ChangeHeadPreset", 52359}};
+                const auto direct = s_direct.find(callbackText);
+                if (direct == s_direct.end())
+                    return Error(id, "callback must be ChangeRace, ChangeSex or ChangeHeadPreset");
+                const auto a0Text = GetJsonString(acLine, "a0");
+                const auto a1Text = GetJsonString(acLine, "a1");
+                const double a0 = a0Text.empty() ? 0.0 : std::stod(a0Text);
+                const double a1 = a1Text.empty() ? 0.0 : std::stod(a1Text);
+                const uint32_t handlerId = direct->second;
+                QueueCreatorCall([handlerId, a0, a1, callbackText]() {
+                    auto* pUI = UI::Get();
+                    auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))
+                        ? pUI->FindMenuByName(BSFixedString("RaceSex Menu")) : nullptr;
+                    if (!pMenu)
+                        return;
+                    struct FakeValue { uint64_t objectInterface; uint32_t type; uint32_t pad; double number; };
+                    struct FakeArgs { uint8_t responseId[0x18]; void* pHandler; void* pMovie; FakeValue* pArgs; uint32_t count; };
+                    FakeValue values[2]{{0, 5, 0, a0}, {0, 5, 0, a1}};
+                    FakeArgs args{};
+                    args.pHandler = pMenu;
+                    args.pArgs = values;
+                    args.count = 2;
+                    using THandler = void (*)(FakeArgs*);
+                    VersionDbPtr<void> pHandler(handlerId);
+                    spdlog::info("Test creator_slide: {}({}, {})", callbackText, a0, a1);
+                    reinterpret_cast<THandler>(pHandler.GetPtr())(&args);
+                });
+                return Result(id, fmt::format("\"queued\":\"{}\"", callbackText));
+            }
+            const auto [pSliders, count] = sliderArray(pMenu);
+            if (!pSliders)
+                return Error(id, "no slider array");
+            const auto indexText = GetJsonString(acLine, "index");
+            if (indexText.empty())
+            {
+                std::string list = "[";
+                for (uint32_t i = 0; i < count && i < 128; ++i)
+                {
+                    auto* pSlider = pSliders + i * 0x138;
+                    char name[64]{};
+                    strncpy_s(name, reinterpret_cast<const char*>(pSlider + 0x20), _TRUNCATE);
+                    list += fmt::format("{}{{\"i\":{},\"cb\":\"{}\",\"min\":{:.2f},\"max\":{:.2f},\"tint\":{},\"value\":{:.2f}}}",
+                        i ? "," : "", i, name, *reinterpret_cast<float*>(pSlider), *reinterpret_cast<float*>(pSlider + 4),
+                        *reinterpret_cast<int32_t*>(pSlider + 0x124), *reinterpret_cast<float*>(pSlider + 0x130));
+                }
+                return Result(id, fmt::format("\"count\":{},\"sliders\":{}]", count, list));
+            }
+            const uint32_t index = std::stoul(indexText);
+            if (index >= count)
+                return Error(id, "index out of range");
+            const auto valueText = GetJsonString(acLine, "value");
+            QueueCreatorCall([index, valueText]() {
+                auto* pUI = UI::Get();
+                auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))
+                    ? reinterpret_cast<uint8_t*>(pUI->FindMenuByName(BSFixedString("RaceSex Menu"))) : nullptr;
+                if (!pMenu)
+                    return;
+                auto* pLists = *reinterpret_cast<uint8_t**>(pMenu + 0x140 + *reinterpret_cast<uint32_t*>(pMenu + 0x198) * 0x18);
+                auto* pEntry = pLists + *reinterpret_cast<uint32_t*>(pMenu + 0x188) * 0x28;
+                if (index >= *reinterpret_cast<uint32_t*>(pEntry + 0x18))
+                    return;
+                auto* pSlider = *reinterpret_cast<uint8_t**>(pEntry + 8) + index * 0x138;
+                const std::string callback(reinterpret_cast<const char*>(pSlider + 0x20));
+                static const std::unordered_map<std::string, uint32_t> s_handlers{
+                    {"ChangeWeight", 52353}, {"ChangeFaceDetails", 52354}, {"ChangeMorph", 52355}, {"ChangeDoubleMorph", 52356},
+                    {"ChangeHeadPart", 52357}, {"ChangePreset", 52358}, {"ChangeHeadPreset", 52359},
+                    {"ChangeHairColorPreset", 52360}, {"ChangeTintingMask", 52361}, {"ChangeMask", 52362}, {"ChangeMaskColor", 52363}};
+                const auto handler = s_handlers.find(callback);
+                if (handler == s_handlers.end())
+                {
+                    spdlog::info("Test creator_slide: slider {} callback '{}' not driven", index, callback);
+                    return;
+                }
+                const float minimum = *reinterpret_cast<float*>(pSlider);
+                const float maximum = *reinterpret_cast<float*>(pSlider + 4);
+                const float current = *reinterpret_cast<float*>(pSlider + 0x130);
+                float value = valueText.empty() ? 0.f : std::stof(valueText);
+                if (valueText.empty())
+                {
+                    // Whole steps for index sliders (presets, tint colors, masks), a far point for continuous ones.
+                    value = current + 1.f <= maximum ? std::floor(current) + 1.f : minimum;
+                    if (callback == "ChangeWeight" || callback == "ChangeMorph" || callback == "ChangeDoubleMorph")
+                        value = current > (minimum + maximum) / 2.f ? minimum : maximum;
+                }
+                // Scaleform FxDelegateArgs: handler +0x18, GFxValue args +0x28 (0x18 each, number at +0x10), count +0x30.
+                struct FakeValue { uint64_t objectInterface; uint32_t type; uint32_t pad; double number; };
+                struct FakeArgs { uint8_t responseId[0x18]; void* pHandler; void* pMovie; FakeValue* pArgs; uint32_t count; };
+                FakeValue values[2]{{0, 5, 0, value}, {0, 5, 0, static_cast<double>(index)}};
+                FakeArgs args{};
+                args.pHandler = pMenu;
+                args.pArgs = values;
+                args.count = 2;
+                using THandler = void(FakeArgs*);
+                VersionDbPtr<THandler> pHandler(handler->second);
+                spdlog::info("Test creator_slide: slider {} {} tint {} {:.2f} -> {:.2f}", index, callback,
+                    *reinterpret_cast<int32_t*>(pSlider + 0x124), current, value);
+                pHandler.Get()(&args);
+            });
+            return Result(id, fmt::format("\"queued\":{}", index));
         }
         if (command == "remote_entities")
         {
