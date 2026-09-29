@@ -72,6 +72,9 @@ void WorldStateService::MainThreadUpdate() noexcept
     if (auto* service = s_service.load(std::memory_order_acquire)) service->Pump();
 }
 
+// Set while the cell baseline sweep samples (main thread): its publishes are not live script changes.
+thread_local bool s_baselineSampling{};
+
 bool WorldStateService::Eligible(TESObjectREFR* ref) noexcept
 {
     if (!ref || static_cast<uint8_t>(ref->formType) != 61 || !ref->baseForm ||
@@ -347,17 +350,34 @@ void WorldStateService::Baseline() noexcept
         if (!work.Seen.insert(id).second) continue;
         auto* ref = Cast<TESObjectREFR>(TESForm::GetById(id));
         if (!ref) continue;
+        s_baselineSampling = true;
         Sample(ref);
+        s_baselineSampling = false;
         const auto parent = EnableParent(ref);
         if (parent && parent != UINT32_MAX && !work.Seen.count(parent)) work.Pending.push_back(parent);
     }
-    if (done && work.Pending.empty()) m_baselines.pop_front();
+    if (done && work.Pending.empty())
+    {
+        spdlog::info("World state baseline: cell {:X} sampled {} references", m_baselines.front().Cell, work.Seen.size());
+        m_baselines.pop_front();
+    }
 }
 void WorldStateService::Publish(WorldState state) noexcept
 {
     auto* ref = Cast<TESObjectREFR>(TESForm::GetById(state.Reference.BaseId));
     const bool animation = WorldAnimationReplay::Handles(state.Kind);
-    if (!(animation ? WorldAnimation::Eligible(ref) : Eligible(ref)) || (state.Kind == WorldStateKind::Disabled && EnableParent(ref))) return;
+    if (!(animation ? WorldAnimation::Eligible(ref) : Eligible(ref)))
+        return;
+    if (state.Kind == WorldStateKind::Disabled && EnableParent(ref))
+    {
+        // Children follow their enable parent's replicated state natively; logged so a child whose parent never
+        // replicates is visible (bounded).
+        static std::atomic<uint32_t> s_childLogs{};
+        if (s_childLogs.fetch_add(1, std::memory_order_relaxed) < 2000)
+            spdlog::info("World state publish skipped: ref={:X} disabled={} follows enable parent {:X}", ref->formID,
+                state.Value, EnableParent(ref));
+        return;
+    }
     if (state.Kind == WorldStateKind::Open && ref->baseForm->formType != FormType::Door) return;
     auto* cell = ref->GetParentCellEx();
     if (!cell) return;
@@ -370,9 +390,17 @@ void WorldStateService::Publish(WorldState state) noexcept
     if (state.Kind != WorldStateKind::AnimationEvent && old != m_latest.end() && old->second.Cell == state.Cell && old->second.Value == state.Value &&
         old->second.Scalar == state.Scalar && old->second.Animation == state.Animation && old->second.AnimationData == state.AnimationData) return;
     state.Sequence = ++m_sequences[ref->formID];
-    if (m_watches.count(ref->formID))
-        spdlog::info("World state publish: epoch={} ref={:X} kind={} seq={} value={} scalar={}", state.Epoch,
-            ref->formID, static_cast<unsigned>(state.Kind), state.Sequence, state.Value, state.Scalar);
+    // Durable states are always logged (bounded): the 2026-09-28 playthrough could not tell whether the Helgen inn
+    // roof's collision change was ever sent, because only watched references were.
+    // Live changes only; the startup baseline sweep publishes every reference and used to exhaust the cap in seconds.
+    static std::atomic<uint32_t> s_publishLogs{};
+    const bool durable = state.Kind == WorldStateKind::Disabled || state.Kind == WorldStateKind::Destroyed ||
+        state.Kind == WorldStateKind::DestructionHealth;
+    if (m_watches.count(ref->formID) ||
+        (durable && !s_baselineSampling && s_publishLogs.fetch_add(1, std::memory_order_relaxed) < 4000))
+        spdlog::info("World state publish: epoch={} ref={:X} base={:X} kind={} seq={} value={} scalar={}", state.Epoch,
+            ref->formID, ref->baseForm ? ref->baseForm->formID : 0, static_cast<unsigned>(state.Kind), state.Sequence,
+            state.Value, state.Scalar);
     m_latest.insert_or_assign(key, state);
     std::lock_guard lock(m_mailboxMutex);
     if (!(m_authority == m_requestedAuthority)) return;
@@ -399,6 +427,23 @@ void WorldStateService::TraceAnimation(uint32_t id, const char* event) noexcept
 }
 void WorldStateService::Pump() noexcept
 {
+    {
+        // Queue depths every 5 s while non-empty: a live script change waits behind every queued state (the
+        // 2026-09-28 Helgen inn collision markers reached the follower minutes late).
+        static uint64_t s_nextDepthLog{};
+        if (const auto nowMs = GetTickCount64(); nowMs >= s_nextDepthLog)
+        {
+            s_nextDepthLog = nowMs + 5000;
+            size_t outgoing{};
+            {
+                std::lock_guard lock(m_mailboxMutex);
+                outgoing = m_outgoing.size();
+            }
+            if (outgoing || m_follower.Pending() || !m_baselines.empty())
+                spdlog::info("World state queues: outgoing={} follower-pending={} baseline-cells={}", outgoing,
+                    m_follower.Pending(), m_baselines.size());
+        }
+    }
     std::set<uint32_t> watchRequests;
     uint32_t diagnostic{};
     {
@@ -514,7 +559,10 @@ void WorldStateService::Pump() noexcept
             const bool accepted = m_follower.Receive(state);
             if (!hadGap && m_follower.AnimationNeedsCheckpoint(id))
                 spdlog::error("World anim: {:X} history overflow; synchronization incomplete until a covering checkpoint", state.Reference.BaseId);
-            if (m_watches.count(state.Reference.BaseId))
+            static std::atomic<uint32_t> s_receiveLogs{};
+            const bool durable = state.Kind == WorldStateKind::Disabled || state.Kind == WorldStateKind::Destroyed ||
+                state.Kind == WorldStateKind::DestructionHealth;
+            if (m_watches.count(state.Reference.BaseId) || (durable && s_receiveLogs.fetch_add(1, std::memory_order_relaxed) < 4000))
                 spdlog::info("World state receive: epoch={} ref={:X} kind={} seq={} accepted={} value={} scalar={} animation={}",
                     state.Epoch, state.Reference.BaseId, static_cast<unsigned>(state.Kind), state.Sequence,
                     accepted, state.Value, state.Scalar, state.Animation.c_str());

@@ -1350,6 +1350,21 @@ void TP_MAKE_THISCALL(HookApplyActorEffect, ActiveEffect, Actor* apTarget, float
 {
     const auto* pValueModEffect = Cast<ValueModifierEffect>(apThis);
 
+    // Health damage by magic on any player (local, or a remote player's copy): owner report 2026-09-28, the host was
+    // hurt while the follower stood in fire at the Helgen inn. Bounded log of the target, caster and spell.
+    if (pValueModEffect && pValueModEffect->actorValueIndex == ActorValueInfo::kHealth && aEffectValue < 0.f && apTarget &&
+        apTarget->GetExtension() && apTarget->GetExtension()->IsPlayer())
+    {
+        static std::atomic<uint32_t> s_logs{};
+        if (s_logs.fetch_add(1, std::memory_order_relaxed) < 500)
+        {
+            auto* pCaster = TESObjectREFR::GetByHandle(apThis->hCaster);
+            spdlog::info("Player health effect: target {:X} (local {}, remote copy {}) value {:.2f} caster {:X} spell {:X}",
+                apTarget->formID, apTarget->GetExtension()->IsLocalPlayer(), apTarget->GetExtension()->IsRemotePlayer(),
+                aEffectValue, pCaster ? pCaster->formID : 0, apThis->pSpell ? apThis->pSpell->formID : 0);
+        }
+    }
+
     if (pValueModEffect)
     {
         if (pValueModEffect->actorValueIndex == ActorValueInfo::kHealth && aEffectValue > 0.0f)

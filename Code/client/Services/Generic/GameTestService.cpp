@@ -196,6 +196,7 @@ namespace
 // drop_item request (base form, count), window thread -> game thread.
 std::mutex s_mainFrameDropLock;
 std::pair<uint32_t, int32_t> s_mainFrameDrop{};
+std::pair<uint32_t, bool> s_mainFrameDisable{}; // set_disabled request (reference, disabled), same lock
 
 // Read-only timing at the caller of the existing automatic-door hook. 40201 /
 // 140738120 is NiTimeController slot 0x27, void(this, NiUpdateData*), and calls +0x58
@@ -2273,6 +2274,26 @@ void GameTestService::OnWindowThread() noexcept
 
 void GameTestService::OnGameThread() noexcept
 {
+    {
+        std::pair<uint32_t, bool> request{};
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            request = std::exchange(s_mainFrameDisable, {});
+        }
+        if (auto* pRef = request.first ? Cast<TESObjectREFR>(TESForm::GetById(request.first)) : nullptr)
+        {
+            if (request.second)
+                pRef->Disable();
+            else
+            {
+                using ObjectReference = TESObjectREFR;
+                PAPYRUS_FUNCTION(void, ObjectReference, EnableNoWait, bool);
+                if (s_pEnableNoWait)
+                    s_pEnableNoWait(pRef, false);
+            }
+            spdlog::info("Test set_disabled: {:X} -> {} (now disabled={})", request.first, request.second, pRef->IsDisabled());
+        }
+    }
     {
         // drop_item, queued by the window thread.
         // Two phases: Papyrus AddItem hands the inventory change to the task queue, so the item is only in the
@@ -5456,6 +5477,17 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         // Drop an item from this PC's player (added first) the way the inventory menu does. Queued to the main frame
         // (GameTestService::RunMainFrameRequests): calling the drop on this window thread crashed the game twice
         // (2026-09-28 19:03 and 19:09). Poll nearby_refs for the result.
+        // Enable or disable a reference the way quest scripts do (Papyrus EnableNoWait / TESObjectREFR::Disable), on
+        // the game thread. Measures the world-state pipeline end to end.
+        if (command == "set_disabled")
+        {
+            const auto formText = GetJsonString(acLine, "form_id");
+            if (formText.empty())
+                return Error(id, "form_id missing");
+            std::lock_guard lock(s_mainFrameDropLock);
+            s_mainFrameDisable = {static_cast<uint32_t>(std::stoul(formText, nullptr, 16)), GetJsonString(acLine, "disabled") != "false"};
+            return Result(id, "\"queued\":true");
+        }
         if (command == "drop_item")
         {
             const auto baseText = GetJsonString(acLine, "base");
