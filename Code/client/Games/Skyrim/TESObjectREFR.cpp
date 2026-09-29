@@ -146,20 +146,31 @@ static bool HookRunPendingDoor(void* apProcess, TESObjectREFR* apActor)
     if (!*ppMiddleHigh)
         return false;
     auto* pHandle = reinterpret_cast<uint32_t*>(*ppMiddleHigh + 0xD8);
-    auto* pDoor = TESObjectREFR::GetByHandle(*pHandle);
+    // Hold the door's reference across the activation like the native (17201 adds one; released below): the
+    // activation can unload cells.
+    using TGetRefrByHandle = void(uint32_t&, TESObjectREFR*&);
+    POINTER_SKYRIMSE(TGetRefrByHandle, s_lookup, 17201);
+    TESObjectREFR* pDoor = nullptr;
+    s_lookup.Get()(*pHandle, pDoor);
     if (!pDoor)
         return false;
-    *pHandle = 0; // null handle
-    if (apActor == PlayerCharacter::Get())
-        return false;
-    POINTER_SKYRIMSE(TActivate, s_activateEntry, 19796);
-    TiltedPhoques::ThisCall(s_activateEntry.Get(), pDoor, apActor, 0, nullptr, 1, 0);
-    if (auto* pMiddleHigh = *ppMiddleHigh)
-        pMiddleHigh[0x470] = 0;
-    else
-        spdlog::info("Pending door {:X}: actor {:X} lost its middle-high process during the activation (unloaded)",
-            pDoor->formID, apActor ? apActor->formID : 0);
-    return true;
+    *pHandle = *TESObjectREFR::GetNullHandle();
+    bool activated = false;
+    const uint32_t doorId = pDoor->formID;
+    if (apActor != PlayerCharacter::Get())
+    {
+        // The function's own entry is detoured, so this call runs HookActivate as the native call did.
+        POINTER_SKYRIMSE(TActivate, s_activateEntry, 19796);
+        TiltedPhoques::ThisCall(s_activateEntry.Get(), pDoor, apActor, 0, nullptr, 1, 0);
+        activated = true;
+        if (auto* pMiddleHigh = *ppMiddleHigh)
+            pMiddleHigh[0x470] = 0;
+        else
+            spdlog::info("Pending door {:X}: actor {:X} lost its middle-high process during the activation (unloaded)",
+                doorId, apActor ? apActor->formID : 0);
+    }
+    pDoor->handleRefObject.DecRefHandle();
+    return activated;
 }
 
 TESObjectREFR* TESObjectREFR::GetByHandle(uint32_t aHandle) noexcept

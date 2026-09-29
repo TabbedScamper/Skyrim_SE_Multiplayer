@@ -306,7 +306,9 @@ void BusyLockService::Replay() noexcept
         return;
     }
     m_waiting = false;
-    m_openDeadline = GetTickCount64() + 15000;
+    // A locked reference opens the minigame at once, or never (the player holds the key, or the pick is refused):
+    // do not block the other players for the full 15 s.
+    m_openDeadline = GetTickCount64() + (m_request.Kind == BusyLockKind::Lockpicking ? 1500 : 15000);
     m_nextHeartbeat = 0;
     const auto activation = m_activation;
     if (activation.Type == Operation::Container)
