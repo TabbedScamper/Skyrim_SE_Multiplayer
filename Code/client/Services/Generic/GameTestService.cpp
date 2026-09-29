@@ -14,6 +14,7 @@
 #include <Services/CameraService.h>
 #include <Services/CharacterService.h>
 #include <Services/PlayerService.h>
+#include <Systems/FaceGenSystem.h>
 #include <Services/PapyrusService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/Generic/HeadTrackService.h>
@@ -5662,8 +5663,10 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                     if (feature == 4)
                     {
                         auto* pTexture = static_cast<NiRenderedTexture*>(static_cast<BSMaskedShaderMaterial*>(material)->renderedTexture.object);
-                        list += fmt::format("{}\"{}/{}\"", list.empty() ? "" : ",", fmt::ptr(pTexture),
-                            fmt::ptr(pTexture ? static_cast<void*>(pTexture->buffer) : nullptr));
+                        // texture/buffer/pixel hash (the pixels, read back from the GPU: what is actually drawn).
+                        list += fmt::format("{}\"{}/{}/{:X}\"", list.empty() ? "" : ",", fmt::ptr(pTexture),
+                            fmt::ptr(pTexture ? static_cast<void*>(pTexture->buffer) : nullptr),
+                            FaceGenSystem::HashTintTexture(material));
                     }
                 return list;
             };
@@ -5888,6 +5891,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 pHandler.Get()(&args);
             });
             return Result(id, fmt::format("\"queued\":{}", index));
+        }
+        if (command == "facegen_restore")
+        {
+            // Control runs only: "false" stops redrawing the local player's tints after a copy's tint job.
+            FaceGenSystem::RestoreLocalTints.store(GetJsonString(acLine, "enabled") != "false");
+            return Result(id, fmt::format("\"restore\":{}", JsonBool(FaceGenSystem::RestoreLocalTints.load())));
         }
         if (command == "papyrus_has")
         {
