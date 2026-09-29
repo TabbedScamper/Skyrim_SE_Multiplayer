@@ -158,6 +158,10 @@ public:
     static void QueueAnimObjectEvent(uint32_t aFormId, uint32_t aAnimObjectId, bool aDraw) noexcept;
     // Main thread (ObjectService::OnMainFrame): received props onto remote copies (Draw writes the scene node).
     static void ApplyAnimObjectsOnMainFrame() noexcept;
+    // Actor moves requested off the main thread (network handlers), applied from the main loop.
+    static void ApplyMovesOnMainFrame() noexcept;
+    // A remote NPC copy was killed by sync (any thread): its body goes to the dead-body collision layer on the main loop.
+    static void NoteRemoteDeath(uint32_t aFormId) noexcept;
 
 private:
     uint64_t m_nextAnimObjectSnapshot{};

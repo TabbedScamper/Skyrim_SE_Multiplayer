@@ -5957,6 +5957,20 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             ReviveService::SetTestBleed(value);
             return Result(id, fmt::format("\"bleed\":{}", value));
         }
+        if (command == "crosshair")
+        {
+            // What the crosshair is on (CrosshairPickData, 401585: target handle at +4), as the activate prompt and
+            // the hold-to-grab see it.
+            POINTER_SKYRIMSE(uint8_t*, pickData, 401585);
+            auto* pData = *pickData.Get();
+            const uint32_t handle = pData ? *reinterpret_cast<uint32_t*>(pData + 4) : 0;
+            auto* pTarget = handle ? TESObjectREFR::GetByHandle(handle) : nullptr;
+            auto* pActor = Cast<Actor>(pTarget);
+            return Result(id, fmt::format("\"target\":\"{:X}\",\"base\":\"{:X}\",\"actor\":{},\"dead\":{},\"lifeState\":{}",
+                pTarget ? pTarget->formID : 0, pTarget && pTarget->baseForm ? pTarget->baseForm->formID : 0,
+                JsonBool(pActor != nullptr), JsonBool(pActor && pActor->IsDead()),
+                pActor ? static_cast<int>((pActor->actorState.flags1 >> 21) & 0xF) : -1));
+        }
         if (command == "ref_pose")
         {
             // A loose object's reference position, its drawn 3D position, and whether the host's physics stream drives
@@ -6063,7 +6077,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             auto* pPlayer = PlayerCharacter::Get();
             if (baseText.empty() || !pPlayer || !pPlayer->parentCell)
                 return Error(id, "base or player missing");
-            const uint32_t base = std::stoul(baseText, nullptr, 16);
+            // "weapons": every weapon lying loose (a dead NPC's dropped weapon is a new temporary reference).
+            const bool anyWeapon = baseText == "weapons";
+            const uint32_t base = anyWeapon ? 0 : std::stoul(baseText, nullptr, 16);
             const float radius = radiusText.empty() ? 1000.f : std::stof(radiusText);
             NiPoint3 center = pPlayer->position;
             if (!GetJsonString(acLine, "x").empty())
@@ -6081,7 +6097,8 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
                 {
                     auto* pRef = pCell->refData.refArray[i].Get();
-                    if (!pRef || !pRef->baseForm || pRef->baseForm->formID != base || pRef->IsDeleted())
+                    if (!pRef || !pRef->baseForm || pRef->IsDeleted() ||
+                        (anyWeapon ? pRef->baseForm->formType != FormType::Weapon : pRef->baseForm->formID != base))
                         continue;
                     const auto d = pRef->position - center;
                     if (d.x * d.x + d.y * d.y + d.z * d.z > radius * radius)
@@ -6212,11 +6229,20 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                     ActorPoseDiagnosticViews::RigidBody state{};
                     const bool readable = ReadNative(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
                         ReadNative(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody && ReadNative(pBody, state);
+                    // hkpWorldObject: world +0x10, collidable broadphase collisionFilterInfo +0x4C (layer = low 7 bits).
+                    uint32_t filterInfo{};
+                    void* pPhysicsWorld{};
+                    if (readable)
+                    {
+                        ReadNative(static_cast<const uint8_t*>(pBody) + 0x4C, filterInfo);
+                        ReadNative(static_cast<const uint8_t*>(pBody) + 0x10, pPhysicsWorld);
+                    }
                     const auto& lr = apNode->local.rotate.entry;
                     const auto& wr = apNode->world.rotate.entry;
-                    bodies += fmt::format("{}{{\"name\":\"{}\",\"depth\":{},\"readable\":{},\"motionType\":{},\"body\":[{},{},{}],\"node\":[{},{},{}],"
+                    bodies += fmt::format("{}{{\"name\":\"{}\",\"layer\":{},\"filter\":\"{:X}\",\"inWorld\":{},\"depth\":{},\"readable\":{},\"motionType\":{},\"body\":[{},{},{}],\"node\":[{},{},{}],"
                         "\"localRot\":[{:.4f},{:.4f},{:.4f},{:.4f}],\"worldRot\":[{:.4f},{:.4f},{:.4f},{:.4f}],\"bodyRot\":[{:.4f},{:.4f},{:.4f},{:.4f}]}}",
-                        emitted++ ? "," : "", EscapeJson(pName ? pName : ""), aDepth, JsonBool(readable), readable ? state.motionType : -1,
+                        emitted++ ? "," : "", EscapeJson(pName ? pName : ""), filterInfo & 0x7F, filterInfo, JsonBool(pPhysicsWorld != nullptr),
+                        aDepth, JsonBool(readable), readable ? state.motionType : -1,
                         state.transform[12] * 70.f, state.transform[13] * 70.f, state.transform[14] * 70.f, apNode->world.translate.x,
                         apNode->world.translate.y, apNode->world.translate.z, lr[0][0], lr[0][1], lr[1][0], lr[2][2], wr[0][0], wr[0][1],
                         wr[1][0], wr[2][2], state.transform[0], state.transform[1], state.transform[4], state.transform[10]);

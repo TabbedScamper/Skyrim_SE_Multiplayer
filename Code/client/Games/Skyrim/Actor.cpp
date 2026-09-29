@@ -1,4 +1,5 @@
 #include <Games/References.h>
+#include <Services/CharacterService.h>
 #include <Services/ReviveService.h>
 #include <Games/Skyrim/EquipManager.h>
 #include <atomic>
@@ -1043,6 +1044,8 @@ void Actor::Kill() noexcept
     t_syncKill = true;
     KillImpl(nullptr, 100.f, true, !(pExtension && pExtension->IsRemote()));
     t_syncKill = false;
+    if (pExtension && pExtension->IsRemote())
+        CharacterService::NoteRemoteDeath(formID);
 
     // Papyrus kill will not go through if it is queued by a kill move
     /*
@@ -1058,6 +1061,8 @@ void Actor::KillIntoRagdoll() noexcept
     t_syncKill = true;
     KillImpl(nullptr, 100.f, true, true);
     t_syncKill = false;
+    if (GetExtension()->IsRemote())
+        CharacterService::NoteRemoteDeath(formID);
 }
 
 void Actor::Reset() noexcept
@@ -1256,6 +1261,8 @@ void TP_MAKE_THISCALL(HookKillImpl, Actor, Actor* apAttacker, float aDamage, boo
     }
     TiltedPhoques::ThisCall(RealKillImpl, apThis, apAttacker, aDamage, aSendEvent, aRagdollInstant);
     CorpseRagdollService::QueueActor(apThis);
+    if (pExtension && pExtension->IsRemote() && !pExtension->IsPlayer())
+        CharacterService::NoteRemoteDeath(apThis->formID);
 }
 
 // TODO: this is flawed, since it does not account for invulnerable actors

@@ -3,6 +3,7 @@
 #include "GameLoopDiagnostic.h"
 #include <Misc/GameVM.h>
 #include <Services/ObjectService.h>
+#include <Services/CharacterService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/CreatorTogether.h>
 #include <Services/HarnessService.h>
@@ -43,6 +44,7 @@ int TP_MAKE_THISCALL(HookVMUpdate, GameVM, float a2)
 
 short TP_MAKE_THISCALL(HookMainLoop, Main)
 {
+    CharacterService::ApplyMovesOnMainFrame();
     ObjectService::OnMainFrame();
     CorpseRagdollService::OnMainFrame();
     CreatorTogether::OnMainFrame();

@@ -2664,8 +2664,103 @@ void CharacterService::OnPartyJoinedEvent(const PartyJoinedEvent& acEvent) noexc
     }
 }
 
+namespace
+{
+// Owner crash 2026-09-29 15:30 (dump SkyrimTogether.exe.67508): a teleport notice was handled in the client update,
+// which runs off the main thread (the Papyrus VM update hook), and MoveActor loaded the destination cell there
+// (TESWorldSpace::LoadCell 20460 -> form allocation) while the game loaded cells itself: CRT invalid-parameter abort.
+// Cell loads and MoveTo run on the main thread only; moves asked for elsewhere wait for the next main frame.
+struct PendingMove
+{
+    uint32_t FormId{};
+    GameId WorldSpaceId{};
+    GameId CellId{};
+    Vector3_NetQuantize Position{};
+};
+std::mutex s_pendingMovesLock;
+Vector<PendingMove> s_pendingMoves;
+std::atomic<uint32_t> s_mainThreadId{};
+}
+
+// Owner report 2026-09-29: the follower got no Search prompt on a body the host killed and could not pick it up. The
+// engine moves a dying actor's body to the dead-body collision layer (32, DEADBIP) in its death path 0x1406A9E50 (37896)
+// only when the knock state is 0 or 6; a copy killed by sync is usually already ragdolling from the synced knock
+// (state 1), so its bodies stayed on the living layer (8) while the owner's were on 32 (corpse_test: host L32,
+// follower L8). Do what the death path does: NiAVObject::SetCollisionLayer (77998) with 32 on the copy's 3D, repeated
+// for 5 s so a body that attaches or rebuilds after the kill gets it too. Bounded by recent deaths.
+namespace
+{
+std::mutex s_deadLayerLock;
+Vector<std::pair<uint32_t, uint64_t>> s_deadLayers; // form id, until (GetTickCount64)
+uint64_t s_nextDeadLayerPass{};
+}
+
+void CharacterService::NoteRemoteDeath(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_deadLayerLock);
+    const auto until = GetTickCount64() + 5000;
+    for (auto& entry : s_deadLayers)
+        if (entry.first == aFormId)
+        {
+            entry.second = until;
+            return;
+        }
+    s_deadLayers.emplace_back(aFormId, until);
+    spdlog::info("Dead copy {:X}: body goes to the dead-body collision layer", aFormId);
+}
+
+void CharacterService::ApplyMovesOnMainFrame() noexcept
+{
+    s_mainThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    if (const auto now = GetTickCount64(); now >= s_nextDeadLayerPass)
+    {
+        s_nextDeadLayerPass = now + 250;
+        Vector<uint32_t> bodies;
+        {
+            std::lock_guard lock(s_deadLayerLock);
+            std::erase_if(s_deadLayers, [now](const auto& aEntry) { return now >= aEntry.second; });
+            for (const auto& entry : s_deadLayers)
+                bodies.push_back(entry.first);
+        }
+        using TSetCollisionLayer = void(NiAVObject*, uint32_t);
+        POINTER_SKYRIMSE(TSetCollisionLayer, setCollisionLayer, 77998);
+        for (const auto formId : bodies)
+            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId)); pActor && pActor->IsDead())
+                if (auto* pRoot = pActor->GetNiNode())
+                    setCollisionLayer.Get()(pRoot, 32);
+    }
+    Vector<PendingMove> moves;
+    {
+        std::lock_guard lock(s_pendingMovesLock);
+        if (s_pendingMoves.empty())
+            return;
+        moves.swap(s_pendingMoves);
+    }
+    if (!entt::locator<World>::has_value())
+        return;
+    auto& service = World::Get().GetCharacterService();
+    for (const auto& move : moves)
+        if (auto* pActor = Cast<Actor>(TESForm::GetById(move.FormId)))
+            service.MoveActor(pActor, move.WorldSpaceId, move.CellId, move.Position);
+}
+
 void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
 {
+    if (!apActor)
+        return;
+    if (const auto mainThread = s_mainThreadId.load(std::memory_order_relaxed); mainThread && GetCurrentThreadId() != mainThread)
+    {
+        std::lock_guard lock(s_pendingMovesLock);
+        // The newest request per actor wins; bounded by the number of actors.
+        const auto same = std::find_if(s_pendingMoves.begin(), s_pendingMoves.end(),
+            [apActor](const PendingMove& acMove) { return acMove.FormId == apActor->formID; });
+        const PendingMove move{apActor->formID, acWorldSpaceId, acCellId, acPosition};
+        if (same != s_pendingMoves.end())
+            *same = move;
+        else
+            s_pendingMoves.push_back(move);
+        return;
+    }
     // Never a remote actor that is dying, dead, knocked down or ragdolling (ActorState1 lifeState
     // bits 21-24, knockState 25-27): MoveTo disables and re-enables it, reloading its 3D, which
     // showed as the falling intro prisoner going naked and landing at the owner's final spot. The
