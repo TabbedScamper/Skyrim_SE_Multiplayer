@@ -308,7 +308,11 @@ void TP_MAKE_THISCALL(HookRegisterPapyrusFunction, BSScript::IVirtualMachine, Na
     // Straight into the table, not through the runner: natives register once at startup, and the runner drops events
     // queued before a game load (RunnerService load generation), which threw every registration away and left every
     // name-bound Papyrus call returning a default (2026-09-29).
-    World::Get().ctx().at<PapyrusService>().Register(pTypeName, pFunctionName, apFunction->functionAddress);
+    if (auto* pService = World::Get().ctx().find<PapyrusService>())
+        pService->Register(pTypeName, pFunctionName, apFunction->functionAddress);
+    else
+        spdlog::error("Papyrus native {}.{} registered before PapyrusService exists; it will not resolve by name",
+            pTypeName ? pTypeName : "?", pFunctionName ? pFunctionName : "?");
 
     TiltedPhoques::ThisCall(RealRegisterPapyrusFunction, apThis, apFunction);
 }

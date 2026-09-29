@@ -67,7 +67,7 @@ void DoorVoteService::Cancel(Vote& aVote, const char* aReason) const noexcept
     Broadcast(aVote, DoorVoteAction::Cancel, "Door vote cancelled");
 }
 
-void DoorVoteService::Changed(Vote& aVote) noexcept
+void DoorVoteService::Changed(Vote& aVote, bool aExtendDeadline) noexcept
 {
     // A fallen member spectates and cannot vote: it is carried through with the party (owner question 2026-09-28).
     // Downed members still hold the vote, so nobody leaves a bleeding ally behind.
@@ -75,7 +75,10 @@ void DoorVoteService::Changed(Vote& aVote) noexcept
         if (m_world.GetReviveService().IsFallenPlayer(id))
             aVote.Ready.insert(id);
     aVote.Data.Tick = 0;
-    aVote.Deadline = GameServer::Get()->GetTick() + 120000;
+    // A player's vote restarts the 120 s window; a carry-through or a prune does not (repeated falls could stretch a
+    // vote forever).
+    if (aExtendDeadline)
+        aVote.Deadline = GameServer::Get()->GetTick() + 120000;
     spdlog::info("Door vote: vote {}/{}", aVote.Ready.size(), aVote.Members.size());
     const auto notice = fmt::format("{} wants to go through {}: {}/{} ready. Activate the door to go.",
         aVote.InitiatorName, aVote.Data.Name, aVote.Ready.size(), aVote.Members.size());
@@ -199,7 +202,9 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
     for (auto it = m_votes.begin(); it != m_votes.end();)
     {
         auto& vote = it->second;
+        // A fallen initiator spectates from elsewhere (its hidden body follows the camera): not a departure.
         const bool departed = (!vote.Data.Tick || now < vote.Data.Tick) &&
+            !m_world.GetReviveService().IsFallenPlayer(vote.Initiator) &&
             !IsNear(m_world.GetPlayerManager().GetById(vote.Initiator), vote.Data, 400.f);
         if (!IsCurrent(it->first, vote) || now >= vote.Deadline || departed)
         {
@@ -236,7 +241,7 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
                     ++ready;
             }
             if (changed)
-                Changed(vote);
+                Changed(vote, false);
         }
         ++it;
     }

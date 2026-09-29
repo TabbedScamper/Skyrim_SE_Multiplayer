@@ -248,11 +248,9 @@ SpectateInput ReadSpectate() noexcept
                     return reinterpret_cast<TXInput>(proc);
         return nullptr;
     }();
-    for (DWORD index = 0; getState && index < XUSER_MAX_COUNT; ++index)
+    XINPUT_STATE input{};
+    if (getState && ReadPad(getState, input))
     {
-        XINPUT_STATE input{};
-        if (getState(index, &input) != ERROR_SUCCESS)
-            continue;
         const auto buttons = input.Gamepad.wButtons;
         result.Previous |= (buttons & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_LEFT_SHOULDER)) != 0;
         result.Next |= (buttons & (XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_RIGHT_SHOULDER)) != 0;
@@ -264,7 +262,6 @@ SpectateInput ReadSpectate() noexcept
         LASTINPUTINFO last{sizeof(LASTINPUTINFO)};
         const uint64_t keyboardAge = GetLastInputInfo(&last) ? GetTickCount() - last.dwTime : UINT64_MAX;
         result.Gamepad = s_lastPadInput && GetTickCount64() - s_lastPadInput < keyboardAge;
-        break;
     }
     return result;
 }

@@ -33,7 +33,7 @@ private:
     bool IsCurrent(uint32_t aPartyId, const Vote& aVote) const noexcept;
     void Broadcast(Vote& aVote, DoorVoteAction aAction, const String& aNotice) const noexcept;
     void Cancel(Vote& aVote, const char* aReason) const noexcept;
-    void Changed(Vote& aVote) noexcept;
+    void Changed(Vote& aVote, bool aExtendDeadline = true) noexcept;
 
     World& m_world;
     std::map<uint32_t, Vote> m_votes;

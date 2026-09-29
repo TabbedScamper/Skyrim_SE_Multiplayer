@@ -501,6 +501,15 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
             m_transport.IsConnected(), m_inParty, m_sessionState, GetTickCount64() - m_wipeFadeSince);
         FadeOutGame(false, true, 1.f, true, 0.f);
         m_wipeFade = false;
+        // The world-ready gate went up with the fade: never leave the player paused and input-blocked behind it.
+        if (m_worldGateHeld)
+        {
+            if (auto* pUI = UI::Get(); pUI && pUI->numPausesGame > 0)
+                --pUI->numPausesGame;
+            m_worldGateHeld = false;
+            if (auto* pControls = PlayerControls::GetInstance())
+                pControls->SetBlockPlayerInput(false);
+        }
     }
     // A follower waiting for the leader's load: never forever (a leader that cannot load must not strand the party).
     if (m_deferredLaunch && (m_sessionState != 1 || !m_inParty))
