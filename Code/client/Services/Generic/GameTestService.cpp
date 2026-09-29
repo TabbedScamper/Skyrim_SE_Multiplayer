@@ -193,6 +193,10 @@ void Report(World& aWorld, uint64_t aNow) noexcept
 
 namespace
 {
+// drop_item request (base form, count), window thread -> game thread.
+std::mutex s_mainFrameDropLock;
+std::pair<uint32_t, int32_t> s_mainFrameDrop{};
+
 // Read-only timing at the caller of the existing automatic-door hook. 40201 /
 // 140738120 is NiTimeController slot 0x27, void(this, NiUpdateData*), and calls +0x58
 // only on distance crossings. 17934 / 1402848F0 installs 17933 / 1402846B0
@@ -2269,6 +2273,57 @@ void GameTestService::OnWindowThread() noexcept
 
 void GameTestService::OnGameThread() noexcept
 {
+    {
+        // drop_item, queued by the window thread.
+        // Two phases: Papyrus AddItem hands the inventory change to the task queue, so the item is only in the
+        // inventory a few frames later; the drop follows 500 ms after the add.
+        static std::pair<uint32_t, int32_t> s_adding{};
+        static uint64_t s_dropAt{};
+        std::pair<uint32_t, int32_t> drop{};
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            if (s_mainFrameDrop.first)
+            {
+                s_adding = std::exchange(s_mainFrameDrop, {});
+                s_dropAt = 0;
+            }
+        }
+        auto* pPlayer = PlayerCharacter::Get();
+        if (s_adding.first && pPlayer && !s_dropAt)
+        {
+            using ObjectReference = TESObjectREFR;
+            PAPYRUS_FUNCTION(void, ObjectReference, AddItem, TESForm*, int32_t, bool);
+            auto* pAdd = Cast<TESBoundObject>(TESForm::GetById(s_adding.first));
+            if (s_pAddItem && pAdd && s_adding.second > 0)
+                s_pAddItem(pPlayer, pAdd, s_adding.second, true);
+            s_dropAt = GetTickCount64() + 500;
+        }
+        else if (s_adding.first && s_dropAt && GetTickCount64() >= s_dropAt)
+        {
+            drop = std::exchange(s_adding, {});
+            s_dropAt = 0;
+        }
+        auto* pBase = drop.first ? Cast<TESBoundObject>(TESForm::GetById(drop.first)) : nullptr;
+        if (pBase && pPlayer && drop.second > 0)
+        {
+            // Papyrus DropObject returns its reference through a hidden return slot that PAPYRUS_FUNCTION does not
+            // model (the misread pointer crashed the game, 2026-09-28 19:21). Use the native Actor::DropObject entry
+            // (40454, through our hook, as the inventory menu does), 100 u in front of the player.
+            {
+                NiPoint3 location = pPlayer->position;
+                location.x += std::sin(pPlayer->rotation.z) * 100.f;
+                location.y += std::cos(pPlayer->rotation.z) * 100.f;
+                location.z += 60.f;
+                NiPoint3 rotation{};
+                using TDrop = void*(Actor*, uint32_t*, TESBoundObject*, ExtraDataList*, int32_t, NiPoint3*, NiPoint3*);
+                POINTER_SKYRIMSE(TDrop, dropEntry, 40454);
+                uint32_t handle{};
+                dropEntry.Get()(pPlayer, &handle, pBase, nullptr, drop.second, &location, &rotation);
+                auto* pDropped = TESObjectREFR::GetByHandle(handle);
+                spdlog::info("Test drop: {:X} x{} -> {:X}", drop.first, drop.second, pDropped ? pDropped->formID : 0);
+            }
+        }
+    }
     DrainArmorAttachmentTrace();
     InstallVirtualMachineDiagnostic();
     if (!HarnessService::OwnsDriver()) IntroDriver::Tick();
@@ -5397,6 +5452,68 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             }
             pPlaced->MoveTo(pPlayer->parentCell, target);
             return Result(id, fmt::format("\"form_id\":\"{:X}\"", pPlaced->formID));
+        }
+        // Drop an item from this PC's player (added first) the way the inventory menu does. Queued to the main frame
+        // (GameTestService::RunMainFrameRequests): calling the drop on this window thread crashed the game twice
+        // (2026-09-28 19:03 and 19:09). Poll nearby_refs for the result.
+        if (command == "drop_item")
+        {
+            const auto baseText = GetJsonString(acLine, "base");
+            const auto countText = GetJsonString(acLine, "count");
+            auto* pBase = baseText.empty() ? nullptr : Cast<TESBoundObject>(TESForm::GetById(std::stoul(baseText, nullptr, 16)));
+            if (!pBase)
+                return Error(id, "base form not found");
+            std::lock_guard lock(s_mainFrameDropLock);
+            s_mainFrameDrop = {pBase->formID, countText.empty() ? 1 : std::stoi(countText)};
+            return Result(id, "\"queued\":true");
+        }
+        // References of a base within radius of a point (default: this PC's player), in the cells around the player.
+        if (command == "nearby_refs")
+        {
+            const auto baseText = GetJsonString(acLine, "base");
+            const auto radiusText = GetJsonString(acLine, "radius");
+            auto* pPlayer = PlayerCharacter::Get();
+            if (baseText.empty() || !pPlayer || !pPlayer->parentCell)
+                return Error(id, "base or player missing");
+            const uint32_t base = std::stoul(baseText, nullptr, 16);
+            const float radius = radiusText.empty() ? 1000.f : std::stof(radiusText);
+            NiPoint3 center = pPlayer->position;
+            if (!GetJsonString(acLine, "x").empty())
+            {
+                center.x = std::stof(GetJsonString(acLine, "x"));
+                center.y = std::stof(GetJsonString(acLine, "y"));
+                center.z = std::stof(GetJsonString(acLine, "z"));
+            }
+            std::string found = "[";
+            int count = 0;
+            auto visit = [&](TESObjectCELL* pCell)
+            {
+                if (!pCell || !pCell->refData.refArray || pCell->refData.capacity > 50000)
+                    return;
+                for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
+                {
+                    auto* pRef = pCell->refData.refArray[i].Get();
+                    if (!pRef || !pRef->baseForm || pRef->baseForm->formID != base || pRef->IsDeleted())
+                        continue;
+                    const auto d = pRef->position - center;
+                    if (d.x * d.x + d.y * d.y + d.z * d.z > radius * radius)
+                        continue;
+                    found += fmt::format("{}{{\"form_id\":\"{:X}\",\"disabled\":{},\"position\":[{:.1f},{:.1f},{:.1f}]}}",
+                        count++ ? "," : "", pRef->formID, JsonBool(pRef->IsDisabled()), pRef->position.x, pRef->position.y,
+                        pRef->position.z);
+                }
+            };
+            if (auto* pSpace = pPlayer->GetWorldSpace())
+            {
+                const int32_t cx = static_cast<int32_t>(std::floor(pPlayer->position.x / 4096.f));
+                const int32_t cy = static_cast<int32_t>(std::floor(pPlayer->position.y / 4096.f));
+                for (int32_t dx = -1; dx <= 1; ++dx)
+                    for (int32_t dy = -1; dy <= 1; ++dy)
+                        visit(ModManager::Get()->GetCellFromCoordinates(cx + dx, cy + dy, pSpace, false));
+            }
+            else
+                visit(pPlayer->parentCell);
+            return Result(id, fmt::format("\"count\":{},\"refs\":{}]", count, found));
         }
         // Knock an actor away from this PC's player (so it ragdolls), then kill it.
         if (command == "kill_actor")
