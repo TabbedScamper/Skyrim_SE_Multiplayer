@@ -865,6 +865,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
         UpdateLeaderScriptedPackage();
     }
     SendCreatorAppearance();
+    SendNameIfChanged();
     PoseCopyAuthority::SetCurrentTick(SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick());
     static uint64_t s_nextPoseRegistryMs = 0;
     if (const auto registryNow = GetTickCount64(); registryNow >= s_nextPoseRegistryMs)
@@ -1969,6 +1970,41 @@ bool CharacterService::GetCreatorDisplayOffset(const uint32_t aFormId, NiPoint3&
     return true;
 }
 
+// The local character's name whenever it differs from the last one sent (after the creator's ChangeName, after
+// loading a named save): a rename-only appearance packet. Checked every 2 s.
+void CharacterService::SendNameIfChanged() noexcept
+{
+    const auto now = GetTickCount64();
+    if (now < m_nextNameCheckMs)
+        return;
+    m_nextNameCheckMs = now + 2000;
+    if (!m_transport.IsConnected())
+    {
+        m_sentName.clear();
+        return;
+    }
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+    if (!pNpc || !pNpc->fullName.value.data)
+        return;
+    const std::string name = pNpc->fullName.value.AsAscii();
+    if (name.empty() || name == m_sentName)
+        return;
+    auto view = m_world.view<FormIdComponent>();
+    const auto it = std::find_if(view.begin(), view.end(), [view](auto entity) { return view.get<FormIdComponent>(entity).Id == 0x14; });
+    if (it == view.end())
+        return;
+    const auto serverId = Utils::GetServerId(*it);
+    if (!serverId)
+        return;
+    PlayerAppearanceRequest request;
+    request.ServerId = *serverId;
+    request.Name = name.c_str();
+    m_transport.Send(request);
+    m_sentName = name;
+    spdlog::info("This player's character is called {}", name);
+}
+
 // While the creator (RaceSex Menu) is open: this player's look, once a second when it changed,
 // and the final look when the creator closes. Receivers apply it to this player's character.
 void CharacterService::SendCreatorAppearance() noexcept
@@ -2013,6 +2049,8 @@ void CharacterService::SendCreatorAppearance() noexcept
     }
     // Still editing until Done (the creator stays open while the others finish; CreatorTogether).
     request.InCreator = creatorOpen && !CreatorTogether::IsDone();
+    if (pNpc->fullName.value.data)
+        request.Name = pNpc->fullName.value.AsAscii();
 
     uint64_t hash = 14695981039346656037ULL;
     for (const char c : request.AppearanceBuffer)
@@ -2046,6 +2084,14 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
     if (!pNpc || pActor == PlayerCharacter::Get() || pActor->formID == 0x14 ||
         !pActor->GetExtension() || !pActor->GetExtension()->IsRemotePlayer())
         return;
+    // Its name (the crosshair and dialogue show the copy's TESNPC name).
+    if (!acMessage.Name.empty())
+    {
+        pNpc->fullName.value.Set(acMessage.Name.c_str());
+        spdlog::info("Player copy {:X} is called {}", pActor->formID, acMessage.Name);
+    }
+    if (acMessage.AppearanceBuffer.empty())
+        return; // a rename only
 
     {
         std::lock_guard lock(s_creatorPlayersLock);

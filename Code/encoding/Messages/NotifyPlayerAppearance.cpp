@@ -8,6 +8,7 @@ void NotifyPlayerAppearance::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter
     Serialization::WriteString(aWriter, AppearanceBuffer);
     FaceTints.Serialize(aWriter);
     Serialization::WriteBool(aWriter, InCreator);
+    Serialization::WriteString(aWriter, Name);
 }
 
 void NotifyPlayerAppearance::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -20,4 +21,5 @@ void NotifyPlayerAppearance::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRead
     AppearanceBuffer = Serialization::ReadString(aReader);
     FaceTints.Deserialize(aReader);
     InCreator = Serialization::ReadBool(aReader);
+    Name = Serialization::ReadString(aReader);
 }

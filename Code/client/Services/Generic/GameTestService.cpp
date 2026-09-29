@@ -5594,11 +5594,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 parts += "]";
                 return fmt::format("{{\"actor\":\"{:X}\",\"npc\":\"{:X}\",\"npcPtr\":\"{}\",\"faceMorphs\":\"{}\",\"morphHash\":\"{:X}\","
                     "\"morph0\":{:.3f},\"weight\":{:.2f},\"headData\":\"{}\",\"headpartsPtr\":\"{}\",\"headparts\":{},\"faceNPC\":\"{:X}\","
-                    "\"race\":\"{:X}\"}}",
+                    "\"race\":\"{:X}\",\"name\":\"{}\"}}",
                     apActor->formID, pNpc->formID, fmt::ptr(pNpc), fmt::ptr(pNpc->faceMorphs), hash,
                     pNpc->faceMorphs ? pNpc->faceMorphs->option[0] : -1.f, pNpc->weight, fmt::ptr(pNpc->headData),
                     fmt::ptr(pNpc->headparts), parts, pNpc->faceNPC ? pNpc->faceNPC->formID : 0,
-                    pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0);
+                    pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0,
+                    EscapeJson(pNpc->fullName.value.data ? pNpc->fullName.value.AsAscii() : ""));
             };
             // Every lighting material on a character's 3D (feature 4 face tint, 5 skin tint): shared materials between
             // characters carry one player's creator tint writes onto the other.
@@ -5698,9 +5699,15 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             for (const auto& [material, feature] : selfMaterials)
                 if (feature == 4 || feature == 5)
                     selfList += fmt::format("{}\"{}:{}\"", selfList.empty() ? "" : ",", fmt::ptr(material), feature);
-            return Result(id, fmt::format("\"self\":{},\"others\":{}],\"selfTintHash\":\"{:X}\",\"selfFirstTint\":\"{:06X}\",\"selfFaceTexture\":[{}],\"otherFaceTexture\":[{}],\"selfSkin\":{},\"otherSkin\":{},\"selfTintMaterials\":[{}],\"sharedMaterials\":{},\"shared\":[{}],\"creatorLeaks\":{},\"appliedLooks\":{}",
+            return Result(id, fmt::format("\"self\":{},\"others\":{}],\"selfTintHash\":\"{:X}\",\"selfFirstTint\":\"{:06X}\",\"selfFaceTexture\":[{}],\"otherFaceTexture\":[{}],\"selfSkin\":{},\"otherSkin\":{},\"selfTintMaterials\":[{}],\"sharedMaterials\":{},\"shared\":[{}],\"creatorLeaks\":{},\"appliedLooks\":{},\"partyNames\":[{}]",
                 describe(PlayerCharacter::Get()), others, tintHash, firstTint, faceTextures, otherFace, skinColors(selfMaterials), otherSkin,
-                selfList, shared, sharedList, CreatorTogether::LeakedFrames(), CreatorTogether::AppliedLooks()));
+                selfList, shared, sharedList, CreatorTogether::LeakedFrames(), CreatorTogether::AppliedLooks(),
+                [this]() {
+                    std::string names;
+                    for (const auto& [playerId, name] : m_world.GetPartyService().GetPlayers())
+                        names += fmt::format("{}\"{}:{}\"", names.empty() ? "" : ",", playerId, EscapeJson(name.c_str()));
+                    return names;
+                }()));
         }
         if (command == "checkpoint_now")
         {

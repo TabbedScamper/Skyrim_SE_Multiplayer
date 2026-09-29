@@ -164,6 +164,9 @@ public:
     static void NoteRemoteDeath(uint32_t aFormId) noexcept;
     // Queued moves and dead-body layers of the old connection name nothing after a disconnect.
     static void ClearMainFrameWork() noexcept;
+    void SendNameIfChanged() noexcept;
+    std::string m_sentName;
+    uint64_t m_nextNameCheckMs{};
 
 private:
     uint64_t m_nextAnimObjectSnapshot{};

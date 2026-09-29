@@ -68,6 +68,8 @@ struct PartyService
     bool IsPlayerLeader(const Player* const apPlayer) const noexcept;
     Party* GetPlayerParty(Player* const apPlayer) noexcept;
     ServerSettings GetSettingsForPlayer(const Player* apPlayer) const noexcept;
+    // Every player's list of names again (a player renamed its character).
+    void RefreshPlayerNames() const noexcept { BroadcastPlayerList(); }
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;

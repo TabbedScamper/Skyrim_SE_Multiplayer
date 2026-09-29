@@ -1135,11 +1135,27 @@ void CharacterService::OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequ
     if (it == view.end() || view.get<OwnerComponent>(entity).GetOwner() != acMessage.pPlayer)
         return;
     auto& characterComponent = view.get<CharacterComponent>(entity);
-    if (!characterComponent.IsPlayer() || packet.AppearanceBuffer.empty() || packet.AppearanceBuffer.size() > 64 * 1024)
+    const bool renameOnly = packet.AppearanceBuffer.empty();
+    if (!characterComponent.IsPlayer() || (renameOnly && packet.Name.empty()) || packet.AppearanceBuffer.size() > 64 * 1024)
         return;
-    characterComponent.SaveBuffer = packet.AppearanceBuffer;
-    characterComponent.ChangeFlags = packet.ChangeFlags;
-    characterComponent.FaceTints = packet.FaceTints;
+    // The character's name is the player's name in the party (revive and door notices, the party list). The client
+    // connected with whatever its character was called at the main menu ("Prisoner" before the creator).
+    if (!packet.Name.empty())
+    {
+        const auto name = GameServer::Get()->SanitizePlayerName(packet.Name);
+        if (!name.empty() && name != acMessage.pPlayer->GetUsername())
+        {
+            spdlog::info("Player {} is now called {}", acMessage.pPlayer->GetId(), name);
+            acMessage.pPlayer->SetUsername(name);
+            m_world.GetPartyService().RefreshPlayerNames();
+        }
+    }
+    if (!renameOnly)
+    {
+        characterComponent.SaveBuffer = packet.AppearanceBuffer;
+        characterComponent.ChangeFlags = packet.ChangeFlags;
+        characterComponent.FaceTints = packet.FaceTints;
+    }
 
     NotifyPlayerAppearance notify{};
     notify.ServerId = packet.ServerId;
@@ -1147,6 +1163,7 @@ void CharacterService::OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequ
     notify.AppearanceBuffer = packet.AppearanceBuffer;
     notify.FaceTints = packet.FaceTints;
     notify.InCreator = packet.InCreator;
+    notify.Name = packet.Name.empty() ? String{} : acMessage.pPlayer->GetUsername();
     for (auto* pPlayer : m_world.GetPlayerManager())
     {
         if (pPlayer != acMessage.pPlayer)
