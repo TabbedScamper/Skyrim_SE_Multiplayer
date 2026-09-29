@@ -84,6 +84,7 @@ struct CarriedCorpse
 {
     uint32_t Carrier{};
     std::chrono::steady_clock::time_point Until{};
+    uint64_t Epoch{}; // the party's campaign epoch at pickup: a wipe reload ends the carry
 };
 
 struct RagdollRelayState
@@ -525,8 +526,9 @@ void CharacterService::EnforceLeaderAuthority() const noexcept
         auto* leader = party ? m_world.GetPlayerManager().GetById(party->LeaderPlayerId) : nullptr;
         if (const auto* carried = m_world.try_get<CarriedCorpse>(entity))
         {
-            // A carried corpse stays with its carrier (until set down, or 60 s without word).
-            if (now < carried->Until && m_world.GetPlayerManager().GetById(carried->Carrier))
+            // A carried corpse stays with its carrier (until set down, 60 s without word, or a new campaign epoch).
+            if (now < carried->Until && m_world.GetPlayerManager().GetById(carried->Carrier) &&
+                (!party || carried->Epoch == party->StartEpoch))
                 continue;
             m_world.remove<CarriedCorpse>(entity);
         }
@@ -1018,8 +1020,16 @@ void CharacterService::OnOwnershipClaimRequest(const PacketEvent<RequestOwnershi
             spdlog::info("Corpse carry: {:X} refused for player {}", message.ServerId, acMessage.pPlayer->GetId());
             return;
         }
+        // A pickup names the ownership epoch it saw; a renewal comes from the owner itself.
+        if (owner->GetOwner() != acMessage.pPlayer &&
+            !OwnershipPolicy::AcceptOwnershipEpoch(message.ExpectedOwnershipEpoch, owner->OwnershipEpoch))
+        {
+            spdlog::info("Corpse carry: {:X} refused for player {} (stale ownership epoch)", message.ServerId, acMessage.pPlayer->GetId());
+            return;
+        }
+        const auto* pCarrierParty = m_world.GetPartyService().GetPlayerParty(acMessage.pPlayer);
         m_world.emplace_or_replace<CarriedCorpse>(cEntity, CarriedCorpse{acMessage.pPlayer->GetId(),
-            std::chrono::steady_clock::now() + std::chrono::seconds(60)});
+            std::chrono::steady_clock::now() + std::chrono::seconds(60), pCarrierParty ? pCarrierParty->StartEpoch : 0});
         const bool owned = owner->GetOwner() == acMessage.pPlayer ||
             TransferOwnership(acMessage.pPlayer, cEntity, OwnershipTransferReason::CorpseCarry);
         spdlog::info("Corpse carry: {:X} picked up by player {} (simulating it: {})", message.ServerId,

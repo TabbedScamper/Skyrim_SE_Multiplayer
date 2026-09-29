@@ -2679,6 +2679,7 @@ struct PendingMove
     GameId CellId{};
     Vector3_NetQuantize Position{};
     bool EnableAfter{};
+    bool CorpseCorrection{};
 };
 std::mutex s_pendingMovesLock;
 Vector<PendingMove> s_pendingMoves;
@@ -2757,11 +2758,11 @@ void CharacterService::ApplyMovesOnMainFrame() noexcept
     auto& service = World::Get().GetCharacterService();
     for (const auto& move : moves)
         if (auto* pActor = Cast<Actor>(TESForm::GetById(move.FormId)))
-            service.MoveActor(pActor, move.WorldSpaceId, move.CellId, move.Position, move.EnableAfter);
+            service.MoveActor(pActor, move.WorldSpaceId, move.CellId, move.Position, move.EnableAfter, move.CorpseCorrection);
 }
 
 void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
-    bool aEnableAfter) const noexcept
+    bool aEnableAfter, bool aCorpseCorrection) const noexcept
 {
     if (!apActor)
         return;
@@ -2772,7 +2773,7 @@ void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, c
         // The newest request per actor wins (an enable request is kept); bounded by the number of actors.
         const auto same = std::find_if(s_pendingMoves.begin(), s_pendingMoves.end(),
             [apActor](const PendingMove& acMove) { return acMove.FormId == apActor->formID; });
-        PendingMove move{apActor->formID, acWorldSpaceId, acCellId, acPosition, aEnableAfter};
+        PendingMove move{apActor->formID, acWorldSpaceId, acCellId, acPosition, aEnableAfter, aCorpseCorrection};
         if (same != s_pendingMoves.end())
         {
             move.EnableAfter |= same->EnableAfter;
@@ -2782,18 +2783,21 @@ void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, c
             s_pendingMoves.push_back(move);
         return;
     }
-    MoveActorNow(apActor, acWorldSpaceId, acCellId, acPosition);
+    MoveActorNow(apActor, acWorldSpaceId, acCellId, acPosition, aCorpseCorrection);
     if (aEnableAfter && apActor->IsDisabled())
         apActor->EnableImpl();
 }
 
-void CharacterService::MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
+void CharacterService::MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+    bool aCorpseCorrection) const noexcept
 {
     // Never a remote actor that is dying, dead, knocked down or ragdolling (ActorState1 lifeState
     // bits 21-24, knockState 25-27): MoveTo disables and re-enables it, reloading its 3D, which
     // showed as the falling intro prisoner going naked and landing at the owner's final spot. The
     // owner's ragdoll stream places its body (CorpseRagdollService).
-    if (apActor && apActor->GetExtension() && apActor->GetExtension()->IsRemote())
+    // The settled corpse cell correction is the exception: it exists to move a dead copy to the owner's cell (it was
+    // blocked here too, so it never ran; Muse review 2026-09-29).
+    if (!aCorpseCorrection && apActor && apActor->GetExtension() && apActor->GetExtension()->IsRemote())
     {
         const uint32_t flags1 = apActor->actorState.flags1;
         if (((flags1 >> 21) & 0xF) != 0 || ((flags1 >> 25) & 0x7) != 0 || apActor->IsDead())
@@ -3784,7 +3788,7 @@ void CharacterService::RunRemoteUpdates() noexcept
             pActor->actorState.IsDeadState())
         {
             MoveActor(pActor, correction.WorldSpaceId, correction.CellId,
-                correction.Position);
+                correction.Position, false, true);
             spdlog::info("Corpse cell correction actor={:X} sourceCell={:X} hostCell={:X} error={} attempt={}",
                 correction.ActorId, correction.PriorCellId,
                 correction.TargetCellId, correction.Error, correction.Attempt);

@@ -215,9 +215,12 @@ private:
 
 private:
     // aEnableAfter: enable the actor once it stands at the destination (a parked actor resuming).
+    // aCorpseCorrection: the settled corpse cell correction may move a dead copy (every other caller leaves dying,
+    // dead and ragdolling copies to the owner's ragdoll stream).
     void MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
-        bool aEnableAfter = false) const noexcept;
-    void MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
+        bool aEnableAfter = false, bool aCorpseCorrection = false) const noexcept;
+    void MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+        bool aCorpseCorrection) const noexcept;
 
     void RequestServerAssignment(entt::entity aEntity) const noexcept;
     void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId) const noexcept;
