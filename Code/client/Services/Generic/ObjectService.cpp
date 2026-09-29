@@ -4055,6 +4055,7 @@ struct TrackedGrab
     uint64_t ReleasedAt{};
     uint64_t StillSince{};
     uint64_t NextCarryRefresh{};
+    uint64_t NextLeaseRefresh{};
     NiPoint3 LastPosition{};
 };
 TrackedGrab s_tracked{};
@@ -4173,7 +4174,10 @@ void ObjectService::OnPhysicsLease(const NotifyPhysicsLease& acMessage) noexcept
     }
     // First holder wins: whoever else is holding it here (a refused grab, or the leader while a follower carries it)
     // lets go, or its grab spring would fight the carrier's stream (the original jiggle). The main frame does it.
-    if (acMessage.HolderId && acMessage.HolderId != localId && s_grabbed.load() == formId)
+    // Also when it goes back to the leader while a follower still holds it (the lease lapsed or was cleared): the
+    // leader's stream would pull the follower's grab again (Muse review 2026-09-29).
+    const bool otherStreams = acMessage.HolderId ? acMessage.HolderId != localId : !party.IsLeader();
+    if (otherStreams && s_grabbed.load() == formId)
         s_forceRelease.store(formId);
     // The new streamer admits the object; everyone else drops what it streamed.
     QueuePhysicsRefresh(formId);
@@ -4321,6 +4325,7 @@ void ObjectService::UpdateGrabLease() noexcept
             request.Hold = true;
             request.Epoch = party.GetStartEpoch();
             m_transport.Send(request);
+            tracked.NextLeaseRefresh = now + 5000;
             spdlog::info("Physics lease: grabbed {:X}, stream requested", tracked.FormId);
         }
         return;
@@ -4328,7 +4333,19 @@ void ObjectService::UpdateGrabLease() noexcept
     if (!tracked.Released)
     {
         if (grabbed == tracked.FormId && !s_grabReleased.load())
+        {
+            // Held: renew a follower's lease every 5 s, so a still hand (few stream updates) never lets it lapse.
+            if (!tracked.Corpse && !party.IsLeader() && now >= tracked.NextLeaseRefresh)
+            {
+                tracked.NextLeaseRefresh = now + 5000;
+                PhysicsLeaseRequest request{};
+                request.Id = tracked.Id;
+                request.Hold = true;
+                request.Epoch = party.GetStartEpoch();
+                m_transport.Send(request);
+            }
             return;
+        }
         tracked.Released = true;
         tracked.ReleasedAt = now;
         if (grabbed == tracked.FormId)

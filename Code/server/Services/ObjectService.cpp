@@ -74,6 +74,12 @@ void ObjectService::OnPhysicsLease(const PacketEvent<PhysicsLeaseRequest>& acMes
             pPlayer->Send(current);
             return;
         }
+        // The holder renewing its own lease while it keeps holding (every 5 s).
+        if (it != leases.end() && it->second.Holder == pPlayer->GetId())
+        {
+            it->second.LastUpdate = now;
+            return;
+        }
         // The leader grabbing what nobody else carries is the normal case: it already streams it.
         if (m_world.GetPartyService().IsPlayerLeader(pPlayer))
         {
