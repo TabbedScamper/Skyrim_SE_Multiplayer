@@ -359,21 +359,35 @@ void TESObjectREFR::LoadAnimationVariables(const AnimationVariables& aVariables)
             // camera). The owner is a player, so its IsNPC, head-tracking switches and look-at gains are off; copying
             // them every update disabled the receiver's BSLookAtModifier outright (2026-09-28: the modifier never
             // ran for a remote player graph, so the head never pitched; the yaw seen was the body turning).
-            const bool ownHeadTracking = pExtendedActor->IsRemotePlayer() &&
-                pExtendedActor->GraphDescriptorHash == AnimationGraphDescriptor_Master_Behavior::m_key;
-            const auto headTrackVariable = [](uint32_t aIndex)
+            // Every graph, not only Master_Behavior (werewolf and vampire lord graphs and modded graphs place these
+            // variables elsewhere; Muse review 2026-09-29): the indices are resolved by name from the graph's own
+            // variable table, once per graph type (e.g. Master_Behavior: IsNPC 25, bHeadTracking 151, ...).
+            const bool ownHeadTracking = pExtendedActor->IsRemotePlayer();
+            static std::mutex s_headTrackLock;
+            static std::unordered_map<uint64_t, std::vector<uint32_t>> s_headTrackIndices;
+            const std::vector<uint32_t>* pHeadTrack = nullptr;
+            if (ownHeadTracking)
             {
-                // Master_Behavior: IsNPC 25, bHeadTracking 151, LookAtOutOfRange 178, bHeadTrackSpine 185,
-                // LookAtOnGain/OffGain/EyeOnGain/EyeOffGain 191-194, bHeadTrackingOn 257, bDisableHeadTrack 271,
-                // bCanHeadTrack 272, bNoHeadTrack 283.
-                switch (aIndex)
+                std::lock_guard headTrackLock(s_headTrackLock);
+                auto [entry, added] = s_headTrackIndices.try_emplace(pExtendedActor->GraphDescriptorHash);
+                if (added)
                 {
-                case 25: case 151: case 178: case 185: case 191: case 192: case 193: case 194: case 257: case 271:
-                case 272: case 283:
-                    return true;
-                default:
-                    return false;
+                    static constexpr const char* s_names[]{"IsNPC", "bHeadTracking", "LookAtOutOfRange", "bHeadTrackSpine",
+                        "LookAtOnGain", "LookAtOffGain", "LookAtEyeOnGain", "LookAtEyeOffGain", "bHeadTrackingOn", "bDisableHeadTrack",
+                        "bCanHeadTrack", "bNoHeadTrack"};
+                    for (const auto& [index, name] : pManager->DumpAnimationVariables(false))
+                        for (const auto* pName : s_names)
+                            if (_stricmp(name.c_str(), pName) == 0)
+                                entry->second.push_back(index);
+                    std::sort(entry->second.begin(), entry->second.end());
+                    spdlog::info("Head track: graph {:X} keeps {} of {} receiver-owned head-tracking variables",
+                        pExtendedActor->GraphDescriptorHash, entry->second.size(), std::size(s_names));
                 }
+                pHeadTrack = &entry->second;
+            }
+            const auto headTrackVariable = [pHeadTrack](uint32_t aIndex)
+            {
+                return pHeadTrack && std::binary_search(pHeadTrack->begin(), pHeadTrack->end(), aIndex);
             };
 
             for (size_t i = 0; i < pDescriptor->BooleanLookUpTable.size(); ++i)
@@ -1546,6 +1560,46 @@ std::string WorldGraphDiagnostic(BSAnimationGraphManager* manager)
     }
     return result + fmt::format("],\"graphsTruncated\":{}", manager->animationGraphs.size > count);
 }
+
+// Every active state machine clone's (node, current state) of the active graph, hashed: equal digests mean the graph
+// sits in the same states.
+uint64_t WorldGraphStateDigest(BSAnimationGraphManager* manager)
+{
+    using namespace ActorPoseDiagnosticViews;
+    if (!manager)
+        return 0;
+    BSScopedLock<BSRecursiveLock> lock(manager->lock);
+    if (manager->animationGraphIndex >= manager->animationGraphs.size)
+        return 0;
+    auto* graph = manager->animationGraphs.Get(manager->animationGraphIndex);
+    BehaviorGraph behavior{};
+    ActiveNodeList nodes{};
+    if (!graph || !WorldProbeRead(graph->behaviorGraph, behavior) || !WorldProbeRead(behavior.activeNodes, nodes) ||
+        nodes.size <= 0 || nodes.size > 1024 || !nodes.data)
+        return 0;
+    uint64_t digest = 1469598103934665603ull;
+    for (int i = 0; i < (std::min)(nodes.size, 256); ++i)
+    {
+        ActiveNodeInfo info{};
+        StateMachine state{};
+        if (!WorldProbeRead(static_cast<const ActiveNodeInfo*>(nodes.data) + i, info) || !info.nodeClone ||
+            !Cast<hkbStateMachine>(reinterpret_cast<hkbGenerator*>(info.nodeClone)) || !WorldProbeRead(info.nodeClone, state))
+            continue;
+        digest = (digest ^ state.nodeID) * 1099511628211ull;
+        digest = (digest ^ static_cast<uint32_t>(state.currentStateID)) * 1099511628211ull;
+    }
+    return digest;
+}
+}
+
+uint64_t TESObjectREFR::GetGraphStateDigest() noexcept
+{
+    BSAnimationGraphManager* pManager = nullptr;
+    if (!animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return 0;
+    const auto digest = WorldGraphStateDigest(pManager);
+    pManager->Release();
+    return digest;
 }
 
 std::string WorldStateService::AnimationDiagnostic(TESObjectREFR* ref) noexcept

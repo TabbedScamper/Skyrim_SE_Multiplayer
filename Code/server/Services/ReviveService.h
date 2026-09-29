@@ -23,6 +23,8 @@ private:
         uint32_t PartyId{};
         uint64_t Received{};
         uint64_t GrantUntil{};
+        // A raise at this revision: a fallen report at or before it was sent before the owner heard of the raise.
+        uint64_t RaisedRevision{};
     };
     struct Hold
     {

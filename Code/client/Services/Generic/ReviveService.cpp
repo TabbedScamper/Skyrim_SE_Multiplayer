@@ -119,6 +119,35 @@ const char* PadButtonName(uint16_t aKey) noexcept
     }
 }
 
+// The first connected controller's state, read at most once per 8 ms (Activate and Shout share it each frame). A
+// query on an empty XInput slot is slow, so empty slots are rescanned every 2 s, not every frame.
+bool ReadPad(DWORD(WINAPI* apGetState)(DWORD, XINPUT_STATE*), XINPUT_STATE& arState) noexcept
+{
+    static XINPUT_STATE s_state{};
+    static DWORD s_index = XUSER_MAX_COUNT;
+    static uint64_t s_readAt{};
+    static uint64_t s_nextScan{};
+    const auto now = GetTickCount64();
+    if (now - s_readAt >= 8)
+    {
+        s_readAt = now;
+        if (s_index < XUSER_MAX_COUNT && apGetState(s_index, &s_state) != ERROR_SUCCESS)
+            s_index = XUSER_MAX_COUNT;
+        if (s_index == XUSER_MAX_COUNT && now >= s_nextScan)
+        {
+            s_nextScan = now + 2000;
+            for (DWORD index = 0; index < XUSER_MAX_COUNT; ++index)
+                if (apGetState(index, &s_state) == ERROR_SUCCESS)
+                {
+                    s_index = index;
+                    break;
+                }
+        }
+    }
+    arState = s_state;
+    return s_index < XUSER_MAX_COUNT;
+}
+
 // The live bindings of a control-map user event ("Activate", "Shout"): keyboard key, mouse button, controller button.
 ActivateInput ReadControl(const char* aEvent) noexcept
 {
@@ -164,11 +193,9 @@ ActivateInput ReadControl(const char* aEvent) noexcept
             }
             else if (device == 2 && getState)
             {
-                for (DWORD index = 0; index < XUSER_MAX_COUNT; ++index)
+                XINPUT_STATE input{};
+                if (ReadPad(getState, input))
                 {
-                    XINPUT_STATE input{};
-                    if (getState(index, &input) != ERROR_SUCCESS)
-                        continue;
                     const bool held = entry.Key == 9 ? input.Gamepad.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD :
                         entry.Key == 10 ? input.Gamepad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD :
                         (input.Gamepad.wButtons & entry.Key) != 0;
@@ -186,7 +213,6 @@ ActivateInput ReadControl(const char* aEvent) noexcept
                         entry.Key == XINPUT_GAMEPAD_X ? "X" : entry.Key == XINPUT_GAMEPAD_Y ? "Y" :
                         entry.Key == 9 ? "LT" : entry.Key == 10 ? "RT" : "controller";
                     result.Label += std::string(" / ") + label;
-                    break;
                 }
             }
             break;
@@ -323,8 +349,7 @@ std::atomic<float> s_lethalShare{};
 std::atomic<uint32_t> s_lethalAttacker{};
 constexpr float kOverkillShare = 0.75f;
 constexpr uint64_t kLethalWindowMs = 1500;
-constexpr uint64_t kFlungRestMs = 3000;
-constexpr uint64_t kFlungMaxMs = 10000;
+NiPoint3 BodyPosition(Actor* apActor) noexcept;
 
 void HookShoutButton(void* apHandler, ShoutButton* apEvent)
 {
@@ -338,6 +363,22 @@ void HookShoutButton(void* apHandler, ShoutButton* apEvent)
         }
         s_ritualConsumed.store(false, std::memory_order_relaxed);
         s_shoutCapture.store(true, std::memory_order_relaxed);
+        return;
+    }
+    // The ritual disarmed while the key was held (combat started, magicka dropped, the ally was called back by
+    // someone else) and did not happen: hand the key back as a fresh press, then its live held/release events, so the
+    // shout the player is holding still comes out (Muse review 2026-09-29: the release used to be eaten).
+    if (!s_ritualArmed.load(std::memory_order_relaxed) && !s_ritualConsumed.load(std::memory_order_relaxed))
+    {
+        s_shoutCapture.store(false, std::memory_order_relaxed);
+        const float value = apEvent->Value;
+        const float held = apEvent->Held;
+        apEvent->Value = 1.f;
+        apEvent->Held = 0.f;
+        s_shoutButton(apHandler, apEvent);
+        apEvent->Value = value;
+        apEvent->Held = held;
+        s_shoutButton(apHandler, apEvent);
         return;
     }
     if (pressed)
@@ -434,10 +475,17 @@ Actor* ReviveService::FindPlayer(uint32_t aId) const noexcept
 {
     if (aId == m_transport.GetLocalPlayerId())
         return PlayerCharacter::Get();
-    auto view = m_world.view<FormIdComponent, PlayerComponent>();
-    for (auto entity : view)
-        if (view.get<PlayerComponent>(entity).Id == aId)
-            return Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+    if (m_playerFormsFrame != m_frame)
+    {
+        m_playerFormsFrame = m_frame;
+        m_playerForms.clear();
+        auto view = m_world.view<FormIdComponent, PlayerComponent>();
+        for (auto entity : view)
+            m_playerForms.emplace_back(view.get<PlayerComponent>(entity).Id, view.get<FormIdComponent>(entity).Id);
+    }
+    for (const auto& [id, formId] : m_playerForms)
+        if (id == aId)
+            return Cast<Actor>(TESForm::GetById(formId));
     return nullptr;
 }
 
@@ -446,7 +494,7 @@ void ReviveService::Reset(bool aRestorePlayer) noexcept
     if (m_fallen && aRestorePlayer)
         if (auto* player = PlayerCharacter::Get())
             LeaveFallen(player, nullptr);
-    m_fallen = m_flung = false;
+    m_fallen = m_slain = false;
     m_dyingSince = 0;
     m_watch = m_cameraOn = 0;
     s_ritualArmed.store(false, std::memory_order_relaxed);
@@ -488,7 +536,7 @@ void ReviveService::SendState(PlayerCharacter* aPlayer, uint64_t aNow) noexcept
     request.InCombat = aPlayer->IsInCombat();
     request.Bleed = m_down ? m_bleed : m_fallen ? 0.f : 1.f;
     request.Dead = m_fallen;
-    request.Flung = m_fallen && m_flung;
+    request.Flung = m_fallen && m_slain; // "slain": notice text only
     m_alive = request.Alive;
     m_combat = request.InCombat;
     m_transport.Send(request);
@@ -715,10 +763,30 @@ void ReviveService::ApplyPeers() noexcept
             continue;
         }
         if (peer.AppliedForm == actor->formID && peer.AppliedRevision == peer.Data.Revision &&
-            peer.AppliedDead == peer.Data.Dead && peer.AppliedFlung == peer.Data.Flung)
+            peer.AppliedDead == peer.Data.Dead)
         {
-            if (peer.Data.Dead && !peer.Data.Flung)
+            if (peer.Data.Dead)
                 SetHidden(actor, true);
+            const auto now = GetTickCount64();
+            if (peer.DownSampleAt && now >= peer.DownSampleAt)
+            {
+                peer.DownSampleAt = 0;
+                if (peer.Data.Down && !peer.Data.Dead)
+                    peer.DownDigest = actor->GetGraphStateDigest();
+            }
+            if (peer.StopCheckAt && now >= peer.StopCheckAt)
+            {
+                peer.StopCheckAt = 0;
+                const auto digest = actor->GetGraphStateDigest();
+                if (peer.DownDigest && digest == peer.DownDigest && !peer.Data.Down && !peer.Data.Dead)
+                {
+                    BSFixedString idle("IdleForceDefaultState");
+                    const bool reset = actor->SendAnimationEvent(&idle);
+                    spdlog::warn("Revive: {:X} still in its down graph states 1.5 s after standing up, default-state reset {}",
+                        actor->formID, reset);
+                }
+                peer.DownDigest = 0;
+            }
             continue;
         }
         spdlog::info("Revive: apply {} to {:X} (revision {}, form was {:X}, life {})",
@@ -726,16 +794,15 @@ void ReviveService::ApplyPeers() noexcept
             actor->formID, peer.Data.Revision, peer.AppliedForm, (actor->actorState.flags1 >> 21) & 0xF);
         if (peer.Data.Dead)
         {
-            // A fallen player: hidden and in essential down (never a combat target) until called back. A flung one
-            // keeps its body (the owner's ragdoll streams in) until the owner reports it at rest.
+            // A fallen player: hidden and in essential down (never a combat target) until called back. A slain one
+            // already flew and landed on its owner's screen (dying phase) before it was reported fallen.
             actor->SetNoBleedoutRecovery(true);
             if (((actor->actorState.flags1 >> 21) & 0xF) != 7)
             {
                 LifeState(actor, 7);
-                if (!peer.Data.Flung)
-                    PlayRemoteBleedout(actor, true);
+                PlayRemoteBleedout(actor, true);
             }
-            SetHidden(actor, !peer.Data.Flung);
+            SetHidden(actor, true);
         }
         else if (peer.Data.Down)
         {
@@ -743,6 +810,8 @@ void ReviveService::ApplyPeers() noexcept
             LifeState(actor, 7);
             const bool played = PlayRemoteBleedout(actor, true);
             spdlog::info("Revive: {:X} bleedout start action played {}", actor->formID, played);
+            peer.DownDigest = 0;
+            peer.DownSampleAt = GetTickCount64() + 1500;
         }
         else if (peer.AppliedDown || peer.AppliedDead || actor->actorState.IsBleedingOut())
         {
@@ -766,17 +835,18 @@ void ReviveService::ApplyPeers() noexcept
                 reset = actor->SendAnimationEvent(&idle);
             }
             spdlog::info("Revive: {:X} bleedout stop action played {}, default-state reset {}", actor->formID, played, reset);
+            peer.StopCheckAt = played ? GetTickCount64() + 1500 : 0;
         }
         peer.AppliedForm = actor->formID;
         peer.AppliedRevision = peer.Data.Revision;
         peer.AppliedDown = peer.Data.Down;
         peer.AppliedDead = peer.Data.Dead;
-        peer.AppliedFlung = peer.Data.Flung;
     }
 }
 
 bool ReviveService::Update(bool aEnabled) noexcept
 {
+    ++m_frame;
     const auto& party = m_world.GetPartyService();
     if (!aEnabled || !m_transport.IsConnected() || !party.IsInParty())
     {
@@ -833,7 +903,7 @@ bool ReviveService::Update(bool aEnabled) noexcept
                 m_dyingKnocked = false;
                 m_dyingKnockSince = 0;
                 m_dyingCollapsed = false;
-                m_dyingLastPos = player->position;
+                m_dyingLastPos = BodyPosition(player);
                 m_dyingLastSample = now;
                 m_dyingStillSince = 0;
                 m_skipHeld = true;
@@ -864,10 +934,11 @@ bool ReviveService::Update(bool aEnabled) noexcept
             // Nearly still: under 15 u moved per 250 ms sample, held for a second.
             if (now - m_dyingLastSample >= 250)
             {
-                const auto delta = player->position - m_dyingLastPos;
+                const auto body = BodyPosition(player);
+                const auto delta = body - m_dyingLastPos;
                 const bool still = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z) < 15.f;
                 m_dyingStillSince = still ? (m_dyingStillSince ? m_dyingStillSince : now) : 0;
-                m_dyingLastPos = player->position;
+                m_dyingLastPos = body;
                 m_dyingLastSample = now;
             }
             const auto skip = ReadActivate();
@@ -892,7 +963,7 @@ bool ReviveService::Update(bool aEnabled) noexcept
             {
                 // At rest (or skipped): straight to spectating; the body is hidden like any fallen player's.
                 m_dyingSince = 0;
-                m_flung = false;
+                m_slain = true;
                 EnterFallen(player, m_dyingCollapsed ? "overkill" : "flung");
                 return true;
             }
@@ -951,7 +1022,10 @@ bool ReviveService::Update(bool aEnabled) noexcept
     const bool input = !paused && window && GetForegroundWindow() == window->hWnd &&
         !ControlBindings::IsCapturing() && (m_down || m_fallen || PlayerCollision::LocalHasFreeControl()) &&
         !ui->GetMenuOpen(BSFixedString("Dialogue Menu"));
+    if (now >= m_nextTestState)
     {
+        // Test bridge read-out, a few times a second (not every frame).
+        m_nextTestState = now + 250;
         std::lock_guard lock(s_testStateLock);
         s_testState = fmt::format("{{\"fallen\":{},\"down\":{},\"watch\":{},\"watchName\":\"{}\",\"cameraState\":{},"
             "\"life\":{},\"hidden\":{},\"ritualArmed\":{},\"ritualTarget\":{},\"magicka\":{:.1f},\"bleed\":{:.3f}}}",
@@ -1085,6 +1159,20 @@ TESObjectCELL* ReviveService::PeerCell(const ReviveData& aData, const NiPoint3& 
     return Cast<TESObjectCELL>(TESForm::GetById(mods.GetGameId(aData.Cell)));
 }
 
+// Where the body is drawn: its pelvis bone (a ragdoll moves the bones; the reference position may lag), else the
+// reference position.
+namespace
+{
+NiPoint3 BodyPosition(Actor* apActor) noexcept
+{
+    static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+    if (auto* pRoot = apActor ? apActor->GetNiNode() : nullptr)
+        if (auto* pBone = pRoot->GetByName(s_pelvis))
+            return pBone->world.translate;
+    return apActor ? apActor->position : NiPoint3{};
+}
+}
+
 void ReviveService::EnterFallen(PlayerCharacter* aPlayer, const char* aReason) noexcept
 {
     m_fallen = true;
@@ -1100,11 +1188,10 @@ void ReviveService::EnterFallen(PlayerCharacter* aPlayer, const char* aReason) n
     aPlayer->SetNoBleedoutRecovery(true);
     if (((aPlayer->actorState.flags1 >> 21) & 0xF) != 7)
         LifeState(aPlayer, 7);
-    if (!m_flung)
-        SetHidden(aPlayer, true);
+    SetHidden(aPlayer, true);
     ++m_revision;
     spdlog::info("Revive: fallen ({})", aReason);
-    Notice(m_flung ? "You have been slain. An ally can call you back." : "You have fallen. An ally can call you back.");
+    Notice(m_slain ? "You have been slain. An ally can call you back." : "You have fallen. An ally can call you back.");
     if (m_transport.IsConnected())
         SendState(aPlayer, GetTickCount64());
 }
@@ -1112,7 +1199,7 @@ void ReviveService::EnterFallen(PlayerCharacter* aPlayer, const char* aReason) n
 void ReviveService::LeaveFallen(PlayerCharacter* aPlayer, const NotifyRevive* apRaise) noexcept
 {
     m_fallen = false;
-    m_flung = false;
+    m_slain = false;
     m_watch = m_cameraOn = 0;
     SetHidden(aPlayer, false);
     SetCameraTarget(aPlayer);
@@ -1153,24 +1240,6 @@ void ReviveService::LeaveFallen(PlayerCharacter* aPlayer, const NotifyRevive* ap
 
 void ReviveService::UpdateFallen(PlayerCharacter* aPlayer, uint64_t aNow, bool aInput) noexcept
 {
-    if (m_flung)
-    {
-        // The camera stays on the landed body a moment (the knock state stays set in essential down, so time it).
-        if (!m_flungRestSince)
-            m_flungRestSince = aNow;
-        if ((m_flungRestSince && aNow - m_flungRestSince >= kFlungRestMs) || aNow - m_flungSince >= kFlungMaxMs)
-        {
-            m_flung = false;
-            ++m_revision;
-            SendState(aPlayer, aNow);
-            spdlog::info("Revive: flung body at rest, spectating");
-        }
-        else
-        {
-            PushUi(4, {}, {}, 0, "An ally can call you back", aNow, "Slain");
-            return;
-        }
-    }
     // Reapplied every frame: a save load or cell change brings the body and the alive state back.
     SetHidden(aPlayer, true);
     aPlayer->SetNoBleedoutRecovery(true);

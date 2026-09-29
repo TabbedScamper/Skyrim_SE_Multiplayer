@@ -4,6 +4,7 @@
 
 #include <World.h>
 #include <Events/PapyrusFunctionRegisterEvent.h>
+#include <Services/PapyrusService.h>
 #include <Forms/TESForm.h>
 #include <Misc/GameVM.h>
 #include <Actor.h>
@@ -295,7 +296,6 @@ BSScript::CallResult TP_MAKE_THISCALL(HookNativePapyrusCall, BSScript::NativeFun
 
 void TP_MAKE_THISCALL(HookRegisterPapyrusFunction, BSScript::IVirtualMachine, NativeFunction* apFunction)
 {
-    auto& runner = World::Get().GetRunner();
 
     const char* pFunctionName = apFunction->functionName.AsAscii();
     const char* pTypeName = apFunction->typeName.AsAscii();
@@ -305,9 +305,10 @@ void TP_MAKE_THISCALL(HookRegisterPapyrusFunction, BSScript::IVirtualMachine, Na
             _stricmp(pFunctionName, "HideTitleSequenceMenu") == 0))
         spdlog::info("Title sequence native registered {} address={}", pFunctionName, apFunction->functionAddress);
 
-    PapyrusFunctionRegisterEvent event(apFunction->functionName.AsAscii(), apFunction->typeName.AsAscii(), apFunction->functionAddress);
-
-    runner.Trigger(std::move(event));
+    // Straight into the table, not through the runner: natives register once at startup, and the runner drops events
+    // queued before a game load (RunnerService load generation), which threw every registration away and left every
+    // name-bound Papyrus call returning a default (2026-09-29).
+    World::Get().ctx().at<PapyrusService>().Register(pTypeName, pFunctionName, apFunction->functionAddress);
 
     TiltedPhoques::ThisCall(RealRegisterPapyrusFunction, apThis, apFunction);
 }

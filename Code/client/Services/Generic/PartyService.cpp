@@ -427,6 +427,8 @@ void PartyService::ReachWorldReadyBarrier() noexcept
     // Owner (2026-09-28): no frozen world while the others load; this PC waits on black and everyone fades in together
     // at the gameplay barrier.
     FadeOutGame(true, true, 0.f, true, 0.f);
+    if (!m_wipeFade)
+        m_wipeFadeSince = GetTickCount64();
     m_wipeFade = true;
 
     if (auto* pUI = UI::Get())
@@ -489,6 +491,17 @@ void PartyService::LaunchCheckpoint(const String& acCheckpointId) noexcept
 
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
+    // The black screen of a load never outlives the reason for it: lifted when the party or connection is gone, or
+    // when the gameplay barrier has not released everyone within 3 minutes (a stuck peer must not leave this player
+    // blind; Muse review 2026-09-29).
+    if (m_wipeFade && (!m_transport.IsConnected() || !m_inParty || m_sessionState == 0 ||
+        GetTickCount64() - m_wipeFadeSince > 180000))
+    {
+        spdlog::warn("Load fade lifted without the gameplay barrier (connected {}, in party {}, state {}, {} ms)",
+            m_transport.IsConnected(), m_inParty, m_sessionState, GetTickCount64() - m_wipeFadeSince);
+        FadeOutGame(false, true, 1.f, true, 0.f);
+        m_wipeFade = false;
+    }
     // A follower waiting for the leader's load: never forever (a leader that cannot load must not strand the party).
     if (m_deferredLaunch && (m_sessionState != 1 || !m_inParty))
         m_deferredLaunch = false;
@@ -799,6 +812,7 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             // the load (reapplied after it) until the gameplay barrier releases everyone together.
             FadeOutGame(true, true, 0.5f, true, 0.f);
             m_wipeFade = true;
+            m_wipeFadeSince = GetTickCount64();
             m_reloadPending = true;
             m_world.GetCharacterService().ReleaseForReload();
             spdlog::info("Party wipe: reloading checkpoint '{}' in game", acPartyInfo.CheckpointId);

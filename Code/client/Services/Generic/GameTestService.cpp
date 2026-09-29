@@ -5452,11 +5452,16 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 missing += "Quest.Stop ";
             else if (pIntro && !keepQuest)
                 s_pStop(pIntro);
-            PAPYRUS_FUNCTION(void, Game, SetInChargen, bool, bool, bool);
-            if (!s_pSetInChargen)
-                missing += "Game.SetInChargen ";
-            else
-                s_pSetInChargen(nullptr, false, false, false);
+            // Game.SetInChargen is a static native with no address in the registration hook (papyrus_natives.tsv):
+            // call its implementation 55576 (VM, stack id, static tag, disableSaving, disableWaiting, showMessage).
+            {
+                using TSetInChargen = void(void*, uint32_t, void*, bool, bool, bool);
+                POINTER_SKYRIMSE(TSetInChargen, setInChargen, 55576);
+                if (auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr)
+                    setInChargen.Get()(pVM, 0, nullptr, false, false, false);
+                else
+                    missing += "Game.SetInChargen ";
+            }
             // Game's static natives register without a direct address (papyrus_natives.tsv); call their
             // implementations (VM, stack id, static tag, arguments): EnablePlayerControls 55455
             // (0x140A23FC0), SetPlayerAIDriven 55577 (0x140A2AE50).
@@ -5884,6 +5889,28 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             });
             return Result(id, fmt::format("\"queued\":{}", index));
         }
+        if (command == "papyrus_has")
+        {
+            // names: "Type.Function,..." -> which are missing from PapyrusService's runtime table (a name-bound call to
+            // a missing one returns a default).
+            const auto names = GetJsonString(acLine, "names");
+            const auto& service = World::Get().ctx().at<PapyrusService>();
+            std::string missing;
+            size_t start = 0;
+            while (start < names.size())
+            {
+                auto end = names.find(',', start);
+                if (end == std::string::npos)
+                    end = names.size();
+                const auto entry = names.substr(start, end - start);
+                const auto dot = entry.find('.');
+                if (dot != std::string::npos &&
+                    !service.Get(String(entry.substr(0, dot).c_str()), String(entry.substr(dot + 1).c_str())))
+                    missing += fmt::format("{}\"{}\"", missing.empty() ? "" : ",", entry);
+                start = end + 1;
+            }
+            return Result(id, fmt::format("\"registered\":{},\"missing\":[{}]", service.RegisteredCount(), missing));
+        }
         if (command == "remote_entities")
         {
             // Every remote character entity: server id, cached form, whether that form exists and is flagged a
@@ -5913,7 +5940,7 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
         }
         if (command == "revive_state")
-            return Result(id, fmt::format("\"revive\":{}", ReviveService::DescribeTest()));
+            return Result(id, fmt::format("\"revive\":{},\"unresolvedPapyrus\":{},\"papyrusRegistered\":{}", ReviveService::DescribeTest(), g_unresolvedPapyrusNatives.load(), World::Get().ctx().at<PapyrusService>().RegisteredCount()));
         if (command == "revive_bleed")
         {
             const auto valueText = GetJsonString(acLine, "value");

@@ -41,7 +41,11 @@ private:
         uint64_t AppliedRevision{};
         bool AppliedDown{};
         bool AppliedDead{};
-        bool AppliedFlung{};
+        // The copy's graph states while it lay down (sampled 1.5 s in), and when to check that a stand-up took: a
+        // stop that plays but leaves the graph in its down states shows the copy lying whenever the pose stream gaps.
+        uint64_t DownDigest{};
+        uint64_t DownSampleAt{};
+        uint64_t StopCheckAt{};
     };
 
     void OnNotify(const NotifyRevive& aMessage) noexcept;
@@ -55,6 +59,12 @@ private:
     void RestoreSpells(PlayerCharacter* aPlayer) noexcept;
     void ApplyPeers() noexcept;
     Actor* FindPlayer(uint32_t aId) const noexcept;
+    // Player id -> local form of its character, rebuilt once per Update (one pass over the player entities instead of
+    // one per lookup: lookups run per peer several times a frame).
+    mutable std::vector<std::pair<uint32_t, uint32_t>> m_playerForms;
+    mutable uint64_t m_playerFormsFrame{~0ull};
+    uint64_t m_frame{};
+    uint64_t m_nextTestState{};
     bool IsPartyMember(uint32_t aId) const noexcept;
     bool Near(PlayerCharacter* aPlayer, const Peer& aPeer, float aRadius) const noexcept;
     std::string Name(uint32_t aId) const;
@@ -110,18 +120,18 @@ private:
     // The party wiped: everyone collapsed and the checkpoint reload is on its way.
     bool m_wiped{};
     bool m_wasFirstPerson{};
-    // Fallen to a fling (ragdolled when the lethal hit landed) or an overkill: the body stays visible while it flies
-    // and rests, and the camera stays on it, before spectating begins.
-    bool m_flung{};
-    uint64_t m_flungSince{};
-    uint64_t m_flungRestSince{};
-    // Between a lethal fling/overkill hit and landing: the engine's knockdown plays untouched.
+    // Fallen to a fling or an overkill blow ("slain", for the notices; ReviveData::Flung on the wire). The body flew
+    // and landed in the dying phase below, before this player became fallen; fallen bodies are hidden alike.
+    bool m_slain{};
+    // Between a lethal fling/overkill hit and landing: the engine's knockdown plays untouched and the body stays
+    // visible (remote copies stream it) until it is nearly still or the player skips.
     uint64_t m_dyingSince{};
     bool m_dyingOverkill{};
     bool m_dyingKnocked{};
     bool m_dyingCollapsed{};
     uint64_t m_dyingKnockSince{};
-    // Stillness of the flying body (fallen once nearly still) and the skip key's previous state.
+    // Stillness of the flying body, sampled on its pelvis bone (the ragdoll moves the bones, not necessarily the
+    // reference position), and the skip key's previous state.
     NiPoint3 m_dyingLastPos{};
     uint64_t m_dyingLastSample{};
     uint64_t m_dyingStillSince{};

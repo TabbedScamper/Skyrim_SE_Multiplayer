@@ -215,10 +215,16 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
         if (!vote.Data.Tick || now < vote.Data.Tick)
         {
             bool changed = false;
+            // A member who fell mid-vote is carried through at once, not at the next vote event (the vote used to
+            // sit until its 120 s deadline; Muse review 2026-09-29).
+            for (const auto id : vote.Members)
+                if (!vote.Ready.count(id) && m_world.GetReviveService().IsFallenPlayer(id))
+                    changed = true;
             for (auto ready = vote.Ready.begin(); ready != vote.Ready.end();)
             {
                 auto* player = m_world.GetPlayerManager().GetById(*ready);
-                if (!IsNear(player, vote.Data, 400.f))
+                // Fallen members spectate from wherever they are; distance does not apply to them.
+                if (!IsNear(player, vote.Data, 400.f) && !m_world.GetReviveService().IsFallenPlayer(*ready))
                 {
                     ready = vote.Ready.erase(ready);
                     vote.Data.Tick = 0;

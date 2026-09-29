@@ -190,6 +190,7 @@ void ReviveService::OnRaise(Player* aCaster, const ReviveRequest& aRequest, uint
     if (const auto it = m_states.find(target->GetId()); it != m_states.end())
     {
         raise.Revision = it->second.Data.Revision;
+        it->second.RaisedRevision = it->second.Data.Revision;
         it->second.Data.Dead = false;
         Broadcast(target, it->second.Data);
     }
@@ -236,8 +237,12 @@ void ReviveService::OnRequest(const PacketEvent<ReviveRequest>& aEvent) noexcept
         state.Data = request;
         state.Data.PlayerId = id;
         state.Data.ReviverId = 0;
-        // Fallen is sticky: set by the owner when it bleeds out, cleared only by a raise (or a new campaign).
-        if (request.Dead && !IsFallen(player, request.Epoch))
+        // Fallen is sticky: set by the owner when it bleeds out, cleared only by a raise (or a new campaign). A report
+        // still carrying the raised revision crossed the raise in flight and must not undo it (the player would stand
+        // up while the server kept it fallen for good).
+        if (request.Dead && state.RaisedRevision && request.Revision <= state.RaisedRevision)
+            state.Data.Dead = false;
+        else if (request.Dead && !IsFallen(player, request.Epoch))
         {
             SetFallen(player, request.Epoch);
             spdlog::info("Revive: {} has fallen", player->GetUsername());

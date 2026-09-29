@@ -191,6 +191,8 @@ struct TESObjectREFR : TESForm
     void SaveAnimationVariables(AnimationVariables& aWriter) const noexcept;
     void LoadAnimationVariables(const AnimationVariables& aReader) const noexcept;
     uint32_t GetAnimationVariableInt(BSFixedString* apVariableName) noexcept;
+    // Hash of the active graph's state machine states (0 if unreadable): equal values mean the graph sits in the same states.
+    uint64_t GetGraphStateDigest() noexcept;
 
     void RemoveAllItems() noexcept;
     Vector<uint32_t> RemoveNonQuestItems(Inventory& aCurrentInventory) noexcept;

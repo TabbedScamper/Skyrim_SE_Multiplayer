@@ -115,6 +115,8 @@ private:
     bool m_reloadPending{};
     // A synced load (session start or wipe reload) keeps the screen black until the gameplay barrier.
     bool m_wipeFade{};
+    // When the black screen went up (a dead-man release lifts it if the gameplay barrier never comes).
+    uint64_t m_wipeFadeSince{};
     // A follower's Continue load held until the leader's world has loaded.
     bool m_deferredLaunch{};
     uint64_t m_deferredSince{};

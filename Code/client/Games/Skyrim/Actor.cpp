@@ -368,8 +368,11 @@ void Actor::DispelAllSpells(bool aNow) noexcept
 
 bool Actor::IsInCombat() const noexcept
 {
-    PAPYRUS_FUNCTION(bool, Actor, IsInCombat);
-    return s_pIsInCombat(this);
+    // Papyrus Actor.IsInCombat (140A0D6D0) is only this virtual call (Actor vtable +0x718). Calling it directly never
+    // depends on the native being registered: an unresolved binding returned false, which read as "out of combat"
+    // (Muse review 2026-09-29: revives would take the out-of-combat time mid-fight).
+    using TIsInCombat = bool (*)(const Actor*);
+    return reinterpret_cast<TIsInCombat>((*reinterpret_cast<void* const* const*>(this))[0x718 / 8])(this);
 }
 
 Actor* Actor::GetCombatTarget() const noexcept

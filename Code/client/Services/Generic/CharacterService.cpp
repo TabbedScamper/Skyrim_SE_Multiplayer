@@ -831,19 +831,20 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     m_createdThisFrame = false;
     if (!m_nextFrameSpawns.empty() && !m_holdSpawns)
     {
-        auto spawn = m_nextFrameSpawns.front();
-        m_nextFrameSpawns.erase(m_nextFrameSpawns.begin());
+        auto spawn = std::move(m_nextFrameSpawns.front());
+        m_nextFrameSpawns.pop_front();
         OnCharacterSpawn(spawn);
     }
     // A reload in progress: release the held spawns once the load event has fired and the player stands in a loaded
-    // cell (at most 90 s, so a failed load never strands them). Frame updates do not run during the load itself.
+    // cell. Never into an unloaded world (that is the crash the hold prevents): after 90 s a missed load event is
+    // forgiven only while the player is in a loaded cell. Frame updates do not run during the load itself.
     if (m_holdSpawns)
     {
         auto* pUI = UI::Get();
         const bool loading = pUI && pUI->GetMenuOpen(BSFixedString("Loading Menu"));
         auto* pPlayer = PlayerCharacter::Get();
         const bool inWorld = !loading && pPlayer && pPlayer->parentCell && pPlayer->GetNiNode();
-        if ((m_holdSawLoading && inWorld) || GetTickCount64() - m_holdSince > 90000)
+        if (inWorld && (m_holdSawLoading || GetTickCount64() - m_holdSince > 90000))
         {
             m_holdSpawns = false;
             auto held = std::move(m_heldSpawns);
@@ -934,6 +935,10 @@ void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const
 
 void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept
 {
+    // Spawns held or queued for the old connection name nothing now (ReleaseForReload re-arms the hold after this).
+    m_holdSpawns = false;
+    m_heldSpawns.clear();
+    m_nextFrameSpawns.clear();
     m_loadedActorLocations.clear();
     m_restoredOwnershipGrants.clear();
     for (const auto entity : m_world.view<LeaderNativeClaim>())
@@ -1258,7 +1263,13 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 {
     if (m_holdSpawns)
     {
-        m_heldSpawns.push_back(acMessage);
+        // Bounded while a load drags on: the newest request per server id replaces an older one.
+        const auto same = std::find_if(m_heldSpawns.begin(), m_heldSpawns.end(),
+            [&acMessage](const CharacterSpawnRequest& acHeld) { return acHeld.ServerId == acMessage.ServerId; });
+        if (same != m_heldSpawns.end())
+            *same = acMessage;
+        else
+            m_heldSpawns.push_back(acMessage);
         return;
     }
     if (acMessage.IsPlayer)

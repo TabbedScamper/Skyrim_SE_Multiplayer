@@ -21,8 +21,12 @@ struct PapyrusService
     const void* Get(const String& acNamespace, const String& acFunction) const noexcept;
 
     void HandlePapyrusFunctionEvent(const PapyrusFunctionRegisterEvent&) noexcept;
+    // From the VM's native registration hook (the game's thread that registers them), at once.
+    void Register(const char* apNamespace, const char* apName, void* apFunction) noexcept;
+    [[nodiscard]] size_t RegisteredCount() const noexcept;
 
 private:
+    mutable std::mutex m_lock;
     Map<String, void*> m_functions;
 
     entt::scoped_connection m_papyrusFunctionRegisterConnection;
@@ -33,6 +37,8 @@ private:
 // before the VM had registered the native kept a null pointer for the whole process (host crash in Actor::IsInCombat,
 // follower crash in TESObjectREFR::RemoveAllItems, 2026-09-29). An unresolved call returns a default value instead.
 const void* ResolvePapyrusFunction(const char* apNamespace, const char* apName) noexcept;
+// Names still unresolved after the VM registered its natives (a test gate: must stay 0).
+extern std::atomic<uint32_t> g_unresolvedPapyrusNatives;
 
 template <class TFunction> struct PapyrusBinding
 {

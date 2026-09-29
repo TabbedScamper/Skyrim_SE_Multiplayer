@@ -612,8 +612,11 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
     state.KeyDown = keyDown;
     state.Focused = focused;
 
-    std::unordered_map<uint32_t, Location> players;
-    std::unordered_set<uint32_t> fallenHandles;
+    // Reused every frame (swapped into the state below, the state's previous ones come back): no per-frame allocation.
+    static std::unordered_map<uint32_t, Location> players;
+    static std::unordered_set<uint32_t> fallenHandles;
+    players.clear();
+    fallenHandles.clear();
     if (leader && active)
     {
         const auto& revive = m_world.GetReviveService();
@@ -666,8 +669,8 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
         state.Epoch = party.GetStartEpoch();
         state.LeaderId = party.GetLeaderPlayerId();
         state.PlayerHandle = PlayerCharacter::Get() ? PlayerCharacter::Get()->GetHandle().handle.iBits : 0;
-        state.Players = std::move(players);
-        state.FallenHandles = std::move(fallenHandles);
+        state.Players.swap(players);
+        state.FallenHandles.swap(fallenHandles);
         state.SampleTime = now;
         TriggerPhantom::SetAuthority(state.Leader);
         // A despawn/cell change has no guaranteed native leave. Close the last

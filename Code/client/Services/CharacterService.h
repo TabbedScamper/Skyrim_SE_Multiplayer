@@ -1,4 +1,6 @@
 #pragma once
+
+#include <deque>
 #include "Structs/Inventory.h"
 #include "Structs/ActorData.h"
 #include <atomic>
@@ -139,7 +141,7 @@ struct CharacterService
     // taken at creation but enters the form table later), and the second spawn took over the first copy (a party
     // reload's replay: the other player's copy became a Thalmor soldier and was later deleted, 2026-09-29).
     bool m_createdThisFrame{};
-    Vector<CharacterSpawnRequest> m_nextFrameSpawns;
+    std::deque<CharacterSpawnRequest> m_nextFrameSpawns;
     void OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept;
     void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept;
     void OnReferencesMoveRequest(const ServerReferencesMoveRequest& acMessage) const noexcept;
