@@ -78,6 +78,14 @@ struct LeaderParkedActor
 // limbs have all settled may move (its streams are ended first): at a checkpoint load the first PC to register a
 // long-dead corpse otherwise kept it for good, outside the leader's authority (Lokir, 2026-09-28: the follower
 // owned and simulated him, local meteor blasts threw him around, the host never bound its own copy).
+// A corpse a player picked up (hold-to-grab): that player simulates it while carrying it; leader enforcement and other
+// claims leave it alone until it is let go and at rest, or 60 s pass without word.
+struct CarriedCorpse
+{
+    uint32_t Carrier{};
+    std::chrono::steady_clock::time_point Until{};
+};
+
 struct RagdollRelayState
 {
     std::array<uint64_t, 2> Ticks{};
@@ -515,6 +523,13 @@ void CharacterService::EnforceLeaderAuthority() const noexcept
             continue;
         }
         auto* leader = party ? m_world.GetPlayerManager().GetById(party->LeaderPlayerId) : nullptr;
+        if (const auto* carried = m_world.try_get<CarriedCorpse>(entity))
+        {
+            // A carried corpse stays with its carrier (until set down, or 60 s without word).
+            if (now < carried->Until && m_world.GetPlayerManager().GetById(carried->Carrier))
+                continue;
+            m_world.remove<CarriedCorpse>(entity);
+        }
         if (leader)
             ReconcileActorOwnership(leader, entity, false);
     }
@@ -973,6 +988,49 @@ void CharacterService::OnOwnershipClaimRequest(const PacketEvent<RequestOwnershi
 {
     const auto& message = acMessage.Packet;
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
+    if (message.Carry)
+    {
+        // Owner report (2026-09-29): followers could not pick up bodies; the leader simulates every corpse near it and
+        // the follower's grab only jiggled it. The carrier simulates a carried corpse; everyone else follows its ragdoll.
+        if (!m_world.valid(cEntity))
+            return;
+        if (message.Carry == 2)
+        {
+            if (const auto* carried = m_world.try_get<CarriedCorpse>(cEntity); carried && carried->Carrier == acMessage.pPlayer->GetId())
+            {
+                m_world.remove<CarriedCorpse>(cEntity);
+                spdlog::info("Corpse carry: {:X} set down by player {}", message.ServerId, acMessage.pPlayer->GetId());
+            }
+            return;
+        }
+        const auto* character = m_world.try_get<CharacterComponent>(cEntity);
+        const auto* cell = m_world.try_get<CellIdComponent>(cEntity);
+        const auto* owner = m_world.try_get<OwnerComponent>(cEntity);
+        const auto* carried = m_world.try_get<CarriedCorpse>(cEntity);
+        const bool carriedByOther = carried && carried->Carrier != acMessage.pPlayer->GetId() &&
+            std::chrono::steady_clock::now() < carried->Until;
+        if (!character || !cell || !owner || !character->IsDead() || character->IsPlayer() || character->IsMount() ||
+            carriedByOther || m_world.all_of<LeaderParkedActor>(cEntity) ||
+            !acMessage.pPlayer->GetCellComponent().IsInRange(*cell, character->IsDragon()) ||
+            !m_world.GetPartyService().GetPlayerParty(acMessage.pPlayer) ||
+            (owner->PartyId && owner->PartyId != acMessage.pPlayer->GetParty().JoinedPartyId))
+        {
+            spdlog::info("Corpse carry: {:X} refused for player {}", message.ServerId, acMessage.pPlayer->GetId());
+            return;
+        }
+        m_world.emplace_or_replace<CarriedCorpse>(cEntity, CarriedCorpse{acMessage.pPlayer->GetId(),
+            std::chrono::steady_clock::now() + std::chrono::seconds(60)});
+        const bool owned = owner->GetOwner() == acMessage.pPlayer ||
+            TransferOwnership(acMessage.pPlayer, cEntity, OwnershipTransferReason::CorpseCarry);
+        spdlog::info("Corpse carry: {:X} picked up by player {} (simulating it: {})", message.ServerId,
+            acMessage.pPlayer->GetId(), owned);
+        if (!owned)
+            m_world.remove<CarriedCorpse>(cEntity);
+        return;
+    }
+    if (const auto* carried = m_world.try_get<CarriedCorpse>(cEntity);
+        carried && carried->Carrier != acMessage.pPlayer->GetId() && std::chrono::steady_clock::now() < carried->Until)
+        return;
     const auto reason = m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer)
         ? OwnershipTransferReason::LeaderClaim
         : OwnershipTransferReason::CellLease;
@@ -1558,6 +1616,8 @@ const char* CharacterService::GetOwnershipTransferReasonName(const OwnershipTran
         return "owner relinquished control";
     case OwnershipTransferReason::OwnerUnavailable:
         return "owner became unavailable";
+    case OwnershipTransferReason::CorpseCarry:
+        return "corpse carry";
     }
 
     return "unknown reason";

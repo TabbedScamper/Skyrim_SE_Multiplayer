@@ -58,7 +58,8 @@ protected:
         CellLease,
         Mount,
         Relinquish,
-        OwnerUnavailable
+        OwnerUnavailable,
+        CorpseCarry
     };
 
     void OnUpdate(const UpdateEvent& acEvent) const noexcept;

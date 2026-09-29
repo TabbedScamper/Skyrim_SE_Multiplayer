@@ -5957,6 +5957,59 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             ReviveService::SetTestBleed(value);
             return Result(id, fmt::format("\"bleed\":{}", value));
         }
+        if (command == "ref_pose")
+        {
+            // A loose object's reference position, its drawn 3D position, and whether the host's physics stream drives
+            // it here (followers apply the host's poses; the host has none).
+            const auto form = GetJsonString(acLine, "form_id");
+            auto* pRef = form.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            if (!pRef)
+                return Error(id, "reference not found");
+            NiAVObject* pRoot = pRef->GetNiNode();
+            // A body: its pelvis bone (the ragdoll moves the bones, not the reference).
+            static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+            if (pRoot && Cast<Actor>(pRef))
+                if (auto* pBone = static_cast<NiNode*>(pRoot)->GetByName(s_pelvis))
+                    pRoot = pBone;
+            ObjectService::RemotePhysicsDiagnostic authority{};
+            const bool driven = m_world.ctx().at<ObjectService>().GetRemotePhysicsDiagnostic(pRef->formID, authority);
+            return Result(id, fmt::format("\"position\":[{:.1f},{:.1f},{:.1f}],\"node\":[{:.1f},{:.1f},{:.1f}],"
+                "\"hostDriven\":{},\"hostPosition\":[{:.1f},{:.1f},{:.1f}],\"hostAgeMs\":{},\"bodyDriven\":{},\"lease\":{}",
+                pRef->position.x, pRef->position.y, pRef->position.z, pRoot ? pRoot->world.translate.x : 0.f,
+                pRoot ? pRoot->world.translate.y : 0.f, pRoot ? pRoot->world.translate.z : 0.f, JsonBool(driven),
+                authority.Position.x, authority.Position.y, authority.Position.z, authority.AgeMs,
+                JsonBool(authority.BodyDriven), ObjectService::LeaseHolder(pRef->formID)));
+        }
+        if (command == "grab_object")
+        {
+            // The hold-Activate grab without a crosshair: StartGrabObject (40552) checks the crosshair reference's
+            // mass and then calls 40555 (player, reference, 1, 1000.0, 0), which attaches the grab spring.
+            // "release" ends it (PlayerCharacter::DestroyMouseSprings, 40557).
+            const auto formText = GetJsonString(acLine, "form_id");
+            const bool release = GetJsonString(acLine, "release") == "true";
+            const uint32_t formId = formText.empty() ? 0 : std::stoul(formText, nullptr, 16);
+            QueueCreatorCall([formId, release]() {
+                auto* pPlayer = PlayerCharacter::Get();
+                if (!pPlayer)
+                    return;
+                if (release)
+                {
+                    using TRelease = void(PlayerCharacter*);
+                    POINTER_SKYRIMSE(TRelease, destroySprings, 40557);
+                    destroySprings.Get()(pPlayer);
+                    spdlog::info("Test grab_object: released");
+                    return;
+                }
+                auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
+                if (!pReference)
+                    return;
+                using TGrab = void*(PlayerCharacter*, TESObjectREFR*, uint32_t, float, bool);
+                POINTER_SKYRIMSE(TGrab, grab, 40555);
+                const auto* pResult = grab.Get()(pPlayer, pReference, 1, 1000.f, false);
+                spdlog::info("Test grab_object: {:X} grab spring {}", formId, fmt::ptr(pResult));
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\",\"release\":{}", formId, JsonBool(release)));
+        }
         if (command == "start_combat")
         {
             // attacker: a form id (hex); target: a form id or "remote_player" (the other player's copy here).

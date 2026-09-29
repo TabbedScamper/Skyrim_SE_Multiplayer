@@ -84,6 +84,7 @@ enum ClientOpcode : unsigned char
     kRequestPlayerMirror, // Reserved. Experimental player replay was withdrawn.
     kRequestHarness,
     kAnimObjectRequest,
+    kPhysicsLeaseRequest,
     kClientOpcodeMax
 };
 
@@ -169,5 +170,6 @@ enum ServerOpcode : unsigned char
     kNotifyPlayerMirror, // Reserved. Experimental player replay was withdrawn.
     kNotifyHarness,
     kNotifyAnimObject,
+    kNotifyPhysicsLease,
     kServerOpcodeMax
 };

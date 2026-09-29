@@ -75,6 +75,7 @@
 #include <Messages/NotifyLeaderControl.h>
 #include <Messages/NotifyDoorVote.h>
 #include <Messages/NotifyRevive.h>
+#include <Messages/NotifyPhysicsLease.h>
 #include <Messages/NotifyScriptedCamera.h>
 
 #include <Messages/NotifyQuestItems.h>
@@ -96,7 +97,7 @@ struct ServerMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<NotifyHarness, NotifyNpcWorn, NotifyNpcLoot, NotifyWorldState, NotifyPlayerControlState, NotifySharedDrop, NotifyDialogueListen, NotifyBusyLock, NotifyPlayerCombatState, NotifyQuestItems, NotifyScriptedCamera, NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<NotifyPhysicsLease, NotifyHarness, NotifyNpcWorn, NotifyNpcLoot, NotifyWorldState, NotifyPlayerControlState, NotifySharedDrop, NotifyDialogueListen, NotifyBusyLock, NotifyPlayerCombatState, NotifyQuestItems, NotifyScriptedCamera, NotifyRevive, NotifyDoorVote, NotifyPartyUnstuck, NotifyDismember, NotifyQuestAliasFills,
             NotifyScriptedActorState, AuthenticationResponse, AssignCharacterResponse, ServerReferencesMoveRequest, ServerTimeSettings, CharacterSpawnRequest, NotifyInventoryChanges, StringCacheUpdate, NotifyFactionsChanges, NotifyRemoveCharacter, NotifyQuestUpdate, NotifyPlayerList, NotifyPartyInfo, NotifyPartyInvite,
             NotifyActorValueChanges, NotifyPartyJoined, NotifyPartyLeft, NotifyActorMaxValueChanges, NotifyHealthChangeBroadcast, NotifyActivate, NotifyLockChange, AssignObjectsResponse, NotifyDeathStateChange, NotifyOwnershipTransfer, NotifyObjectInventoryChanges, NotifySpellCast,
             NotifyProjectileLaunch, NotifyInterruptCast, NotifyAddTarget, NotifyScriptAnimation, NotifyDrawWeapon, NotifyAnimObject, NotifyMount, NotifyNewPackage, NotifyRespawn, NotifySyncExperience, NotifyEquipmentChanges, NotifyChatMessageBroadcast, TeleportCommandResponse, NotifyPlayerRespawn, NotifyDialogue,
