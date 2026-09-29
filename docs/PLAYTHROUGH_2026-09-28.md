@@ -24,7 +24,7 @@ Status: **fixed** = changed and verified in a two-PC run; **changed** = code cha
 | 11 | "To Helgen Keep" message repeats continuously inside the keep | The native door activation prompt stays on screen. The door vote held 25FAE for 3 s (17:44:29-32) and replayed the activation; suspect the crosshair target is not cleared on the replay path. Needs a door repro | open |
 | 12 | Tails stuck straight out in Helgen Keep until downed/revived | | open |
 | 13 | Other players cannot see dropped items | Both installed STServer.ini files had `bEnableItemDrops=false` (the old upstream default; code default is true), so every drop was registered as Local only. Set true on the host install (backups `*.pre-itemdrops`). Two-PC drop test (`agent\drop_test.ps1`): each drop appears on the other PC within 2 s at the same spot | fixed (config) |
-| 14 | Remote players' idle animation plays too fast | | open |
+| 14 | Remote players' idle animation plays too fast | Not reproduced for standing player copies: `agent\idle_rate.ps1` shows the copy is not graph-updated at all (it follows the streamed pose); `agent\idle_trace.ps1` head-bone motion equal on owner and copy (1.9/2.0 and 2.0/1.8 u/s). Need which characters (players or NPC companions) and when | open (no repro) |
 | 15 | Mage "magic hands" effect stays active | | open |
 
 Also found while testing: my drop_item test command crashed both games three times (fixed: runs on the game thread, no Papyrus DropObject return); `agent\crash_check.ps1` now reports any crash on either PC from the dumps. A script-placed item (PlaceAtMe) is not shared.

@@ -5533,7 +5533,23 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         if (command == "actor_state")
         {
             const auto form = GetJsonString(acLine, "form_id");
-            auto* pActor = form.empty() ? nullptr : Cast<Actor>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            Actor* pActor = nullptr;
+            if (form == "remote_player")
+            {
+                // The other player's copy on this PC (its form id differs per PC).
+                auto view = m_world.view<FormIdComponent>();
+                for (auto entity : view)
+                {
+                    auto* pCandidate = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                    if (pCandidate && pCandidate->GetExtension() && pCandidate->GetExtension()->IsRemotePlayer())
+                    {
+                        pActor = pCandidate;
+                        break;
+                    }
+                }
+            }
+            else if (!form.empty())
+                pActor = Cast<Actor>(TESForm::GetById(std::stoul(form, nullptr, 16)));
             // Or the nearest non-player actor within 500 units of x,y,z (temporary actors have
             // different form ids on each PC).
             if (!pActor && !GetJsonString(acLine, "x").empty())
@@ -5573,15 +5589,19 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             }
             worn += "]";
             items += "}";
+            // Graph update calls for this actor's holder (a copy updated twice per frame animates at double speed).
+            AnimationGraphUpdateTrace::WatchHolder(&pActor->animationGraphHolder, pActor->formID);
+            const auto graph = AnimationGraphUpdateTrace::GetHolderSample(&pActor->animationGraphHolder);
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
                 "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{},\"health\":{:.1f},\"inCombat\":{},\"combatTarget\":\"{:X}\","
-                "\"remote\":{},\"items\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
                 CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor),
                 pActor->GetActorValue(ActorValueInfo::kHealth), JsonBool(pActor->IsInCombat()),
                 pActor->GetCombatTarget() ? pActor->GetCombatTarget()->formID : 0,
-                JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote()), items));
+                JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote()), items, graph.Calls, graph.LastPostCallMs,
+                GetTickCount64()));
         }
         if (command == "ref_bodies")
         {
