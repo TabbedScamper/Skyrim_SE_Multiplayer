@@ -1013,9 +1013,20 @@ void HarnessService::Tick()
                 // game's own trigger-enter event; the party follower lands on "party_wait" beside it instead.
                 const bool intoTrigger = s.Step->HasKey("until_trigger");
                 const bool partyFollower = intoTrigger && s.Step->GetBool("party_trigger") && s.Local != s.Leader;
-                auto* ref = Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, intoTrigger ? "until_trigger" : "ref"))));
+                // An absolute point ("x","y","z" without "ref") stages relative to the player's own cell.
+                const bool absolute = !intoTrigger && !s.Step->HasKey("ref") && s.Step->HasKey("x") && s.Step->HasKey("y") && s.Step->HasKey("z");
+                auto* ref = absolute ? static_cast<TESObjectREFR*>(player) :
+                    Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, intoTrigger ? "until_trigger" : "ref"))));
                 if (!ref) throw std::runtime_error("teleport staging reference unavailable");
-                if (intoTrigger)
+                if (absolute)
+                {
+                    s.TeleportPosition.x = static_cast<float>(Num(s.Step, "x"));
+                    s.TeleportPosition.y = static_cast<float>(Num(s.Step, "y"));
+                    s.TeleportPosition.z = static_cast<float>(Num(s.Step, "z"));
+                    if (glm::length(s.TeleportPosition - player->position) > 8192.f)
+                        throw std::runtime_error("absolute teleport point is too far from the player");
+                }
+                else if (intoTrigger)
                 {
                     auto point = partyFollower ? s.Step->GetDictionary("party_wait") : s.Step;
                     if (!point || !point->HasKey("x") || !point->HasKey("y") || !point->HasKey("z"))

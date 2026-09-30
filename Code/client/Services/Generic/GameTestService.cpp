@@ -958,9 +958,13 @@ void Tick()
                     // turns heading only and would otherwise keep any earlier look-up/down pitch.
                     if (active && ownsAI)
                     {
+                        // About 90 degrees per second, by elapsed time (the driver tick rate varies).
+                        static uint64_t s_lastPitchMs{};
+                        const float maxStep = std::clamp((now - s_lastPitchMs) * 0.0016f, 0.f, 0.1f);
+                        s_lastPitchMs = now;
                         const float horizontal = std::hypot(target->position.x - player->position.x, target->position.y - player->position.y);
                         const float wanted = std::clamp(std::atan2(player->position.z - target->position.z, std::max(horizontal, 64.f)), -0.5f, 0.5f);
-                        const float step = std::clamp(wanted - player->rotation.x, -0.05f, 0.05f);
+                        const float step = std::clamp(wanted - player->rotation.x, -maxStep, maxStep);
                         if (std::isfinite(step) && std::abs(step) > 0.001f)
                             player->SetRotation(player->rotation.x + step, player->rotation.y, player->rotation.z);
                     }
@@ -970,6 +974,16 @@ void Tick()
         }
     }
     catch (const std::exception& e) { Finish(player, "failed", e.what()); }
+    // Owner saw test players' views snap straight up or down: log any big pitch jump with the driver state.
+    if (player)
+    {
+        static float s_lastPitch{};
+        const float pitch = player->rotation.x;
+        if (std::isfinite(pitch) && std::abs(pitch - s_lastPitch) > 0.35f)
+            spdlog::info("Intro driver: pitch jump {:.0f} -> {:.0f} deg state={} active={} ownsAI={} aiDriven={} target={:X}",
+                s_lastPitch * 57.2958f, pitch * 57.2958f, state, active, ownsAI, Driven(player), targetId);
+        s_lastPitch = pitch;
+    }
     const auto json = fmt::format("\"state\":\"{}\",\"reason\":\"{}\",\"active\":{},\"ownsAI\":{},\"aiDriven\":{},\"creator\":\"{}\",\"creatorOpen\":{},\"creatorDone\":{},\"movementEnabled\":{},\"cellId\":{},\"targetId\":{},\"questId\":{},\"objectiveId\":{},\"distance\":{},\"radius\":{},\"pathId\":{},\"elapsedMs\":{},\"sampleMs\":{}",
         state, EscapeJson(reason), JsonBool(active), JsonBool(ownsAI), JsonBool(Driven(player)), EscapeJson(creator), JsonBool(creatorOpen), JsonBool(CreatorTogether::IsDone()), JsonBool((controls & 1) != 0), cell ? cell->formID : 0, targetId, questId, objectiveId, distance, radius, pathId, active ? now - started : 0, now);
     {
