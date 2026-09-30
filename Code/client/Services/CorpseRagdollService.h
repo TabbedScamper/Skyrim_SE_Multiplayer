@@ -86,6 +86,9 @@ private:
         const char* LastSkipReason{};
         // Times the local actor reference was moved onto the owner origin while following.
         uint32_t AnchorMoves{};
+        // The copy's ragdoll drives its drawn body (bound with a driver). Until then it holds its last living pose,
+        // drawn relative to its own reference, so the owner's death-time reference turn must wait.
+        bool DrivesBody{};
         uint64_t DismemberTick{};
         uint64_t EndTick{};
         uint64_t RetryTransitionMs{};

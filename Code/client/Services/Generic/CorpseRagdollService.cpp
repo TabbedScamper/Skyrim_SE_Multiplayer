@@ -1935,17 +1935,38 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                     presented = index;
             }
             const auto& newest = ragdoll.Ring[presented];
+            // Interpolate the owner's origin and heading at the presentation clock (between the presented sample and
+            // the next one) and move the reference there every frame, a bounded step at a time. Snapping it to the
+            // newest sample past a 5 u threshold moved it in steps (Lokir 2026-09-30: 33 u at death, then 60 u and a
+            // 127 deg turn one second later); the ragdoll is drawn relative to the reference, so each step flashed
+            // the body out of place for a frame.
             NiPoint3 origin;
-            origin.x = newest.Origin[0];
-            origin.y = newest.Origin[1];
-            origin.z = newest.Origin[2];
-            const float dx = actor->position.x - origin.x, dy = actor->position.y - origin.y,
-                dz = actor->position.z - origin.z;
-            const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (std::isfinite(gap) && gap > 5.f) // review P1-6: no per-frame churn for sub-5 u drift
+            origin.x = newest.Origin[0]; origin.y = newest.Origin[1]; origin.z = newest.Origin[2];
+            float heading = newest.Heading;
+            for (uint32_t i = 0; i + 1 < ragdoll.RingCount; ++i)
             {
-                if (!ragdoll.AnchorMoves || gap > 50.f)
-                    spdlog::info("Ragdoll {:X} (server {:X}): actor reference {:.1f} u from owner origin, re-anchored",
+                const auto& a = ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i) % size];
+                const auto& b = ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i + 1) % size];
+                if (a.Tick <= presentation && presentation < b.Tick && b.Tick > a.Tick)
+                {
+                    const float u = static_cast<float>(static_cast<double>(presentation - a.Tick) / static_cast<double>(b.Tick - a.Tick));
+                    origin.x = a.Origin[0] + (b.Origin[0] - a.Origin[0]) * u;
+                    origin.y = a.Origin[1] + (b.Origin[1] - a.Origin[1]) * u;
+                    origin.z = a.Origin[2] + (b.Origin[2] - a.Origin[2]) * u;
+                    heading = a.Heading + std::remainder(b.Heading - a.Heading, 6.2831853f) * u;
+                    break;
+                }
+            }
+            // Only once the copy's ragdoll draws the body. Before that it holds its last living pose relative to its
+            // own reference; taking the owner's death-time reference turn then (Lokir: 97 -> 330 deg at death) drew
+            // the held pose turned 134 deg away for 8 frames (the flash at death, 2026-09-30). Then all at once: the
+            // drawn ragdoll sits on the reference, so a partial move is drawn partially wrong.
+            const float dx = origin.x - actor->position.x, dy = origin.y - actor->position.y, dz = origin.z - actor->position.z;
+            const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (ragdoll.DrivesBody && std::isfinite(gap) && gap > 0.25f)
+            {
+                if (gap > 50.f)
+                    spdlog::info("Ragdoll {:X} (server {:X}): actor reference {:.1f} u from owner origin, moved to it",
                         actor->formID, serverId, gap);
                 // HookSetPosition drops SetPosition on remote actors unless the call is scoped as ours: without this the
                 // re-anchor never applied (run 20260928-072831: reference stayed exactly 88.1 u off every frame).
@@ -1957,13 +1978,13 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             // death (97 -> 306..330 deg for Lokir, then 108 at the settle); the copy stayed at 97, so its drawn
             // body was the owner's pose turned by the difference (151 deg measured = the reference gap, run
             // 20260928-093355), seen as the corpse spinning during the fall.
-            const float turn = std::remainder(newest.Heading - actor->rotation.z, 6.2831853f);
-            if (std::isfinite(turn) && std::abs(turn) > 0.02f)
+            const float turn = std::remainder(heading - actor->rotation.z, 6.2831853f);
+            if (ragdoll.DrivesBody && std::isfinite(turn) && std::abs(turn) > 0.002f)
             {
-                if (std::abs(turn) > 0.5f)
+                if (std::abs(turn) > 1.5f)
                     spdlog::info("Ragdoll {:X} (server {:X}): heading {:.0f} deg from the owner's, turned to match",
                         actor->formID, serverId, turn * 57.29578f);
-                actor->SetRotation(actor->rotation.x, actor->rotation.y, newest.Heading);
+                actor->SetRotation(actor->rotation.x, actor->rotation.y, heading);
             }
         }
         if (!limb)
@@ -2144,6 +2165,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         {
             PoseCopyAuthority::SetControlledRagdollDriver(driver, true);
             PoseCopyAuthority::SetRagdollSimulating(actor->formID, true);
+            ragdoll.DrivesBody = true;
         }
         if (ragdoll.PublishedRevision == ragdoll.Revision)
             continue;
@@ -2167,6 +2189,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         {
             PoseCopyAuthority::SetControlledRagdollDriver(driver, true);
             PoseCopyAuthority::SetRagdollSimulating(actor->formID, true);
+            ragdoll.DrivesBody = true;
         }
     }
 
