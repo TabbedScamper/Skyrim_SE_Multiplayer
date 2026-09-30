@@ -224,9 +224,9 @@
       }
     },
     {
-      "op": "teleport",
+      "op": "walk",
       "ref": "AA7A3",
-      "timeout": 20,
+      "timeout": 90,
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -241,7 +241,10 @@
           "AA7DF"
         ]
       },
-      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
+      "source": "crosses an exterior grid boundary from the staging point; stays a walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true
     },
     {
       "op": "wait_stage",
@@ -765,9 +768,9 @@
       }
     },
     {
-      "op": "teleport",
+      "op": "walk",
       "ref": "D7D7E",
-      "timeout": 20,
+      "timeout": 90,
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -782,7 +785,10 @@
           "AA7DF"
         ]
       },
-      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
+      "source": "crosses an exterior grid boundary from the staging point; stays a walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true
     },
     {
       "op": "teleport",
