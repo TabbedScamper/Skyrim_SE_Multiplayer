@@ -693,7 +693,15 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     if (m_inParty && m_isLeader && m_sessionState >= 2)
     {
         PlayerControlState state;
-        const bool free = m_sessionState >= 3 && CapturePlayerControlState(state) && state.Free;
+        // Down, fallen or dead is not a cutscene: bleedout takes the leader's controls, and reporting that as "not
+        // free" put every follower into cutscene follow, whose player then took the downed leader's pose and camera
+        // (2026-09-30: the follower's character mangled, third person, glued to the fallen host). ReviveService owns
+        // downed players.
+        auto* pLocal = PlayerCharacter::Get();
+        const uint32_t life = pLocal ? (pLocal->actorState.flags1 >> 21) & 0xF : 0;
+        const bool down = pLocal && (pLocal->actorState.IsBleedingOut() || life == 1 || life == 2 || life == 7 || life == 8 ||
+            m_world.GetReviveService().IsFallen(m_world.GetTransport().GetLocalPlayerId()));
+        const bool free = m_sessionState >= 3 && (down || (CapturePlayerControlState(state) && state.Free));
         const auto nowMs = GetTickCount64();
         if (static_cast<int>(free) != m_leaderFreeSent || nowMs >= m_nextLeaderFreeSendMs)
         {

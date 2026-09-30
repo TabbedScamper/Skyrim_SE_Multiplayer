@@ -6092,7 +6092,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const auto cellText = GetJsonString(acLine, "cell");
             if (cellText.empty())
                 return Error(id, "cell missing");
-            const char* error = m_world.GetDoorVoteService().RequestTestCell(std::stoul(cellText, nullptr, 16));
+            // "name": the cell's editor id (QASmoke, CTest, HelgenExterior07); each PC loads it as the console's coc does.
+            const auto nameText = GetJsonString(acLine, "name");
+            const char* error = m_world.GetDoorVoteService().RequestTestCell(std::stoul(cellText, nullptr, 16), nameText.c_str());
             if (*error)
                 return Error(id, error);
             return Result(id, fmt::format("\"requested\":\"{}\"", EscapeJson(cellText)));
@@ -6441,6 +6443,80 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 GetTickCount64(), JsonBool(pRoot && (pRoot->flags & 1u) != 0),
                 pActor->GetActorValue(ActorValueInfo::kMagicka), (pActor->actorState.flags2 >> 5) & 7,
                 pActor->GetEquippedWeapon(1) ? pActor->GetEquippedWeapon(1)->formID : 0, HeadTrackService::DescribeLook(pActor)));
+        }
+        if (command == "world_snapshot")
+        {
+            // Every non-actor reference within "radius" (default 2500) of a point ("x","y","z"; default the player) in
+            // the 3x3 loaded exterior cells, or the player's interior cell: [form, disabled, 3D loaded, collision bodies
+            // in the physics world]. Diffed step by step on both PCs while a quest plays (Helgen inn, 2026-09-30).
+            auto* pPlayer = PlayerCharacter::Get();
+            if (!pPlayer || !pPlayer->parentCell)
+                return Error(id, "player missing");
+            const auto radiusText = GetJsonString(acLine, "radius");
+            const float radius = radiusText.empty() ? 2500.f : std::stof(radiusText);
+            NiPoint3 center = pPlayer->position;
+            if (!GetJsonString(acLine, "x").empty())
+            {
+                center.x = std::stof(GetJsonString(acLine, "x"));
+                center.y = std::stof(GetJsonString(acLine, "y"));
+                center.z = std::stof(GetJsonString(acLine, "z"));
+            }
+            const auto bodiesInWorld = [](NiAVObject* apRoot) {
+                int inWorld = 0, visited = 0;
+                std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth) {
+                    if (!apNode || aDepth > 8 || ++visited > 256)
+                        return;
+                    if (apNode->collisionObject)
+                    {
+                        void* pWrapper{};
+                        void* pBody{};
+                        void* pPhysicsWorld{};
+                        if (ReadNative(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
+                            ReadNative(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody &&
+                            ReadNative(static_cast<const uint8_t*>(pBody) + 0x10, pPhysicsWorld) && pPhysicsWorld)
+                            ++inWorld;
+                    }
+                    if (auto* pAsNode = apNode->AsNode())
+                        for (uint16_t i = 0; i < pAsNode->children.length; ++i)
+                            walk(pAsNode->children.data[i], aDepth + 1);
+                };
+                walk(apRoot, 0);
+                return inWorld;
+            };
+            std::string refs = "[";
+            int count = 0;
+            auto visit = [&](TESObjectCELL* pCell) {
+                if (!pCell || !pCell->refData.refArray || pCell->refData.capacity > 50000)
+                    return;
+                for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
+                {
+                    auto* pRef = pCell->refData.refArray[i].Get();
+                    if (!pRef || !pRef->baseForm || pRef->IsDeleted() || pRef->formType == Actor::Type)
+                        continue;
+                    const auto d = pRef->position - center;
+                    if (d.x * d.x + d.y * d.y + d.z * d.z > radius * radius)
+                        continue;
+                    auto* pRoot = pRef->GetNiNode();
+                    refs += fmt::format("{}[\"{:X}\",{},{},{}]", count++ ? "," : "", pRef->formID, pRef->IsDisabled() ? 1 : 0,
+                        pRoot ? 1 : 0, pRoot ? bodiesInWorld(pRoot) : 0);
+                }
+            };
+            if (auto* pSpace = pPlayer->GetWorldSpace())
+            {
+                const int32_t cx = static_cast<int32_t>(std::floor(center.x / 4096.f));
+                const int32_t cy = static_cast<int32_t>(std::floor(center.y / 4096.f));
+                for (int32_t dx = -1; dx <= 1; ++dx)
+                    for (int32_t dy = -1; dy <= 1; ++dy)
+                        visit(ModManager::Get()->GetCellFromCoordinates(cx + dx, cy + dy, pSpace, false));
+                // Persistent references (quest properties, enable-parent children such as the Helgen inn models)
+                // live in the worldspace's persistent cell (TESWorldSpace +0x88), not in the grid cells.
+                void* pPersistent{};
+                if (ReadNative(reinterpret_cast<const uint8_t*>(pSpace) + 0x88, pPersistent))
+                    visit(Cast<TESObjectCELL>(static_cast<TESForm*>(pPersistent)));
+            }
+            else
+                visit(pPlayer->parentCell);
+            return Result(id, fmt::format("\"count\":{},\"refs\":{}]", count, refs));
         }
         if (command == "ref_bodies")
         {

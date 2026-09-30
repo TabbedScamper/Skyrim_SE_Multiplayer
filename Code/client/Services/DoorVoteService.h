@@ -76,7 +76,8 @@ struct DoorVoteService
     bool IsVoteDoor(TESObjectREFR* aDoor) noexcept;
     bool HasPendingVote() const noexcept { return m_deadline != 0 || m_state.VoteId != 0; }
     // Test harness, leader only: move the whole party into a cell through the door barrier. Returns an error or "".
-    const char* RequestTestCell(uint32_t aCellFormId) noexcept;
+    // By editor id (as the console's coc), which also finds exterior cells that are not loaded yet.
+    const char* RequestTestCell(uint32_t aCellFormId, const char* apEditorId) noexcept;
     // Main thread (HookMainLoop): performs a queued test-cell load (CenterOnCell); never from the update thread.
     static void OnMainFrame() noexcept;
 
