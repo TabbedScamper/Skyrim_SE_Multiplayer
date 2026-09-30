@@ -1993,8 +1993,9 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
         const auto sample = [&](uint32_t i) -> const Sample& { return ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i) % size]; };
         const auto& newest = sample(ragdoll.RingCount - 1);
-        // A limb waits for its presentation. A body binds as soon as its local ragdoll exists and is held on the
-        // owner's first sample until that sample is due (StepFrame::Stream::Evaluate); no knock before then.
+        // A limb waits for its presentation. A body is knocked into ragdoll and bound at once, and held on the
+        // owner's first sample until that sample is due (StepFrame::Stream::Evaluate). Binding without the knock let
+        // the copy's own death animation drag it 96 u by root motion before the owner's stream (15:3x run).
         const bool awaitingFirst = presentation < sample(0).Tick;
         if (limb && (awaitingFirst || presentation < ragdoll.DismemberTick))
         {
@@ -2004,7 +2005,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         bool ownerDyingNow = false;
         for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
             ownerDyingNow |= sample(i).Dying && sample(i).Tick <= presentation;
-        if (!limb && !awaitingFirst && aNowMs >= ragdoll.RetryTransitionMs &&
+        if (!limb && aNowMs >= ragdoll.RetryTransitionMs &&
             (!ragdoll.Knocked || (ownerDyingNow && !actor->IsDead())))
         {
             if (!actor->currentProcess)
