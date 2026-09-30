@@ -70,6 +70,10 @@ struct MenuCursorCounter
 static_assert(offsetof(MenuCursorCounter, ShowCursorCount) == 0x2C);
 
 std::atomic_bool s_shellOwnsPointer{false}; // Also read by the game input poll.
+// Windows' own move/resize loop (a title-bar or border drag, WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE): the pointer is
+// Windows' until it ends. Confined to the client area, a border could only be dragged inward (owner report
+// 2026-09-29: "i cant drag the window out, it shrinks when grabbing the edges in windowed mode").
+bool s_sizeMoveLoop{};
 std::atomic_bool s_windowDeactivated{false};
 uint32_t s_focusMessageDepth = 0;
 std::optional<bool> s_appliedGameOwnership; // last visibility state applied
@@ -126,7 +130,7 @@ void ClipToClientArea(HWND aWindow) noexcept
 
 bool GameOwnsPointer(HWND aWindow) noexcept
 {
-    return !s_shellOwnsPointer && !s_windowDeactivated && s_focusMessageDepth == 0 &&
+    return !s_shellOwnsPointer && !s_windowDeactivated && !s_sizeMoveLoop && s_focusMessageDepth == 0 &&
         GetForegroundWindow() == aWindow && GetFocus() == aWindow && !IsIconic(aWindow);
 }
 
@@ -285,6 +289,11 @@ void InputService::AfterGameWndProc(HWND hwnd, UINT uMsg) noexcept
             --s_focusMessageDepth;
         if (s_focusMessageDepth == 0)
             UpdateCursorOwnership(hwnd);
+        break;
+    case WM_ENTERSIZEMOVE:
+    case WM_EXITSIZEMOVE:
+        s_sizeMoveLoop = uMsg == WM_ENTERSIZEMOVE;
+        UpdateCursorOwnership(hwnd);
         break;
     case WM_SIZE:
     case WM_MOVE:
