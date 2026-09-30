@@ -5619,6 +5619,22 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Result(id, "\"queued\":true");
         }
         // Revive tests: face a point (heading toward x,y), hold Activate, damage this PC's player (game thread).
+        // Cheap per-frame-safe camera sample: camera root and player root world positions, the camera's view
+        // direction and one quest's stage. For probes that run inside a scene (a full game snapshot costs ~0.2 s).
+        if (command == "camera_sample")
+        {
+            auto* player = PlayerCharacter::Get();
+            auto* camera = PlayerCamera::Get();
+            if (!player || !player->GetNiNode() || !camera || !camera->cameraNode)
+                return Error(id, "player or camera not loaded");
+            const auto& c = camera->cameraNode->world;
+            const auto& p = player->GetNiNode()->world.translate;
+            const auto questText = GetJsonString(acLine, "quest");
+            auto* quest = questText.empty() ? nullptr : Cast<TESQuest>(TESForm::GetById(std::stoul(questText, nullptr, 16)));
+            return Result(id, fmt::format("\"camera\":[{},{},{}],\"view\":[{},{},{}],\"body\":[{},{},{}],\"stage\":{}",
+                c.translate.x, c.translate.y, c.translate.z, c.rotate.entry[0][1], c.rotate.entry[1][1], c.rotate.entry[2][1],
+                p.x, p.y, p.z, quest ? quest->currentStage : -1));
+        }
         if (command == "face_point")
         {
             auto* player = PlayerCharacter::Get();
