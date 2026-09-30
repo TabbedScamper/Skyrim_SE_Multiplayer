@@ -939,8 +939,14 @@ struct CorpseRagdollService::StepFrame
         bool Evaluate(double aTime, size_t aBody, QsTransform& aPose, bool& aSettled, uint64_t& aTick,
             CorpseRagdollBody* apState = nullptr) const noexcept
         {
-            if (Samples.empty() || aTime < Samples.front().Tick || (EndTick && aTime >= EndTick))
+            if (Samples.empty() || (EndTick && aTime >= EndTick))
                 return false;
+            // Before the owner's first sample is due, hold the copy on that sample, still. Left to itself the copy's
+            // own local ragdoll kept the actor's momentum: Lokir, shot mid-run, slid 76 u from his reference in the
+            // 185 ms before the stream took over, then snapped onto the owner's body (2026-09-30).
+            const bool holding = aTime < Samples.front().Tick;
+            if (holding)
+                aTime = static_cast<double>(Samples.front().Tick);
             size_t index = 0;
             while (index + 1 < Samples.size() && Samples[index + 1].Tick <= aTime)
                 ++index;
@@ -986,7 +992,7 @@ struct CorpseRagdollService::StepFrame
                     apState->AngularVelocity[axis] = x.AngularVelocity[axis] + (y.AngularVelocity[axis] - x.AngularVelocity[axis]) * t;
                 }
                 // Never extrapolate velocity indefinitely across a lost stream.
-                if (aSettled || aTime > Samples.back().Tick + 100.0)
+                if (holding || aSettled || aTime > Samples.back().Tick + 100.0)
                 {
                     std::fill_n(apState->LinearVelocity, 3, 0.f);
                     std::fill_n(apState->AngularVelocity, 3, 0.f);
@@ -1987,7 +1993,10 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
         const auto sample = [&](uint32_t i) -> const Sample& { return ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i) % size]; };
         const auto& newest = sample(ragdoll.RingCount - 1);
-        if (presentation < sample(0).Tick || (limb && presentation < ragdoll.DismemberTick))
+        // A limb waits for its presentation. A body binds as soon as its local ragdoll exists and is held on the
+        // owner's first sample until that sample is due (StepFrame::Stream::Evaluate); no knock before then.
+        const bool awaitingFirst = presentation < sample(0).Tick;
+        if (limb && (awaitingFirst || presentation < ragdoll.DismemberTick))
         {
             skip("waiting for first presentation sample");
             continue;
@@ -1995,7 +2004,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         bool ownerDyingNow = false;
         for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
             ownerDyingNow |= sample(i).Dying && sample(i).Tick <= presentation;
-        if (!limb && aNowMs >= ragdoll.RetryTransitionMs &&
+        if (!limb && !awaitingFirst && aNowMs >= ragdoll.RetryTransitionMs &&
             (!ragdoll.Knocked || (ownerDyingNow && !actor->IsDead())))
         {
             if (!actor->currentProcess)
