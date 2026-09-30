@@ -7,6 +7,7 @@
 #include <Services/CorpseRagdollService.h>
 #include <Services/CreatorTogether.h>
 #include <Services/HarnessService.h>
+#include <Services/DoorVoteService.h>
 #include <Games/Skyrim/Actor.h>
 #include <Systems/InterpolationSystem.h>
 
@@ -45,6 +46,7 @@ int TP_MAKE_THISCALL(HookVMUpdate, GameVM, float a2)
 short TP_MAKE_THISCALL(HookMainLoop, Main)
 {
     CharacterService::ApplyMovesOnMainFrame();
+    DoorVoteService::OnMainFrame();
     ObjectService::OnMainFrame();
     CorpseRagdollService::OnMainFrame();
     CreatorTogether::OnMainFrame();

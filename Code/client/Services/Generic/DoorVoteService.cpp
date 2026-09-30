@@ -52,6 +52,7 @@ namespace
 {
 using TAutomaticDoor = void(void*, uint32_t, bool);
 TAutomaticDoor* s_automaticDoor{};
+std::atomic<uint32_t> s_pendingTestCell{0}; // test-cell load for the next main frame
 
 void OnAutomaticDoor(void* aObject3D, uint32_t aDistanceBand, bool aEntering)
 {
@@ -447,8 +448,24 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
         Reset();
         return;
     }
+    const bool testCell = m_state.Door && m_state.Door == m_state.Destination;
+    if (testCell && !m_loading && m_state.Ready && m_state.Tick && m_world.GetTick() >= m_state.Tick)
+    {
+        // The engine load (CenterOnCell) runs on the main thread; this update is not it (LoadCell crashed off it).
+        auto* cell = Cast<TESObjectCELL>(TESForm::GetById(m_world.GetModSystem().GetGameId(m_state.Destination)));
+        if (!cell)
+        {
+            SendAction(DoorVoteAction::Failed);
+            Reset();
+            return;
+        }
+        m_loading = true;
+        m_activationTime = GetTickCount64();
+        s_pendingTestCell.store(cell->formID, std::memory_order_release);
+        spdlog::info("Door vote: test cell {:X} at tick {} (shared {})", cell->formID, m_world.GetTick(), m_state.Tick);
+    }
     auto* door = Cast<TESObjectREFR>(TESForm::GetById(m_doorForm));
-    if (!m_loading && m_state.Ready && m_state.Door == m_heldDoor)
+    if (!testCell && !m_loading && m_state.Ready && m_state.Door == m_heldDoor)
     {
         const bool goNow = m_state.Tick && m_world.GetTick() >= m_state.Tick;
         const auto* lock = door ? door->GetLock() : nullptr;
@@ -521,6 +538,44 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
         SendAction(DoorVoteAction::Loaded);
         m_nextLoadedSend = GetTickCount64() + 500;
     }
+}
+
+const char* DoorVoteService::RequestTestCell(uint32_t aCellFormId) noexcept
+{
+    auto& party = m_world.GetPartyService();
+    auto* cell = Cast<TESObjectCELL>(TESForm::GetById(aCellFormId));
+    if (!party.IsInParty() || !party.IsLeader() || party.GetPartyMembers().size() < 2)
+        return "only the leader of a party of two or more can move it";
+    if (!cell)
+        return "cell not found";
+    if (HasPendingVote())
+        return "a door vote is already pending";
+    DoorVoteRequest request;
+    request.Action = DoorVoteAction::TestCell;
+    request.Epoch = party.GetStartEpoch();
+    if (!m_world.GetModSystem().GetServerModId(cell->formID, request.Destination))
+        return "cell has no server id";
+    request.Door = request.Destination;
+    const auto* name = cell->GetName();
+    request.Name = String(name && *name ? name : "the test cell").substr(0, 160);
+    if (!m_transport.Send(request))
+        return "send failed";
+    spdlog::info("Door vote: requested test cell {:X} ({})", cell->formID, request.Name.c_str());
+    return "";
+}
+
+void DoorVoteService::OnMainFrame() noexcept
+{
+    const auto formId = s_pendingTestCell.exchange(0, std::memory_order_acq_rel);
+    auto* cell = formId ? Cast<TESObjectCELL>(TESForm::GetById(formId)) : nullptr;
+    auto* player = PlayerCharacter::Get();
+    if (!cell || !player)
+        return;
+    // PlayerCharacter::CenterOnCell_Impl (40437 / 0x140742DF0, player, editor id, cell): the console's coc load.
+    using TCenterOnCell = bool(PlayerCharacter*, const char*, TESObjectCELL*);
+    POINTER_SKYRIMSE(TCenterOnCell, centerOnCell, 40437);
+    centerOnCell.Get()(player, nullptr, cell);
+    spdlog::info("Door vote: centered on test cell {:X}", formId);
 }
 
 static TiltedPhoques::Initializer s_doorVoteInput([]()

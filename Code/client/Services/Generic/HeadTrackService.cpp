@@ -113,6 +113,19 @@ struct GraphOverride
 std::mutex s_graphLock;
 std::unordered_map<uint32_t, GraphOverride> s_graphOverrides;
 std::atomic<uint64_t> s_remoteTrackingPasses{}, s_remoteTargetsSubmitted{};
+// Diagnostic: per actor, the last camera-target outcome and when native tracking last reached it.
+struct TrackingOutcome { const char* Reason{"never"}; uint64_t AtMs{}; uint64_t Passes{}; };
+std::mutex s_outcomeLock;
+std::unordered_map<uint32_t, TrackingOutcome> s_outcomes;
+void NoteOutcome(const Actor* apActor, const char* apReason) noexcept
+{
+    if (!apActor) return;
+    std::lock_guard lock(s_outcomeLock);
+    auto& outcome = s_outcomes[apActor->formID];
+    outcome.Reason = apReason;
+    outcome.AtMs = GetTickCount64();
+    ++outcome.Passes;
+}
 
 void HookModifyLookAt(LookAtModifier* apModifier, const void* apContext, void* apOutput)
 {
@@ -291,19 +304,25 @@ bool ApplyCameraTarget(Actor* apActor)
         // Restore the remote-player branch present at 25fa030d. This runs
         // only from native ProcessTracking, never from the 37964 getter.
         const auto* extension = apActor->GetExtension();
-        if (!extension || !extension->IsRemotePlayer() || !CanTrack(apActor) || NativeTargetWins(apActor))
+        if (!extension || !extension->IsRemotePlayer())
             return false;
+        if (!CanTrack(apActor)) { NoteOutcome(apActor, "cannot track"); return false; }
+        if (NativeTargetWins(apActor)) { NoteOutcome(apActor, "native target wins"); return false; }
         std::lock_guard lock(s_presentedLock);
         const auto it = s_presented.find(apActor->formID);
         if (it == s_presented.end() || !it->second.Present ||
             GetTickCount64() - it->second.ReceivedAt > kStaleMs)
+        {
+            NoteOutcome(apActor, "no fresh look");
             return false;
+        }
         look = it->second.Look;
     }
 
     // TDM's disable mode yields when the camera is behind the character.
     if (std::abs(ShortestAngle(apActor->rotation.z, look.y)) > 2.f * kPi / 3.f)
     {
+        NoteOutcome(apActor, "camera behind");
         RestoreGraph(apActor);
         return false;
     }
@@ -378,6 +397,7 @@ bool ApplyCameraTarget(Actor* apActor)
     using TSetTarget = void(AIProcess*, Actor*, NiPoint3&);
     POINTER_SKYRIMSE(TSetTarget, s_setTarget, 39887);
     s_setTarget.Get()(apActor->currentProcess, apActor, previous.Target);
+    NoteOutcome(apActor, "applied");
     return true;
 }
 
@@ -478,6 +498,15 @@ std::string HeadTrackService::DescribeLook(Actor* apActor) noexcept
         if (it != s_graphOverrides.end())
             result += fmt::format(",\"overridePitch\":{:.1f},\"overrideAgeMs\":{}", it->second.Look.x * kDegrees,
                 GetTickCount64() - it->second.SubmittedAt);
+    }
+    {
+        std::lock_guard lock(s_outcomeLock);
+        const auto it = s_outcomes.find(apActor->formID);
+        if (it != s_outcomes.end())
+            result += fmt::format(",\"trackOutcome\":\"{}\",\"trackOutcomeAgeMs\":{},\"trackPasses\":{}", it->second.Reason,
+                GetTickCount64() - it->second.AtMs, it->second.Passes);
+        else
+            result += ",\"trackOutcome\":\"never reached\"";
     }
     // The head bone's world forward: NPC Head [Head] local +Y points out of the face in the vanilla skeleton.
     if (auto* pRoot = apActor->GetNiNode())

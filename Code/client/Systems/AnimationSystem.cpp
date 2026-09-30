@@ -37,6 +37,9 @@
 #include <unordered_map>
 #include <utility>
 
+// A/B switch (test command copy_native_tracking): run native head tracking/expressions after a copy's graph update.
+std::atomic<bool> g_copyNativeTracking{true};
+
 extern thread_local const char* g_animErrorCode;
 
 namespace
@@ -534,7 +537,21 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
 void TP_MAKE_THISCALL(HookActorUpdateAnimation, Actor, float aDelta)
 {
     if (!UpdateRemoteGraph(apThis, aDelta, false))
-        TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+        return TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+    // The native update this replaced (37361 / 0x14067D590) follows the graph with head tracking (Actor vtable
+    // slot 0x122, 38009, where HeadTrackService aims a remote player's head at its owner's camera) and the facial
+    // expression update (slot 0x123), gated on a living, upright actor with a processed middle-high process.
+    // Skipping them froze every nearby copy's head (Helgen Keep, 2026-09-29: the owner's pitch arrived, the copy's
+    // look-at override was 5 minutes old). Queued (distant) updates, 20123, never run tracking natively either.
+    const auto flags1 = apThis->actorState.flags1;
+    const auto* process = reinterpret_cast<const uint8_t*>(apThis->currentProcess);
+    if (!g_copyNativeTracking.load(std::memory_order_relaxed) || !apThis->GetNiNode() || !process || process[0x137] || ((flags1 >> 21) & 0xF) != 0 ||
+        (flags1 & 0xE000000) != 0 || (flags1 & 0x3C000) == 0x1C000 || !(aDelta > 0.f) || !std::isfinite(aDelta))
+        return;
+    using TActorFrame = void(Actor*, float);
+    auto** table = *reinterpret_cast<void***>(apThis);
+    reinterpret_cast<TActorFrame*>(table[0x122])(apThis, aDelta);
+    reinterpret_cast<TActorFrame*>(table[0x123])(apThis, aDelta);
 }
 
 void TP_MAKE_THISCALL(HookQueuedAnimationUpdate, TESObjectREFR, float aDelta)

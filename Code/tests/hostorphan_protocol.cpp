@@ -9,6 +9,7 @@
 #include <Messages/ClientMessageFactory.h>
 #include <Messages/AssignCharacterRequest.h>
 #include <Messages/RequestOwnershipTransfer.h>
+#include <Messages/DoorVoteRequest.h>
 #include "../server/Services/OwnershipPolicy.h"
 
 using namespace TiltedPhoques;
@@ -170,4 +171,37 @@ TEST_CASE("Survivors observe both launch barriers in order", "[hostorphan]")
     REQUIRE(OwnershipPolicy::AfterMemberLeft(2, true, true, true) == 3);
     REQUIRE(OwnershipPolicy::AfterMemberLeft(3, true, false, false) == 3);
     REQUIRE(OwnershipPolicy::AfterMemberLeft(1, false, true, true) == 1);
+}
+
+TEST_CASE("Test-cell party moves survive the packet factory; other clients cannot send server-only actions", "[doorvote]")
+{
+    DoorVoteRequest source;
+    source.Action = DoorVoteAction::TestCell;
+    source.Epoch = 3;
+    source.Destination = {0, 0x32AE7};
+    source.Door = source.Destination;
+    source.Name = "Editor Smoke Test Cell";
+    Buffer buffer(8192);
+    Buffer::Writer writer(&buffer);
+    source.Serialize(writer);
+    Buffer::Reader reader(&buffer);
+    auto decoded = ClientMessageFactory{}.Extract(reader);
+    REQUIRE(decoded);
+    REQUIRE(decoded->GetOpcode() == DoorVoteRequest::Opcode);
+    const auto& request = static_cast<const DoorVoteRequest&>(*decoded);
+    REQUIRE(request.IsValid());
+    REQUIRE(request.Action == DoorVoteAction::TestCell);
+    REQUIRE(request.Door == request.Destination);
+    REQUIRE(request.Name == source.Name);
+
+    // Go/Release/State are the server's; a client packet claiming one is rejected.
+    DoorVoteRequest forged = source;
+    forged.Action = DoorVoteAction::Go;
+    Buffer forgedBuffer(8192);
+    Buffer::Writer forgedWriter(&forgedBuffer);
+    forged.Serialize(forgedWriter);
+    Buffer::Reader forgedReader(&forgedBuffer);
+    auto forgedDecoded = ClientMessageFactory{}.Extract(forgedReader);
+    // The factory drops it (or, at most, delivers it marked invalid).
+    REQUIRE((!forgedDecoded || !static_cast<const DoorVoteRequest&>(*forgedDecoded).IsValid()));
 }

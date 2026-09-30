@@ -12,7 +12,7 @@ void DoorVoteRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noe
     {
         ClientMessage::DeserializeRaw(aReader);
         DeserializeData(aReader);
-        m_valid = Action <= DoorVoteAction::Failed;
+        m_valid = Action <= DoorVoteAction::Failed || Action == DoorVoteAction::TestCell;
     }
     catch (...) {}
 }

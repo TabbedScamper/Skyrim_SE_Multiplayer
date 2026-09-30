@@ -48,6 +48,7 @@
 #include <Games/Skyrim/ArmorAttachmentTrace.h>
 #include <Forms/TESIdleForm.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
+#include <Services/DoorVoteService.h>
 #include <Combat/CombatController.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
 #include <Games/Skyrim/NetImmerse/NiTriBasedGeom.h>
@@ -76,6 +77,8 @@
 #include <Games/Memory.h>
 #include <Services/CreatorTogether.h>
 #include <MinHook.h>
+
+extern std::atomic<bool> g_copyNativeTracking; // AnimationSystem.cpp
 
 // Research handoff: perf2-r1-check/reference-research.patch records the native
 // call paths and prior art. This task cannot edit the shared research document.
@@ -5499,6 +5502,21 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const auto offsetText = GetJsonString(acLine, "offset");
             auto* pWorldSpace = worldText.empty() ? nullptr : Cast<TESWorldSpace>(TESForm::GetById(std::stoul(worldText, nullptr, 16)));
             auto* pPlayer = PlayerCharacter::Get();
+            // No worldspace: a move inside the player's current cell (interiors included; never another cell).
+            if (worldText.empty() && pPlayer && pPlayer->parentCell && !GetJsonString(acLine, "x").empty())
+            {
+                NiPoint3 target{};
+                target.x = std::stof(GetJsonString(acLine, "x"));
+                target.y = std::stof(GetJsonString(acLine, "y"));
+                target.z = std::stof(GetJsonString(acLine, "z"));
+                auto* pCell = pPlayer->parentCell;
+                QueueCreatorCall([pCell, target]() {
+                    if (auto* pLocal = PlayerCharacter::Get(); pLocal && pLocal->parentCell == pCell)
+                        pLocal->MoveTo(pCell, target);
+                });
+                return Result(id, fmt::format("\"cell\":\"{:X}\",\"x\":{:.0f},\"y\":{:.0f},\"z\":{:.0f},\"sameCell\":true",
+                    pCell->formID, target.x, target.y, target.z));
+            }
             if (!pWorldSpace || !pPlayer || GetJsonString(acLine, "x").empty())
                 return Error(id, "worldspace, position or player missing");
             NiPoint3 target{};
@@ -6066,6 +6084,26 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 authority.Position.x, authority.Position.y, authority.Position.z, authority.AgeMs,
                 JsonBool(authority.BodyDriven), ObjectService::LeaseHolder(pRef->formID)));
         }
+        if (command == "party_load_cell")
+        {
+            // Leader only: move the whole party into a cell (e.g. 32AE7 QASmoke, B1783 CTest) through the door barrier:
+            // Go at a shared tick, each PC loads it (CenterOnCell on the main thread), the world gate holds until all
+            // have. Never a per-player teleport into another cell.
+            const auto cellText = GetJsonString(acLine, "cell");
+            if (cellText.empty())
+                return Error(id, "cell missing");
+            const char* error = m_world.GetDoorVoteService().RequestTestCell(std::stoul(cellText, nullptr, 16));
+            if (*error)
+                return Error(id, error);
+            return Result(id, fmt::format("\"requested\":\"{}\"", EscapeJson(cellText)));
+        }
+        if (command == "copy_native_tracking")
+        {
+            const auto enabled = GetJsonString(acLine, "enabled");
+            if (!enabled.empty())
+                g_copyNativeTracking.store(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", JsonBool(g_copyNativeTracking.load())));
+        }
         if (command == "actor_bones")
         {
             // Local rotations of named bones (default: head and beast tail) and the head-tracking inputs of an actor
@@ -6157,10 +6195,30 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                         vtable > moduleBase ? vtable - moduleBase : 0);
                 }
             }
-            return Result(id, fmt::format("\"race\":\"{:X}\",\"remotePlayer\":{},\"slotGraphs\":[{}],\"bones\":[{}],\"isNPC\":{},\"headTrackSpine\":{},"
+            // Native tracking gate (37361 / 37363): process + 0x137 clear, then *(middleHigh + 0x250) + 0x29c in
+            // [0, threshold] (0x14209FF08, or 0x14209FF50 when +0x1F8's +0x128 is 3).
+            std::string trackGate = "\"trackGate\":null";
+            if (const auto* process = reinterpret_cast<const uint8_t*>(pActor->currentProcess))
+            {
+                const auto moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                const uint8_t* middle{};
+                const uint8_t* data{};
+                float value = -1.f;
+                SIZE_T got{};
+                ReadProcessMemory(GetCurrentProcess(), process + 8, &middle, sizeof(middle), &got);
+                if (middle)
+                    ReadProcessMemory(GetCurrentProcess(), middle + 0x250, &data, sizeof(data), &got);
+                if (data)
+                    ReadProcessMemory(GetCurrentProcess(), data + 0x29C, &value, sizeof(value), &got);
+                const float threshold = *reinterpret_cast<const float*>(moduleBase + 0x209FF08);
+                const float thresholdAlt = *reinterpret_cast<const float*>(moduleBase + 0x209FF50);
+                trackGate = fmt::format("\"trackGate\":{{\"culled137\":{},\"middle\":{},\"data250\":{},\"value29C\":{:.1f},\"threshold\":{:.1f},\"thresholdAlt\":{:.1f}}}",
+                    process[0x137], JsonBool(middle != nullptr), JsonBool(data != nullptr), value, threshold, thresholdAlt);
+            }
+            return Result(id, fmt::format("{},\"race\":\"{:X}\",\"remotePlayer\":{},\"slotGraphs\":[{}],\"bones\":[{}],\"isNPC\":{},\"headTrackSpine\":{},"
                 "\"bHeadTracking\":{},\"graphRead\":[{},{},{}],\"flags2HeadTrack\":{},\"nativeTargetType\":{},\"flags1\":\"{:X}\",\"flags2\":\"{:X}\","
                 "\"weaponDrawn\":{},{}",
-                pActor->race ? pActor->race->formID : 0, JsonBool(pExtension && pExtension->IsRemotePlayer()), slotGraphs, bones,
+                trackGate, pActor->race ? pActor->race->formID : 0, JsonBool(pExtension && pExtension->IsRemotePlayer()), slotGraphs, bones,
                 JsonBool(isNpc), JsonBool(spine), JsonBool(headTracking), JsonBool(haveNpc), JsonBool(haveSpine),
                 JsonBool(haveTracking), JsonBool((pActor->actorState.flags2 & (1u << 3)) != 0), type,
                 pActor->actorState.flags1, pActor->actorState.flags2, JsonBool(pActor->actorState.IsWeaponDrawn()),

@@ -12,7 +12,10 @@ enum class DoorVoteAction : uint8_t
     State,
     Go,
     Cancel,
-    Release
+    Release,
+    // Test harness: the leader moves the whole party into a cell (Destination) through the same Go / Loaded /
+    // Release barrier as a door. Door == Destination marks such a vote.
+    TestCell
 };
 
 struct DoorVoteData

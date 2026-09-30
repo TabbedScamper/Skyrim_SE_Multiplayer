@@ -20,6 +20,9 @@ bool DoorVoteService::IsNear(Player* aPlayer, const DoorVoteData& aData, float a
 {
     if (!aPlayer || !aPlayer->GetCharacter())
         return false;
+    // A test-cell move has no door to stand at.
+    if (aData.Door && aData.Door == aData.Destination)
+        return true;
     const auto& cell = aPlayer->GetCellComponent();
     if (aData.WorldSpace ? cell.WorldSpaceId != aData.WorldSpace : cell.Cell != aData.Cell)
         return false;
@@ -110,6 +113,38 @@ void DoorVoteService::OnRequest(const PacketEvent<DoorVoteRequest>& aEvent) noex
         it = m_votes.end();
     }
     const auto now = GameServer::Get()->GetTick();
+    if (request.Action == DoorVoteAction::TestCell)
+    {
+        // Test harness only: the leader moves the whole party into a cell through the door barrier (Go at a shared
+        // tick, everyone loads, the world gate holds until all have). No door and no proximity.
+        if (party->LeaderPlayerId != player->GetId() || !request.Destination || request.Destination.ModId == UINT32_MAX ||
+            request.Name.empty())
+            return;
+        if (it != m_votes.end())
+        {
+            Cancel(it->second, "test cell move");
+            m_votes.erase(it);
+        }
+        Vote vote;
+        vote.Data = request;
+        vote.Data.Action = DoorVoteAction::Vote;
+        vote.Data.Door = request.Destination;
+        vote.Data.Tick = 0;
+        vote.Data.VoteId = ++m_nextVoteId;
+        vote.Initiator = player->GetId();
+        vote.InitiatorName = player->GetUsername().substr(0, 80);
+        vote.Leader = party->LeaderPlayerId;
+        vote.Deadline = now + 120000;
+        for (const auto* member : party->Members)
+        {
+            vote.Members.insert(member->GetId());
+            vote.Ready.insert(member->GetId());
+        }
+        auto& started = m_votes.emplace(partyId, std::move(vote)).first->second;
+        spdlog::info("Door vote: test cell {:X} for the party of {}", request.Destination.BaseId, player->GetUsername());
+        Changed(started);
+        return;
+    }
     if (request.Action == DoorVoteAction::Vote)
     {
         if (!request.Door || !request.Cell || !request.Destination || request.Door.ModId == UINT32_MAX ||
