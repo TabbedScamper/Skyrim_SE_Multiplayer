@@ -1262,6 +1262,11 @@ void HarnessService::Tick()
                         s.Record("objective_leg_ended", state->Copy(false));
                         s.Submitted = false; s.NextRetry = now + 1000;
                     }
+                    else if (op == "jump" && Str(state, "reason").find("(airborne or settling)") != std::string::npos)
+                    {
+                        // Just teleported: wait for the player to land; the step timeout still bounds it.
+                        s.Submitted = false; s.NextRetry = now + 500;
+                    }
                     else if (s.Step->GetBool("step_over") && s.Recoveries < 3 && Num(state, "distance") < 1200)
                     {
                         s.Record("path_stall_recovery", state->Copy(false));

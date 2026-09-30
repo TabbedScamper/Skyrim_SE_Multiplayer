@@ -712,10 +712,23 @@ void Tick()
             auto* target = form.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
             if (nudge && form.empty() && player && cell && !loading && !creatorOpen)
                 target = CoordinateTarget(player, cell, request);
-            if (!player || !cell || !player->GetNiNode() || loading || creatorOpen || !target || !SameSpace(player, target) ||
-                Driven(player) || !(controls & 1) || !(controls & (1 << 10)) || !ControlsDriven(Controller(player)) ||
-                (!nudge && player->IsInCombat()) || player->actorState.IsDeadState() || player->GetNativeMountFormId() || !CanJump(player))
-                Finish(player, "failed", "jump requires an eligible free player and a local target");
+            // Harness travel may jump during the dragon attack (the player is in combat then), like walk_to.
+            const bool combatAllowed = nudge || (GetJsonString(request, "allow_combat") == "true" &&
+                HarnessService::IsEnabled() && HarnessService::OwnsDriver());
+            const char* refusal = !player || !cell || !player->GetNiNode() ? "player not loaded" :
+                loading || creatorOpen ? "loading or creator open" :
+                !target || !SameSpace(player, target) ? "target missing or in another space" :
+                Driven(player) || !ControlsDriven(Controller(player)) ? "player AI driven by another system" :
+                !(controls & 1) || !(controls & (1 << 10)) ? "movement or jumping controls disabled" :
+                !combatAllowed && player->IsInCombat() ? "player in combat" :
+                player->actorState.IsDeadState() ? "player dead" :
+                player->GetNativeMountFormId() ? "player mounted" :
+                !CanJump(player) ? "player cannot jump now (airborne or settling)" : nullptr;
+            if (refusal)
+            {
+                const auto message = fmt::format("jump requires an eligible free player and a local target: {}", refusal);
+                Finish(player, "failed", message.c_str());
+            }
             else if (reinterpret_cast<uint8_t*>(Controller(player))[0x1C6])
                 Finish(player, "failed", "native direct movement already owned");
             else if (Distance(player->position, target->position) > 1200.f)
@@ -956,18 +969,25 @@ void Tick()
                     // Look where a person walking there would: eye level toward the target, tilted only
                     // for height difference (stairs, ramps), eased so the view never snaps. Path steering
                     // turns heading only and would otherwise keep any earlier look-up/down pitch.
+                    // Measured 2026-09-30 13:11:46: starting the native path pulls the player's pitch from -3 to 84
+                    // degrees within 120 ms (not our code). Hold our own pitch from level and write it every tick.
+                    static bool s_pitchHeld{};
+                    static float s_heldPitch{};
+                    static uint64_t s_lastPitchMs{};
                     if (active && ownsAI)
                     {
+                        if (!s_pitchHeld) { s_pitchHeld = true; s_heldPitch = 0.f; s_lastPitchMs = now; }
                         // About 90 degrees per second, by elapsed time (the driver tick rate varies).
-                        static uint64_t s_lastPitchMs{};
                         const float maxStep = std::clamp((now - s_lastPitchMs) * 0.0016f, 0.f, 0.1f);
                         s_lastPitchMs = now;
                         const float horizontal = std::hypot(target->position.x - player->position.x, target->position.y - player->position.y);
                         const float wanted = std::clamp(std::atan2(player->position.z - target->position.z, std::max(horizontal, 64.f)), -0.5f, 0.5f);
-                        const float step = std::clamp(wanted - player->rotation.x, -maxStep, maxStep);
-                        if (std::isfinite(step) && std::abs(step) > 0.001f)
-                            player->SetRotation(player->rotation.x + step, player->rotation.y, player->rotation.z);
+                        if (std::isfinite(wanted))
+                            s_heldPitch += std::clamp(wanted - s_heldPitch, -maxStep, maxStep);
+                        if (std::abs(player->rotation.x - s_heldPitch) > 0.001f)
+                            player->SetRotation(s_heldPitch, player->rotation.y, player->rotation.z);
                     }
+                    else s_pitchHeld = false;
                     if (active && now - lastProgress > 20000) Finish(player, "failed", "no path progress for 20 seconds");
                 }
             }
