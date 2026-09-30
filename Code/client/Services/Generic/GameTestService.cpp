@@ -530,19 +530,31 @@ int32_t RunPath(PlayerCharacter* player, TESObjectREFR* target)
     return registerPath.Get()(*manager.Get(), request.value);
 }
 
-bool CanJump(PlayerCharacter* player)
+// nullptr when the player can jump now, else the first failed check (named in the driver's refusal).
+const char* JumpBlocker(PlayerCharacter* player)
 {
     using InJump = bool(Actor*);
     POINTER_SKYRIMSE(InJump, inJump, 37949);
     const auto actorFlags = player->actorState.flags1;
-    if ((actorFlags & ((1 << 8) | (1 << 10) | (0xF << 14) | (7 << 18) | (0xF << 21) | (7 << 25))) ||
-        (player->actorState.flags2 & (1 << 13)) || inJump.Get()(player)) return false;
+    if (actorFlags & ((1 << 8) | (1 << 10))) return "actor state bit 8/10";
+    if (actorFlags & (0xF << 14)) return "sitting or sleeping";
+    if (actorFlags & (7 << 18)) return "flying state";
+    if (actorFlags & (0xF << 21)) return "life state not alive";
+    if (actorFlags & (7 << 25)) return "knock state";
+    if (player->actorState.flags2 & (1 << 13)) return "actor state2 bit 13";
+    if (inJump.Get()(player)) return "already jumping";
     using GetController = void*(Actor*);
     POINTER_SKYRIMSE(GetController, getController, 37258);
     auto* controller = static_cast<uint8_t*>(getController.Get()(player));
+    if (!controller) return "no character controller";
     uint32_t flags{};
-    if (controller) std::memcpy(&flags, controller + 0x218, sizeof(flags));
-    return (flags & (1 << 10)) != 0;
+    std::memcpy(&flags, controller + 0x218, sizeof(flags));
+    return (flags & (1 << 10)) ? nullptr : "controller not supported (airborne or standing on something that is not ground)";
+}
+
+bool CanJump(PlayerCharacter* player)
+{
+    return JumpBlocker(player) == nullptr;
 }
 
 bool ReadJumpState(PlayerCharacter* player)
@@ -724,9 +736,10 @@ void Tick()
                 player->actorState.IsDeadState() ? "player dead" :
                 player->GetNativeMountFormId() ? "player mounted" :
                 !CanJump(player) ? "player cannot jump now (airborne or settling)" : nullptr;
+            const std::string blocker = refusal && player && !CanJump(player) ? std::string(" [") + JumpBlocker(player) + "]" : std::string();
             if (refusal)
             {
-                const auto message = fmt::format("jump requires an eligible free player and a local target: {}", refusal);
+                const auto message = fmt::format("jump requires an eligible free player and a local target: {}{}", refusal, blocker);
                 Finish(player, "failed", message.c_str());
             }
             else if (reinterpret_cast<uint8_t*>(Controller(player))[0x1C6])
