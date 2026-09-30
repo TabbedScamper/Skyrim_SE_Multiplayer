@@ -709,7 +709,15 @@ void GameServer::OnConsume(const void* apData, const uint32_t aSize, const Conne
     auto pMessage = factory.Extract(reader);
     if (!pMessage)
     {
-        spdlog::error("Couldn't parse packet from {:x}", aConnectionId);
+        // Which message failed (opcode = the first byte(s), ClientOpcode order in encoding/Opcodes.h) and its size:
+        // an unnamed error once a second hid a whole class of dropped messages (2026-09-29 session, 1168 from the
+        // follower).
+        uint32_t opcode{};
+        if (aSize >= sizeof(ClientOpcode))
+            std::memcpy(&opcode, apData, sizeof(ClientOpcode));
+        static std::atomic<uint32_t> s_parseLogs{};
+        if (s_parseLogs.fetch_add(1, std::memory_order_relaxed) < 200)
+            spdlog::error("Couldn't parse packet from {:x}: opcode {} ({} bytes)", aConnectionId, opcode, aSize);
         return;
     }
 
