@@ -453,21 +453,28 @@ struct TriggerGate::State
             return false;
         const auto inside = Inside.find(aTrigger.Handle);
         const auto leader = Players.find(LeaderId);
+        // Distance fallbacks only bridge native contact catching up after cell attachment or controller recreation;
+        // they must not call a player present who has not come through. With 400 u around the trigger centre or 600 u
+        // around the leader (the leader always passing against itself), the follower landing in the Helgen inn
+        // released CD6AC (stage 120, the inn barrier collision) while the host still stood on the tower 200 u above
+        // (owner, 2026-09-30: "it needs to stay off until all players have jumped in").
+        const auto within = [](const glm::vec3& a, const glm::vec3& b, float aHorizontal)
+        {
+            const float dx = a.x - b.x, dy = a.y - b.y;
+            return dx * dx + dy * dy <= aHorizontal * aHorizontal && std::abs(a.z - b.z) <= 150.f;
+        };
         for (const auto& [id, player] : Players)
         {
             if (!SameSpace(player, aTrigger) || !player.Handle)
                 return false;
-            const auto delta = player.Position - aTrigger.Position;
-            if (glm::dot(delta, delta) <= 400.f * 400.f)
+            if (inside != Inside.end() && inside->second.Members.contains(player.Handle))
                 continue;
-            // Retain the nearby-party fallback while native contact state catches
-            // up after cell attachment or controller recreation.
-            if (leader != Players.end() && SameSpace(player, leader->second))
-            {
-                const auto toLeader = player.Position - leader->second.Position;
-                if (glm::dot(toLeader, toLeader) <= 600.f * 600.f)
-                    continue;
-            }
+            if (within(player.Position, aTrigger.Position, 150.f))
+                continue;
+            if (id != LeaderId && leader != Players.end() && SameSpace(player, leader->second) &&
+                inside != Inside.end() && inside->second.Members.contains(leader->second.Handle) &&
+                within(player.Position, leader->second.Position, 200.f))
+                continue;
             if (inside == Inside.end() || !inside->second.Members.contains(player.Handle))
                 return false;
         }
