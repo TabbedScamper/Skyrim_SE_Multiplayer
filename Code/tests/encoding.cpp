@@ -99,6 +99,13 @@ TEST_CASE("Both movement message formats preserve independent player look direct
     ServerReferencesMoveRequest relayed;
     relayed.Tick = received.Tick;
     relayed.Updates = received.Updates;
+    // The relay carries each owner sample's age (Lokir jitter, 2026-09-30): 0, one byte, and multi-byte values.
+    std::vector<uint32_t> ids;
+    for (const auto& entry : relayed.Updates)
+        ids.push_back(entry.first);
+    for (size_t i = 0; i < ids.size(); ++i)
+        relayed.Updates[ids[i]].SampleAge = i == 0 ? 0 : 999;
+    relayed.Updates[42].SampleAge = 17;
     Buffer serverBuffer(8192);
     Buffer::Writer serverWriter(&serverBuffer);
     relayed.Serialize(serverWriter);
@@ -110,6 +117,9 @@ TEST_CASE("Both movement message formats preserve independent player look direct
     REQUIRE(presented.Updates.size() == sent.Updates.size());
     for (const auto& [id, update] : sent.Updates)
         REQUIRE(presented.Updates.at(id).UpdatedMovement == update.UpdatedMovement);
+    for (const auto& [id, update] : relayed.Updates)
+        REQUIRE(presented.Updates.at(id).SampleAge == update.SampleAge);
+    REQUIRE(presented.Updates.at(42).SampleAge == 17);
 }
 
 TEST_CASE("Every server setting participates in equality", "[encoding.settings]")

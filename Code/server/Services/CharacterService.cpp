@@ -2044,6 +2044,9 @@ void CharacterService::ProcessMovementChanges() const noexcept
             movement.LookDirection = movementComponent.LookDirection;
             movement.Variables = movementComponent.Variables;
             update.CombatTargetServerId = movementComponent.CombatTargetServerId;
+            // The owner's own sample time, relative to this relay's stamp (owner clocks can run a few ms ahead: 0).
+            update.SampleAge = message.Tick > movementComponent.Tick && movementComponent.Tick
+                ? static_cast<uint32_t>((std::min)(message.Tick - movementComponent.Tick, uint64_t{1000})) : 0;
 
             update.ActionEvents = animationComponent.Actions;
             if (animationComponent.EvaluatedPosePending)

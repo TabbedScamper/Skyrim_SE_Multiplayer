@@ -1494,6 +1494,10 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         auto& interpolationComponent = view.get<InterpolationComponent>(*itor);
         auto& animationComponent = view.get<RemoteAnimationComponent>(*itor);
         const auto& movement = update.UpdatedMovement;
+        // The owner's sample time: the relay stamps its 20 ms batch with the server's clock, up to a batch or more
+        // after the owner sampled. Played at the relay stamp, each position sat 0-50 ms off its true time (Lokir,
+        // 2026-09-30: along-track error spread 10 ms, follower frame-to-frame velocity change 4x the host's).
+        const uint64_t sampleTick = acMessage.Tick > update.SampleAge ? acMessage.Tick - update.SampleAge : acMessage.Tick;
 
         // Read-only interval diagnostics, per player/ownership lifetime. No
         // event deduplication by name: repeated same-tick actions can be valid.
@@ -1598,7 +1602,7 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         }
 
         InterpolationComponent::TimePoint point;
-        point.Tick = acMessage.Tick;
+        point.Tick = sampleTick;
         point.Position = movement.Position;
         point.Rotation = {movement.Rotation.x, 0.f, movement.Rotation.y};
         point.Variables = movement.Variables;
@@ -1606,7 +1610,7 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
 
         InterpolationSystem::AddPoint(interpolationComponent, point);
         if (const auto* traced = m_world.try_get<FormIdComponent>(*itor))
-            ObjectService::MotionTraceReceived(traced->Id, acMessage.Tick, movement.Position);
+            ObjectService::MotionTraceReceived(traced->Id, sampleTick, movement.Position);
         if (acMessage.Tick >= animationComponent.LastReceivedCombatTargetTick)
         {
             animationComponent.LastReceivedCombatTargetTick = acMessage.Tick;

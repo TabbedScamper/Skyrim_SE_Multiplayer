@@ -8,7 +8,7 @@ bool ReferenceUpdate::operator==(const ReferenceUpdate& acRhs) const noexcept
 {
     return UpdatedMovement == acRhs.UpdatedMovement &&
         CombatTargetServerId == acRhs.CombatTargetServerId && ActionEvents == acRhs.ActionEvents &&
-        EvaluatedPose == acRhs.EvaluatedPose && VisualBones == acRhs.VisualBones;
+        EvaluatedPose == acRhs.EvaluatedPose && VisualBones == acRhs.VisualBones && SampleAge == acRhs.SampleAge;
 }
 
 bool ReferenceUpdate::operator!=(const ReferenceUpdate& acRhs) const noexcept
@@ -29,6 +29,7 @@ void ReferenceUpdate::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const no
     }
     EvaluatedPose.Serialize(aWriter);
     VisualBones.Serialize(aWriter);
+    Serialization::WriteVarInt(aWriter, SampleAge);
 }
 
 void ReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
@@ -48,4 +49,8 @@ void ReferenceUpdate::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
     }
     EvaluatedPose.Deserialize(aReader);
     VisualBones.Deserialize(aReader);
+    const auto age = CheckedRead::VarInt(aReader);
+    if (age > 60000)
+        throw std::runtime_error("reference update sample age exceeds limit");
+    SampleAge = static_cast<uint32_t>(age);
 }
