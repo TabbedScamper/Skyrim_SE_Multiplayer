@@ -546,9 +546,9 @@
     {
       "op": "jump",
       "ref": "E24C3",
-      "radius": 128,
+      "radius": 320,
       "timeout": 45,
-      "source": "E24C3 inn objective, real tower crossing",
+      "source": "E24C3 inn objective, real tower crossing; landing on the burned upper floor (measured 262 u from E24C3, z 8862) counts, as in vanilla",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
