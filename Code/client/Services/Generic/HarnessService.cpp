@@ -299,7 +299,9 @@ struct HarnessService::Impl
     std::atomic<uint64_t> TriggerToken{};
     std::atomic<uint32_t> TriggerEntrant{0x14};
     // A partner's delivered trip that landed before this PC armed its token (the follower's side of the step can
-    // finish first: 15:10:10 run, 1095D8 tripped by her before the host's teleport armed it).
+    // finish first: 15:10:10 run, 1095D8 tripped by her before the host's teleport armed it), accepted for 30 s
+    // before the step: her staging teleport for the previous step can land in the trigger (15:29:33 run), and a
+    // one-shot trigger then disables itself, so this PC's own entry never fires.
     std::atomic<uint32_t> LastPartyTrigger{}, LastPartyEntrant{};
     std::atomic<uint64_t> LastPartyTripMs{};
     uint64_t StepReceivedMs{};
@@ -1069,7 +1071,7 @@ void HarnessService::Tick()
                 {
                     s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
                     s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | ref->formID;
-                    if (s.LastPartyTrigger == ref->formID && s.LastPartyTripMs >= s.StepReceivedMs)
+                    if (s.LastPartyTrigger == ref->formID && s.LastPartyTripMs + 30000 >= s.StepReceivedMs)
                     {
                         s.TriggerEntrant = s.LastPartyEntrant.load();
                         s.TriggerToken = s.TriggerToken | (uint64_t(1) << 63);
@@ -1189,7 +1191,7 @@ void HarnessService::Tick()
                     if (!trigger || op != "walk") throw std::runtime_error("until_trigger_requires_walk_and_reference");
                     s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
                     s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | trigger;
-                    if (s.LastPartyTrigger == trigger && s.LastPartyTripMs >= s.StepReceivedMs)
+                    if (s.LastPartyTrigger == trigger && s.LastPartyTripMs + 30000 >= s.StepReceivedMs)
                     {
                         s.TriggerEntrant = s.LastPartyEntrant.load();
                         s.TriggerToken = s.TriggerToken | (uint64_t(1) << 63);
