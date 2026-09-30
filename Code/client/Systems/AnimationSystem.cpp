@@ -40,6 +40,7 @@ extern thread_local bool g_forceAnimation;
 #include <limits>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 // A/B switch (test command copy_native_tracking): run native head tracking/expressions after a copy's graph update.
@@ -842,8 +843,12 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
                 g_mirroringLeaderIdle = g_forceAnimation = false;
                 if (played)
                     CutsceneFollow::NoteLeaderIdleMirrored(first.IdleId);
-                spdlog::info("Cutscene follow: mirrored the leader's idle {:08X} ('{}') on this player played={}",
-                    first.IdleId, first.EventName, played);
+                // Locomotion idles (turns, move start/stop) refuse on a follower whose movement is off: log each
+                // refused idle once, every played one.
+                static std::unordered_set<uint32_t> s_refusedLogged;
+                if (played || s_refusedLogged.insert(first.IdleId).second)
+                    spdlog::info("Cutscene follow: mirrored the leader's idle {:08X} ('{}') on this player played={}",
+                        first.IdleId, first.EventName, played);
             }
         }
         // Revive check (2026-09-28): the host's copy of a revived player replayed its get-up over and over.
