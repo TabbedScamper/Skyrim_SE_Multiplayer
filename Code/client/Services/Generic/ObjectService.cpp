@@ -1690,6 +1690,9 @@ struct FollowProbe
     float MaxErrorUnits{};
     std::chrono::steady_clock::time_point NextLog{};
     std::chrono::steady_clock::time_point NextSteerLog{};
+    // Placed exactly on the host's resting pose and left asleep (host at rest, copy within 10 u).
+    bool RestPlaced{};
+    uint32_t RestPlacements{};
 };
 std::unordered_map<void*, FollowProbe> s_followProbes;
 std::mutex s_stepTargetsLock;
@@ -1952,6 +1955,33 @@ int RunNativeStep(void* apWorld, float aDeltaTime, NativeStep&& aNativeStep, boo
                     driveExact.Get()(position, rotation, 1.f / aDeltaTime, target.Body);
                     continue;
                 }
+                // Host at rest: place the copy exactly on the host's pose once, clear its motion and let it sleep, then
+                // stop driving it. A broom leaning on a wall in Helgen Keep, driven toward the resting pose every step,
+                // slid 5 u back and forth against gravity and the wall on the follower while the host's stood still
+                // (2026-09-30: 300 steps per 5 s, gap up to 7.1 u, never settled). Re-driven if it ends up 10 u away.
+                if (!hostMoving)
+                {
+                    if (gap <= 10.f)
+                    {
+                        if (!probe.RestPlaced)
+                        {
+                            alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
+                            alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
+                            s_placeBody.Get()(target.Body, position, quaternion);
+                            for (int axis = 0; axis < 3; ++axis)
+                                pBody->linearVelocity[axis] = pBody->angularVelocity[axis] = 0.f;
+                            using DeactivateFn = void(void*);
+                            POINTER_SKYRIMSE(DeactivateFn, requestDeactivation, 60850);
+                            requestDeactivation.Get()(target.Body);
+                            probe.RestPlaced = true;
+                            ++probe.RestPlacements;
+                        }
+                        continue;
+                    }
+                    probe.RestPlaced = false;
+                }
+                else
+                    probe.RestPlaced = false;
                 if (glm::length(error) > kFollowTeleport)
                     ++probe.Teleports;
                 bool placed = false;
@@ -4830,8 +4860,8 @@ void ObjectService::OnMainFrame() noexcept
         spdlog::info("Cart steer {:X}: gap {:.1f} u vel {:.1f} host-age {} ms fighter unresolved; {} steps {} teleports",
             probe.FormId, probe.Gap, probe.Speed, probe.HostAgeMs, probe.Steps, probe.Teleports);
     for (const auto& probe : summaries)
-        spdlog::info("Follow body {:X}: {} steps, {} teleports, 0 keyframed placements, largest gap {:.1f} u",
-            probe.FormId, probe.Steps, probe.Teleports, probe.MaxErrorUnits);
+        spdlog::info("Follow body {:X}: {} steps, {} teleports, {} rest placements, largest gap {:.1f} u",
+            probe.FormId, probe.Steps, probe.Teleports, probe.RestPlacements, probe.MaxErrorUnits);
     pService->m_physicsMaintenanceReportUs += maintenanceUs;
     pService->ApplyRemotePhysics();
 }
