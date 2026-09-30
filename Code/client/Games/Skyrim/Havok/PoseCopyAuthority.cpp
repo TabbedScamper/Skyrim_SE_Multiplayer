@@ -10,6 +10,7 @@
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
+#include <glm/gtc/quaternion.hpp>
 
 #include <array>
 #include <atomic>
@@ -61,7 +62,54 @@ struct Sample
     uint64_t Tick{};
     uint32_t Count{};
     std::array<QsTransform, kMaxBones> Bones{};
+    // Owner's frame for bone 0 at capture (dying/dead owners): see RebaseRootBone.
+    bool HasParent{};
+    NiTransform Parent{};
 };
+
+// The frame bone 0's local transform is relative to: a flattened bone tree's own node, or a plain node's parent.
+bool RootBoneFrame(const void* apBoneNodes, NiTransform& aOut) noexcept
+{
+    const auto* entries = apBoneNodes ? *reinterpret_cast<const BoneNodeEntry* const*>(apBoneNodes) : nullptr;
+    if (!entries || !entries[0].node)
+        return false;
+    const auto* node = static_cast<const NiAVObject*>(entries[0].node);
+    if (static_cast<int32_t>(entries[0].unk08) < 0)
+        node = node->parent;
+    if (!node)
+        return false;
+    aOut = node->world;
+    return true;
+}
+
+glm::mat3 ToMat3(const NiMatrix3& acMatrix) noexcept
+{
+    glm::mat3 m;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            m[c][r] = acMatrix.entry[r][c];
+    return m;
+}
+
+// Bone 0 of an owner sample, re-expressed from the owner's frame onto this copy's: world = from * local, local' =
+// to^-1 * world. A dying owner's reference turns at death (Lokir 97 -> 330 deg) while its body does not; played
+// against this copy's own frame, the held or blended pose was drawn turned 134 deg away for 8 frames (2026-09-30).
+QsTransform RebaseRootBone(const QsTransform& acBone, const NiTransform& acFrom, const NiTransform& acTo) noexcept
+{
+    const glm::mat3 from = ToMat3(acFrom.rotate), to = ToMat3(acTo.rotate);
+    const glm::vec3 fromT{acFrom.translate.x, acFrom.translate.y, acFrom.translate.z};
+    const glm::vec3 toT{acTo.translate.x, acTo.translate.y, acTo.translate.z};
+    const glm::vec3 local{acBone.translation[0], acBone.translation[1], acBone.translation[2]};
+    const glm::vec3 world = from * (local * acFrom.scale) + fromT;
+    const float toScale = acTo.scale > 0.0001f ? acTo.scale : 1.f;
+    const glm::vec3 rebased = glm::transpose(to) * (world - toT) / toScale;
+    const glm::quat q{acBone.rotation[3], acBone.rotation[0], acBone.rotation[1], acBone.rotation[2]};
+    const glm::quat r = glm::normalize(glm::quat_cast(glm::transpose(to) * from * glm::mat3_cast(q)));
+    QsTransform out = acBone;
+    out.translation[0] = rebased.x; out.translation[1] = rebased.y; out.translation[2] = rebased.z;
+    out.rotation[0] = r.x; out.rotation[1] = r.y; out.rotation[2] = r.z; out.rotation[3] = r.w;
+    return out;
+}
 
 struct ActorPose
 {
@@ -76,6 +124,8 @@ struct ActorPose
     bool PendingLiving{};
     std::array<QsTransform, kMaxBones> Captured{};
     uint32_t CapturedCount{};
+    bool PendingHasParent{}, CapturedHasParent{};
+    NiTransform PendingParent{}, CapturedParent{};
     uint64_t CapturedAtMs{};
     uint64_t CapturedTick{};
     // Other PCs: legacy hysteresis for physics transitions; living samples blend back from
@@ -355,6 +405,8 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
             {
                 std::copy_n(pose.Pending.begin(), pose.PendingCount, pose.Captured.begin());
                 pose.CapturedCount = pose.PendingCount;
+                pose.CapturedHasParent = pose.PendingHasParent;
+                pose.CapturedParent = pose.PendingParent;
                 pose.CapturedTick = pose.PendingTick;
                 pose.CapturedAtMs = living ? pose.PendingAtMs : NowMs();
                 // Merge partial passes within a living frame only. Otherwise a root-only
@@ -368,6 +420,8 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
             // Physics-owned skeletons also retain unwritten bones across frames.
             std::copy_n(apPose, count, pose.Pending.begin());
             pose.PendingCount = (std::max)(pose.PendingCount, count);
+            // Every sample: the copy holds the owner's last living pose through the death transition.
+            pose.PendingHasParent = RootBoneFrame(apBoneNodes, pose.PendingParent);
             pose.PendingFrame = frame;
             pose.PendingTick = s_currentTick.load(std::memory_order_relaxed);
             pose.PendingAtMs = NowMs();
@@ -410,6 +464,14 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 const float t = b.Tick > a.Tick ? static_cast<float>((time - static_cast<double>(a.Tick)) /
                     static_cast<double>(b.Tick - a.Tick)) : 1.f;
                 Interpolate(a.Bones.data(), b.Bones.data(), t, driven, t_override.data());
+                // A dying owner's samples carry its bone-0 frame: blend bone 0 in this copy's frame instead.
+                NiTransform frame{};
+                if (!livingFallback && driven && a.HasParent && b.HasParent && RootBoneFrame(apBoneNodes, frame))
+                {
+                    const auto ra = RebaseRootBone(a.Bones[0], a.Parent, frame);
+                    const auto rb = RebaseRootBone(b.Bones[0], b.Parent, frame);
+                    Interpolate(&ra, &rb, t, 1, t_override.data());
+                }
                 useOverride = true;
             }
             // Briefly hold the newest sample beyond the buffered timeline.
@@ -425,6 +487,9 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                     if (driven < count)
                         FillUndriven(pose, apPose, driven, count, livingFallback);
                     std::copy_n(newest.Bones.begin(), driven, t_override.begin());
+                    NiTransform frame{};
+                    if (!livingFallback && driven && newest.HasParent && RootBoneFrame(apBoneNodes, frame))
+                        t_override[0] = RebaseRootBone(newest.Bones[0], newest.Parent, frame);
                     useOverride = true;
                 }
             }
@@ -962,6 +1027,16 @@ bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noex
         std::copy_n(source.rotation, 4, target.Rotation.begin());
         std::copy_n(source.scale, 3, target.Scale.begin());
     }
+    arPose.HasParent = pending ? pose.PendingHasParent : pose.CapturedHasParent;
+    if (arPose.HasParent)
+    {
+        const auto& parent = pending ? pose.PendingParent : pose.CapturedParent;
+        arPose.ParentTranslation = {parent.translate.x, parent.translate.y, parent.translate.z};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                arPose.ParentRotation[r * 3 + c] = parent.rotate.entry[r][c];
+        arPose.ParentScale = parent.scale;
+    }
     return arPose.IsValid();
 }
 
@@ -1035,6 +1110,17 @@ void PushOwnerSample(const uint32_t aFormId, const EvaluatedPoseSnapshot& acPose
         std::copy(source.Rotation.begin(), source.Rotation.end(), target.rotation);
         std::copy(source.Scale.begin(), source.Scale.end(), target.scale);
         target.scale[3] = 0.f;
+    }
+    sample.HasParent = acPose.HasParent;
+    if (sample.HasParent)
+    {
+        sample.Parent.translate.x = acPose.ParentTranslation[0];
+        sample.Parent.translate.y = acPose.ParentTranslation[1];
+        sample.Parent.translate.z = acPose.ParentTranslation[2];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sample.Parent.rotate.entry[r][c] = acPose.ParentRotation[r * 3 + c];
+        sample.Parent.scale = acPose.ParentScale;
     }
     std::copy_n(sample.Bones.begin(), sample.Count, pose.Held.begin());
     pose.HeldCount = (std::max)(pose.HeldCount, sample.Count);

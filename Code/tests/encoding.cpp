@@ -1055,6 +1055,42 @@ TEST_CASE("Evaluated pose transport bounds", "[encoding.pose]")
     REQUIRE_FALSE(pose.IsValid());
 }
 
+TEST_CASE("Evaluated pose carries a dying owner's bone-0 frame", "[encoding.pose]")
+{
+    // Lokir's flash at death (2026-09-30): receivers rebase bone 0 onto the owner's frame at capture.
+    EvaluatedPoseSnapshot pose;
+    pose.GraphDescriptor = 7;
+    pose.SourceTick = 1234;
+    pose.Bones.resize(2);
+    for (auto& bone : pose.Bones)
+    {
+        bone.Translation = {1.f, 2.f, 3.f};
+        bone.Rotation = {0.f, 0.f, 0.f, 1.f};
+        bone.Scale = {1.f, 1.f, 1.f};
+    }
+    for (const bool withParent : {false, true})
+    {
+        pose.HasParent = withParent;
+        pose.ParentTranslation = {16106.f, -82438.f, 8200.f};
+        pose.ParentRotation = {0.866f, -0.5f, 0.f, 0.5f, 0.866f, 0.f, 0.f, 0.f, 1.f};
+        pose.ParentScale = 1.f;
+        Buffer buffer(4096);
+        Buffer::Writer writer(&buffer);
+        pose.Serialize(writer);
+        Buffer::Reader reader(&buffer);
+        EvaluatedPoseSnapshot received;
+        received.Deserialize(reader);
+        REQUIRE(received.HasParent == withParent);
+        REQUIRE(received.Bones.size() == 2);
+        if (withParent)
+        {
+            REQUIRE(received.ParentTranslation == pose.ParentTranslation);
+            REQUIRE(received.ParentRotation == pose.ParentRotation);
+            REQUIRE(received.ParentScale == pose.ParentScale);
+        }
+    }
+}
+
 TEST_CASE("Evaluated pose packing keeps every bone within tolerance", "[encoding.pose]")
 {
     EvaluatedPoseSnapshot pose;

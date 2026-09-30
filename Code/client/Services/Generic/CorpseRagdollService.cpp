@@ -1957,13 +1957,13 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                     break;
                 }
             }
-            // Only once the copy's ragdoll draws the body. Before that it holds its last living pose relative to its
-            // own reference; taking the owner's death-time reference turn then (Lokir: 97 -> 330 deg at death) drew
-            // the held pose turned 134 deg away for 8 frames (the flash at death, 2026-09-30). Then all at once: the
-            // drawn ragdoll sits on the reference, so a partial move is drawn partially wrong.
+            // Every frame, all at once: the drawn ragdoll sits on the reference, so a partial move is drawn partly
+            // wrong. A held or blended owner pose no longer depends on it: PoseCopyAuthority rebases bone 0 onto the
+            // owner's own frame (the death-time reference turn flashed the held pose 134 deg away; gating this move
+            // instead left the reference 85.7 u behind and jumped the body when the ragdoll took over, 2026-09-30).
             const float dx = origin.x - actor->position.x, dy = origin.y - actor->position.y, dz = origin.z - actor->position.z;
             const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (ragdoll.DrivesBody && std::isfinite(gap) && gap > 0.25f)
+            if (std::isfinite(gap) && gap > 0.25f)
             {
                 if (gap > 50.f)
                     spdlog::info("Ragdoll {:X} (server {:X}): actor reference {:.1f} u from owner origin, moved to it",
@@ -1979,7 +1979,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             // body was the owner's pose turned by the difference (151 deg measured = the reference gap, run
             // 20260928-093355), seen as the corpse spinning during the fall.
             const float turn = std::remainder(heading - actor->rotation.z, 6.2831853f);
-            if (ragdoll.DrivesBody && std::isfinite(turn) && std::abs(turn) > 0.002f)
+            if (std::isfinite(turn) && std::abs(turn) > 0.002f)
             {
                 if (std::abs(turn) > 1.5f)
                     spdlog::info("Ragdoll {:X} (server {:X}): heading {:.0f} deg from the owner's, turned to match",
