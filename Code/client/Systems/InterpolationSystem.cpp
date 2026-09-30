@@ -32,7 +32,7 @@ std::vector<uint32_t> s_unseat;
 // threads at a varying point of the frame; the follower drew Lokir 3.7 u (mean) off the interpolation of the samples
 // it had received and 2.4x as jerky. Update publishes each actor's timeline here; the main frame places every remote
 // actor for one presentation time per frame (fractional ms), just before the engine's frame.
-std::atomic<bool> s_mainFramePlacement{true};
+std::atomic<bool> s_mainFramePlacement{false}; // off: horses and riders tipped sideways with it (owner, 2026-09-30)
 std::atomic<uint32_t> s_presentationDelayMs{100};
 struct Placement
 {
