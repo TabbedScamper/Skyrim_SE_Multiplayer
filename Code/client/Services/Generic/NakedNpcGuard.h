@@ -47,6 +47,10 @@ private:
         Inventory OwnerStock;
         Inventory FailedSupply; // Stop repeating an addition the native reader could not identify.
         Vector<GameId> FormOnly;
+        // Weapons the owner's worn list holds in a hand (ExtraWorn right, ExtraWornLeft left). Equipped only from
+        // this copy's own stock, like armor; never minted.
+        Inventory Weapons;
+        uint64_t WeaponLoggedSequence{};
         Vector<Change> Changes;
         bool Complete{}, StockKnown{}, Unmapped{}, Observe{}, Held{}, LoggedWait{};
         uint8_t Life{0xff};

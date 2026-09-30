@@ -325,6 +325,11 @@ void NakedNpcGuard::ApplyInput(const Input& input, uint64_t now) noexcept
             state.Unmapped = std::any_of(state.Worn.Entries.begin(), state.Worn.Entries.end(), [&](const auto& item) {
                 return item.Count > 0 && item.IsWorn() && !TESForm::GetById(m_world.GetModSystem().GetGameId(item.BaseId));
             });
+            state.Weapons = message.Worn;
+            state.Weapons.RemoveByFilter([&](const auto& item) {
+                auto* form = TESForm::GetById(m_world.GetModSystem().GetGameId(item.BaseId));
+                return item.Count <= 0 || !item.IsWorn() || !form || form->formType != FormType::Weapon;
+            });
             state.Worn.RemoveByFilter([&](const auto& item) { return item.Count <= 0 || !item.IsWorn() || !Armor(m_world, item.BaseId); });
             state.FormOnly.clear(); state.Complete = true;
         }
@@ -555,6 +560,38 @@ void NakedNpcGuard::UpdateNative() noexcept
         }
         state.NextCheck = now + kCheckIntervalMs;
         ++m_checkedActors;
+        // Hand-held weapons (2026-09-30: Ralof held his iron war axe on the host but not on the follower after an
+        // owner inventory refresh listed only his armor as worn; this guard only restored armor).
+        if (life == 0)
+        {
+            for (const auto& desired : state.Weapons.Entries)
+            {
+                auto* weapon = TESForm::GetById(m_world.GetModSystem().GetGameId(desired.BaseId));
+                if (!weapon || weapon->formType != FormType::Weapon)
+                    continue;
+                const bool left = desired.ExtraWornLeft && !desired.ExtraWorn;
+                if (actor->GetEquippedWeapon(left ? 0 : 1) == weapon)
+                    continue;
+                const auto inventory = actor->GetActorInventory();
+                const bool owned = std::any_of(inventory.Entries.begin(), inventory.Entries.end(),
+                    [&](const auto& item) { return item.BaseId == desired.BaseId && item.Count > 0; });
+                if (!owned)
+                {
+                    if (state.WeaponLoggedSequence != state.Sequence)
+                        spdlog::info("Worn weapon deferred: {:X} seq {} weapon {:X}:{:X} not in this copy's stock",
+                            target.Form, state.Sequence, desired.BaseId.ModId, desired.BaseId.BaseId);
+                    state.WeaponLoggedSequence = state.Sequence;
+                    continue;
+                }
+                auto* slot = TESForm::GetById(left ? 0x13F43 : 0x13F42); // BGSEquipSlot LeftHand / RightHand
+                EquipManager::Get()->Equip(actor, weapon, nullptr, 1, slot, false, false, false, true);
+                if (state.WeaponLoggedSequence != state.Sequence)
+                    spdlog::info("Worn weapon: {:X} seq {} equipped {:X} in the {} hand, as its owner holds it (now held: {})",
+                        target.Form, state.Sequence, weapon->formID, left ? "left" : "right",
+                        actor->GetEquippedWeapon(left ? 0 : 1) == weapon);
+                state.WeaponLoggedSequence = state.Sequence;
+            }
+        }
         Inventory stock;
         if (!ReadArmor(m_world, actor, stock))
         {
