@@ -70,6 +70,13 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
 
         const auto res = TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
 
+        // Execution block (2026-09-30): the leader's first-person camera follows a scene idle the follower's own
+        // camera graph never plays. Record every local player action while cutscene follow is on.
+        if (pActor->formID == 0x14 && CutsceneFollow::IsActive() && pEventName)
+            spdlog::info("Cutscene action: local player event={} target={} idleForm={:08X} result={} forced={}",
+                pEventName, apAction->targetEventName.AsAscii() ? apAction->targetEventName.AsAscii() : "",
+                apAction->idleForm ? apAction->idleForm->formID : 0, res, g_forceAnimation);
+
         if (res && pActor->formID == 0x14 && apAction->idleForm)
         {
             if (walkingStart)
