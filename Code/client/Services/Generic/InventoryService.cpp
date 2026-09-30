@@ -103,6 +103,22 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
         serverId = *serverIdRes;
     }
 
+    if (acEvent.OwnershipEpoch != 0 && acEvent.FormId != 0x14 && !acEvent.Drop)
+    {
+        const uint64_t key = (uint64_t(acEvent.FormId) << 32) ^ (uint64_t(acEvent.Item.BaseId.ModId) << 24) ^ acEvent.Item.BaseId.BaseId;
+        auto& recent = m_recentNpcDeltas[key];
+        const auto nowMs = GetTickCount64();
+        if (nowMs - recent.AtMs > 3000)
+            recent.Net = 0;
+        recent.Net += acEvent.Item.Count;
+        recent.AtMs = nowMs;
+        recent.ServerId = serverId;
+        recent.OwnershipEpoch = acEvent.OwnershipEpoch;
+        recent.Item = acEvent.Item;
+        if (m_recentNpcDeltas.size() > 256)
+            std::erase_if(m_recentNpcDeltas, [nowMs](const auto& entry) { return nowMs - entry.second.AtMs > 3000; });
+    }
+
     RequestInventoryChanges request;
     request.ServerId = serverId;
     request.OwnershipEpoch = acEvent.OwnershipEpoch;
@@ -148,6 +164,29 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
         return;
     if (!modSystem.GetServerModId(acEvent.ItemId, request.ItemId))
         return;
+
+    // Equipping proves the NPC owns the item. If this PC just reported it removed and never re-added (the engine
+    // re-applied the outfit: Ralof entering Helgen Keep, 2026-09-30 15:46:53, sent -1 for his cuirass and boots and
+    // then equipped both), report the add first so every other PC keeps the items (he was naked on the follower).
+    if (!acEvent.Unequip && !acEvent.IsSpell && !acEvent.IsShout && acEvent.ActorId != 0x14)
+    {
+        const uint64_t key = (uint64_t(acEvent.ActorId) << 32) ^ (uint64_t(request.ItemId.ModId) << 24) ^ request.ItemId.BaseId;
+        const auto recent = m_recentNpcDeltas.find(key);
+        if (recent != m_recentNpcDeltas.end() && recent->second.Net < 0 && GetTickCount64() - recent->second.AtMs <= 3000 &&
+            recent->second.ServerId == acEvent.ServerId && recent->second.OwnershipEpoch == acEvent.OwnershipEpoch)
+        {
+            RequestInventoryChanges restore;
+            restore.ServerId = acEvent.ServerId;
+            restore.OwnershipEpoch = acEvent.OwnershipEpoch;
+            restore.Item = recent->second.Item;
+            restore.Item.Count = static_cast<int32_t>(-recent->second.Net);
+            restore.UpdateClients = true;
+            m_transport.Send(restore);
+            spdlog::info("Equipped {:X} on {:X} after reporting it removed ({}); re-added it for the other PCs",
+                acEvent.ItemId, acEvent.ActorId, recent->second.Net);
+            m_recentNpcDeltas.erase(recent);
+        }
+    }
 
     request.Count = acEvent.Count;
     request.Unequip = acEvent.Unequip;

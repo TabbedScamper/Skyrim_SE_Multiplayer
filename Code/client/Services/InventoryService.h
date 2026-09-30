@@ -66,4 +66,14 @@ private:
     entt::scoped_connection m_equipmentConnection;
     entt::scoped_connection m_inventoryChangeConnection;
     entt::scoped_connection m_equipmentChangeConnection;
+    // Net item deltas sent in the last few seconds for NPCs this PC owns, per (actor form, item): an outfit
+    // re-applied by the engine re-adds its items without an inventory event, so only the removals were sent.
+    struct RecentNpcDelta
+    {
+        int64_t Net{};
+        uint64_t AtMs{};
+        uint32_t ServerId{}, OwnershipEpoch{};
+        Inventory::Entry Item{};
+    };
+    std::unordered_map<uint64_t, RecentNpcDelta> m_recentNpcDeltas;
 };
