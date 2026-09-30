@@ -1046,6 +1046,13 @@ void HarnessService::Tick()
                     s.TeleportPosition.y = ref->position.y + static_cast<float>(dy);
                     s.TeleportPosition.z = ref->position.z + static_cast<float>(dz);
                 }
+                // Both players teleported onto one point shove each other (14:42 run: the host landed 100 u away and
+                // 80 u up). A step may place the party follower beside the leader ("follower_dx", "follower_dy").
+                if (!intoTrigger && s.Local != s.Leader)
+                {
+                    s.TeleportPosition.x += static_cast<float>(Num(s.Step, "follower_dx"));
+                    s.TeleportPosition.y += static_cast<float>(Num(s.Step, "follower_dy"));
+                }
                 if (!SameTeleportCell(player, ref, s.TeleportPosition))
                     throw std::runtime_error("teleport staging would cross a physical cell boundary");
                 s.WorldRef.GetGameTestService().HarnessDriverTick("{\"command\":\"walk_cancel\"}");

@@ -625,12 +625,8 @@
     },
     {
       "op": "teleport",
-      "ref": "1095D8",
       "timeout": 20,
-      "dx": -919.8802083333,
-      "dy": 67.6302083333,
-      "dz": -458.96126302083,
-      "source": "esm.sqlite NAVM FECF2 triangle55 centroid; explicit same-cell position onto lower inn floor",
+      "source": "same-grid staging 108 u before the step 32 grid crossing on its line (the 14:42 run stalled 304 u away behind the inn wall)",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -644,7 +640,11 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "x": 16340.0,
+      "y": -83815.765625,
+      "z": 8411.41478080534,
+      "follower_dx": -60.0
     },
     {
       "op": "walk",
