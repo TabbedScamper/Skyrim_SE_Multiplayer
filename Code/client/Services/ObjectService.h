@@ -182,6 +182,8 @@ public:
     static bool IsCartCurve() noexcept;
     // Per-frame rendered position/heading trace of chosen references (motion_trace). Ids start a trace; dump writes it.
     static std::string MotionTrace(const std::string& aIds, const std::string& aBone, const std::string& aDump) noexcept;
+    // A received network sample (its stamp and position) for a traced id, dumped with "sit":65535. Any thread.
+    static void MotionTraceReceived(uint32_t aFormId, uint64_t aTick, const glm::vec3& acPosition) noexcept;
     static bool IsCartReplayEnabled() noexcept;
     // Lock-free: true for a local horse tethered to a cart. Its native position moves keep their Havok sync
     // (HookSetPosition), called from engine threads about once a frame per horse.

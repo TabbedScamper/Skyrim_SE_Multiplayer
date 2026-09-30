@@ -72,15 +72,20 @@ uint32_t LeaderFormId() noexcept
     return s_active.load(std::memory_order_acquire) ? s_leaderFormId.load(std::memory_order_acquire) : 0;
 }
 
-bool ClaimLeaderIdleMirror(const uint32_t aIdleFormId) noexcept
+bool LeaderIdleNeeded(const uint32_t aIdleFormId) noexcept
 {
     const auto now = GetTickCount64();
     std::lock_guard guard(s_idleLock);
-    auto& play = s_idlePlays[aIdleFormId];
-    if (play.AtMs && now - play.AtMs < kIdleDedupeMs)
-        return false; // this character already played it
-    play = {now, true};
-    return true;
+    const auto it = s_idlePlays.find(aIdleFormId);
+    return it == s_idlePlays.end() || !it->second.AtMs || now - it->second.AtMs >= kIdleDedupeMs;
+}
+
+void NoteLeaderIdleMirrored(const uint32_t aIdleFormId) noexcept
+{
+    // Only a mirror that played counts: a refused one must not cancel this character's own later play of it
+    // (2026-09-30 14:13: a failed IdleExecutioneeIdle mirror suppressed her scene's own, successful one).
+    std::lock_guard guard(s_idleLock);
+    s_idlePlays[aIdleFormId] = {GetTickCount64(), true};
 }
 
 bool ClaimLocalIdle(const uint32_t aIdleFormId) noexcept

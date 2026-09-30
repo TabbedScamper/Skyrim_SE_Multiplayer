@@ -30,6 +30,7 @@
 #include <Services/CorpseRagdollService.h>
 #include <Services/CutsceneFollow.h>
 extern thread_local bool g_mirroringLeaderIdle;
+extern thread_local bool g_forceAnimation;
 #include <PlayerCharacter.h>
 #include <Forms/TESIdleForm.h>
 #include <Services/TransportService.h>
@@ -824,13 +825,23 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         if (first.IdleId && first.IdleId != 0x10C00C && first.IdleId != 0x10C00D &&
             apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer() &&
             apActor->formID == CutsceneFollow::LeaderFormId() && actionData.idleForm &&
-            CutsceneFollow::ClaimLeaderIdleMirror(first.IdleId))
+            CutsceneFollow::LeaderIdleNeeded(first.IdleId))
         {
             if (auto* pLocal = PlayerCharacter::Get())
             {
-                g_mirroringLeaderIdle = true;
-                const bool played = pLocal->PlayIdle(actionData.idleForm);
-                g_mirroringLeaderIdle = false;
+                // The same forced action as the leader's copy just ran: PlayIdle checks the idle's conditions, which
+                // fail on this character (IdleExecutionerChop_Player refused, 2026-09-30 14:13) because its scene
+                // partner (the headsman) is the leader's, not this PC's.
+                TESActionData mirror(first.Type & 0x3, pLocal, pAction, pTarget);
+                mirror.eventName = BSFixedString(first.EventName.c_str());
+                mirror.idleForm = actionData.idleForm;
+                mirror.someFlag = actionData.someFlag;
+                // Forced like Actor.cpp's replays: not broadcast as this player's own action.
+                g_mirroringLeaderIdle = g_forceAnimation = true;
+                const bool played = ActorMediator::Get()->ForceAction(&mirror) != 0;
+                g_mirroringLeaderIdle = g_forceAnimation = false;
+                if (played)
+                    CutsceneFollow::NoteLeaderIdleMirrored(first.IdleId);
                 spdlog::info("Cutscene follow: mirrored the leader's idle {:08X} ('{}') on this player played={}",
                     first.IdleId, first.EventName, played);
             }

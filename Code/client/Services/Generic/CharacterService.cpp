@@ -1,6 +1,7 @@
 #include <Services/CreatorTogether.h>
 #include <limits>
 #include <Services/SmoothClock.h>
+#include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
 #include "Forms/TESObjectCELL.h"
 #include "Forms/TESWorldSpace.h"
@@ -1604,6 +1605,8 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         point.Direction = movement.Direction;
 
         InterpolationSystem::AddPoint(interpolationComponent, point);
+        if (const auto* traced = m_world.try_get<FormIdComponent>(*itor))
+            ObjectService::MotionTraceReceived(traced->Id, acMessage.Tick, movement.Position);
         if (acMessage.Tick >= animationComponent.LastReceivedCombatTargetTick)
         {
             animationComponent.LastReceivedCombatTargetTick = acMessage.Tick;

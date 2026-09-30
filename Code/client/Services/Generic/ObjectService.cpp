@@ -5095,6 +5095,27 @@ bool ObjectService::IsCartCurve() noexcept
     return s_cartCurve.load(std::memory_order_relaxed);
 }
 
+void ObjectService::MotionTraceReceived(const uint32_t aFormId, const uint64_t aTick, const glm::vec3& acPosition) noexcept
+{
+    if (!s_motionTraceOn.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard lock(s_motionTraceLock);
+    if (s_motionTrace.size() >= kMotionTraceMax ||
+        std::find(s_motionTraceIds.begin(), s_motionTraceIds.end(), aFormId) == s_motionTraceIds.end())
+        return;
+    const double steady = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    MotionTraceRecord r{};
+    r.SteadyMs = steady;
+    r.SharedMs = static_cast<double>(aTick);
+    r.FormId = aFormId;
+    r.X = r.RefX = r.RootX = r.SkelX = acPosition.x;
+    r.Y = r.RefY = r.RootY = r.SkelY = acPosition.y;
+    r.Z = r.RefZ = r.RootZ = r.SkelZ = acPosition.z;
+    r.Sit = 0xFFFF;
+    s_motionTrace.push_back(r);
+}
+
 std::string ObjectService::MotionTrace(const std::string& aIds, const std::string& aBone, const std::string& aDump) noexcept
 {
     // The bridge runs on the window thread; the recorder on the main frame. One lock covers both.

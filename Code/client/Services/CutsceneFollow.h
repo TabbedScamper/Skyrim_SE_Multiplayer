@@ -22,6 +22,7 @@ uint32_t LeaderFormId() noexcept;
 // character plays itself (the pose copy moves the body, not the camera), so a leader idle the
 // follower's own scene never plays (the paired IdleExecutionerChop_Player) is mirrored onto it.
 // Each idle plays once: a mirror and the follower's own later play of it within 5 s cancel.
-bool ClaimLeaderIdleMirror(uint32_t aIdleFormId) noexcept; // true: play it now
-bool ClaimLocalIdle(uint32_t aIdleFormId) noexcept;        // false: already mirrored, skip it
+bool LeaderIdleNeeded(uint32_t aIdleFormId) noexcept;      // false: this character already played it
+void NoteLeaderIdleMirrored(uint32_t aIdleFormId) noexcept; // after a mirror that played
+bool ClaimLocalIdle(uint32_t aIdleFormId) noexcept;         // false: already mirrored, skip it
 } // namespace CutsceneFollow
