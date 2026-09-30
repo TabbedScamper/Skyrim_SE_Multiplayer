@@ -16,6 +16,47 @@
 #include <Interface/UI.h>
 #include <FunctionHook.hpp>
 #include <cmath>
+#include <Games/ActorExtension.h>
+
+// Death weapon drops (owner report 2026-09-29: the enemy's dropped weapon was not where the host saw it). The death
+// path 0x1406A9E50 (37896) calls 0x140677C90 (37320) to drop the dying actor's weapons: always for some actors, else on
+// a random roll against iDeathDropWeaponChance (setting 374997, value 374998). Every PC rolled its own dice for its own
+// copy of the NPC, so a weapon fell on one PC and not the other, or in another spot. The NPC's owner alone drops: a
+// copy's death skips it, and the owner's drop becomes a shared drop (one reference, seen by everyone, physics from the
+// dropper) like a player's.
+namespace
+{
+thread_local uint32_t t_deathDropActor{};
+using TDeathDrop = void(Actor*);
+TDeathDrop* s_realDeathDrop{};
+
+void HookDeathDrop(Actor* apActor)
+{
+    auto* pExtension = apActor ? apActor->GetExtension() : nullptr;
+    if (pExtension && pExtension->IsRemote() && !pExtension->IsPlayer() && World::Get().GetTransport().IsConnected())
+    {
+        static std::atomic<uint32_t> s_logs{};
+        if (s_logs.fetch_add(1, std::memory_order_relaxed) < 32)
+            spdlog::info("Death drop of copy {:X} skipped: its owner's drop is shared", apActor->formID);
+        return;
+    }
+    spdlog::info("Death drop of {:X}: dropping here (this PC owns it)", apActor ? apActor->formID : 0);
+    const auto previous = t_deathDropActor;
+    t_deathDropActor = apActor ? apActor->formID : 0;
+    // As Actor::DropObject does for a player: the removal is the shared drop's to report (the server debits the
+    // NPC when it creates the drop); a separate inventory change first left the drop unbacked.
+    ScopedInventoryOverride inventoryOverride;
+    s_realDeathDrop(apActor);
+    t_deathDropActor = previous;
+}
+
+TiltedPhoques::Initializer s_deathDropHook([]()
+{
+    POINTER_SKYRIMSE(TDeathDrop, deathDrop, 37320);
+    s_realDeathDrop = deathDrop.Get();
+    TP_HOOK(&s_realDeathDrop, HookDeathDrop);
+});
+}
 
 namespace
 {
@@ -136,16 +177,21 @@ BSTEventResult SharedDropService::OnEvent(const TESContainerChangedEvent* aEvent
 {
     // Actor::DropObject holds this override while its native RemoveItem creates
     // the reference. Direct inventory removals already report their own delta.
-    if (!aEvent || !TracksPlayerDrops() || !ScopedInventoryOverride::IsOverriden()) return BSTEventResult::kOk;
+    // Or the death drop of an NPC this PC owns (HookDeathDrop above), on this thread.
+    const bool deathDrop = t_deathDropActor != 0;
+    if (!aEvent || !TracksPlayerDrops() || (!ScopedInventoryOverride::IsOverriden() && !deathDrop)) return BSTEventResult::kOk;
     ContainerChange event{};
     memcpy(&event, aEvent, sizeof(event));
-    if (event.OldContainer != 0x14 || event.NewContainer || !event.Reference || event.Count <= 0) return BSTEventResult::kOk;
+    const uint32_t dropper = deathDrop ? t_deathDropActor : 0x14;
+    if (event.OldContainer != dropper || event.NewContainer || !event.Reference || event.Count <= 0) return BSTEventResult::kOk;
+    if (deathDrop)
+        spdlog::info("Death drop of {:X}: {:X} x{} shared", dropper, event.Base, event.Count);
     auto* reference = Reference(event.Reference);
     if (!reference || !reference->IsTemporary() || !reference->baseForm ||
         reference->baseForm->formID != event.Base || reference->GetExtraDataList()->HasQuestObjectAlias()) return BSTEventResult::kOk;
     std::lock_guard lock(m_lock);
     const auto token = m_nextToken++;
-    m_nativeDrops.push_back({event.Reference, event.Base, event.Count, token});
+    m_nativeDrops.push_back({event.Reference, event.Base, event.Count, token, dropper});
     m_origins.emplace(token, event.Reference);
     return BSTEventResult::kOk;
 }
@@ -330,6 +376,17 @@ void SharedDropService::OnMainFrame() noexcept
         TESObjectREFR::GetItemFromExtraData(request.Item, extras);
         request.Item.Count = native.Count;
         request.Item.ExtraWorn = request.Item.ExtraWornLeft = false;
+        if (native.Dropper != 0x14)
+        {
+            // A death drop: the server debits the NPC this PC owns.
+            for (auto entity : m_world.view<FormIdComponent, LocalComponent>())
+                if (m_world.get<FormIdComponent>(entity).Id == native.Dropper)
+                {
+                    request.Source = m_world.get<LocalComponent>(entity).Id;
+                    break;
+                }
+            if (!request.Source) { m_origins.erase(native.Token); continue; }
+        }
         request.ExtraMask = (extras->Contains(ExtraDataType::Charge) ? 1 : 0) | (extras->Contains(ExtraDataType::Health) ? 2 : 0);
         if (auto* text = Cast<ExtraTextDisplayData>(extras->GetByType(ExtraDataType::TextDisplayData)))
         {

@@ -1,4 +1,5 @@
 #include <Services/CorpseRagdollService.h>
+#include <Services/CharacterService.h>
 #include <Games/Overrides.h>
 
 #include <World.h>
@@ -2014,6 +2015,10 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                 s_wornProbeUntilMs.store(GetTickCount64() + 400, std::memory_order_relaxed);
             ragdoll.Knocked = true;
             ragdoll.RetryTransitionMs = aNowMs + 250;
+            // A dead copy following the owner's ragdoll gets the dead-body collision layer whichever path killed it
+            // (a death animation without a knock does not pass the kill hook).
+            if (const auto life = (actor->actorState.flags1 >> 21) & 0xF; life == 1 || life == 2)
+                CharacterService::NoteRemoteDeath(actor->formID);
         }
         if (!limb && ragdoll.WatchSinceMs && aNowMs - ragdoll.WatchSinceMs < 2000)
         {

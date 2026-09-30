@@ -2737,7 +2737,7 @@ std::atomic<uint32_t> s_mainThreadId{};
 // only when the knock state is 0 or 6; a copy killed by sync is usually already ragdolling from the synced knock
 // (state 1), so its bodies stayed on the living layer (8) while the owner's were on 32 (corpse_test: host L32,
 // follower L8). Do what the death path does: NiAVObject::SetCollisionLayer (77998) with 32 on the copy's 3D, repeated
-// for 5 s so a body that attaches or rebuilds after the kill gets it too. Bounded by recent deaths.
+// for 30 s so a body that attaches or rebuilds after the kill gets it too. Bounded by recent deaths.
 namespace
 {
 std::mutex s_deadLayerLock;
@@ -2758,7 +2758,8 @@ void CharacterService::ClearMainFrameWork() noexcept
 void CharacterService::NoteRemoteDeath(uint32_t aFormId) noexcept
 {
     std::lock_guard lock(s_deadLayerLock);
-    const auto until = GetTickCount64() + 5000;
+    // 30 s: a body that dies in its death animation (no knock) gets its ragdoll seconds later (corpse_test, no-knock kill).
+    const auto until = GetTickCount64() + 30000;
     for (auto& entry : s_deadLayers)
         if (entry.first == aFormId)
         {

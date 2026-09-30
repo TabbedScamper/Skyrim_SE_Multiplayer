@@ -16,6 +16,7 @@
 #include <Services/PlayerService.h>
 #include <Systems/FaceGenSystem.h>
 #include <Services/PapyrusService.h>
+#include <EquipManager.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/Generic/HeadTrackService.h>
 #include <World.h>
@@ -5964,6 +5965,51 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             ReviveService::SetTestBleed(value);
             return Result(id, fmt::format("\"bleed\":{}", value));
         }
+        if (command == "death_drop_now")
+        {
+            // The death path's weapon drop (0x140677C90 / 37320, through our hook) on an actor, as a death would call it.
+            const auto formText = GetJsonString(acLine, "form_id");
+            const uint32_t formId = formText.empty() ? 0 : std::stoul(formText, nullptr, 16);
+            QueueCreatorCall([formId]() {
+                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                if (!pActor)
+                    return;
+                using TDeathDrop = void(Actor*);
+                POINTER_SKYRIMSE(TDeathDrop, deathDrop, 37320);
+                deathDrop.Get()(pActor);
+                spdlog::info("Test death_drop_now: {:X}", formId);
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\"", formId));
+        }
+        if (command == "death_drop_chance")
+        {
+            // iDeathDropWeaponChance (GameSetting 374997, int value 374998): percent chance a dying NPC drops its weapon.
+            POINTER_SKYRIMSE(int32_t, chance, 374998);
+            const auto valueText = GetJsonString(acLine, "value");
+            if (!valueText.empty())
+                *chance.Get() = std::stoi(valueText);
+            return Result(id, fmt::format("\"chance\":{}", *chance.Get()));
+        }
+        if (command == "give_weapon")
+        {
+            // Arm an actor (form_id) with a weapon (base, default Iron Sword 12EB7) and equip it, on the game thread.
+            const auto formText = GetJsonString(acLine, "form_id");
+            const auto baseText = GetJsonString(acLine, "base");
+            const uint32_t formId = formText.empty() ? 0 : std::stoul(formText, nullptr, 16);
+            const uint32_t baseId = baseText.empty() ? 0x12EB7 : std::stoul(baseText, nullptr, 16);
+            QueueCreatorCall([formId, baseId]() {
+                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                auto* pWeapon = TESForm::GetById(baseId);
+                if (!pActor || !pWeapon)
+                    return;
+                using ObjectReference = TESObjectREFR;
+                PAPYRUS_FUNCTION(void, ObjectReference, AddItem, TESForm*, int32_t, bool);
+                s_pAddItem(pActor, pWeapon, 1, true);
+                EquipManager::Get()->Equip(pActor, pWeapon, nullptr, 1, nullptr, false, true, false, true);
+                spdlog::info("Test give_weapon: {:X} armed with {:X}", formId, baseId);
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\"", formId));
+        }
         if (command == "crosshair")
         {
             // What the crosshair is on (CrosshairPickData, 401585: target handle at +4), as the activate prompt and
@@ -6137,7 +6183,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (!pActor || !pPlayer || !pActor->currentProcess)
                 return Error(id, "actor not found");
             const float push = pushText.empty() ? 20.f : std::stof(pushText);
-            pActor->currentProcess->KnockExplosion(pActor, &pPlayer->position, push);
+            // push < 0: no knock first (a knock sheathes the weapon, and the death weapon drop needs it drawn).
+            if (push >= 0.f)
+                pActor->currentProcess->KnockExplosion(pActor, &pPlayer->position, push);
             pActor->Kill();
             return Result(id, fmt::format("\"push\":{}", push));
         }
@@ -6207,14 +6255,15 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
                 "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{},\"health\":{:.1f},\"inCombat\":{},\"combatTarget\":\"{:X}\","
-                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{},\"hidden\":{},\"magicka\":{:.1f},\"look\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{},\"hidden\":{},\"magicka\":{:.1f},\"weaponState\":{},\"rightHand\":\"{:X}\",\"look\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
                 CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor),
                 pActor->GetActorValue(ActorValueInfo::kHealth), JsonBool(pActor->IsInCombat()),
                 pActor->GetCombatTarget() ? pActor->GetCombatTarget()->formID : 0,
                 JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote()), items, graph.Calls, graph.LastPostCallMs,
                 GetTickCount64(), JsonBool(pRoot && (pRoot->flags & 1u) != 0),
-                pActor->GetActorValue(ActorValueInfo::kMagicka), HeadTrackService::DescribeLook(pActor)));
+                pActor->GetActorValue(ActorValueInfo::kMagicka), (pActor->actorState.flags2 >> 5) & 7,
+                pActor->GetEquippedWeapon(1) ? pActor->GetEquippedWeapon(1)->formID : 0, HeadTrackService::DescribeLook(pActor)));
         }
         if (command == "ref_bodies")
         {
