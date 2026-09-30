@@ -1693,6 +1693,7 @@ struct FollowProbe
     // Placed exactly on the host's resting pose and left asleep (host at rest, copy within 10 u).
     bool RestPlaced{};
     uint32_t RestPlacements{};
+    std::chrono::steady_clock::time_point NextRestPlace{};
 };
 std::unordered_map<void*, FollowProbe> s_followProbes;
 std::mutex s_stepTargetsLock;
@@ -1958,13 +1959,16 @@ int RunNativeStep(void* apWorld, float aDeltaTime, NativeStep&& aNativeStep, boo
                 // Host at rest: place the copy exactly on the host's pose once, clear its motion and let it sleep, then
                 // stop driving it. A broom leaning on a wall in Helgen Keep, driven toward the resting pose every step,
                 // slid 5 u back and forth against gravity and the wall on the follower while the host's stood still
-                // (2026-09-30: 300 steps per 5 s, gap up to 7.1 u, never settled). Re-driven if it ends up 10 u away.
+                // (2026-09-30: 300 steps per 5 s, gap up to 7.1 u, never settled). At any distance: a copy that fell
+                // over on load (36.6 u off, 17 u low) was never lifted back by the drive. Re-placed at most once a
+                // second while it stays more than 2 u off.
                 if (!hostMoving)
                 {
-                    if (gap <= 10.f)
+                    if (gap <= 300.f)
                     {
-                        if (!probe.RestPlaced)
+                        if ((!probe.RestPlaced || gap > 2.f) && started >= probe.NextRestPlace)
                         {
+                            probe.NextRestPlace = started + std::chrono::seconds(1);
                             alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
                             alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
                             s_placeBody.Get()(target.Body, position, quaternion);
