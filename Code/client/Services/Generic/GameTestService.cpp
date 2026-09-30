@@ -953,6 +953,17 @@ void Tick()
                         progressPoint = player->position;
                         lastProgress = now;
                     }
+                    // Look where a person walking there would: eye level toward the target, tilted only
+                    // for height difference (stairs, ramps), eased so the view never snaps. Path steering
+                    // turns heading only and would otherwise keep any earlier look-up/down pitch.
+                    if (active && ownsAI)
+                    {
+                        const float horizontal = std::hypot(target->position.x - player->position.x, target->position.y - player->position.y);
+                        const float wanted = std::clamp(std::atan2(player->position.z - target->position.z, std::max(horizontal, 64.f)), -0.5f, 0.5f);
+                        const float step = std::clamp(wanted - player->rotation.x, -0.05f, 0.05f);
+                        if (std::isfinite(step) && std::abs(step) > 0.001f)
+                            player->SetRotation(player->rotation.x + step, player->rotation.y, player->rotation.z);
+                    }
                     if (active && now - lastProgress > 20000) Finish(player, "failed", "no path progress for 20 seconds");
                 }
             }
@@ -5582,8 +5593,13 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const float dx = std::stof(GetJsonString(acLine, "x")) - player->position.x;
             const float dy = std::stof(GetJsonString(acLine, "y")) - player->position.y;
             const float z = std::atan2(dx, dy);
-            player->SetRotation(player->rotation.x, player->rotation.y, z);
-            return Result(id, fmt::format("\"yaw\":{}", z));
+            // Look at the point like a player would: at its height when "z" is given (eyes about
+            // 120 u up), otherwise straight ahead, never keeping an earlier look up or down.
+            const auto pointZ = GetJsonString(acLine, "z");
+            const float x = pointZ.empty() ? 0.f :
+                std::clamp(std::atan2(player->position.z + 120.f - std::stof(pointZ), std::max(std::hypot(dx, dy), 1.f)), -1.2f, 1.2f);
+            player->SetRotation(x, player->rotation.y, z);
+            return Result(id, fmt::format("\"yaw\":{},\"pitch\":{}", z, x));
         }
         if (command == "revive_hold")
         {
