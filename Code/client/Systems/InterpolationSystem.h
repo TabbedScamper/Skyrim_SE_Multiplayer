@@ -20,6 +20,8 @@ struct InterpolationSystem
     static void SetMainFramePlacement(bool aEnabled) noexcept;
     static bool IsMainFramePlacement() noexcept;
     static void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
+    // Any thread: release this actor from furniture or a mount on the next main frame (native quick stop).
+    static void QueueStopInteracting(uint32_t aFormId) noexcept;
     static void AddPoint(InterpolationComponent& aInterpolationComponent, const InterpolationComponent::TimePoint& acPoint) noexcept;
     static InterpolationComponent& Setup(World& aWorld, entt::entity aEntity) noexcept;
     static void Clean(World& aWorld, entt::entity aEntity) noexcept;

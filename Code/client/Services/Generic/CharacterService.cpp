@@ -2261,6 +2261,18 @@ void CharacterService::OnNotifyMount(const NotifyMount& acMessage) noexcept
         return;
     if (!acMessage.MountId)
     {
+        // A dismount after this PC already started the mount package: stop it. Erasing the relation alone left the
+        // native package running (2026-09-30 15:03:39: Hadvar's copy began mounting 654E1 0.5 s before the owner's
+        // dismount arrived; the horse stayed face down in the dirt, spinning, on the follower only).
+        const auto pending = m_pendingMounts.find(acMessage.RiderId);
+        const bool started = pending != m_pendingMounts.end() && (pending->second.StartedAtMs || pending->second.WasSeated);
+        auto* pRider = Utils::GetByServerId<Actor>(acMessage.RiderId);
+        if (pRider && pRider->GetExtension()->IsRemote() && (started || pRider->GetNativeMountFormId()))
+        {
+            spdlog::info("Mount: owner dismounted rider {:X} (native mount {:X}, package started {}); released here",
+                pRider->formID, pRider->GetNativeMountFormId(), started);
+            InterpolationSystem::QueueStopInteracting(pRider->formID);
+        }
         m_pendingMounts.erase(acMessage.RiderId);
         return;
     }
@@ -2315,6 +2327,20 @@ void CharacterService::RunPendingMounts() noexcept
                 if (pRider->GetNativeMountFormId() == pMount->formID)
                     ++m_vehicleTrialImmediateSeats;
                 pending.NextAttemptMs = now + 1000;
+                ++it;
+                continue;
+            }
+        }
+        // A relation that waited for 3D can be stale: a rider still in the owner's saddle is streamed onto its horse.
+        // Start the mount only while the copy is near the horse (a stale mount began just before the owner's
+        // dismount arrived, 2026-09-30 15:03:39).
+        if (!pending.StartedAtMs && pRider->GetExtension()->IsRemote())
+        {
+            const auto gap = glm::length(glm::vec3(pRider->position.x - pMount->position.x,
+                pRider->position.y - pMount->position.y, pRider->position.z - pMount->position.z));
+            if (gap > 200.f)
+            {
+                pending.NextAttemptMs = now + 250;
                 ++it;
                 continue;
             }

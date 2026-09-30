@@ -348,6 +348,11 @@ bool InterpolationSystem::IsMainFramePlacement() noexcept
     return s_mainFramePlacement.load(std::memory_order_relaxed);
 }
 
+void InterpolationSystem::QueueStopInteracting(const uint32_t aFormId) noexcept
+{
+    QueueUnseat(aFormId);
+}
+
 void InterpolationSystem::SetPresentationDelayMs(const uint32_t aDelayMs) noexcept
 {
     s_presentationDelayMs.store(aDelayMs, std::memory_order_relaxed);
