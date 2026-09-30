@@ -873,6 +873,14 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             if (auto* pControls = PlayerControls::GetInstance())
                 pControls->SetBlockPlayerInput(false);
             spdlog::info("Shared-campaign world-ready barrier released for epoch {}", m_startEpoch);
+            // Everyone has loaded: fade in together here. The gameplay barrier can be minutes away (a fresh intro
+            // reaches it only after the character creator): waiting for it kept both screens black through the whole
+            // cart ride until the 3-minute lift (session 2026-09-29 22:14-22:17).
+            if (m_wipeFade)
+            {
+                FadeOutGame(false, true, 2.5f, true, 0.f);
+                m_wipeFade = false;
+            }
         }
         else if (previousSessionState == 2 && m_sessionState == 3)
         {
