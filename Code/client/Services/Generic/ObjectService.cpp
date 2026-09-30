@@ -3937,7 +3937,8 @@ void ObjectService::CaptureHazards() noexcept
         return;
     s_nextCapture = nowMs + 50;
     PhysicsReferencesMoveRequest request;
-    request.Tick = m_transport.GetClock().GetCurrentTick();
+    // The smooth shared clock, like the body snapshots above (receivers play back on it).
+    request.Tick = SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick();
     for (auto it = s_hostHazards.begin(); it != s_hostHazards.end();)
     {
         auto& hazard = it->second;

@@ -3437,6 +3437,9 @@ void CharacterService::ProcessLeveledConforms() noexcept
 // default. Live-tunable through the sync_level bridge command to back off if bandwidth or the server lags.
 std::atomic<uint32_t> g_syncBatchMs{0};
 
+// A/B switch for the snapshot stamp clock (test command smooth_stamp); on in production.
+std::atomic<bool> g_smoothSnapshotStamp{true};
+
 void CharacterService::RunLocalUpdates() const noexcept
 {
     static std::chrono::steady_clock::time_point nextSendTimePoint;
@@ -3469,7 +3472,12 @@ void CharacterService::RunLocalUpdates() const noexcept
     }
 
     ClientReferencesMoveRequest message;
-    message.Tick = m_transport.GetClock().GetCurrentTick();
+    // Stamp on the same smooth shared clock the receivers play back on. The transport clock moves only when the
+    // transport updates it and steps on each resync: its stamps put these positions and poses a few ms off their
+    // true time, which receivers showed as a wobble growing with speed (2026-09-28 trace: follower frame-to-frame
+    // velocity change 559 u/s vs the host's 35 on the flying dragon, 4.6 u mean wobble).
+    message.Tick = SmoothClock::NowTick() && g_smoothSnapshotStamp.load(std::memory_order_relaxed) ? SmoothClock::NowTick() :
+        m_transport.GetClock().GetCurrentTick();
 
     auto animatedLocalView = m_world.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
 
