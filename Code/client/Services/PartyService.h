@@ -76,6 +76,9 @@ private:
     uint8_t m_campaignMode{};
     // Checkpoint the leader announced; written once this PC is in the world.
     String m_pendingCheckpoint{};
+    // The cell this PC's player has been in since when (checkpoint timing).
+    uint32_t m_checkpointCellId{};
+    uint64_t m_checkpointCellSinceMs{};
     // When this follower's player last got 3D after a load, and whether its walking camera was cleared since.
     std::chrono::steady_clock::time_point m_player3DSince{};
     bool m_walkingCameraCleared{};

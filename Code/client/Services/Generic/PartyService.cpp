@@ -554,9 +554,27 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     }
     // A checkpoint the leader announced: start it once this PC is in the world (the engine
     // defers a queued save until saving is allowed), then copy the save when it is on disk.
+    // Only once the player has been in one cell for 5 s with no load screen: the leader's autosave at a load door
+    // announces the checkpoint as it goes through, and saving as soon as the new cell had 3D recorded escorts the
+    // engine had not yet brought through (Ralof outside Helgen Keep, 2026-09-30: missing after loading it).
+    if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell)
+    {
+        // Outdoors the grid cell changes as the player walks: key on the worldspace there, on the cell indoors.
+        const auto* pWorld = pPlayer->parentCell->worldspace;
+        const uint32_t place = pWorld ? reinterpret_cast<const TESForm*>(pWorld)->formID : pPlayer->parentCell->formID;
+        if (place != m_checkpointCellId)
+        {
+            m_checkpointCellId = place;
+            m_checkpointCellSinceMs = GetTickCount64();
+        }
+    }
+    else
+        m_checkpointCellId = 0;
     if (!m_pendingCheckpoint.empty() && m_sessionState >= 2)
     {
-        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell && pPlayer->GetNiNode())
+        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell && pPlayer->GetNiNode() &&
+            m_checkpointCellId && GetTickCount64() - m_checkpointCellSinceMs >= 5000 &&
+            (!pUI || !pUI->GetMenuOpen(BSFixedString("Loading Menu"))))
         {
             CheckpointSaves::Begin(m_pendingCheckpoint);
             m_pendingCheckpoint.clear();
