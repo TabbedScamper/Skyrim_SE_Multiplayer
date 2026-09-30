@@ -297,6 +297,7 @@ struct HarnessService::Impl
     std::atomic<uint32_t> Dirty{~0u};
     std::atomic_bool InboxOverflow{};
     std::atomic<uint64_t> TriggerToken{};
+    std::atomic<uint32_t> TriggerEntrant{0x14};
     uint32_t TriggerGeneration{};
     float PreviousSpeed{100.f};
     NiPoint3 TeleportPosition{};
@@ -625,9 +626,25 @@ BSTEventResult HarnessService::OnEvent(const TESTriggerEnterEvent* event, const 
     auto token = m->TriggerToken.load();
     if (token && event && event->pTrigger && event->pActionRef &&
         event->pTrigger->formID == uint32_t(token) && event->pActionRef->formID == 0x14)
+    {
+        m->TriggerEntrant = 0x14;
         m->TriggerToken.compare_exchange_strong(token, token | (uint64_t(1) << 63));
+    }
     m->Dirty.fetch_or(16);
     return BSTEventResult::kOk;
+}
+void HarnessService::OnPartyTriggerDelivered(uint32_t aTriggerFormId, uint32_t aRemoteFormId) noexcept
+{
+    // In play, whichever party member crosses a quest trigger advances the story for everyone.
+    auto* service = s_service.load();
+    if (!service) return;
+    auto token = service->m->TriggerToken.load();
+    if (token && !(token & (uint64_t(1) << 63)) && uint32_t(token) == aTriggerFormId)
+    {
+        service->m->TriggerEntrant = aRemoteFormId;
+        service->m->TriggerToken.compare_exchange_strong(token, token | (uint64_t(1) << 63));
+    }
+    service->m->Dirty.fetch_or(16);
 }
 
 void HarnessService::Tick()
@@ -1058,7 +1075,8 @@ void HarnessService::Tick()
                 d->SetInt("leaderId", s.Leader); d->SetInt("localId", s.Local);
                 d->SetInt("generation", (token >> 32) & 0x7fffffff);
                 if (player) { d->SetDouble("x", player->position.x); d->SetDouble("y", player->position.y); d->SetDouble("z", player->position.z); }
-                d->SetInt("entrant", 0x14); s.Record("local_trigger_enter", d);
+                const auto entrant = s.TriggerEntrant.exchange(0x14);
+                d->SetInt("entrant", entrant); s.Record(entrant == 0x14 ? "local_trigger_enter" : "party_trigger_enter", d);
                 s.TriggerToken = 0;
                 s.WorldRef.GetGameTestService().HarnessDriverTick("{\"command\":\"walk_cancel\"}");
                 s.Complete();

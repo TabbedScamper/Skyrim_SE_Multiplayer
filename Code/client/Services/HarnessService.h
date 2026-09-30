@@ -16,6 +16,9 @@ struct HarnessService : BSTEventSink<TESQuestStageEvent>, BSTEventSink<TESCellFu
     static void MainThreadUpdate() noexcept;
     static bool OwnsDriver() noexcept;
     static bool IsEnabled() noexcept;
+    // TriggerGate delivers a remote player's trip straight to the script sinks, bypassing the
+    // trigger event dispatcher: report it so a party-trigger step sees the party's entry.
+    static void OnPartyTriggerDelivered(uint32_t aTriggerFormId, uint32_t aRemoteFormId) noexcept;
     std::string Command(const std::string&);
     BSTEventResult OnEvent(const TESQuestStageEvent*, const EventDispatcher<TESQuestStageEvent>*) override;
     BSTEventResult OnEvent(const TESCellFullyLoadedEvent*, const EventDispatcher<TESCellFullyLoadedEvent>*) override;

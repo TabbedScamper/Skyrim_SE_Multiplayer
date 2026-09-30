@@ -1,5 +1,6 @@
 #include <Services/TriggerGate.h>
 #include <Services/ReviveService.h>
+#include <Services/HarnessService.h>
 
 #include <World.h>
 #include <Components.h>
@@ -210,8 +211,11 @@ BSTEventResult HookTrigger(void* apSink, const TESTriggerEnterEvent* apEvent, co
         auto* pSink = kind == Kind ? apSink : reinterpret_cast<uint8_t*>(GameVM::Get()) + kSinkOffsets[kind];
         const auto result = s_original[kind](pSink, &event, kind == Kind ? apSource : nullptr);
         if (kind == kEnter && event.pActionRef != apEvent->pActionRef)
+        {
             spdlog::info("Trigger: {:X} tripped by remote player {:X} (delivered)",
                 event.pTrigger->formID, apEvent->pActionRef->formID);
+            HarnessService::OnPartyTriggerDelivered(event.pTrigger->formID, apEvent->pActionRef->formID);
+        }
         return result;
     }
     return s_original[Kind](apSink, apEvent, apSource);
@@ -763,8 +767,11 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
                 s_original[kind](reinterpret_cast<uint8_t*>(GameVM::Get()) + kSinkOffsets[kind], &event, nullptr);
         }
         if (held.Enter && held.RemoteFormId && mayDeliver())
+        {
             spdlog::info("Trigger: {:X} tripped by remote player {:X} (delivered)",
                 held.FormId, held.RemoteFormId);
+            HarnessService::OnPartyTriggerDelivered(held.FormId, held.RemoteFormId);
+        }
     }
     if (notice)
     {
