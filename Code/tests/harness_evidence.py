@@ -75,6 +75,19 @@ class EvidenceTests(unittest.TestCase):
         self.party_fixture()
         self.assertTrue(self.validate()['valid'])
 
+    def test_party_leader_partner_trip(self):
+        # 2026-09-30: the follower tripped 1093B4 first; the leader's step completes on the delivered trip.
+        self.party_fixture()
+        rows = list(module.records(self.path('Host')))
+        rows[4].update(kind='party_trigger_enter', entrant=0xff000814)
+        self.write_rows('Host', rows)
+        self.assertTrue(self.validate()['valid'])
+        for entrant in (0x14, 0):
+            rows[4]['entrant'] = entrant
+            self.write_rows('Host', rows)
+            with self.assertRaises(ValueError):
+                self.validate()
+
     def test_party_missing_proof(self):
         self.party_fixture()
         for pc in self.accepted:

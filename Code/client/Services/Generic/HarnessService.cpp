@@ -762,7 +762,7 @@ void HarnessService::Tick()
             if (step->GetBool("party_trigger"))
             {
                 auto wait = step->GetDictionary("party_wait");
-                if (Str(step, "op") != "walk" || !Id(Str(step, "until_trigger")) || !wait ||
+                if ((Str(step, "op") != "walk" && Str(step, "op") != "teleport") || !Id(Str(step, "until_trigger")) || !wait ||
                     !wait->HasKey("x") || !wait->HasKey("y") || !wait->HasKey("z") ||
                     Num(wait, "radius", 8) < 8 || Num(wait, "radius", 8) > 64)
                     throw std::runtime_error("invalid_party_trigger_wait_target");
@@ -1009,17 +1009,40 @@ void HarnessService::Tick()
             }
             else if (!s.Submitted)
             {
-                auto* ref = Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, "ref"))));
+                // Trigger steps teleport onto the floor inside the trigger volume ("x","y","z") and complete on the
+                // game's own trigger-enter event; the party follower lands on "party_wait" beside it instead.
+                const bool intoTrigger = s.Step->HasKey("until_trigger");
+                const bool partyFollower = intoTrigger && s.Step->GetBool("party_trigger") && s.Local != s.Leader;
+                auto* ref = Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, intoTrigger ? "until_trigger" : "ref"))));
                 if (!ref) throw std::runtime_error("teleport staging reference unavailable");
-                const double dx = Num(s.Step, "dx"), dy = Num(s.Step, "dy"), dz = Num(s.Step, "dz");
-                if (std::abs(dx) > 2048 || std::abs(dy) > 2048 || std::abs(dz) > 2048)
-                    throw std::runtime_error("teleport staging offset exceeds 2048 units");
-                s.TeleportPosition.x = ref->position.x + static_cast<float>(dx);
-                s.TeleportPosition.y = ref->position.y + static_cast<float>(dy);
-                s.TeleportPosition.z = ref->position.z + static_cast<float>(dz);
+                if (intoTrigger)
+                {
+                    auto point = partyFollower ? s.Step->GetDictionary("party_wait") : s.Step;
+                    if (!point || !point->HasKey("x") || !point->HasKey("y") || !point->HasKey("z"))
+                        throw std::runtime_error("trigger teleport needs x, y, z (and party_wait for a party trigger)");
+                    s.TeleportPosition.x = static_cast<float>(Num(point, "x"));
+                    s.TeleportPosition.y = static_cast<float>(Num(point, "y"));
+                    s.TeleportPosition.z = static_cast<float>(Num(point, "z"));
+                    if (glm::length(s.TeleportPosition - ref->position) > 2048.f)
+                        throw std::runtime_error("trigger teleport point is not near the trigger");
+                }
+                else
+                {
+                    const double dx = Num(s.Step, "dx"), dy = Num(s.Step, "dy"), dz = Num(s.Step, "dz");
+                    if (std::abs(dx) > 2048 || std::abs(dy) > 2048 || std::abs(dz) > 2048)
+                        throw std::runtime_error("teleport staging offset exceeds 2048 units");
+                    s.TeleportPosition.x = ref->position.x + static_cast<float>(dx);
+                    s.TeleportPosition.y = ref->position.y + static_cast<float>(dy);
+                    s.TeleportPosition.z = ref->position.z + static_cast<float>(dz);
+                }
                 if (!SameTeleportCell(player, ref, s.TeleportPosition))
                     throw std::runtime_error("teleport staging would cross a physical cell boundary");
                 s.WorldRef.GetGameTestService().HarnessDriverTick("{\"command\":\"walk_cancel\"}");
+                if (intoTrigger && !partyFollower)
+                {
+                    s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
+                    s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | ref->formID;
+                }
                 s.TeleportCell = cell->formID;
                 // Actor slot A9 / 1406770A0 synchronizes position, controller and 3D.
                 // Native Havok-moved 19826 uses 19799 for cell/world reconciliation.
@@ -1036,7 +1059,43 @@ void HarnessService::Tick()
             {
                 if (cell->formID != s.TeleportCell) throw std::runtime_error("teleport changed physical cell");
                 const auto delta = player->position - s.TeleportPosition;
-                if (now >= s.NextRetry && glm::length(delta) <= 96.f)
+                const auto token = s.TriggerToken.load();
+                if (s.Step->HasKey("until_trigger") && token)
+                {
+                    // Leader: done once the native trigger event (local, or a partner's delivered trip) fires.
+                    if (token & (uint64_t(1) << 63))
+                    {
+                        auto d = CefDictionaryValue::Create(); d->SetInt("trigger", uint32_t(token));
+                        d->SetInt("leaderId", s.Leader); d->SetInt("localId", s.Local);
+                        d->SetInt("generation", (token >> 32) & 0x7fffffff);
+                        const auto entrant = s.TriggerEntrant.exchange(0x14); d->SetInt("entrant", entrant);
+                        d->SetDouble("x", player->position.x); d->SetDouble("y", player->position.y); d->SetDouble("z", player->position.z);
+                        s.Record(entrant == 0x14 ? "local_trigger_enter" : "party_trigger_enter", d);
+                        s.TriggerToken = 0; s.Complete();
+                    }
+                }
+                else if (s.Step->HasKey("until_trigger") && s.Step->GetBool("party_trigger") && s.Local != s.Leader)
+                {
+                    // Party follower: landed beside the trigger; same proximity evidence as the walk.
+                    auto wait = s.Step->GetDictionary("party_wait");
+                    auto* trigger = Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, "until_trigger"))));
+                    const auto targetDistance = glm::length(delta);
+                    if (trigger && now >= s.NextRetry && targetDistance <= Num(wait, "radius", 8))
+                    {
+                        auto evidence = wait->Copy(false);
+                        evidence->SetInt("leaderId", s.Leader); evidence->SetInt("localId", s.Local);
+                        evidence->SetString("proximityTo", "trigger");
+                        evidence->SetInt("trigger", trigger->formID);
+                        evidence->SetDouble("targetDistance", targetDistance);
+                        evidence->SetDouble("triggerDistance", glm::length(player->position - trigger->position));
+                        evidence->SetDouble("actualX", player->position.x); evidence->SetDouble("actualY", player->position.y);
+                        evidence->SetDouble("actualZ", player->position.z);
+                        evidence->SetDouble("triggerX", trigger->position.x); evidence->SetDouble("triggerY", trigger->position.y);
+                        evidence->SetDouble("triggerZ", trigger->position.z);
+                        s.Record("party_trigger_proximity_arrived", evidence); s.Complete();
+                    }
+                }
+                else if (now >= s.NextRetry && glm::length(delta) <= 96.f)
                 {
                     s.Record("teleport_arrived"); s.Complete();
                 }

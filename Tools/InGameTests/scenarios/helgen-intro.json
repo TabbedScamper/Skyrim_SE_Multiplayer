@@ -4,7 +4,12 @@
   "steps": [
     {
       "op": "watch",
-      "actor_aliases": [{"quest": "3372B", "alias": 47}],
+      "actor_aliases": [
+        {
+          "quest": "3372B",
+          "alias": 47
+        }
+      ],
       "refs": [
         "6CF54"
       ],
@@ -388,15 +393,12 @@
       }
     },
     {
-      "op": "walk",
-      "x": 14654.275511409241,
-      "y": -83435.32884732911,
+      "op": "teleport",
+      "x": 14654.275511409242,
+      "y": -83435.3288473291,
       "z": 8813.8916015625,
-      "radius": 8,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
-      "source": "esm.sqlite CD697 floor marker inset40u along 1093B4 thin-axis normal; local trigger entry required",
+      "timeout": 20,
+      "source": "esm.sqlite CD697 floor marker inset40u along 1093B4 thin-axis normal; local trigger entry required; teleported onto the floor inside the trigger, completes on the native trigger-enter event",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -417,7 +419,7 @@
         "x": 14692.0224609375,
         "y": -83422.09375,
         "z": 8813.8916015625,
-        "radius": 8,
+        "radius": 32,
         "source": "esm.sqlite CD697 supported floor marker outside 1093B4 contact"
       }
     },
@@ -698,15 +700,12 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 17179.171875,
       "y": -83815.765625,
       "z": 8401.11625244052,
-      "source": "esm.sqlite NAVM 2AB79 triangle80 floor at 1095D8 center; leader local entry required",
+      "source": "esm.sqlite NAVM 2AB79 triangle80 floor at 1095D8 center; leader local entry required; teleported onto the floor inside the trigger, completes on the native trigger-enter event",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -727,7 +726,7 @@
         "x": 17354.5123697917,
         "y": -83630.4427083333,
         "z": 8443.841796875,
-        "radius": 8,
+        "radius": 32,
         "source": "esm.sqlite NAVM 2AB79 triangle78 centroid; edge-adjacent to staging triangle81, outside trigger"
       }
     },
@@ -1114,11 +1113,17 @@
       "source": "esm.sqlite SCEN DEDBB phase3 completion; Hadvar-specific trigger 10D966",
       "preconditions": {
         "MQ101": 100,
-        "scenes": ["BECD4", "CD68E"],
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
         "scene_idle": false,
         "combat_clear": false,
         "load_complete": false,
-        "observed_scenes": ["D0594", "AA7DF"]
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
       }
     },
     {
@@ -1130,11 +1135,17 @@
       "source": "esm.sqlite SCEN DEDBB phase7 Fragment_0; phase3 requires stages190 and192",
       "preconditions": {
         "MQ101": 100,
-        "scenes": ["BECD4", "CD68E"],
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
         "scene_idle": false,
         "combat_clear": false,
         "load_complete": false,
-        "observed_scenes": ["D0594", "AA7DF"]
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
       }
     },
     {
