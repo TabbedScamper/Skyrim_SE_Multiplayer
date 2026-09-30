@@ -813,7 +813,7 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
     m_world.remove<LeaderNativeClaim>(cId);
 
     auto& formIdComponent = view.get<FormIdComponent>(cId);
-    CancelServerAssignment(*entityIt, formIdComponent.Id);
+    CancelServerAssignment(*entityIt, formIdComponent.Id, true);
 
     m_world.remove<EarlyAnimationBufferComponent, DeferredAssignmentComponent>(cId);
 
@@ -2177,6 +2177,7 @@ void CharacterService::OnBeastFormChange(const BeastFormChangeEvent& acEvent) co
         return;
     }
 
+    pNpc->MarkChanged(0x3000800); // race, sex and face: see SendCreatorAppearance
     pNpc->Serialize(&request.AppearanceBuffer);
     request.ChangeFlags = pNpc->GetChangeFlags();
 
@@ -3103,7 +3104,7 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
     }
 }
 
-void CharacterService::CancelServerAssignment(const entt::entity aEntity, const uint32_t aFormId) const noexcept
+void CharacterService::CancelServerAssignment(const entt::entity aEntity, const uint32_t aFormId, const bool aFromDiscovery) const noexcept
 {
     if (m_world.all_of<RemoteComponent>(aEntity))
     {
@@ -3151,7 +3152,8 @@ void CharacterService::CancelServerAssignment(const entt::entity aEntity, const 
             // idle (Helgen Keep Stormcloaks, session 2026-09-29). Scripted departures of placed actors park instead.
             const auto* pCell = pActor->GetParentCellEx();
             const auto& party = m_world.GetPartyService();
-            if (pActor->IsTemporary() && (pActor->IsDisabled() || pActor->IsDeleted()) && !pActor->IsDead() &&
+            // Discovery removal only: a respawn cancels its assignment first and must not delete the actor.
+            if (aFromDiscovery && pActor->IsTemporary() && (pActor->IsDisabled() || pActor->IsDeleted()) && !pActor->IsDead() &&
                 party.IsInParty() && party.IsLeader() && !pActor->GetExtension()->IsRemotePlayer() && pCell && pCell->IsAttached())
             {
                 request.Reason = OwnershipReleaseReason::ScriptRemoved;

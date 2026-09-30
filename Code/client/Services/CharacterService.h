@@ -226,7 +226,8 @@ private:
         bool aCorpseCorrection) const noexcept;
 
     void RequestServerAssignment(entt::entity aEntity) const noexcept;
-    void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId) const noexcept;
+    // aFromDiscovery: the actor left the loaded world (discovery removal), the only case that may report a script removal.
+    void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId, bool aFromDiscovery = false) const noexcept;
     void DeleteRemoteEntityComponents(entt::entity aEntity) const noexcept;
     void DeclineOwnership(uint32_t aServerId, uint32_t aOwnershipEpoch) const noexcept;
     void ReconcileActorData(entt::entity aEntity, Actor* apActor, uint32_t aOwnershipEpoch, const ActorData& acActorData, bool aApplyInventory, bool aIsLocalOwner, bool aInitialNativeAssignment = false) noexcept;

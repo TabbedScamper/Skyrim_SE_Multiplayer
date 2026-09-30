@@ -831,8 +831,9 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
         // Only the leader's world is the story's; a follower's local script removing its copy decides nothing.
         const auto* pForm = m_world.try_get<FormIdComponent>(cEntity);
         const bool temporary = !pForm || pForm->Id.ModId == UINT32_MAX || pForm->Id == GameId{};
+        // A death that reached the server after the leader's check keeps its corpse.
         if (m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer) && temporary &&
-            !view.get<CharacterComponent>(*it).IsPlayer())
+            !view.get<CharacterComponent>(*it).IsPlayer() && !view.get<CharacterComponent>(*it).IsDead())
         {
             spdlog::info("Leader's scripts removed temporary actor {:X}; removing it for every player", message.ServerId);
             m_world.GetDispatcher().trigger(CharacterRemoveEvent(message.ServerId));
