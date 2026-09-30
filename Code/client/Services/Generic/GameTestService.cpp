@@ -5634,6 +5634,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         // Revive tests: face a point (heading toward x,y), hold Activate, damage this PC's player (game thread).
         // Cheap per-frame-safe camera sample: camera root and player root world positions, the camera's view
         // direction and one quest's stage. For probes that run inside a scene (a full game snapshot costs ~0.2 s).
+        if (command == "main_frame_placement")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                InterpolationSystem::SetMainFramePlacement(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", InterpolationSystem::IsMainFramePlacement()));
+        }
         if (command == "smooth_stamp")
         {
             extern std::atomic<bool> g_smoothSnapshotStamp;

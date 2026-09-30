@@ -16,6 +16,7 @@
 #include <Services/CreatorTogether.h>
 #include <Services/PlayerCollision.h>
 #include <Services/Generic/HeadTrackService.h>
+#include <Services/SmoothClock.h>
 
 namespace
 {
@@ -25,6 +26,21 @@ namespace
 std::atomic<bool> s_unseatRemotePlayers{false}; // no effect at the block (run 20260928-124808): the copy re-seats
 std::mutex s_unseatLock;
 std::vector<uint32_t> s_unseat;
+
+// Remote actor placement on the main frame (owner, 2026-09-30: NPCs jitter slightly on the follower, Lokir most).
+// Measured: the world update, and with it this system, runs inside the Papyrus VM update hook, on varying worker
+// threads at a varying point of the frame; the follower drew Lokir 3.7 u (mean) off the interpolation of the samples
+// it had received and 2.4x as jerky. Update publishes each actor's timeline here; the main frame places every remote
+// actor for one presentation time per frame (fractional ms), just before the engine's frame.
+std::atomic<bool> s_mainFramePlacement{true};
+std::atomic<uint32_t> s_presentationDelayMs{100};
+struct Placement
+{
+    std::vector<InterpolationComponent::TimePoint> Points; // positions and rotations only
+    uint64_t PublishedMs{};
+};
+std::mutex s_placementLock;
+std::unordered_map<uint32_t, Placement> s_placements;
 
 void QueueUnseat(const uint32_t aFormId) noexcept
 {
@@ -219,7 +235,25 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                 "sit state {}", apActor->formID, jump, apActor->position.x, apActor->position.y, apActor->position.z, position.x,
                 position.y, position.z, sitSleepState);
     }
-    if (!vehicleTimeline || creatorPreview)
+    const bool mainPlacement = s_mainFramePlacement.load(std::memory_order_relaxed) && !vehicleTimeline && !creatorPreview;
+    if (mainPlacement)
+    {
+        Placement placement;
+        placement.PublishedMs = GetTickCount64();
+        for (const auto& point : movements)
+        {
+            if (placement.Points.size() >= 6)
+                break;
+            InterpolationComponent::TimePoint slim;
+            slim.Tick = point.Tick;
+            slim.Position = point.Position;
+            slim.Rotation = point.Rotation;
+            placement.Points.push_back(slim);
+        }
+        std::lock_guard lock(s_placementLock);
+        s_placements[apActor->formID] = std::move(placement);
+    }
+    else if (!vehicleTimeline || creatorPreview)
         apActor->ForcePosition(position);
     const auto& discrete = aTick >= second.Tick ? second : first;
     apActor->LoadAnimationVariables(discrete.Variables);
@@ -261,7 +295,7 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
             newest ? second.Position : position, newest ? second.Rotation : NiPoint3{glm::vec3{finalX, finalY, finalZ}},
             velocity, angular);
     }
-    else
+    else if (!mainPlacement)
         apActor->SetRotation(finalX, finalY, creatorPreview ? creatorHeading : finalZ);
 }
 
@@ -298,8 +332,73 @@ void InterpolationSystem::Clean(World& aWorld, const entt::entity aEntity) noexc
 
 // Main thread (HookMainLoop): leave a stale seat with the engine's quick stop-interacting
 // (Actor::StopInteractingQuick, ID 38697, VA 0x1406D2A40).
+void InterpolationSystem::SetMainFramePlacement(const bool aEnabled) noexcept
+{
+    s_mainFramePlacement.store(aEnabled, std::memory_order_relaxed);
+    if (!aEnabled)
+    {
+        std::lock_guard lock(s_placementLock);
+        s_placements.clear();
+    }
+    spdlog::info("Remote actor placement: {}", aEnabled ? "main frame" : "world update");
+}
+
+bool InterpolationSystem::IsMainFramePlacement() noexcept
+{
+    return s_mainFramePlacement.load(std::memory_order_relaxed);
+}
+
+void InterpolationSystem::SetPresentationDelayMs(const uint32_t aDelayMs) noexcept
+{
+    s_presentationDelayMs.store(aDelayMs, std::memory_order_relaxed);
+}
+
 void InterpolationSystem::OnMainFrame() noexcept
 {
+    if (s_mainFramePlacement.load(std::memory_order_relaxed))
+    {
+        const double sharedNow = SmoothClock::NowMs();
+        const double at = sharedNow - static_cast<double>(s_presentationDelayMs.load(std::memory_order_relaxed));
+        const auto nowMs = GetTickCount64();
+        std::vector<std::pair<uint32_t, Placement>> placements;
+        {
+            std::lock_guard lock(s_placementLock);
+            // An actor the world update stopped publishing (dead, ragdoll, vehicle, gone) is left alone.
+            std::erase_if(s_placements, [nowMs](const auto& entry) { return nowMs - entry.second.PublishedMs > 250; });
+            placements.assign(s_placements.begin(), s_placements.end());
+        }
+        for (const auto& [formId, placement] : placements)
+        {
+            const auto& points = placement.Points;
+            if (sharedNow <= 0.0 || points.size() < 2)
+                continue;
+            auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+            if (!pActor || !pActor->GetNiNode() || pActor->actorState.IsDeadState() ||
+                CorpseRagdollService::IsFollowingOwner(formId))
+                continue;
+            size_t i = 0;
+            while (i + 2 < points.size() && at > static_cast<double>(points[i + 1].Tick))
+                ++i;
+            const auto& first = points[i];
+            const auto& second = points[i + 1];
+            float delta = 0.f;
+            if (at >= static_cast<double>(second.Tick))
+                delta = 1.f;
+            else if (at > static_cast<double>(first.Tick) && second.Tick > first.Tick)
+                delta = static_cast<float>((at - static_cast<double>(first.Tick)) / static_cast<double>(second.Tick - first.Tick));
+            const NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
+            pActor->ForcePosition(position);
+            const auto& rotA = first.Rotation;
+            const auto& rotB = second.Rotation;
+            auto finalX = TiltedPhoques::Mod(rotA.x + TiltedPhoques::DeltaAngle(rotA.x, rotB.x, true) * delta, float(TiltedPhoques::Pi * 2));
+            if (finalX > 0.f && finalX > float(TiltedPhoques::Pi / 2))
+                finalX -= TiltedPhoques::Pi * 2;
+            const auto finalY = TiltedPhoques::Mod(rotA.y + TiltedPhoques::DeltaAngle(rotA.y, rotB.y, true) * delta, float(TiltedPhoques::Pi * 2));
+            const auto finalZ = TiltedPhoques::Mod(rotA.z + TiltedPhoques::DeltaAngle(rotA.z, rotB.z, true) * delta, float(TiltedPhoques::Pi * 2));
+            pActor->SetRotation(finalX, finalY, finalZ);
+        }
+    }
+
     std::vector<uint32_t> unseat;
     {
         std::lock_guard lock(s_unseatLock);

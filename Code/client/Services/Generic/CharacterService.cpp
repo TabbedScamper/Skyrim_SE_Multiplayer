@@ -3687,6 +3687,7 @@ void CharacterService::RunRemoteUpdates() noexcept
     const auto delay = static_cast<uint64_t>(GetPresentationDelayMs());
     const auto tick = now > delay ? now - delay : 0;
     PoseCopyAuthority::SetPresentationDelayMs(static_cast<uint32_t>(delay));
+    InterpolationSystem::SetPresentationDelayMs(static_cast<uint32_t>(delay));
     VisualPoseMailbox::SetPresentationTick(tick);
     PoseCopyAuthority::SetPresentationTick(tick);
 
