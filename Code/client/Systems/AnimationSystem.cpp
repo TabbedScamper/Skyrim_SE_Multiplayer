@@ -820,7 +820,9 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         // Cutscene follow: this follower's own character plays the leader's scene idles too, so its first-person
         // camera takes the same motion (measured 2026-09-30: the leader's IdleExecutionerChop_Player dropped his
         // camera 50 u onto the block while hers stayed at eye height). Walking camera idles belong to CameraService.
-        if (player && first.IdleId && first.IdleId != 0x10C00C && first.IdleId != 0x10C00D &&
+        // ("player" above is only set during a frame-cost session; test the copy itself.)
+        if (first.IdleId && first.IdleId != 0x10C00C && first.IdleId != 0x10C00D &&
+            apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer() &&
             apActor->formID == CutsceneFollow::LeaderFormId() && actionData.idleForm &&
             CutsceneFollow::ClaimLeaderIdleMirror(first.IdleId))
         {
