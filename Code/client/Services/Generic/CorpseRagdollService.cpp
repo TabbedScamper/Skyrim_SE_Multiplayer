@@ -401,6 +401,9 @@ void HookRemoveObjects(void* apBroadphase, const HavokArray<uintptr_t>* apHandle
 }
 
 // Dying, dead, knocked down or ragdolling (ActorState1 lifeState bits 21-24, knockState 25-27).
+// Owner side: when each captured actor's life state first left alive (stream start latency log).
+std::unordered_map<uint32_t, uint64_t> s_diedAtMs;
+
 bool PhysicsOwnsSkeleton(const Actor* apActor) noexcept
 {
     const uint32_t flags1 = apActor->actorState.flags1;
@@ -1772,13 +1775,22 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
         std::optional<BSScopedLock<BSRecursiveLock>> graphLock;
         if (actor->animationGraphHolder.GetBSAnimationGraph(&graphRef.pManager) && graphRef.pManager)
             graphLock.emplace(graphRef.pManager->lock);
+        if (((actor->actorState.flags1 >> 21) & 0xF) != 0)
+            s_diedAtMs.try_emplace(actor->formID, aNowMs);
+        else
+            s_diedAtMs.erase(actor->formID);
         for (uint32_t limb = 0; limb <= 1; ++limb)
         {
             if ((!limb && !PhysicsOwnsSkeleton(actor)) || (limb && !eventTick))
                 continue;
             const auto key = StreamKey(serverId, limb);
             RetainedBodies bodies;
-            if (limb ? !GetHeadBody(actor, bodies) : !RagdollSimulating(actor, bodies))
+            // Stream a dying body from its first frame, while its bodies are still keyframed to the death animation:
+            // waiting for the ragdoll to take over left the follower's copy on its own death for ~200 ms (Lokir slid
+            // 76 u, then snapped onto the owner's body; owner request 2026-09-30: the first sample in real time).
+            const auto dyingState = (actor->actorState.flags1 >> 21) & 0xF;
+            const bool dying = !limb && (dyingState == 1 || dyingState == 2);
+            if (limb ? !GetHeadBody(actor, bodies) : dying ? !GetRagdollBodies(actor, bodies) : !RagdollSimulating(actor, bodies))
                 continue;
             PhysicsLock physicsLock(bodies);
             if (!physicsLock.Wrapper || !WorldIdle(bodies.front()->world))
@@ -1820,13 +1832,17 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
                 MatrixToQuaternion(rigid->transform, body.Rotation);
                 std::copy_n(rigid->linearVelocity, 3, body.LinearVelocity);
                 std::copy_n(rigid->angularVelocity, 3, body.AngularVelocity);
-                body.MotionType = rigid->motionType;
+                // Keyframed to the owner's death animation (4): receivers follow it as a dynamic body (their restore
+                // path makes a keyframed copy dynamic), so the copy takes the owner's motion from the first frame.
+                body.MotionType = rigid->motionType == 4 ? 1 : rigid->motionType;
                 request.Bodies.push_back(body);
             }
             if (!m_transport.Send(request))
                 continue;
             if (!owned.LastSentMs)
-                spdlog::info("Ragdoll {:X} limb {} (server {:X}): streaming {} bodies", actor->formID, limb, serverId, bodies.size());
+                spdlog::info("Ragdoll {:X} limb {} (server {:X}): streaming {} bodies (life {}, first body motion {}, {} ms after life state left alive)",
+                    actor->formID, limb, serverId, bodies.size(), dyingState, bodies.front()->motionType,
+                    s_diedAtMs.contains(actor->formID) ? static_cast<int64_t>(aNowMs - s_diedAtMs[actor->formID]) : int64_t{-1});
             owned.LastSentMs = aNowMs;
             owned.LastTick = request.Tick;
             owned.SentSettled = request.Settled;
