@@ -9,10 +9,17 @@
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/PlayerCollision.h>
 #include <atomic>
+#include <mutex>
+#include <unordered_map>
 
 namespace
 {
 std::atomic<bool> s_active{};
+std::atomic<uint32_t> s_leaderFormId{};
+std::mutex s_idleLock;
+struct IdlePlay { uint64_t AtMs{}; bool Mirrored{}; };
+std::unordered_map<uint32_t, IdlePlay> s_idlePlays; // idle form -> last play on this character
+constexpr uint64_t kIdleDedupeMs = 5000;
 bool s_movementDisabledByUs{};
 std::unordered_map<uint32_t, bool> s_hiddenByUs; // form id -> hidden by this mode
 
@@ -37,6 +44,11 @@ void Restore() noexcept
             pActor->GetNiNode()->flags &= ~1u;
     }
     s_hiddenByUs.clear();
+    s_leaderFormId = 0;
+    {
+        std::lock_guard guard(s_idleLock);
+        s_idlePlays.clear();
+    }
     PoseCopyAuthority::SetLocalMirror(0);
     PlayerCollision::SetLocalPassThrough(false);
     if (s_movementDisabledByUs)
@@ -53,6 +65,36 @@ namespace CutsceneFollow
 bool IsActive() noexcept
 {
     return s_active.load(std::memory_order_acquire);
+}
+
+uint32_t LeaderFormId() noexcept
+{
+    return s_active.load(std::memory_order_acquire) ? s_leaderFormId.load(std::memory_order_acquire) : 0;
+}
+
+bool ClaimLeaderIdleMirror(const uint32_t aIdleFormId) noexcept
+{
+    const auto now = GetTickCount64();
+    std::lock_guard guard(s_idleLock);
+    auto& play = s_idlePlays[aIdleFormId];
+    if (play.AtMs && now - play.AtMs < kIdleDedupeMs)
+        return false; // this character already played it
+    play = {now, true};
+    return true;
+}
+
+bool ClaimLocalIdle(const uint32_t aIdleFormId) noexcept
+{
+    const auto now = GetTickCount64();
+    std::lock_guard guard(s_idleLock);
+    auto& play = s_idlePlays[aIdleFormId];
+    if (play.Mirrored && now - play.AtMs < kIdleDedupeMs)
+    {
+        play.Mirrored = false; // one skip per mirror
+        return false;
+    }
+    play = {now, false};
+    return true;
 }
 
 void Update(World& aWorld, const bool aActive, const bool aIsLeader, const uint32_t aLeaderPlayerId) noexcept
@@ -96,6 +138,7 @@ void Update(World& aWorld, const bool aActive, const bool aIsLeader, const uint3
         return;
 
     // Follower: its character takes the leader's place, heading and pose; no movement of its own.
+    s_leaderFormId = pLeader->formID;
     PoseCopyAuthority::SetLocalMirror(pLeader->formID);
     PlayerCollision::SetLocalPassThrough(true);
     if (auto* pControls = PlayerControls::GetInstance(); pControls && pControls->pMovementHandler &&

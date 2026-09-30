@@ -16,4 +16,12 @@ namespace CutsceneFollow
 bool IsActive() noexcept;
 // Per frame, from PartyService. aActive: in a party session and the leader has no free control.
 void Update(World& aWorld, bool aActive, bool aIsLeader, uint32_t aLeaderPlayerId) noexcept;
+// The leader's character, as this follower's copy (0 when not following). Animation threads.
+uint32_t LeaderFormId() noexcept;
+// Scene idles on a follower's own character. The first-person camera follows only idles this
+// character plays itself (the pose copy moves the body, not the camera), so a leader idle the
+// follower's own scene never plays (the paired IdleExecutionerChop_Player) is mirrored onto it.
+// Each idle plays once: a mirror and the follower's own later play of it within 5 s cancel.
+bool ClaimLeaderIdleMirror(uint32_t aIdleFormId) noexcept; // true: play it now
+bool ClaimLocalIdle(uint32_t aIdleFormId) noexcept;        // false: already mirrored, skip it
 } // namespace CutsceneFollow

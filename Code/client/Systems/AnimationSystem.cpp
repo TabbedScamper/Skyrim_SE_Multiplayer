@@ -28,6 +28,10 @@
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/GameTestService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/CutsceneFollow.h>
+extern thread_local bool g_mirroringLeaderIdle;
+#include <PlayerCharacter.h>
+#include <Forms/TESIdleForm.h>
 #include <Services/TransportService.h>
 #include <atomic>
 #include <chrono>
@@ -813,6 +817,22 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 
         const auto result = ActorMediator::Get()->ForceAction(&actionData);
         aAnimationComponent.LastRanActionResult = result != 0;
+        // Cutscene follow: this follower's own character plays the leader's scene idles too, so its first-person
+        // camera takes the same motion (measured 2026-09-30: the leader's IdleExecutionerChop_Player dropped his
+        // camera 50 u onto the block while hers stayed at eye height). Walking camera idles belong to CameraService.
+        if (player && first.IdleId && first.IdleId != 0x10C00C && first.IdleId != 0x10C00D &&
+            apActor->formID == CutsceneFollow::LeaderFormId() && actionData.idleForm &&
+            CutsceneFollow::ClaimLeaderIdleMirror(first.IdleId))
+        {
+            if (auto* pLocal = PlayerCharacter::Get())
+            {
+                g_mirroringLeaderIdle = true;
+                const bool played = pLocal->PlayIdle(actionData.idleForm);
+                g_mirroringLeaderIdle = false;
+                spdlog::info("Cutscene follow: mirrored the leader's idle {:08X} ('{}') on this player played={}",
+                    first.IdleId, first.EventName, played);
+            }
+        }
         // Revive check (2026-09-28): the host's copy of a revived player replayed its get-up over and over.
         if (player)
         {

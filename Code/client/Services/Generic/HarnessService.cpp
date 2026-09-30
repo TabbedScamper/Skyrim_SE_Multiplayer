@@ -1275,8 +1275,12 @@ void HarnessService::Tick()
                         else if (!request->HasKey("x"))
                             request->SetString("form_id", fmt::format("{:X}", static_cast<uint32_t>(Num(state, "targetId"))));
                         s.Driver = s.WorldRef.GetGameTestService().HarnessDriverTick(Json(request));
-                        s.Submitted = Parse(s.Driver)->GetBool("active"); s.Recovering = s.Submitted; ++s.Recoveries;
-                        if (!s.Submitted) throw std::runtime_error("native walking recovery refused: " + s.Driver);
+                        auto recovery = Parse(s.Driver);
+                        s.Submitted = recovery->GetBool("active"); s.Recovering = s.Submitted;
+                        if (!s.Submitted && Str(recovery, "reason").find("(airborne or settling)") != std::string::npos)
+                            s.NextRetry = now + 500; // still landing: retry the walk; the step timeout bounds it
+                        else if (!s.Submitted) throw std::runtime_error("native walking recovery refused: " + s.Driver);
+                        else ++s.Recoveries;
                     }
                     else if (Str(s.Step, "fallback") == "tower_jump" && !s.Tcl)
                     {

@@ -23,6 +23,8 @@ static TPerformAction* RealPerformAction;
 
 // TODO: make scoped override
 thread_local bool g_forceAnimation = false;
+// Set while AnimationSystem plays a mirrored leader idle on this follower's character (CutsceneFollow).
+thread_local bool g_mirroringLeaderIdle = false;
 
 uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apAction)
 {
@@ -56,6 +58,14 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
                 apAction->idleForm ? apAction->idleForm->formID : 0,
                 apAction->target ? apAction->target->formID : 0,
                 fmt::ptr(_ReturnAddress()));
+        }
+        // A follower's own scene playing an idle already mirrored from the leader: once is enough.
+        if (!g_forceAnimation && !g_mirroringLeaderIdle && pActor->formID == 0x14 && apAction->idleForm &&
+            CutsceneFollow::LeaderFormId() && apAction->idleForm->formID != 0x10C00C &&
+            apAction->idleForm->formID != 0x10C00D && !CutsceneFollow::ClaimLocalIdle(apAction->idleForm->formID))
+        {
+            spdlog::info("Cutscene follow: skipped this player's own play of mirrored idle {:08X}", apAction->idleForm->formID);
+            return 0;
         }
         ActionEvent action;
         action.State1 = pActor->actorState.flags1;
