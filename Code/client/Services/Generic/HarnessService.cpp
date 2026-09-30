@@ -298,6 +298,11 @@ struct HarnessService::Impl
     std::atomic_bool InboxOverflow{};
     std::atomic<uint64_t> TriggerToken{};
     std::atomic<uint32_t> TriggerEntrant{0x14};
+    // A partner's delivered trip that landed before this PC armed its token (the follower's side of the step can
+    // finish first: 15:10:10 run, 1095D8 tripped by her before the host's teleport armed it).
+    std::atomic<uint32_t> LastPartyTrigger{}, LastPartyEntrant{};
+    std::atomic<uint64_t> LastPartyTripMs{};
+    uint64_t StepReceivedMs{};
     uint32_t TriggerGeneration{};
     float PreviousSpeed{100.f};
     NiPoint3 TeleportPosition{};
@@ -638,6 +643,9 @@ void HarnessService::OnPartyTriggerDelivered(uint32_t aTriggerFormId, uint32_t a
     // In play, whichever party member crosses a quest trigger advances the story for everyone.
     auto* service = s_service.load();
     if (!service) return;
+    service->m->LastPartyEntrant = aRemoteFormId;
+    service->m->LastPartyTrigger = aTriggerFormId;
+    service->m->LastPartyTripMs = GetTickCount64();
     auto token = service->m->TriggerToken.load();
     if (token && !(token & (uint64_t(1) << 63)) && uint32_t(token) == aTriggerFormId)
     {
@@ -759,6 +767,7 @@ void HarnessService::Tick()
             s.Run = message.Run; s.Epoch = message.Epoch; s.Sequence = message.Sequence;
             s.Leader = message.Sender; s.Local = session.LocalId;
             s.Step = step; s.Active = true; s.Done = s.Entered = s.Submitted = false;
+            s.StepReceivedMs = GetTickCount64();
             if (step->GetBool("party_trigger"))
             {
                 auto wait = step->GetDictionary("party_wait");
@@ -1060,6 +1069,11 @@ void HarnessService::Tick()
                 {
                     s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
                     s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | ref->formID;
+                    if (s.LastPartyTrigger == ref->formID && s.LastPartyTripMs >= s.StepReceivedMs)
+                    {
+                        s.TriggerEntrant = s.LastPartyEntrant.load();
+                        s.TriggerToken = s.TriggerToken | (uint64_t(1) << 63);
+                    }
                 }
                 s.TeleportCell = cell->formID;
                 // Actor slot A9 / 1406770A0 synchronizes position, controller and 3D.
@@ -1175,6 +1189,11 @@ void HarnessService::Tick()
                     if (!trigger || op != "walk") throw std::runtime_error("until_trigger_requires_walk_and_reference");
                     s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
                     s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | trigger;
+                    if (s.LastPartyTrigger == trigger && s.LastPartyTripMs >= s.StepReceivedMs)
+                    {
+                        s.TriggerEntrant = s.LastPartyEntrant.load();
+                        s.TriggerToken = s.TriggerToken | (uint64_t(1) << 63);
+                    }
                     auto start = CefDictionaryValue::Create(); start->SetInt("trigger", trigger);
                     start->SetInt("generation", s.TriggerGeneration);
                     start->SetDouble("x", player->position.x); start->SetDouble("y", player->position.y); start->SetDouble("z", player->position.z);
