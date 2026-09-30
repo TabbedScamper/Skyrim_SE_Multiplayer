@@ -64,6 +64,7 @@
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Havok/hkbStateMachine.h>
 #include <Havok/hkbBehaviorGraph.h>
+#include <Havok/bhkCharacterController.h>
 
 #include <ModCompat/BehaviorVar.h>
 
@@ -207,8 +208,20 @@ void Actor::ForcePosition(const NiPoint3& acPosition) noexcept
 {
     ScopedReferencesOverride recursionGuard;
 
-    // It just works TM
-    SetPosition(acPosition, true);
+    bool updateController = true;
+    if (GetExtension()->IsRemote() && currentProcess)
+    {
+        if (auto* pController = currentProcess->GetCharController())
+        {
+            // A newly created controller may be positioned before ActorProcess.
+            // Both SetPositionImpl and the following velocity reset need a step
+            updateController = pController->UpdateStepTiming();
+        }
+    }
+
+    // With no usable step yet, update the reference/3D now; interpolation will
+    // catch the controller up once physics timing becomes available
+    SetPosition(acPosition, updateController);
 }
 
 void Actor::QueueUpdate() noexcept
@@ -1724,7 +1737,7 @@ void Actor::SpeakSound(const char* pFile)
     TiltedPhoques::ThisCall(RealSpeakSoundFunction, this, pFile, handle, 0, 0x32, 0, 0, 0, 0, 0, 0, 0, 1, 1);
 }
 
-char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
+char TP_MAKE_THISCALL(HookActorProcess, Actor, float aDeltaTime)
 {
     // Remote AI cannot be allowed to execute independently of the owner.
     // This opt-in two-actor trial tests whether continued native processing
@@ -1732,6 +1745,14 @@ char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
     // production authority policy and never applies while disconnected.
     if (apThis->GetExtension()->IsRemote())
     {
+        // Suppressed movement still needs a valid controller step (upstream #901): interpolated
+        // position updates reset velocity through it, and a zero step divides by zero and spreads
+        // nonfinite values into nearby contacts (objects and NPCs gliding).
+        if (apThis->currentProcess)
+        {
+            if (auto* pController = apThis->currentProcess->GetCharController())
+                pController->UpdateStepTiming(aDeltaTime);
+        }
         const auto formId = apThis->formID;
         if (!World::Get().GetTransport().IsConnected() ||
             (formId != s_remoteProcessTrialRiderFormId.load(std::memory_order_acquire) &&
@@ -1748,7 +1769,7 @@ char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
         ObjectService::QueueActorSceneUpdate(apThis->formID);
     }
 
-    return TiltedPhoques::ThisCall(RealActorProcess, apThis, a2);
+    return TiltedPhoques::ThisCall(RealActorProcess, apThis, aDeltaTime);
 }
 
 BSExtraData* TP_MAKE_THISCALL(HookNativeExtraDataAdd, ExtraDataList,
