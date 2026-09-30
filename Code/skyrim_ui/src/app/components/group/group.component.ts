@@ -34,7 +34,7 @@ interface GroupPosition {
 export class GroupComponent implements OnInit, OnDestroy {
   timerSubscription: Subscription;
 
-  groupMembers$: Observable<(Player & { isOwner: boolean })[]>;
+  groupMembers$: Observable<(Player & { isOwner: boolean; isLocal: boolean })[]>;
   group$: Observable<Group>;
 
   public isAutoHide = new BehaviorSubject(true);
@@ -62,8 +62,16 @@ export class GroupComponent implements OnInit, OnDestroy {
         if (!group) {
           return [];
         }
-        return members
-          .map(member => ({ ...member, isOwner: member.id === group.owner }))
+        // Co-op: everyone is in the host's one session and the host always leads. The player list holds only the
+        // other players, so this PC's own player is added here, and the leader is named "Host" in words: before the
+        // character creator every character is called "Prisoner" (owner, 2026-09-30).
+        const localId = this.clientService.localPlayerId;
+        const all = [...members];
+        if (localId !== undefined && group.members.includes(localId) && !all.some(m => m.id === localId)) {
+          all.push(new Player({ id: localId, name: this.clientService.nameChange.getValue() || 'You', isLoaded: true }));
+        }
+        return all
+          .map(member => ({ ...member, isOwner: member.id === group.owner, isLocal: member.id === localId }))
           .sort((a, b) =>
             (group.owner === a.id) === (group.owner === b.id)
               ? 0
