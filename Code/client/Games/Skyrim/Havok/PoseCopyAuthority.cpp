@@ -875,6 +875,67 @@ std::string DescribeOverride(const uint32_t aFormId) noexcept
         newest.Count);
 }
 
+std::string DescribeBoneSlots(Actor* apActor, const std::string& acNeedle) noexcept
+{
+    // Main thread. For each animation graph of the actor: its boneNodes length, whether this authority registered
+    // it, and for every node whose name contains acNeedle, its index and the pose this PC captured (owner) or
+    // received newest (copy) at that index. A tail that never moves on a copy shows here whether the owner sends
+    // it (Helgen Keep, 2026-09-29).
+    if (!apActor)
+        return "\"graphs\":[]";
+    BSAnimationGraphManager* pManager{};
+    if (!apActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return "\"graphs\":[]";
+    std::string result = "\"graphs\":[";
+    {
+        BSScopedLock<BSRecursiveLock> managerLock(pManager->lock);
+        std::lock_guard guard(s_lock);
+        const auto pose = s_poses.find(apActor->formID);
+        for (uint32_t g = 0; g < pManager->animationGraphs.size && g < 32; ++g)
+        {
+            auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(g));
+            if (!pGraph)
+                continue;
+            const auto& nodes = reinterpret_cast<const AnimationGraph*>(pGraph)->boneNodes;
+            const auto registered = s_registry.find(&nodes);
+            std::string slots;
+            for (uint32_t i = 0; nodes.data && i < nodes.length && i < kMaxBones; ++i)
+            {
+                const auto* pNode = static_cast<const uint8_t*>(ResolveBoneNode(nodes.data[i]));
+                const char* pName = pNode ? *reinterpret_cast<const char* const*>(pNode + 0x10) : nullptr;
+                if (!pName || !std::strstr(pName, acNeedle.c_str()))
+                    continue;
+                std::string value = "null";
+                if (pose != s_poses.end())
+                {
+                    const auto& p = pose->second;
+                    const QsTransform* pBone = nullptr;
+                    uint32_t count = 0;
+                    if (registered != s_registry.end() && registered->second.Kind == Role::Capture)
+                    {
+                        count = p.CapturedCount;
+                        pBone = i < count ? &p.Captured[i] : nullptr;
+                    }
+                    else if (p.RingCount)
+                    {
+                        const auto& newest = p.Ring[(p.RingNext + kRingSize - 1) % kRingSize];
+                        count = newest.Count;
+                        pBone = i < count ? &newest.Bones[i] : nullptr;
+                    }
+                    value = pBone ? fmt::format("[{:.3f},{:.3f},{:.3f},{:.3f}]", pBone->rotation[0], pBone->rotation[1],
+                        pBone->rotation[2], pBone->rotation[3]) : fmt::format("\"beyond count {}\"", count);
+                }
+                slots += fmt::format("{}{{\"index\":{},\"name\":\"{}\",\"pose\":{}}}", slots.empty() ? "" : ",", i, pName, value);
+            }
+            result += fmt::format("{}{{\"graph\":{},\"length\":{},\"registered\":\"{}\",\"slots\":[{}]}}", g ? "," : "", g,
+                nodes.length, registered == s_registry.end() ? "no" : registered->second.Kind == Role::Capture ? "capture" : "apply",
+                slots);
+        }
+    }
+    pManager->Release();
+    return result + "]";
+}
+
 bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept
 {
     std::lock_guard guard(s_lock);

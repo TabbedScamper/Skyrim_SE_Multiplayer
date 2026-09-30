@@ -6066,6 +6066,106 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 authority.Position.x, authority.Position.y, authority.Position.z, authority.AgeMs,
                 JsonBool(authority.BodyDriven), ObjectService::LeaseHolder(pRef->formID)));
         }
+        if (command == "actor_bones")
+        {
+            // Local rotations of named bones (default: head and beast tail) and the head-tracking inputs of an actor
+            // (form_id). Session 2026-09-29: in Helgen Keep a player copy's tail stayed straight out and its head
+            // stopped tracking; sampling twice shows whether the graph still moves those bones.
+            const auto formText = GetJsonString(acLine, "form_id");
+            auto* pActor = formText.empty() ? nullptr : Cast<Actor>(TESForm::GetById(std::stoul(formText, nullptr, 16)));
+            if (!pActor)
+                return Error(id, "actor not found");
+            // The drawn third-person skeleton (19735); GetNiNode gives the first-person one in first person.
+            using TGet3D = NiAVObject*(TESObjectREFR*);
+            POINTER_SKYRIMSE(TGet3D, get3D, 19735);
+            auto* pRoot = static_cast<NiNode*>(get3D.Get()(pActor));
+            std::vector<std::string> names;
+            if (const auto list = GetJsonString(acLine, "nodes"); !list.empty())
+            {
+                std::stringstream stream(list);
+                for (std::string name; std::getline(stream, name, '|');)
+                    names.push_back(name);
+            }
+            else
+                names = {"NPC Head [Head]", "NPC Neck [Neck]", "TailBone0", "TailBone1", "TailBone2", "TailBone3", "TailBone4"};
+            std::string bones;
+            if (const auto match = GetJsonString(acLine, "match"); !match.empty() && pRoot)
+            {
+                // Every node whose name contains "match" (case-insensitive); NiObjectNET::name is the BSFixedString at +0x10.
+                std::string needle = match;
+                std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                int visited = 0;
+                auto walk = [&](auto& self, NiAVObject* apNode, int aDepth) -> void {
+                    if (!apNode || aDepth > 64 || ++visited > 2048)
+                        return;
+                    const char* pName = *reinterpret_cast<const char* const*>(reinterpret_cast<const uint8_t*>(apNode) + 0x10);
+                    std::string lower = pName ? pName : "";
+                    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                    if (!lower.empty() && lower.find(needle) != std::string::npos)
+                        names.push_back(pName);
+                    if (auto* pNode = apNode->AsNode(); pNode && pNode->children.data)
+                        for (uint16_t i = 0; i < pNode->children.length; ++i)
+                            self(self, pNode->children.data[i], aDepth + 1);
+                };
+                names.clear();
+                walk(walk, pRoot, 0);
+            }
+            for (const auto& name : names)
+            {
+                BSFixedString fixed(name.c_str());
+                auto* pNode = pRoot ? pRoot->GetByName(fixed) : nullptr;
+                if (!pNode)
+                    continue;
+                const auto& r = pNode->local.rotate.entry;
+                // NiObjectNET::controller (+0x18) and the parent: a tail is not in the behavior graph's bones, so
+                // whatever animates it hangs off the node or its parent. Vtable RVAs map through graph/vtables.tsv.
+                const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                const auto rva = [base](const void* apObject) -> uintptr_t {
+                    const auto vtable = apObject ? *static_cast<const uintptr_t*>(apObject) : 0;
+                    return vtable > base ? vtable - base : 0;
+                };
+                const auto* pController = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(pNode) + 0x18);
+                bones += fmt::format("{}{{\"name\":\"{}\",\"local\":[{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}],"
+                    "\"node\":\"{:X}\",\"controller\":\"{:X}\",\"parent\":\"{:X}\",\"flags\":\"{:X}\",\"address\":\"{:X}\"}}",
+                    bones.empty() ? "" : ",", name, r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2],
+                    rva(pNode), rva(pController), rva(pNode->parent), pNode->flags, reinterpret_cast<uintptr_t>(pNode));
+            }
+            bool isNpc{}, spine{}, headTracking{};
+            BSFixedString npcName("IsNPC"), spineName("bHeadTrackSpine"), trackingName("bHeadTracking");
+            const bool haveNpc = pActor->animationGraphHolder.GetVariableBool(&npcName, &isNpc);
+            const bool haveSpine = pActor->animationGraphHolder.GetVariableBool(&spineName, &spine);
+            const bool haveTracking = pActor->animationGraphHolder.GetVariableBool(&trackingName, &headTracking);
+            using TTargetType = uint32_t(AIProcess*);
+            POINTER_SKYRIMSE(TTargetType, targetType, 39486);
+            const auto type = pActor->currentProcess ? targetType.Get()(pActor->currentProcess) : UINT32_MAX;
+            const auto* pExtension = pActor->GetExtension();
+            // Biped slot 10 (the beast tail addon) carries its own animation graph: 15674 / 0x14021E080 stores a
+            // TailAnimationGraphManagerHolder at biped + 0x70 + slot * 0x78 when the addon's model has a behavior.
+            std::string slotGraphs;
+            if (const auto* pBiped = static_cast<const uint8_t*>(pActor->actorWeightData))
+            {
+                const auto moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                for (uint32_t slot = 0; slot < 32; ++slot)
+                {
+                    const void* pHolder{};
+                    uintptr_t vtable{};
+                    SIZE_T read{};
+                    if (!ReadProcessMemory(GetCurrentProcess(), pBiped + 0x70 + slot * 0x78, &pHolder, sizeof(pHolder), &read) || !pHolder)
+                        continue;
+                    ReadProcessMemory(GetCurrentProcess(), pHolder, &vtable, sizeof(vtable), &read);
+                    slotGraphs += fmt::format("{}{{\"slot\":{},\"holderVtable\":\"{:X}\"}}", slotGraphs.empty() ? "" : ",", slot,
+                        vtable > moduleBase ? vtable - moduleBase : 0);
+                }
+            }
+            return Result(id, fmt::format("\"race\":\"{:X}\",\"remotePlayer\":{},\"slotGraphs\":[{}],\"bones\":[{}],\"isNPC\":{},\"headTrackSpine\":{},"
+                "\"bHeadTracking\":{},\"graphRead\":[{},{},{}],\"flags2HeadTrack\":{},\"nativeTargetType\":{},\"flags1\":\"{:X}\",\"flags2\":\"{:X}\","
+                "\"weaponDrawn\":{},{}",
+                pActor->race ? pActor->race->formID : 0, JsonBool(pExtension && pExtension->IsRemotePlayer()), slotGraphs, bones,
+                JsonBool(isNpc), JsonBool(spine), JsonBool(headTracking), JsonBool(haveNpc), JsonBool(haveSpine),
+                JsonBool(haveTracking), JsonBool((pActor->actorState.flags2 & (1u << 3)) != 0), type,
+                pActor->actorState.flags1, pActor->actorState.flags2, JsonBool(pActor->actorState.IsWeaponDrawn()),
+                PoseCopyAuthority::DescribeBoneSlots(pActor, GetJsonString(acLine, "slots").empty() ? "TailBone01" : GetJsonString(acLine, "slots"))));
+        }
         if (command == "grab_object")
         {
             // The hold-Activate grab without a crosshair: StartGrabObject (40552) checks the crosshair reference's

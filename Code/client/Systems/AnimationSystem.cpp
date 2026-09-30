@@ -499,6 +499,20 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
         // simulated flag; ID 63358 still applies LOD.
         TiltedPhoques::ThisCall(s_realUpdateGraphManager, manager, &data);
         manager->Release();
+        // The native update this replaces (20119 / 0x1402FD930) then runs every biped slot's own graph
+        // (15654 / 0x140217BE0 on entry + 0x60 for 0x2A slots): a beast tail is the slot 10 addon's
+        // TailAnimationGraphManagerHolder, whose bones are not in the actor's graph. Skipping that loop left
+        // every copy's tail in its bind pose (straight out) while the owner's swung (Helgen Keep, 2026-09-29).
+        if (auto* biped = static_cast<uint8_t*>(apThis->actorWeightData))
+            for (uint32_t slot = 0; slot < 0x2A; ++slot)
+            {
+                auto* holder = *reinterpret_cast<IAnimationGraphManagerHolder**>(biped + 0x10 + slot * 0x78 + 0x60);
+                BSAnimationGraphManager* slotManager{};
+                if (!holder || !holder->GetBSAnimationGraph(&slotManager) || !slotManager)
+                    continue;
+                TiltedPhoques::ThisCall(s_realUpdateGraphManager, slotManager, &data);
+                slotManager->Release();
+            }
         if (extension->IsRemotePlayer() && started != std::chrono::steady_clock::time_point{})
         {
             s_playerGraphCalls.fetch_add(1, std::memory_order_relaxed);
