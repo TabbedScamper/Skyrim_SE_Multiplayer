@@ -65,6 +65,7 @@ struct GameSettingsService
     void QueueAudioPreviewStop() noexcept;
     void OnMainLoop() noexcept;
     void OnWindowSizeChanged(WPARAM aSizeType) noexcept;
+    void ScheduleWindowRebuild() noexcept;
     // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE / WM_WINDOWPOSCHANGED: remembers where
     // the player puts the framed window so windowed mode comes back there.
     void OnWindowPlacementChanged(UINT aMessage) noexcept;
@@ -103,6 +104,8 @@ private:
     uint32_t m_resizeEventGuardUpdates{0};
     bool m_programmaticDisplayChange{false};
     bool m_inSizeMove{false};
+    bool m_rebuildAfterDrag{false}; // a player resize waits for the drag to end, then rebuilds targets and menus
+
     int m_savedWindowX{INT_MIN};
     int m_savedWindowY{INT_MIN};
     bool m_feedbackPromptPending{false};

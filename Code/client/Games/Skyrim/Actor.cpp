@@ -1142,6 +1142,29 @@ char TP_MAKE_THISCALL(HookSetPosition, Actor, NiPoint3& aPosition)
         ObjectService::RecordNativeSetPosition(apThis,
             caller >= base ? caller - base : 0, &aPosition,
             bIsRemote, scopedOverride);
+        // Session 2026-09-29: picking up a dropped lockpick in Helgen Keep sent the follower back to the Keep's
+        // entrance with nothing in the log. Name whoever moves the local player a long way at once.
+        if (apThis == PlayerCharacter::Get())
+        {
+            const float dx = aPosition.x - apThis->position.x, dy = aPosition.y - apThis->position.y,
+                dz = aPosition.z - apThis->position.z;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance > 600.f && std::isfinite(distance))
+            {
+                void* frames[8]{};
+                const auto count = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
+                std::string stack;
+                for (USHORT i = 0; i < count; ++i)
+                {
+                    const auto address = reinterpret_cast<uintptr_t>(frames[i]);
+                    stack += address >= base && address - base < 0x4000000 ? fmt::format(" SkyrimSE.exe+{:X}", address - base) :
+                        fmt::format(" {:X}", address);
+                }
+                spdlog::warn("Local player moved {:.0f} u at once: ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}) cell {:X}; stack{}",
+                    distance, apThis->position.x, apThis->position.y, apThis->position.z, aPosition.x, aPosition.y, aPosition.z,
+                    apThis->parentCell ? apThis->parentCell->formID : 0, stack);
+            }
+        }
     }
 
     if (bIsRemote && !scopedOverride)

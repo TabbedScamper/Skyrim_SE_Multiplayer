@@ -6010,6 +6010,25 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             });
             return Result(id, fmt::format("\"queued\":\"{:X}\"", formId));
         }
+        if (command == "inventory")
+        {
+            // Every item a reference (form_id) holds with its count and worn flags: the corpse test compares a body's
+            // contents across PCs (session 2026-09-29: a corpse's armor showed twice on the follower).
+            const auto formText = GetJsonString(acLine, "form_id");
+            auto* pReference = formText.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(formText, nullptr, 16)));
+            if (!pReference)
+                return Result(id, "\"found\":false");
+            auto& mods = World::Get().GetModSystem();
+            std::string items;
+            for (const auto& entry : pReference->GetInventory().Entries)
+            {
+                if (entry.Count == 0)
+                    continue;
+                items += fmt::format("{}{{\"base\":\"{:X}\",\"count\":{},\"worn\":{},\"wornLeft\":{}}}", items.empty() ? "" : ",",
+                    mods.GetGameId(entry.BaseId), entry.Count, JsonBool(entry.ExtraWorn), JsonBool(entry.ExtraWornLeft));
+            }
+            return Result(id, fmt::format("\"found\":true,\"items\":[{}]", items));
+        }
         if (command == "crosshair")
         {
             // What the crosshair is on (CrosshairPickData, 401585: target handle at +4), as the activate prompt and

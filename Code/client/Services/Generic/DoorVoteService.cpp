@@ -63,7 +63,15 @@ void OnAutomaticDoor(void* aObject3D, uint32_t aDistanceBand, bool aEntering)
         POINTER_SKYRIMSE(TFindReference, findReference, 19750);
         auto* door = findReference.Get()(aObject3D);
         if (World::Get().GetDoorVoteService().TryHold(door, PlayerCharacter::Get(), 0, nullptr, 1, 0, nullptr, true))
+        {
+            // Every call of the native callback ends in 51622 / 0x1409350B0 (show, text): band 0 entering shows the
+            // "to <destination>" label, every other crossing hides it. Holding band 1 skipped that hide, and the
+            // label stayed on screen through the whole Keep (session 2026-09-29). Hide it as the native call would.
+            using TDoorLabel = void(bool, const char*);
+            POINTER_SKYRIMSE(TDoorLabel, doorLabel, 51622);
+            doorLabel.Get()(false, "");
             return;
+        }
     }
     s_automaticDoor(aObject3D, aDistanceBand, aEntering);
 }

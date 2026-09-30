@@ -143,7 +143,7 @@ TEST_CASE("Five candidates retain independent declines through handoff", "[hosto
 
 TEST_CASE("Release reasons and ownership epochs survive the packet factory", "[hostorphan]")
 {
-    for (const auto reason : {OwnershipReleaseReason::Relinquish, OwnershipReleaseReason::DeclineGrant})
+    for (const auto reason : {OwnershipReleaseReason::Relinquish, OwnershipReleaseReason::DeclineGrant, OwnershipReleaseReason::ScriptRemoved})
     {
         RequestOwnershipTransfer source;
         source.ServerId = 6;

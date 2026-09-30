@@ -820,10 +820,26 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
         return;
     }
 
-    if (message.Reason != OwnershipReleaseReason::Relinquish && message.Reason != OwnershipReleaseReason::DeclineGrant)
+    if (message.Reason != OwnershipReleaseReason::Relinquish && message.Reason != OwnershipReleaseReason::DeclineGrant &&
+        message.Reason != OwnershipReleaseReason::ScriptRemoved)
     {
         spdlog::warn("Ignored ownership release with invalid reason from player {:X} for actor {:X}", acMessage.pPlayer->GetId(), message.ServerId);
         return;
+    }
+    if (message.Reason == OwnershipReleaseReason::ScriptRemoved)
+    {
+        // Only the leader's world is the story's; a follower's local script removing its copy decides nothing.
+        const auto* pForm = m_world.try_get<FormIdComponent>(cEntity);
+        const bool temporary = !pForm || pForm->Id.ModId == UINT32_MAX || pForm->Id == GameId{};
+        if (m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer) && temporary &&
+            !view.get<CharacterComponent>(*it).IsPlayer())
+        {
+            spdlog::info("Leader's scripts removed temporary actor {:X}; removing it for every player", message.ServerId);
+            m_world.GetDispatcher().trigger(CharacterRemoveEvent(message.ServerId));
+            return;
+        }
+        spdlog::info("Script removal of actor {:X} by player {} not accepted; treated as a release", message.ServerId,
+            acMessage.pPlayer->GetId());
     }
 
     if (auto* state = m_world.try_get<RagdollRelayState>(cEntity); state && state->IsActive())
@@ -1745,13 +1761,18 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     if (pOldOwner == apPlayer)
         return true;
 
-    if (HasMovingRagdoll(m_world, aEntity))
+    // A player holding the body decides where it goes, even while it still moves: the owner's copy that player sees
+    // follows the owner's stream closely, so its simulation continues from there. Session 2026-09-29: the follower's
+    // pickup waited 5 s for the stream to settle (she had let go by then), and the host's pickups of the body she then
+    // owned were refused outright while it kept moving; his grab fought her stream and the body slid.
+    const bool carry = aReason == OwnershipTransferReason::CorpseCarry;
+    if (!carry && HasMovingRagdoll(m_world, aEntity))
         return false;
     if (HasActiveRagdoll(m_world, aEntity))
     {
-        // Settled corpse: end the old owner's streams reliably before the new owner starts its own.
-        spdlog::info("Ragdoll server {:X}: settled streams ended for an ownership transfer to player {}",
-            World::ToInteger(aEntity), apPlayer->GetId());
+        // End the old owner's streams reliably before the new owner starts its own.
+        spdlog::info("Ragdoll server {:X}: {} streams ended for an ownership transfer to player {}",
+            World::ToInteger(aEntity), HasMovingRagdoll(m_world, aEntity) ? "moving" : "settled", apPlayer->GetId());
         EndRagdollStreams(m_world, aEntity);
     }
 

@@ -2034,7 +2034,11 @@ void CharacterService::SendCreatorAppearance() noexcept
 
     PlayerAppearanceRequest request;
     request.ServerId = *serverId;
-    pNpc->MarkChanged(0x2000800);
+    // Race (0x2000000), face (0x800) and sex (0x1000000, CHANGE_NPC_GENDER). The native sex toggle
+    // (TESActorBaseData::SetActorBaseFlag, 0x1401DD2C0) CLEARS the gender flag when the sex returns to the base
+    // record's, so the packet then carried no sex and the copy kept the last one it got: the host looked female on
+    // the follower until a load (session 2026-09-29). With the flag, the save writes the sex and the load sets it.
+    pNpc->MarkChanged(0x3000800);
     request.ChangeFlags = pNpc->GetChangeFlags();
     pNpc->Serialize(&request.AppearanceBuffer);
     const auto& tints = pPlayer->GetTints();
@@ -2992,7 +2996,7 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
 
     if (isPlayer)
     {
-        pNpc->MarkChanged(0x2000800);
+        pNpc->MarkChanged(0x3000800); // race, sex and face: see SendCreatorAppearance
     }
 
     const auto changeFlags = pNpc->GetChangeFlags();
@@ -3142,6 +3146,18 @@ void CharacterService::CancelServerAssignment(const entt::entity aEntity, const 
 
         if (Actor* pActor = Cast<Actor>(TESForm::GetById(aFormId)))
         {
+            // The leader's quest disabled or deleted its own temporary actor with the party right there: it is gone,
+            // not orphaned. Released as usual, the server handed it to the follower, whose copy stayed enabled and
+            // idle (Helgen Keep Stormcloaks, session 2026-09-29). Scripted departures of placed actors park instead.
+            const auto* pCell = pActor->GetParentCellEx();
+            const auto& party = m_world.GetPartyService();
+            if (pActor->IsTemporary() && (pActor->IsDisabled() || pActor->IsDeleted()) && !pActor->IsDead() &&
+                party.IsInParty() && party.IsLeader() && !pActor->GetExtension()->IsRemotePlayer() && pCell && pCell->IsAttached())
+            {
+                request.Reason = OwnershipReleaseReason::ScriptRemoved;
+                spdlog::info("Leader's scripts removed temporary actor {:X} (server {:X}, disabled {}, deleted {})", aFormId,
+                    request.ServerId, pActor->IsDisabled(), pActor->IsDeleted());
+            }
             if (!pActor->IsTemporary())
             {
                 auto& modSystem = m_world.GetModSystem();

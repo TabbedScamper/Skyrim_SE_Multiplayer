@@ -283,9 +283,9 @@ void DiscoveryService::VisitForms() noexcept
                 continue;
             }
             if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().IsLeader())
-                spdlog::info("Discovery removed actor {:X}: cell={:X} attached={} has3D={} dead={} remote={} reconciliation={}",
+                spdlog::info("Discovery removed actor {:X}: cell={:X} attached={} has3D={} disabled={} dead={} remote={} reconciliation={}",
                     formId, pCell ? pCell->formID : 0,
-                    pCell && pCell->IsAttached(), pActor->GetNiNode() != nullptr,
+                    pCell && pCell->IsAttached(), pActor->GetNiNode() != nullptr, pActor->IsDisabled(),
                     pActor->IsDead(), pActor->GetExtension()->IsRemote(),
                     static_cast<uint32_t>(cStage));
         }

@@ -71,6 +71,10 @@ bool Dynamic(uint8_t aMotion) noexcept
     return aMotion == 1 || aMotion == 2 || aMotion == 3 || aMotion == 6;
 }
 
+// A copy this close to the owner's settled pose may sleep, and stays asleep until it leaves the band.
+constexpr float kSettleNearPosition = 2.f; // game units per body
+constexpr float kSettleNearAngle = 10.f;   // degrees per body
+
 bool Resting(const RigidBody* apBody) noexcept
 {
     float linear{}, angular{};
@@ -1143,8 +1147,11 @@ void CorpseRagdollService::OnHavokStep(void* apWorld, float aDeltaTime, bool aAf
                 for (size_t i = 0; i < binding.Bodies.size(); ++i)
                 {
                     const auto error = MeasureBody(binding.Bodies[i], targets[i], states[i].MotionType);
-                    aligned &= error.Position < 1.f && error.Angle < 1.f;
+                    aligned &= error.Position < kSettleNearPosition && error.Angle < kSettleNearAngle;
                 }
+                // The same band that let it settle keeps it asleep. With a tighter wake band (1 u/1 deg) the joint
+                // solver's relaxation after the exact placement (~1.15 deg) woke it again, and the drive re-settled
+                // it every half second for ten minutes: the corpse crept on the follower (B1695, session 2026-09-29).
                 if (aligned) continue; // heartbeats must not reactivate an island
                 binding.Asleep = false; // resume the entire constrained set
                 binding.RestSinceMs = 0;
@@ -1250,7 +1257,7 @@ void CorpseRagdollService::OnHavokStep(void* apWorld, float aDeltaTime, bool aAf
         // settled and the copy is close, count it as rested so the one-time placement + sleep can finish it.
         bool closeToOwner = true;
         for (size_t i = 0; i < binding.Bodies.size(); ++i)
-            closeToOwner &= observation.Bodies[i].Position < 2.f && observation.Bodies[i].Angle < 10.f;
+            closeToOwner &= observation.Bodies[i].Position < kSettleNearPosition && observation.Bodies[i].Angle < kSettleNearAngle;
         if (settled && valid && (observation.FollowerResting || closeToOwner))
         {
             if (!binding.RestSinceMs) binding.RestSinceMs = now;
