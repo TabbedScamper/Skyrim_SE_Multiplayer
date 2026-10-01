@@ -20,7 +20,7 @@ foreach ($requiredPath in @($configPath, $creationPath, $PluginsPath, $SkyrimPre
     }
 }
 
-$requiredMultiplayerPlugins = @('SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp')
+$requiredMultiplayerPlugins = @('SkyrimSEMultiplayer.esp', 'SkyrimSEMultiplayerQuestPatches.esp')
 $pluginLines = [Collections.Generic.List[string]]::new()
 $pluginLines.AddRange([string[]](Get-Content -LiteralPath $PluginsPath))
 $preservedPluginLines = [Collections.Generic.List[string]]::new()

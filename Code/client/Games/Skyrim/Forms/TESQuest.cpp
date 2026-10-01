@@ -169,24 +169,6 @@ bool TESQuest::IsStageDone(uint16_t stageIndex)
     return false;
 }
 
-bool TESQuest::Kill()
-{
-    using TSetStopped = void(TESQuest*, bool);
-    POINTER_SKYRIMSE(TSetStopped, SetStopped, 24987);
-
-    if (flags & Flags::Enabled)
-    {
-        unkFlags = 0;
-        flags = Flags::Completed;
-        MarkChanged(2);
-
-        // SetStopped(this, false);
-        return true;
-    }
-
-    return false;
-}
-
 bool TESQuest::EnsureQuestStarted(bool& success, bool force)
 {
     TP_THIS_FUNCTION(TSetRunning, bool, TESQuest, bool*, bool);

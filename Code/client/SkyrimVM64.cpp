@@ -8,6 +8,8 @@
 #include <Services/CreatorTogether.h>
 #include <Services/HarnessService.h>
 #include <Services/DoorVoteService.h>
+#include <Services/CheckpointSaves.h>
+#include <Services/CharacterSnapshots.h>
 #include <Games/Skyrim/Actor.h>
 #include <Systems/InterpolationSystem.h>
 
@@ -45,6 +47,8 @@ int TP_MAKE_THISCALL(HookVMUpdate, GameVM, float a2)
 
 short TP_MAKE_THISCALL(HookMainLoop, Main)
 {
+    CheckpointSaves::MarkMainThread();
+    CharacterSnapshots::OnMainFrame();
     CharacterService::ApplyMovesOnMainFrame();
     DoorVoteService::OnMainFrame();
     ObjectService::OnMainFrame();

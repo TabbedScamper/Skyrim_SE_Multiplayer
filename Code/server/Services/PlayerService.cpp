@@ -107,6 +107,17 @@ void PlayerService::HandleExteriorCellEnter(const PacketEvent<EnterExteriorCellR
     auto& message = acMessage.Packet;
     auto* pPlayer = acMessage.pPlayer;
 
+    if (message.Heartbeat)
+    {
+        const auto& recorded = pPlayer->GetCellComponent();
+        if (recorded.WorldSpaceId == message.WorldSpaceId && recorded.Cell == message.CellId)
+            return;
+        spdlog::warn("Cell record healed for player {}: recorded {:X}:{:X} world {:X}:{:X}, actually {:X}:{:X} world {:X}:{:X}",
+            pPlayer->GetId(), recorded.Cell.ModId, recorded.Cell.BaseId, recorded.WorldSpaceId.ModId,
+            recorded.WorldSpaceId.BaseId, message.CellId.ModId, message.CellId.BaseId, message.WorldSpaceId.ModId,
+            message.WorldSpaceId.BaseId);
+    }
+
     if (pPlayer->GetCharacter())
     {
         auto entity = *pPlayer->GetCharacter();
@@ -132,6 +143,17 @@ void PlayerService::HandleInteriorCellEnter(const PacketEvent<EnterInteriorCellR
     auto& message = acMessage.Packet;
 
     const auto oldCell = pPlayer->GetCellComponent().Cell;
+    // The client re-reports its cell every few seconds. A matching record needs nothing; a stale one is healed by the
+    // ordinary enter below (the follower stayed "outside" here after entering the Helgen Keep with the host, so it got
+    // no host copy, no revive and Helgen's actors to simulate, 2026-09-30 19:25).
+    if (message.Heartbeat)
+    {
+        if (oldCell == message.CellId && !pPlayer->GetCellComponent().WorldSpaceId)
+            return;
+        spdlog::warn("Cell record healed for player {}: recorded {:X}:{:X} world {:X}:{:X}, actually interior {:X}:{:X}",
+            pPlayer->GetId(), oldCell.ModId, oldCell.BaseId, pPlayer->GetCellComponent().WorldSpaceId.ModId,
+            pPlayer->GetCellComponent().WorldSpaceId.BaseId, message.CellId.ModId, message.CellId.BaseId);
+    }
 
     auto cell = CellIdComponent{message.CellId, {}, {}};
     pPlayer->SetCellComponent(cell);
@@ -149,11 +171,33 @@ void PlayerService::HandleInteriorCellEnter(const PacketEvent<EnterInteriorCellR
         }
     }
 
+    // Other players already recorded in this interior, by their player cell: a player character's own cell
+    // component follows its movement later. Two players entering the Helgen Keep together each missed the other:
+    // the second one's character still read the exterior, and the first one's arrival sent a remove (owner,
+    // 2026-09-30 19:25: the host was invisible to the follower for the rest of the Keep).
+    std::vector<entt::entity> sentPlayers;
+    for (auto* pOther : m_world.GetPlayerManager())
+    {
+        if (pOther == pPlayer || !pOther->GetCharacter() || !m_world.valid(*pOther->GetCharacter()) ||
+            pOther->GetCellComponent().Cell != message.CellId)
+            continue;
+        const auto character = *pOther->GetCharacter();
+        if (!m_world.all_of<CharacterComponent, OwnerComponent>(character) || !SnapshotEligible(m_world, pPlayer, character))
+            continue;
+        CharacterSpawnRequest spawnMessage;
+        CharacterService::Serialize(m_world, character, &spawnMessage);
+        pPlayer->Send(spawnMessage);
+        sentPlayers.push_back(character);
+    }
+
     auto characterView = m_world.view<CellIdComponent, CharacterComponent, OwnerComponent>();
     for (auto character : characterView)
     {
 
         if (message.CellId != characterView.get<CellIdComponent>(character).Cell)
+            continue;
+
+        if (std::find(sentPlayers.begin(), sentPlayers.end(), character) != sentPlayers.end())
             continue;
 
         if (!SnapshotEligible(m_world, pPlayer, character))

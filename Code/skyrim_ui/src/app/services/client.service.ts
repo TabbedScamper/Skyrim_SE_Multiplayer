@@ -8,7 +8,7 @@ import { Player } from '../models/player';
 import { AudioDevice, DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
 import { ControlBindingsState } from '../models/control-bindings';
 import { ChatService } from './chat.service';
-import { CoopLobbyState } from '../models/coop-lobby-state';
+import { CheckpointEntry, CoopLobbyState, JoinCharacter } from '../models/coop-lobby-state';
 import { SteamFriend, SteamInvite, SteamLobbyState } from '../models/steam-lobby-state';
 import { ErrorEvents, ErrorService } from './error.service';
 import { LoadingService } from './loading.service';
@@ -60,6 +60,20 @@ export class ClientService implements OnDestroy {
 
   /** Connect player to server change. */
   public playerConnectedChange = new Subject<Player>();
+
+  /** A player's character was renamed (the character creator names everyone after "Prisoner"). */
+  public playerNameChange = new Subject<{ id: number; name: string }>();
+
+  /** The checkpoint picker's entries, newest first. */
+  public checkpointListChange = new ReplaySubject<CheckpointEntry[]>(1);
+
+  /** Characters to join a running session with, newest first. */
+  public characterListChange = new ReplaySubject<JoinCharacter[]>(1);
+
+  /** Progress of joining a running session. */
+  public dropInStatusChange = new BehaviorSubject<string>('idle');
+  /** Updater state JSON from the client (Options > Updates); null until the first report. */
+  public updateStateChange = new BehaviorSubject<string | null>(null);
 
   /** Connect party info change. */
   public partyInfoChange = new Subject<PartyInfo>();
@@ -193,6 +207,23 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('debug', this.onDebug.bind(this)); //not needed anymore
     skyrimtogether.on('debugData', this.onUpdateDebug.bind(this));
     skyrimtogether.on('playerConnected', this.onPlayerConnected.bind(this));
+    skyrimtogether.on('playerNameChanged', this.onPlayerNameChanged.bind(this));
+    skyrimtogether.on('characterList', (json: string) => this.zone.run(() => {
+      try {
+        this.characterListChange.next(JSON.parse(json) as JoinCharacter[]);
+      } catch {
+        this.characterListChange.next([]);
+      }
+    }));
+    skyrimtogether.on('dropInStatus', (status: string) => this.zone.run(() => this.dropInStatusChange.next(status)));
+    skyrimtogether.on('updateState', (state: string) => this.zone.run(() => this.updateStateChange.next(state)));
+    skyrimtogether.on('checkpointList', (json: string) => this.zone.run(() => {
+      try {
+        this.checkpointListChange.next(JSON.parse(json) as CheckpointEntry[]);
+      } catch {
+        this.checkpointListChange.next([]);
+      }
+    }));
     skyrimtogether.on(
       'playerDisconnected',
       this.onPlayerDisconnected.bind(this),
@@ -271,6 +302,11 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('debug');
     skyrimtogether.off('debugData');
     skyrimtogether.off('playerConnected');
+    skyrimtogether.off('playerNameChanged');
+    skyrimtogether.off('checkpointList');
+    skyrimtogether.off('characterList');
+    skyrimtogether.off('dropInStatus');
+    skyrimtogether.off('updateState');
     skyrimtogether.off('playerDisconnected');
     skyrimtogether.off('setHealth');
     skyrimtogether.off('setLevel');
@@ -412,6 +448,26 @@ export class ClientService implements OnDestroy {
 
   public setPartyReady(ready: boolean): void {
     skyrimtogether.setPartyReady(ready);
+  }
+
+  public listCharacters(): void {
+    skyrimtogether.listCharacters();
+  }
+
+  public checkUpdates(): void {
+    skyrimtogether.checkUpdates();
+  }
+
+  public downloadUpdate(): void {
+    skyrimtogether.downloadUpdate();
+  }
+
+  public joinRunningSession(path: string): void {
+    skyrimtogether.joinRunningSession(path);
+  }
+
+  public listCheckpoints(): void {
+    skyrimtogether.listCheckpoints();
   }
 
   public selectSharedCampaign(mode: number, checkpointId = ''): void {
@@ -673,6 +729,15 @@ export class ClientService implements OnDestroy {
           cellName: cellName,
         }),
       );
+    });
+  }
+
+  private onPlayerNameChanged(playerId: number, name: string) {
+    this.zone.run(() => {
+      if (playerId === this.localPlayerId) {
+        this.nameChange.next(name);
+      }
+      this.playerNameChange.next({ id: playerId, name });
     });
   }
 

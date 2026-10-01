@@ -5,6 +5,9 @@
 
 #include <Services/GameTestService.h>
 #include <Services/CheckpointSaves.h>
+#include <Services/CharacterSnapshots.h>
+#include <Services/DropInService.h>
+#include <fstream>
 #include <Systems/InterpolationSystem.h>
 #include <Camera/PlayerCamera.h>
 #include <Systems/AnimationSystem.h>
@@ -76,6 +79,7 @@
 #include <OverlayRenderHandler.hpp>
 #include <Games/Memory.h>
 #include <Services/CreatorTogether.h>
+#include <Services/FurnitureGraphLink.h>
 #include <MinHook.h>
 
 extern std::atomic<bool> g_copyNativeTracking; // AnimationSystem.cpp
@@ -5646,6 +5650,133 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
                 g_smoothSnapshotStamp = enabled != "false";
             return Result(id, fmt::format("\"enabled\":{}", g_smoothSnapshotStamp.load()));
+        }
+        if (command == "character_capture")
+        {
+            // Guest character phase 1: read this PC's character (read only), write it to
+            // Data\SkyrimTogetherReborn\snapshots\<name>.snap, read the file back and compare, report a summary.
+            auto name = GetJsonString(acLine, "name");
+            if (name.empty())
+                name = "latest";
+            if (name.size() > 48 || !std::all_of(name.begin(), name.end(), [](char c) {
+                    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                }))
+                return Error(id, "name must be 1-48 letters, digits or underscores");
+            CharacterSnapshot snapshot;
+            std::string error;
+            if (!CharacterSnapshots::Capture(snapshot, error))
+                return Error(id, error);
+            Buffer buffer(1 << 22);
+            Buffer::Writer writer(&buffer);
+            snapshot.Serialize(writer);
+            const auto folder = TiltedPhoques::GetPath() / "snapshots";
+            std::error_code fsError;
+            std::filesystem::create_directories(folder, fsError);
+            const auto path = folder / (name + ".snap");
+            {
+                std::ofstream file(path, std::ios::binary | std::ios::trunc);
+                file.write(reinterpret_cast<const char*>(buffer.GetWriteData()), static_cast<std::streamsize>(writer.Size()));
+                if (!file)
+                    return Error(id, "could not write the snapshot file");
+            }
+            std::ifstream file(path, std::ios::binary);
+            std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            Buffer readBuffer(bytes.size() + 16);
+            std::memcpy(readBuffer.GetWriteData(), bytes.data(), bytes.size());
+            Buffer::Reader reader(&readBuffer);
+            CharacterSnapshot roundtrip;
+            const bool readBack = roundtrip.Deserialize(reader) && roundtrip == snapshot;
+            // "items":"true" lists every stack (plugin:form x count, worn, enchanted) to diff two snapshots.
+            std::string items;
+            if (GetJsonString(acLine, "items") == "true")
+            {
+                items = ",\"itemList\":[";
+                for (size_t i = 0; i < snapshot.Items.Entries.size(); ++i)
+                {
+                    const auto& entry = snapshot.Items.Entries[i];
+                    items += fmt::format("{}\"{:X}:{:X} x{}{}{}\"", i ? "," : "", entry.BaseId.ModId, entry.BaseId.BaseId,
+                        entry.Count, entry.ExtraWorn || entry.ExtraWornLeft ? " worn" : "",
+                        entry.EnchantData.IsWeapon || !entry.EnchantData.Effects.empty() ? " ench" : "");
+                }
+                items += "]";
+            }
+            return Result(id, fmt::format("\"path\":\"{}\",\"bytes\":{},\"roundtrip\":{},{},{}{}",
+                path.generic_string(), writer.Size(), JsonBool(readBack), CharacterSnapshots::Describe(snapshot),
+                CharacterSnapshots::DescribeLiveLook(), items));
+        }
+        if (command == "dropin_join")
+        {
+            // Join the running session as the character in "path" (a .snap file), as the lobby's Join button does.
+            const auto path = GetJsonString(acLine, "path");
+            if (path.empty())
+                return Error(id, "path to a .snap file required");
+            const auto error = m_world.GetDropInService().StartJoin(path);
+            if (!error.empty())
+                return Error(id, error);
+            return Result(id, "\"started\":true");
+        }
+        if (command == "dropin_status")
+            return Result(id, fmt::format("\"status\":\"{}\"", m_world.GetDropInService().Status()));
+        if (command == "load_save_solo")
+        {
+            // Test bench: load the checkpoint SSC_<id> on this PC alone (as Continue does), never inside a party.
+            const auto checkpoint = GetJsonString(acLine, "id");
+            if (checkpoint.empty())
+                return Error(id, "id required (the part after SSC_)");
+            if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().GetPartyMembers().size() > 1)
+                return Error(id, "refused while another player is in the party");
+            if (!CheckpointSaves::Has(checkpoint.c_str()))
+                return Error(id, "no such checkpoint on this PC");
+            // On the next main loop frame: the app update (runner, game-thread queue) does not run at the main menu.
+            CheckpointSaves::QueueLoad(checkpoint.c_str());
+            return Result(id, fmt::format("\"loading\":\"SSC_{}\"", checkpoint));
+        }
+        if (command == "character_apply")
+        {
+            // Guest character phase 1: make this PC's player the character in snapshots\<name>.snap (not its
+            // appearance yet). Changes the character, so only with "confirm":"yes" and never inside a co-op party:
+            // test on a throwaway save, then save to a NEW slot and reload it to check.
+            const auto name = GetJsonString(acLine, "name");
+            if (name.empty() || name.size() > 48 || !std::all_of(name.begin(), name.end(), [](char c) {
+                    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                }))
+                return Error(id, "name must be 1-48 letters, digits or underscores");
+            if (GetJsonString(acLine, "confirm") != "yes")
+                return Error(id, "this changes the character; pass \"confirm\":\"yes\" on a throwaway save");
+            if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().GetPartyMembers().size() > 1)
+                return Error(id, "refused while another player is in the party");
+            const auto path = TiltedPhoques::GetPath() / "snapshots" / (name + ".snap");
+            std::ifstream file(path, std::ios::binary);
+            if (!file)
+                return Error(id, "no such snapshot");
+            std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            Buffer readBuffer(bytes.size() + 16);
+            std::memcpy(readBuffer.GetWriteData(), bytes.data(), bytes.size());
+            Buffer::Reader reader(&readBuffer);
+            CharacterSnapshot snapshot;
+            if (!snapshot.Deserialize(reader))
+                return Error(id, "snapshot unreadable (version or corrupt)");
+            // On the main game frame, appearance included; poll character_apply_status.
+            CharacterSnapshots::QueueApply(std::move(snapshot));
+            spdlog::info("Character snapshot {} queued for apply", name);
+            return Result(id, "\"queued\":true");
+        }
+        if (command == "furniture_links_repair")
+        {
+            // Test only: {"enabled":"true"} turns the experimental furniture relink on for this PC until the game restarts.
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            m_world.ctx().at<FurnitureGraphLink>().SetRepairEnabled(enabled);
+            return Result(id, fmt::format("\"repairEnabled\":{}", enabled));
+        }
+        if (command == "furniture_links")
+            // Tower wall probe: actors using animated furniture and whether their graph is linked to it.
+            return Result(id, "\"links\":" + m_world.ctx().at<FurnitureGraphLink>().Describe());
+        if (command == "character_apply_status")
+        {
+            const auto status = CharacterSnapshots::ApplyStatus();
+            if (status.rfind("done: ", 0) == 0)
+                return Result(id, fmt::format("\"status\":\"done\",\"report\":{}", status.substr(6)));
+            return Result(id, fmt::format("\"status\":\"{}\"", status));
         }
         if (command == "camera_sample")
         {

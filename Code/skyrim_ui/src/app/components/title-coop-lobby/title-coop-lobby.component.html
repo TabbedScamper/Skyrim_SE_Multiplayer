@@ -1,6 +1,6 @@
 <div class="coop-lobby">
   <header>
-    <h1>Skyrim Together</h1>
+    <h1>Skyrim SE Multiplayer</h1>
     <p>{{ inGame ? 'Co-op' : 'Shared campaign' }}</p>
     <p *ngIf="inGame && connected" class="muted">The session keeps running while this menu is open.</p>
   </header>
@@ -90,6 +90,26 @@
       <h2 class="separator"><span>Campaign</span></h2>
 
       <p *ngIf="inGame" class="muted">Campaign selection, ready status and host changes are available before starting a session, from the title menu.</p>
+      <div *ngIf="canDropIn()" class="checkpoints">
+        <p class="chosen"><strong>Join their game</strong></p>
+        <p class="option-hint">{{ leaderName() }} is already playing. Pick the character you join with: you keep its levels and loot, and their world stays theirs.</p>
+        <p *ngIf="!characters.length" class="option-hint">No characters with a save from this mod yet. Play and save once with the mod to make one.</p>
+        <button *ngFor="let character of characters" class="checkpoint" data-style-ornament="inverted" [disabled]="joining()" (click)="joinWith(character)">
+          <img *ngIf="character.image" [src]="character.image" alt="" />
+          <span class="checkpoint-text">
+            <strong>{{ character.name }}</strong>
+            <small>Level {{ character.level }}{{ character.location ? ', ' + character.location : '' }}</small>
+            <small>Saved {{ character.savedMs | date: 'MMM d, h:mm a' }}</small>
+          </span>
+        </button>
+        <button class="checkpoint" data-style-ornament="inverted" disabled>
+          <span class="checkpoint-text">
+            <strong>New character</strong>
+            <small>Create one in a safe spot, then join (coming soon)</small>
+          </span>
+        </button>
+        <p *ngIf="dropInStatus !== 'idle'" class="option-hint">{{ dropInLabel() }}</p>
+      </div>
       <ng-container *ngIf="!sessionStarted">
         <div *ngIf="isLeader(); else guestCampaign" class="choice">
           <button class="option" data-style-ornament="inverted" [attr.data-style-active]="campaignMode === 1" [class.selected]="campaignMode === 1" (click)="chooseCampaign(1)">
@@ -99,10 +119,31 @@
             <strong>Continue</strong>
           </button>
           <p class="option-hint">{{ campaignMode === 2 ? 'Pick up from your last shared checkpoint.' : 'Start a fresh shared playthrough.' }}</p>
-          <input *ngIf="campaignMode === 2" [(ngModel)]="checkpointId" placeholder="Latest shared checkpoint" />
+          <div *ngIf="campaignMode === 2" class="checkpoints">
+            <p *ngIf="!checkpoints.length" class="option-hint">No shared checkpoints on this PC yet.</p>
+            <button *ngFor="let entry of checkpoints; let i = index" class="checkpoint" data-style-ornament="inverted"
+              [attr.data-style-active]="isChosen(entry, i)" [class.selected]="isChosen(entry, i)" (click)="chooseCheckpoint(entry.id)">
+              <img *ngIf="entry.image" [src]="entry.image" alt="" />
+              <span class="checkpoint-text">
+                <strong>{{ entry.location || entry.id }}</strong>
+                <small>{{ entry.player }}, level {{ entry.level }}</small>
+                <small>Played {{ playTime(entry.gameDate) }}</small>
+                <small>Saved {{ entry.savedMs | date: 'MMM d, h:mm a' }}</small>
+              </span>
+            </button>
+          </div>
         </div>
         <ng-template #guestCampaign>
           <p class="chosen"><strong>{{ campaignLabel() }}</strong></p>
+          <div *ngIf="campaignMode === 2 && chosenEntry() as entry" class="checkpoints">
+            <div class="checkpoint selected">
+              <img *ngIf="entry.image" [src]="entry.image" alt="" />
+              <span class="checkpoint-text">
+                <strong>{{ entry.location || entry.id }}</strong>
+                <small>Played {{ playTime(entry.gameDate) }}</small>
+              </span>
+            </div>
+          </div>
           <p class="muted">{{ leaderName() }} chooses the campaign. Ready up when you're set.</p>
         </ng-template>
       </ng-container>

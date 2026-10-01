@@ -35,6 +35,9 @@
 #include <AI/AIProcess.h>
 #include <EquipManager.h>
 #include <Forms/TESRace.h>
+#include <Forms/TESWorldSpace.h>
+#include <Interface/UI.h>
+#include <Games/TES.h>
 
 PlayerService::PlayerService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -61,6 +64,41 @@ void PlayerService::OnUpdate(const UpdateEvent&) noexcept
     RunDifficultyUpdates();
     RunLevelUpdates();
     RunBeastFormDetection();
+    RunCellHeartbeat();
+}
+
+// Re-report the cell this player is in every 5 s; the server acts only when its record differs. Two players taking a
+// load door together left the follower recorded outside the Helgen Keep for the rest of the Keep (2026-09-30 19:25).
+void PlayerService::RunCellHeartbeat() noexcept
+{
+    const auto now = GetTickCount64();
+    if (now < m_nextCellHeartbeat || !m_transport.IsConnected())
+        return;
+    m_nextCellHeartbeat = now + 5000;
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pUi = UI::Get();
+    auto* pCell = pPlayer ? pPlayer->GetParentCellEx() : nullptr;
+    if (!pCell || !pUi || pUi->GetMenuOpen(BSFixedString("Loading Menu")) || pUi->GetMenuOpen(BSFixedString("Main Menu")))
+        return;
+    auto& mods = m_world.GetModSystem();
+    if (auto* pWorldSpace = pPlayer->GetWorldSpace())
+    {
+        EnterExteriorCellRequest message;
+        const auto* pTes = TES::Get();
+        if (!pTes || !mods.GetServerModId(pWorldSpace->formID, message.WorldSpaceId) || !mods.GetServerModId(pCell->formID, message.CellId))
+            return;
+        message.CurrentCoords = GridCellCoords(pTes->currentGridX, pTes->currentGridY);
+        message.Heartbeat = true;
+        m_transport.Send(message);
+    }
+    else
+    {
+        EnterInteriorCellRequest message;
+        if (!mods.GetServerModId(pCell->formID, message.CellId))
+            return;
+        message.Heartbeat = true;
+        m_transport.Send(message);
+    }
 }
 
 void PlayerService::OnConnected(const ConnectedEvent& acEvent) noexcept

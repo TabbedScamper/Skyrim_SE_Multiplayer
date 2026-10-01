@@ -1,6 +1,8 @@
 #include <Services/CreatorTogether.h>
 #include <limits>
 #include <Services/SmoothClock.h>
+#include <Services/OverlayService.h>
+#include <OverlayApp.hpp>
 #include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
 #include "Forms/TESObjectCELL.h"
@@ -1979,6 +1981,14 @@ bool CharacterService::GetCreatorDisplayOffset(const uint32_t aFormId, NiPoint3&
 
 // The local character's name whenever it differs from the last one sent (after the creator's ChangeName, after
 // loading a named save): a rename-only appearance packet. Checked every 2 s.
+void CharacterService::NotifyUiPlayerName(const uint32_t aPlayerId, const char* apName) const noexcept
+{
+    auto pArguments = CefListValue::Create();
+    pArguments->SetInt(0, static_cast<int>(aPlayerId));
+    pArguments->SetString(1, apName);
+    m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("playerNameChanged", pArguments);
+}
+
 void CharacterService::SendNameIfChanged() noexcept
 {
     const auto now = GetTickCount64();
@@ -2010,6 +2020,7 @@ void CharacterService::SendNameIfChanged() noexcept
     m_transport.Send(request);
     m_sentName = name;
     spdlog::info("This player's character is called {}", name);
+    NotifyUiPlayerName(m_transport.GetLocalPlayerId(), name.c_str());
 }
 
 // While the creator (RaceSex Menu) is open: this player's look, once a second when it changed,
@@ -2100,6 +2111,9 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
     {
         pNpc->fullName.value.Set(acMessage.Name.c_str());
         spdlog::info("Player copy {:X} is called {}", pActor->formID, acMessage.Name);
+        // The party list names players from their connect (everyone is "Prisoner" before the creator).
+        if (const auto* pPlayer = m_world.try_get<PlayerComponent>(*entityIt))
+            NotifyUiPlayerName(pPlayer->Id, acMessage.Name.c_str());
     }
     if (acMessage.AppearanceBuffer.empty())
         return; // a rename only
@@ -2332,10 +2346,20 @@ void CharacterService::RunPendingMounts() noexcept
             }
         }
         // A relation that waited for 3D can be stale: a rider still in the owner's saddle is streamed onto its horse.
-        // Start the mount only while the copy is near the horse (a stale mount began just before the owner's
-        // dismount arrived, 2026-09-30 15:03:39).
-        if (!pending.StartedAtMs && pRider->GetExtension()->IsRemote())
+        // Start (and restart) the mount only while the copy is near the horse (a stale mount began just before the
+        // owner's dismount arrived, 2026-09-30 15:03:39).
+        if (pRider->GetExtension()->IsRemote())
         {
+            // A package that never seats is restarted every ~5 s forever: a follower copy of rider 198BC re-mounted
+            // horse 527F1 about every 8 s for two minutes while the owner's rider was far away (2026-09-30 18:26:57).
+            // Each restart replays the mount animation. Give up after three starts; a newer relation re-arms it.
+            if (pending.Starts >= 3 && now - pending.StartedAtMs >= 5000)
+            {
+                spdlog::info("Deferred mount rider {:X} horse {:X}: not seated after {} starts, giving up",
+                    it->first, pending.MountId, pending.Starts);
+                it = m_pendingMounts.erase(it);
+                continue;
+            }
             const auto gap = glm::length(glm::vec3(pRider->position.x - pMount->position.x,
                 pRider->position.y - pMount->position.y, pRider->position.z - pMount->position.z));
             if (gap > 200.f)
@@ -2365,6 +2389,7 @@ void CharacterService::RunPendingMounts() noexcept
         if (started)
         {
             ++m_mountApplied;
+            ++pending.Starts;
             pending.StartedAtMs = now;
             pending.NextAttemptMs = now + 100;
             spdlog::info("Started deferred mount rider {:X} horse {:X} after {} attempts",
@@ -2954,7 +2979,23 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
             // receive cell leases only when the leader is unavailable.
             spdlog::info("Requesting cell-validated ownership for actor {:X} with server id {:X}", pActor->formID, pRemoteComponent->Id);
 
-            RequestOwnership(pActor->formID, pRemoteComponent->Id, aEntity);
+            // The engine carried this actor into the leader's own cell (an escort following the player through a
+            // load door). The server's recorded cell is the owner's copy, which stayed behind: Ralof followed the
+            // host out of Helgen's cave, the follower's copy in the cave kept pulling him back, and he was lost on
+            // both PCs (2026-09-30 19:40:33). The leader's native placement wins, as vanilla's player would.
+            auto* pPlayer = PlayerCharacter::Get();
+            if (party.IsLeader() && pPlayer && pActor->GetParentCellEx() && pActor->GetParentCellEx() == pPlayer->GetParentCellEx() &&
+                !pActor->GetExtension()->IsRemotePlayer() && !pActor->IsPlayerSummon() && pRemoteComponent->OwnershipEpoch)
+            {
+                RequestOwnershipClaim claim;
+                claim.ServerId = pRemoteComponent->Id;
+                claim.ExpectedOwnershipEpoch = pRemoteComponent->OwnershipEpoch;
+                claim.Carry = 3;
+                m_transport.Send(claim);
+                spdlog::info("Leader claim: {:X} is in the leader's own cell", pActor->formID);
+            }
+            else
+                RequestOwnership(pActor->formID, pRemoteComponent->Id, aEntity);
         }
         else
             spdlog::info("New entity remotely managed, form id: {:X}, server id: {:X}", pActor->formID, pRemoteComponent->Id);

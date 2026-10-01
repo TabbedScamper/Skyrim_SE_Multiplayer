@@ -1,5 +1,6 @@
 #pragma once
 #include <Messages/Harness.h>
+#include <Messages/DropIn.h>
 #include <Messages/BusyLockRequest.h>
 
 #include <Messages/Message.h>
@@ -99,7 +100,7 @@ struct ClientMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<PhysicsLeaseRequest, RequestHarness, RequestNpcWorn, RequestNpcLoot, RequestWorldState, RequestWorldStateCell, RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<PhysicsLeaseRequest, RequestDropIn, RequestHarness, RequestNpcWorn, RequestNpcLoot, RequestWorldState, RequestWorldStateCell, RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
             RequestScriptedActorState, AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
             RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, AnimObjectRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,

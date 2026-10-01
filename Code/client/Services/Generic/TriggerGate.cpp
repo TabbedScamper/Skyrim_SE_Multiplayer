@@ -27,6 +27,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
+// Games/Skyrim/TESObjectREFR.cpp: a door open/close through the hooked native, so it replicates.
+void WorldStateSetDoorOpen(TESObjectREFR* apRef, bool aOpen) noexcept;
+
 namespace
 {
 // Research (1.7.104): the phantom update (26036, 1404066c0) walks overlapping
@@ -435,6 +438,16 @@ struct TriggerGate::State
     // fire triggers.
     std::unordered_set<uint32_t> FallenHandles;
     std::unordered_map<uint32_t, Held> Pending;
+    // A quest/scene trigger fired for the first player in (vanilla: the player is whoever gets there). For a few
+    // seconds its stage may not put a barrier near it; barriers it tries are deferred until all players are in.
+    struct Guard
+    {
+        uint32_t FormId{};
+        Location Where{};
+        uint64_t WatchUntil{};
+        std::vector<std::pair<uint32_t, bool>> Deferred; // reference form id, door close (else enable)
+    };
+    std::vector<Guard> Guards;
     std::unordered_map<uint32_t, TriggerPartyContact::Occupancy> Inside;
     uint64_t NextNotice{};
     uint64_t NextUnstuck{};
@@ -506,12 +519,46 @@ BSTEventResult TriggerGate::OnEvent(const TESLoadGameEvent*, const EventDispatch
     if (!m_state->Pending.empty())
         spdlog::warn("Trigger gate: canceled {} held triggers after loading a save", m_state->Pending.size());
     m_state->Pending.clear();
+    // The loaded save holds its own barrier states.
+    m_state->Guards.clear();
     m_state->Inside.clear();
     m_state->Players.clear();
     m_state->Leader = false;
     std::lock_guard moveLock(m_state->MoveMutex);
     m_state->Move.reset();
     return BSTEventResult::kOk;
+}
+
+bool TriggerGate::DeferBarrier(TESObjectREFR* apRef, bool aDoorClose) noexcept
+{
+    auto* pGate = s_gate.load(std::memory_order_acquire);
+    if (!pGate || !apRef || !apRef->baseForm)
+        return false;
+    // Blocking kinds only: activator 24, talking activator 25, door 29, static 34 (also collision and enable-parent
+    // markers), movable static 36, tree 38, furniture 40. Actors, lights, sounds and items keep their native enable.
+    const auto type = static_cast<uint8_t>(apRef->baseForm->formType);
+    if (aDoorClose ? type != static_cast<uint8_t>(FormType::Door) :
+        !(type == 24 || type == 25 || type == 29 || type == 34 || type == 36 || type == 38 || type == 40))
+        return false;
+    const auto where = GetLocation(apRef);
+    auto& state = *pGate->m_state;
+    std::lock_guard lock(state.Mutex);
+    if (!state.Leader || state.Guards.empty())
+        return false;
+    const auto now = GetTickCount64();
+    for (auto& guard : state.Guards)
+    {
+        if (now > guard.WatchUntil || !SameSpace(where, guard.Where))
+            continue;
+        const auto delta = where.Position - guard.Where.Position;
+        if (glm::dot(delta, delta) > 3000.f * 3000.f)
+            continue;
+        guard.Deferred.emplace_back(apRef->formID, aDoorClose);
+        spdlog::info("Trigger gate: deferred {} of {:X} (barrier near {:X}) until all players are in",
+            aDoorClose ? "closing" : "enabling", apRef->formID, guard.FormId);
+        return true;
+    }
+    return false;
 }
 
 bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*& apActor) noexcept
@@ -585,6 +632,17 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
         }
         if (state.AllPresent(trigger))
             return false;
+        // Only door/movement triggers wait for the whole party. Holding every quest/scene trigger stalled MQ101:
+        // the follower alone tripped the lockpick trigger (BA032, stage 400), it was held for three minutes and a
+        // later trigger set 460 first (owner, 2026-09-30 18:49). The barrier a stage puts up (the Helgen inn's
+        // CollisionBMarker, the tower door and TowerCollision) is deferred by the guard instead.
+        if (bucket != TriggerCapabilities::Bucket::DoorOrMovement)
+        {
+            state.Guards.push_back({apTrigger->formID, trigger, GetTickCount64() + 8000, {}});
+            spdlog::info("Trigger gate: {:X} fired for the first player ({}); barrier guard on until all players are in",
+                apTrigger->formID, TriggerCapabilities::Name(bucket));
+            return false;
+        }
         State::Held item{trigger.Handle, apTrigger->formID, ++state.NextHold};
         item.Since = GetTickCount64();
         item.RemoteFormId = remoteFormId;
@@ -649,6 +707,7 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
         fallenHandles.erase(0);
     }
     std::vector<State::Held> release;
+    std::vector<std::pair<uint32_t, bool>> barriers;
     std::vector<uint32_t> staleLeaves;
     uint64_t deliveryGeneration{};
     uint32_t deliveryPlayer{};
@@ -727,6 +786,32 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
             else
                 ++it;
         }
+        // Barrier guards: apply what a stage deferred once every player is in (or the party/authority is gone), and
+        // drop a guard whose watch ended with nothing deferred.
+        for (auto it = state.Guards.begin(); it != state.Guards.end();)
+        {
+            // Also once the party has left the area (nobody within 2000 u of the trigger, or all in another space),
+            // and at the latest 90 s after the trigger: players who passed a trigger at different moments were never
+            // all in at once, and the Helgen street's debris stayed off for good (2026-09-30 19:24, B817D, DB8EC).
+            const bool left = active && !state.Players.empty() &&
+                std::none_of(state.Players.begin(), state.Players.end(), [&it](const auto& aPlayer) {
+                    const auto delta = aPlayer.second.Position - it->Where.Position;
+                    return SameSpace(aPlayer.second, it->Where) && glm::dot(delta, delta) <= 2000.f * 2000.f;
+                });
+            const bool done = !inParty || !leader || changedAuthority || left || now > it->WatchUntil + 82000 ||
+                (active && state.AllPresent(it->Where));
+            if (done || (now > it->WatchUntil && it->Deferred.empty()))
+            {
+                if (!it->Deferred.empty())
+                    spdlog::info("Trigger gate: barrier near {:X} applied ({} change(s), {})", it->FormId,
+                        it->Deferred.size(), !inParty || !leader || changedAuthority ? "party changed" :
+                        left ? "party left the area" : now > it->WatchUntil + 82000 ? "90 s passed" : "all players in");
+                barriers.insert(barriers.end(), it->Deferred.begin(), it->Deferred.end());
+                it = state.Guards.erase(it);
+            }
+            else
+                ++it;
+        }
         // Only when it is needed: a trigger held for a while with a player actually left behind.
         const bool someoneBehind = std::any_of(state.Pending.begin(), state.Pending.end(),
             [now](const auto& aHeld) { return aHeld.second.Since && now - aHeld.second.Since > 8000; });
@@ -735,6 +820,17 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
             state.NextNotice = now + 10000;
         deliveryGeneration = state.Generation;
         deliveryPlayer = state.PlayerHandle;
+    }
+    // The guard is erased, so these native calls pass the barrier hooks; outside the snapshot lock (they re-enter it).
+    for (const auto& [formId, doorClose] : barriers)
+    {
+        auto* pRef = Cast<TESObjectREFR>(TESForm::GetById(formId));
+        if (!pRef || pRef->IsDeleted())
+            continue;
+        if (doorClose)
+            WorldStateSetDoorOpen(pRef, false);
+        else if (pRef->IsDisabled())
+            pRef->EnableImpl();
     }
     // Native sends can acquire VM locks and must run outside the snapshot lock.
     const auto mayDeliver = [&]() {

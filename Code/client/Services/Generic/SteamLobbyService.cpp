@@ -4,6 +4,7 @@
 #include <Services/FarmMode.h>
 #include <Services/OverlayService.h>
 #include <Services/TransportService.h>
+#include <Services/UpdateService.h>
 #include <World.h>
 #include <OverlayApp.hpp>
 
@@ -701,7 +702,7 @@ void SteamLobbyService::CompleteCreate() noexcept
         {
             setData(m_matchmaking, m_lobbyId, "skyrim_se_multiplayer", "1");
             setData(m_matchmaking, m_lobbyId, "server_address", endpoint.c_str());
-            setData(m_matchmaking, m_lobbyId, "build", BUILD_COMMIT);
+            setData(m_matchmaking, m_lobbyId, "build", SSM_WIRE_VERSION);
             setData(m_matchmaking, m_lobbyId, "visibility", "private");
             setData(m_matchmaking, m_lobbyId, "has_password", "0");
         }
@@ -738,9 +739,12 @@ void SteamLobbyService::CompleteJoin() noexcept
         const char* pMarker = getData ? getData(m_matchmaking, m_lobbyId, "skyrim_se_multiplayer") : nullptr;
         const char* pBuild = getData ? getData(m_matchmaking, m_lobbyId, "build") : nullptr;
         const char* pEndpoint = getData ? getData(m_matchmaking, m_lobbyId, "server_address") : nullptr;
-        if (!pMarker || strcmp(pMarker, "1") != 0 || !pBuild || strcmp(pBuild, BUILD_COMMIT) != 0)
+        if (!pMarker || strcmp(pMarker, "1") != 0 || !pBuild || strcmp(pBuild, SSM_WIRE_VERSION) != 0)
         {
-            ShowMessage("That friend's session is not a compatible Skyrim SE Multiplayer build.");
+            const std::string text = pMarker && strcmp(pMarker, "1") == 0 && pBuild
+                                         ? UpdateService::MismatchText(pBuild)
+                                         : std::string("That friend's session is not a compatible Skyrim SE Multiplayer build.");
+            ShowMessage(String(text.c_str()));
             LeaveSession();
         }
         else if (!pEndpoint || !*pEndpoint)

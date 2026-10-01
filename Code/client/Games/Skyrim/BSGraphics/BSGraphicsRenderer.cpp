@@ -23,7 +23,7 @@ static RendererWindow* g_RenderWindow = nullptr;
 static RendererData* g_RendererData = nullptr;
 static Renderer* g_Renderer = nullptr;
 
-static constexpr char kTogetherWindowName[]{"Skyrim Together"};
+static constexpr char kTogetherWindowName[]{SSM_PRODUCT_NAME};
 
 // Renderer::Init AL77226/141007B70 explicitly shows, foregrounds and focuses
 // the game. Farm processes must never activate it, including at startup.

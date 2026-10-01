@@ -1,7 +1,6 @@
 import { Component, ElementRef, EventEmitter, HostBinding, HostListener, OnDestroy, Output } from '@angular/core';
 import { TranslocoService } from '@ngneat/transloco';
-import { lastValueFrom, map, Observable, Subscription } from 'rxjs';
-import { Tag } from 'src/app/models/tag';
+import { map, Observable, Subscription } from 'rxjs';
 import {
   autoHideTimerLengths,
   FontSize,
@@ -9,12 +8,23 @@ import {
   SettingService,
 } from 'src/app/services/setting.service';
 import { Sound, SoundService } from '../../services/sound.service';
-import { environment } from 'src/environments/environment';
 import { HttpClient } from '@angular/common/http';
 import { ClientService } from 'src/app/services/client.service';
 import { AudioDevice, DisplayMode, GameSettings } from 'src/app/models/game-settings';
 
-type SettingsSection = 'display' | 'audio' | 'controls' | 'accessibility' | 'interface' | 'party' | 'about';
+interface UpdateState {
+  current: string;
+  latest: string;
+  phase: string;
+  notes: string;
+  publishedAt: string;
+  received: number;
+  size: number;
+  error: string;
+  lastChecked: number;
+}
+
+type SettingsSection = 'display' | 'audio' | 'controls' | 'accessibility' | 'interface' | 'party' | 'updates' | 'about';
 
 @Component({
   selector: 'app-settings',
@@ -62,6 +72,7 @@ export class SettingsComponent implements OnDestroy {
     { id: 'accessibility', label: 'Accessibility' },
     { id: 'interface', label: 'Interface' },
     { id: 'party', label: 'Party HUD' },
+    { id: 'updates', label: 'Updates' },
     { id: 'about', label: 'About' },
   ];
   readonly volumeChannels = [
@@ -91,7 +102,8 @@ export class SettingsComponent implements OnDestroy {
   private previewTimer?: ReturnType<typeof setInterval>;
 
   clientVersion$: Observable<string>;
-  isVersionOutdated: Promise<boolean>;
+  /** The updater's report (Options > Updates); undefined until the client answers. */
+  public update?: UpdateState;
 
   @Output() public done = new EventEmitter<void>();
   @Output() public settingsUpdated = new EventEmitter<void>();
@@ -108,8 +120,15 @@ export class SettingsComponent implements OnDestroy {
   }
 
   ngOnInit(): void {
-    this.isVersionOutdated = this.isGameVersionOutdated();
     this.subscriptions.push(
+      this.client.updateStateChange.subscribe(state => {
+        if (!state) return;
+        try {
+          this.update = JSON.parse(state) as UpdateState;
+        } catch {
+          // A malformed report keeps the last good one.
+        }
+      }),
       this.client.gameSettingsChange.subscribe(payload => {
         this.gameSettings = { ...payload.settings };
         this.monitors = payload.monitors;
@@ -128,6 +147,8 @@ export class SettingsComponent implements OnDestroy {
       }),
     );
     this.client.requestGameSettings();
+    // The title screen may not run the client's update tick; ask once so the panel has a state.
+    if (!this.client.updateStateChange.value) this.client.checkUpdates();
   }
 
   /** Controller navigation surface (GamepadNavigationService); movement is spatial there. */
@@ -198,7 +219,7 @@ export class SettingsComponent implements OnDestroy {
   private static restoreSection(): SettingsSection {
     try {
       const saved = localStorage.getItem(SettingsComponent.sectionKey) as SettingsSection | null;
-      if (saved && ['display', 'audio', 'controls', 'accessibility', 'interface', 'party', 'about'].includes(saved))
+      if (saved && ['display', 'audio', 'controls', 'accessibility', 'interface', 'party', 'updates', 'about'].includes(saved))
         return saved;
     } catch {
       // Fall through to the default section.
@@ -311,19 +332,68 @@ export class SettingsComponent implements OnDestroy {
     }, 1000);
   }
 
-  private getVersionTagList(): Promise<Tag[]> {
-    return lastValueFrom(
-      this.http
-        .get<Tag[]>(`${ environment.githubUrl }`));
+  checkUpdates(): void {
+    this.client.checkUpdates();
   }
 
-  async isGameVersionOutdated(): Promise<boolean> {
-    let usedVersion = this.client.getVersion();
+  downloadUpdate(): void {
+    this.client.downloadUpdate();
+  }
 
-    const tags = await this.getVersionTagList();
-    const usedVersionIndex = tags.findIndex(tag => tag.name === usedVersion);
+  get updateAvailable(): boolean {
+    return this.update?.phase === 'available';
+  }
 
-    return usedVersionIndex > 0 || usedVersionIndex === -1;
+  get updateBusy(): boolean {
+    const phase = this.update?.phase;
+    return phase === 'checking' || phase === 'downloading' || phase === 'verifying';
+  }
+
+  /** One line for where the updater stands. */
+  get updateStatus(): string {
+    const u = this.update;
+    if (!u) return 'Checking for updates...';
+    switch (u.phase) {
+      case 'idle':
+      case 'checking':
+        return 'Checking for updates...';
+      case 'current':
+        return 'You have the latest version.';
+      case 'available':
+        return `Version ${u.latest} is available.`;
+      case 'downloading':
+        return u.size ? `Downloading... ${Math.min(100, Math.floor((100 * u.received) / u.size))}%` : 'Downloading...';
+      case 'verifying':
+        return 'Checking the download...';
+      case 'ready':
+        return `Version ${u.latest} is ready. Restart the game to finish updating.`;
+      case 'offline':
+        return 'Could not reach GitHub. You can keep playing; it will try again later.';
+      case 'error':
+        return `The update did not finish: ${u.error}`;
+      default:
+        return '';
+    }
+  }
+
+  /** Patch notes as plain lines (markdown markers removed; never rendered as HTML). */
+  get patchNotes(): { text: string; heading: boolean; bullet: boolean }[] {
+    return (this.update?.notes ?? '')
+      .split('\n')
+      .map(line => line.replace(/\s+$/, ''))
+      .filter(line => line.trim().length)
+      .slice(0, 200)
+      .map(line => {
+        const heading = /^#{1,6}\s/.test(line);
+        const bullet = /^\s*[-*]\s/.test(line);
+        const text = line
+          .replace(/^#{1,6}\s+/, '')
+          .replace(/^\s*[-*]\s+/, '')
+          .replace(/\*\*(.+?)\*\*/g, '$1')
+          .replace(/`([^`]+)`/g, '$1')
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+        return { text, heading, bullet };
+      });
   }
 
   @HostListener('window:keydown.escape', ['$event'])

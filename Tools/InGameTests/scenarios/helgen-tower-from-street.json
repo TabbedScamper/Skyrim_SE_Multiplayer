@@ -1,0 +1,394 @@
+{
+    "name":  "helgen-tower-from-street",
+    "description":  "Continuation from the helgen_street2 checkpoint (MQ101DragonAttack stage 22, play 9:56): the run into the tower, the wall smash (stage 103), the jump and the inn landing (stage 120). Diagnostic only.",
+    "steps":  [
+                  {
+                      "op":  "watch",
+                      "actor_aliases":  [
+                                            {
+                                                "quest":  "3372B",
+                                                "alias":  47
+                                            }
+                                        ],
+                      "refs":  [
+                                   "6CF54"
+                               ],
+                      "actors":  [
+                                     "14",
+                                     "654FB",
+                                     "2BF9E",
+                                     "2BFA2"
+                                 ],
+                      "preconditions":  {
+                                            "MQ101":  0,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "ref":  "F5381",
+                      "timeout":  20,
+                      "source":  "esm.sqlite ref F5381",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "timeout":  20,
+                      "x":  14777.0322265625,
+                      "y":  -82934.46875,
+                      "z":  8297.18359375,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        },
+                      "source":  "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
+                  },
+                  {
+                      "op":  "wait_stage",
+                      "quest":  "MQ101DragonAttack",
+                      "stage":  25,
+                      "done":  true,
+                      "timeout":  180,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "wait_stage",
+                      "quest":  "MQ101DragonAttack",
+                      "stage":  50,
+                      "done":  true,
+                      "timeout":  180,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "capture",
+                      "tag":  "tower-entry",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "ref":  "CD697",
+                      "dx":  60.39511924521327,
+                      "dy":  21.17615572657789,
+                      "timeout":  30,
+                      "source":  "esm.sqlite CD697 floor marker +64u along 1093B4 outward thin-axis normal",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "x":  14654.275511409242,
+                      "y":  -83435.3288473291,
+                      "z":  8813.8916015625,
+                      "timeout":  20,
+                      "source":  "esm.sqlite CD697 floor marker inset40u along 1093B4 thin-axis normal; local trigger entry required; teleported onto the floor inside the trigger, completes on the native trigger-enter event",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        },
+                      "until_trigger":  "1093B4",
+                      "party_trigger":  true,
+                      "party_wait":  {
+                                         "x":  14692.0224609375,
+                                         "y":  -83422.09375,
+                                         "z":  8813.8916015625,
+                                         "radius":  32,
+                                         "source":  "esm.sqlite CD697 supported floor marker outside 1093B4 contact"
+                                     }
+                  },
+                  {
+                      "op":  "wait_stage",
+                      "quest":  "MQ101DragonAttack",
+                      "stage":  35,
+                      "done":  true,
+                      "timeout":  180,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "ref":  "CD697",
+                      "timeout":  20,
+                      "source":  "esm.sqlite ref CD697",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "ref":  "CD6AE",
+                      "timeout":  20,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        },
+                      "source":  "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
+                  },
+                  {
+                      "op":  "wait_stage",
+                      "quest":  "MQ101DragonAttack",
+                      "stage":  40,
+                      "done":  true,
+                      "timeout":  180,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "wait_stage",
+                      "quest":  "MQ101DragonAttack",
+                      "stage":  103,
+                      "done":  true,
+                      "timeout":  180,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "capture",
+                      "tag":  "tower-wall",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "jump",
+                      "ref":  "E24C3",
+                      "radius":  320,
+                      "timeout":  45,
+                      "source":  "E24C3 inn objective, real tower crossing; landing on the burned upper floor (measured 262 u from E24C3, z 8862) counts, as in vanilla",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "teleport",
+                      "ref":  "CD6AD",
+                      "timeout":  20,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  true,
+                                            "combat_clear":  true,
+                                            "load_complete":  true,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        },
+                      "source":  "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
+                  },
+                  {
+                      "op":  "wait_stage",
+                      "quest":  "MQ101DragonAttack",
+                      "stage":  120,
+                      "done":  true,
+                      "timeout":  180,
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  },
+                  {
+                      "op":  "finish",
+                      "preconditions":  {
+                                            "MQ101":  100,
+                                            "scenes":  [
+                                                           "BECD4",
+                                                           "CD68E"
+                                                       ],
+                                            "scene_idle":  false,
+                                            "combat_clear":  false,
+                                            "load_complete":  false,
+                                            "observed_scenes":  [
+                                                                    "D0594",
+                                                                    "AA7DF"
+                                                                ]
+                                        }
+                  }
+              ],
+    "metric":  "collision-on"
+}

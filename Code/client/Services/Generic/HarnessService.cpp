@@ -1158,6 +1158,14 @@ void HarnessService::Tick()
                     for (const auto* axis : {"x", "y", "z"}) request->SetDouble(axis, Num(wait, axis));
                     request->SetDouble("radius", Num(wait, "radius", 8));
                 }
+                // Both players walked to one point: the leader stood on it and the follower stopped 44 u from the
+                // leader's body, 66 u from the point, failing "no path progress" (21:40 run, step 32 out of the inn).
+                // The party follower arrives within 120 u of a walk point (the leader's body is on it). Not an offset
+                // target: in corridors and cells a shifted point can sit inside a wall. Reference walks too: the
+                // follower stopped 56.8 u from AA7A3 with radius 48 (22:28 run, step 12).
+                else if (op == "walk" && s.Local != s.Leader &&
+                         ((request->HasKey("x") && request->HasKey("y")) || request->HasKey("ref") || request->HasKey("form_id")))
+                    request->SetDouble("radius", (std::max)(Num(request, "radius", 48), 120.0));
                 return request;
             };
             const auto consumeTrigger = [&]()

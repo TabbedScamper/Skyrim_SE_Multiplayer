@@ -671,7 +671,7 @@ void MagicService::UpdateRevealOtherPlayersEffect(bool aForceTrigger) noexcept
 
     // When active
 
-    Mod* pSkyrimTogether = ModManager::Get()->GetByName("SkyrimTogether.esp");
+    Mod* pSkyrimTogether = ModManager::Get()->GetByName("SkyrimSEMultiplayer.esp");
     if (!pSkyrimTogether)
         return;
 

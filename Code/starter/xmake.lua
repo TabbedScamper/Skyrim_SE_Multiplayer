@@ -1,0 +1,8 @@
+target("Skyrim_SE_Multiplayer")
+    set_kind("binary")
+    set_group("Client")
+    set_languages("cxx20")
+    set_runtimes("MT")
+    add_files("main.cpp")
+    add_ldflags("/SUBSYSTEM:WINDOWS", {force = true})
+    add_syslinks("kernel32", "user32", "shell32", "advapi32", "bcrypt", "ole32")

@@ -165,6 +165,8 @@ public:
     // Queued moves and dead-body layers of the old connection name nothing after a disconnect.
     static void ClearMainFrameWork() noexcept;
     void SendNameIfChanged() noexcept;
+    // Tells the party UI a player's character name (party player id).
+    void NotifyUiPlayerName(uint32_t aPlayerId, const char* apName) const noexcept;
     std::string m_sentName;
     uint64_t m_nextNameCheckMs{};
 
@@ -306,6 +308,7 @@ private:
         uint64_t NextAttemptMs{};
         uint32_t Attempts{};
         uint64_t StartedAtMs{};
+        uint32_t Starts{};
         bool WasSeated{};
         bool VehicleTrialAttempted{};
     };

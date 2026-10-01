@@ -9,6 +9,9 @@
 // update never returned (a 0-byte SSC_*.ess.tmp was left and the game hung). The leader's
 // checkpoint is a copy of the save it just made; other members queue an ordinary save
 // (BGSSaveLoadManager task, as Papyrus Game.RequestSave does) and copy that once written.
+#include <filesystem>
+#include <string>
+
 namespace CheckpointSaves
 {
 // Consumes the flag the native save hook sets when the local game wrote a save of its own.
@@ -19,8 +22,31 @@ namespace CheckpointSaves
 void Begin(const String& acId) noexcept;
 // Finishes a begun checkpoint once its save is on disk. Returns true when nothing is pending.
 bool Poll() noexcept;
+// Records the main-loop thread (36564's caller); a save requested on any other thread is queued instead. Also runs a
+// load queued by QueueLoad.
+void MarkMainThread() noexcept;
+// Test bench: load SSC_<id> at the start of the next main loop frame (works at the main menu, where the app update
+// does not run).
+void QueueLoad(const String& acId) noexcept;
+// The last QueueLoad: 0 while waiting for the main loop, 1 when the engine started it, -1 when it was refused.
+[[nodiscard]] int QueuedLoadState() noexcept;
+// A checkpoint id is safe as a file name: letters, digits, '_' and '-', at most 64 characters.
+[[nodiscard]] bool ValidId(const String& acId) noexcept;
+// True while a begun checkpoint's save has not been copied yet.
+[[nodiscard]] bool IsPending() noexcept;
+// SSC_<id>.ess in this PC's saves folder.
+[[nodiscard]] std::filesystem::path PathOf(const String& acId) noexcept;
+// Writes a save received from the leader as SSC_<id>.ess (atomically). Drop-in saves ("dropin_*") are not listed as
+// shared checkpoints.
+bool WriteReceived(const String& acId, const std::string& acBytes) noexcept;
 // The newest checkpoint this PC wrote, or empty.
 [[nodiscard]] String Latest() noexcept;
+// The newest checkpoints on this PC (at most aMaximum) as a JSON array for the lobby picker: id, player, level,
+// location, gameDate, savedMs and image (the save's own screenshot as a data URL).
+[[nodiscard]] std::string ListJson(size_t aMaximum) noexcept;
+// The characters this PC can join with: the newest .snap per character name beside its saves, as a JSON array (path,
+// name, level, location, savedMs, image from the save's screenshot).
+[[nodiscard]] std::string CharactersJson(size_t aMaximum) noexcept;
 // True if this PC holds SSC_<id>.ess.
 [[nodiscard]] bool Has(const String& acId) noexcept;
 // Loads SSC_<id> the way the console LoadGame command does. False if the load did not start.

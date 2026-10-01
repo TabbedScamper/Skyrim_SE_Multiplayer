@@ -35,6 +35,9 @@
 #include <Services/Generic/SceneTurnsService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/DoorVoteService.h>
+#include <Services/DropInService.h>
+#include <Services/UpdateService.h>
+#include <Services/FurnitureGraphLink.h>
 #include <Services/Generic/BusyLockService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Services/TriggerGate.h>
@@ -183,6 +186,9 @@ World::World()
     ctx().emplace<OrphanTrace>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<DropInService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<UpdateService>(*this, m_dispatcher);
+    ctx().emplace<FurnitureGraphLink>(*this, m_dispatcher);
     ctx().emplace<BusyLockService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SharedDropService>(*this, m_dispatcher, m_transport);
     ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
@@ -298,6 +304,16 @@ TransportService& World::GetTransport() noexcept
 QuestService& World::GetQuestService() noexcept
 {
     return ctx().at<QuestService>();
+}
+
+DropInService& World::GetDropInService() noexcept
+{
+    return ctx().at<DropInService>();
+}
+
+UpdateService& World::GetUpdateService() noexcept
+{
+    return ctx().at<UpdateService>();
 }
 
 DoorVoteService& World::GetDoorVoteService() noexcept

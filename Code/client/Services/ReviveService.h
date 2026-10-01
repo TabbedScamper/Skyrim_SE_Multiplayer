@@ -109,6 +109,7 @@ private:
         const std::string& acHint, uint64_t aNow, const std::string& acNote = {}, const std::string& acButton = {},
         bool aGamepad = false, float aBleed = -1.f) noexcept;
     uint64_t m_nextHold{};
+    uint64_t m_nextNoPromptLog{};
     uint32_t m_mainSpell{};
     uint32_t m_secondarySpell{};
     uint32_t m_power{};
@@ -120,6 +121,7 @@ private:
     // The party wiped: everyone collapsed and the checkpoint reload is on its way.
     bool m_wiped{};
     bool m_wasFirstPerson{};
+    bool m_viewFirstPerson{true};
     // Fallen to a fling or an overkill blow ("slain", for the notices; ReviveData::Flung on the wire). The body flew
     // and landed in the dying phase below, before this player became fallen; fallen bodies are hidden alike.
     bool m_slain{};

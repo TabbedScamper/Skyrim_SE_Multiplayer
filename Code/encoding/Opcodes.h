@@ -85,6 +85,7 @@ enum ClientOpcode : unsigned char
     kRequestHarness,
     kAnimObjectRequest,
     kPhysicsLeaseRequest,
+    kRequestDropIn,
     kClientOpcodeMax
 };
 
@@ -171,5 +172,6 @@ enum ServerOpcode : unsigned char
     kNotifyHarness,
     kNotifyAnimObject,
     kNotifyPhysicsLease,
+    kNotifyDropIn,
     kServerOpcodeMax
 };

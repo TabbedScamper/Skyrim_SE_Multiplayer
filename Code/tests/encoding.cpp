@@ -21,12 +21,95 @@
 #include <Structs/AnimationVariables.h>
 #include <Structs/PhysicsReferenceUpdate.h>
 #include <Structs/ServerSettings.h>
+#include <Structs/CharacterSnapshot.h>
+#include <Messages/DropIn.h>
 #include <Structs/Skyrim/AnimationGraphDescriptor_Master_Behavior.h>
 
 #include <TiltedCore/Math.hpp>
 #include <TiltedCore/Platform.hpp>
 
 using namespace TiltedPhoques;
+
+TEST_CASE("Character snapshot roundtrips every field and refuses a foreign version or oversized list", "[encoding.character]")
+{
+    CharacterSnapshot sent;
+    sent.Name = "Rex";
+    sent.ChangeFlags = 0x1000800;
+    sent.AppearanceBuffer = String("\x01\x02\x00\x7F", 4);
+    sent.Level = 31;
+    sent.Xp = 412.5f;
+    sent.LevelThreshold = 1600.f;
+    sent.PerkPoints = 3;
+    for (uint32_t i = 0; i < CharacterSnapshot::kSkillCount; ++i)
+        sent.Skills.push_back({15.f + i, 0.25f * i, 100.f + i, i % 3});
+    sent.BaseValues = {{24, 250.f}, {25, 180.f}, {26, 210.f}};
+    sent.DragonSouls = 4.f;
+    sent.Perks = {{GameId(0, 0xBABE4), 1}, {GameId(0, 0xBCD2A), 5}};
+    sent.Spells = {GameId(0, 0x12FCD), GameId(1, 0x800)};
+    sent.Shouts = {GameId(0, 0x13E07)};
+    sent.Words = {{GameId(0, 0x602A3), true}, {GameId(0, 0x602A4), false}};
+    Inventory::Entry gold;
+    gold.BaseId = GameId(0, 0xF);
+    gold.Count = 1234;
+    sent.Items.Entries.push_back(gold);
+    sent.ExcludedQuestItems = {GameId(0, 0x2BE4A)};
+
+    Buffer buffer(1 << 14);
+    Buffer::Writer writer(&buffer);
+    sent.Serialize(writer);
+    writer.WriteBits(0xBEEF, 16);
+    Buffer::Reader reader(&buffer);
+    CharacterSnapshot received;
+    REQUIRE(received.Deserialize(reader));
+    uint64_t sentinel{};
+    reader.ReadBits(sentinel, 16);
+    REQUIRE(sentinel == 0xBEEF);
+    REQUIRE(received == sent);
+
+    // A snapshot from another format version is refused rather than misread.
+    Buffer foreign(64);
+    Buffer::Writer foreignWriter(&foreign);
+    Serialization::WriteVarInt(foreignWriter, CharacterSnapshot::kVersion + 1);
+    Buffer::Reader foreignReader(&foreign);
+    CharacterSnapshot unusable;
+    REQUIRE_FALSE(unusable.Deserialize(foreignReader));
+
+    // A skill list longer than the game's 18 skills marks the snapshot corrupt.
+    CharacterSnapshot oversized = sent;
+    oversized.Skills.push_back({});
+    Buffer big(1 << 14);
+    Buffer::Writer bigWriter(&big);
+    oversized.Serialize(bigWriter);
+    Buffer::Reader bigReader(&big);
+    CharacterSnapshot rejected;
+    REQUIRE_FALSE(rejected.Deserialize(bigReader));
+}
+
+TEST_CASE("A hostile inventory count stops at the data instead of allocating without end", "[encoding.inventory]")
+{
+    // Muse 2026-09-30: an entry count of 2^32-1 pushed default entries until the game ran out of memory.
+    Buffer buffer(64);
+    Buffer::Writer writer(&buffer);
+    Serialization::WriteVarInt(writer, 0xFFFFFFFFull);
+    Buffer::Reader reader(&buffer);
+    Inventory inventory;
+    inventory.Deserialize(reader);
+    REQUIRE(inventory.Entries.size() <= 16384);
+}
+
+TEST_CASE("A drop-in chunk offset near 2^64 does not wrap past the size check", "[encoding.dropin]")
+{
+    DropInData chunk;
+    chunk.Attempt = 1;
+    chunk.Op = DropInOp::Chunk;
+    chunk.Bytes = "x";
+    chunk.Offset = 0;
+    REQUIRE(chunk.Valid());
+    chunk.Offset = std::numeric_limits<uint64_t>::max();
+    REQUIRE_FALSE(chunk.Valid());
+    chunk.Offset = DropInData::MaxFile;
+    REQUIRE_FALSE(chunk.Valid());
+}
 
 TEST_CASE("Player camera look survives movement encoding", "[encoding.movement]")
 {

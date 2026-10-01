@@ -209,14 +209,45 @@
       </div>
     </section>
 
+    <!-- Updates: from the GitHub latest release, applied by the starter at the next launch -->
+    <section *ngIf="activeSection === 'updates'">
+      <h2 class="separator"><span>Updates</span></h2>
+      <div class="row">
+        <div class="row-label"><label>Installed version</label></div>
+        <span class="version">{{ update?.current || (clientVersion$ | async) }}</span>
+      </div>
+      <div class="row" *ngIf="update?.latest">
+        <div class="row-label">
+          <label>Latest version</label>
+          <small *ngIf="update?.publishedAt">Released {{ update?.publishedAt | slice: 0 : 10 }}</small>
+        </div>
+        <span class="version">{{ update?.latest }}</span>
+      </div>
+      <p class="update-status" [class.warning]="update?.phase === 'error'">{{ updateStatus }}</p>
+      <div class="update-actions">
+        <button *ngIf="updateAvailable" data-style-ornament="simple" data-nav-y="Update now" (click)="downloadUpdate()">Update now</button>
+        <button data-style-ornament="simple" data-nav-y="Check for updates" [disabled]="updateBusy" (click)="checkUpdates()">Check for updates</button>
+      </div>
+      <ng-container *ngIf="patchNotes.length">
+        <h3 class="separator"><span>Patch notes {{ update?.latest }}</span></h3>
+        <div class="patch-notes">
+          <p *ngFor="let line of patchNotes" [class.heading]="line.heading" [class.bullet]="line.bullet">{{ line.text }}</p>
+        </div>
+      </ng-container>
+    </section>
+
     <!-- About -->
     <section *ngIf="activeSection === 'about'">
       <h2 class="separator"><span>About</span></h2>
       <div class="row">
         <div class="row-label"><label>{{ 'COMPONENT.SETTINGS.VERSION.INFO' | transloco }}</label></div>
-        <span class="version" [class.outdated]="isVersionOutdated | async">{{ clientVersion$ | async }}</span>
+        <span class="version">{{ update?.current || (clientVersion$ | async) }}</span>
       </div>
-      <p *ngIf="isVersionOutdated | async" class="warning">{{ 'COMPONENT.SETTINGS.VERSION.OUTDATED' | transloco }}</p>
+      <p class="credits">
+        <strong>Skyrim SE Multiplayer</strong> &middot; github.com/TabbedScamper/Skyrim_SE_Multiplayer<br />
+        Based on Skyrim Together Reborn by Tilted Phoques (github.com/tiltedphoques/TiltedEvolution).<br />
+        Free software under the GNU General Public License v3.
+      </p>
     </section>
   </div>
 </div>

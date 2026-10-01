@@ -18,6 +18,7 @@ export class PlayerListService implements OnDestroy {
   private debugSubscription: Subscription;
   private connectionSubscription: Subscription;
   private playerConnectedSubscription: Subscription;
+  private playerNameSubscription: Subscription;
   private playerDisconnectedSubscription: Subscription;
   private memberKickedSubscription: Subscription;
   private cellSubscription: Subscription;
@@ -34,6 +35,7 @@ export class PlayerListService implements OnDestroy {
     this.onDebug();
     this.onConnectionStateChanged();
     this.onPlayerConnected();
+    this.onPlayerNameChanged();
     this.onPlayerDisconnected();
     this.onMemberKicked();
     this.onCellChange();
@@ -44,6 +46,7 @@ export class PlayerListService implements OnDestroy {
     this.debugSubscription.unsubscribe();
     this.connectionSubscription.unsubscribe();
     this.playerConnectedSubscription.unsubscribe();
+    this.playerNameSubscription?.unsubscribe();
     this.playerDisconnectedSubscription.unsubscribe();
     this.cellSubscription.unsubscribe();
     this.partyInviteReceivedSubscription.unsubscribe();
@@ -79,6 +82,17 @@ export class PlayerListService implements OnDestroy {
           this.playerList.next(playerList);
         }
       });
+  }
+
+  private onPlayerNameChanged() {
+    this.playerNameSubscription = this.clientService.playerNameChange.subscribe(({ id, name }) => {
+      const playerList = this.getPlayerList();
+      const player = playerList?.players.find(p => p.id === id);
+      if (player && player.name !== name) {
+        player.name = name;
+        this.playerList.next(playerList);
+      }
+    });
   }
 
   private onPlayerDisconnected() {

@@ -334,6 +334,17 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
             }
         }
 
+        // A remote PLAYER's copy shows what its owner wears: the native equip silently refuses an item missing from
+        // the copy's inventory, and loot taken from a container or corpse never reached the copy (armor picked up and
+        // worn stayed invisible to the other player, owners 2026-09-30 19:51, D1F3B from DDF87). The owner's
+        // inventory is authoritative, so the copy is given the item first. NPCs keep the naked guard's stock rules.
+        if (pActor->GetExtension()->IsRemotePlayer() && !pActor->IsItemInInventory(pItem->formID))
+            if (auto* pBound = Cast<TESBoundObject>(pItem))
+            {
+                ScopedInventoryOverride _;
+                pActor->AddObjectToContainer(pBound, nullptr, (std::max)(1, static_cast<int32_t>(acMessage.Count)), nullptr);
+                spdlog::info("Inventory equip for remote player {:X}: added missing {:X} before equipping", pActor->formID, itemId);
+            }
         // Native equip (38894 -> 38929 -> 38001 -> 38004 / 0x1406B3650)
         // removes conflicting biped slots under ScopedEquipOverride. Unequipping
         // and restoring every armor piece here detaches unrelated corpse gear.

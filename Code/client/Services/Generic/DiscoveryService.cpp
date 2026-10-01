@@ -28,7 +28,7 @@ bool IsDefaultModlist(GameList<Mod>& aCurrentModlist) noexcept
 {
     static const auto s_defaultModlist = std::to_array<TiltedPhoques::String>(
         {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", 
-        "Dragonborn.esm", "_ResourcePack.esl", "SkyrimTogether.esp", "SkyrimTogetherQuestPatches.esp"}
+        "Dragonborn.esm", "_ResourcePack.esl", "SkyrimSEMultiplayer.esp", "SkyrimSEMultiplayerQuestPatches.esp"}
     );
 
     if (aCurrentModlist.Size() != s_defaultModlist.size())

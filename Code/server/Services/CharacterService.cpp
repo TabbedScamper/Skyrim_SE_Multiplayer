@@ -1007,6 +1007,29 @@ void CharacterService::OnOwnershipClaimRequest(const PacketEvent<RequestOwnershi
 {
     const auto& message = acMessage.Packet;
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
+    if (message.Carry == 3)
+    {
+        // The leader's game has this actor loaded in the leader's own cell (the engine carried it through a load door
+        // with the player). The recorded cell is the previous owner's copy, left behind: record the leader's cell and
+        // let the leader claim it (Ralof lost leaving Helgen's cave, 2026-09-30 19:40:33).
+        if (!m_world.valid(cEntity) || !m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer))
+            return;
+        auto* cell = m_world.try_get<CellIdComponent>(cEntity);
+        const auto* character = m_world.try_get<CharacterComponent>(cEntity);
+        if (!cell || !character || character->IsPlayer() || character->IsDead())
+            return;
+        const auto previous = *cell;
+        *cell = acMessage.pPlayer->GetCellComponent();
+        if (!CanClaimOwnership(acMessage.pPlayer, cEntity, message.ExpectedOwnershipEpoch, OwnershipTransferReason::LeaderClaim))
+        {
+            *cell = previous;
+            return;
+        }
+        spdlog::info("Leader carry claim: {:X} moved to the leader's cell {:X}:{:X} with the leader", message.ServerId,
+            cell->Cell.ModId, cell->Cell.BaseId);
+        TransferOwnership(acMessage.pPlayer, cEntity, OwnershipTransferReason::LeaderClaim);
+        return;
+    }
     if (message.Carry)
     {
         // Owner report (2026-09-29): followers could not pick up bodies; the leader simulates every corpse near it and

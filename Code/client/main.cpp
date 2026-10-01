@@ -38,17 +38,17 @@ static void ShowAddressLibraryError(const wchar_t* apGamePath)
 
 static void ShowIncompatibleVersionError(const char* apDetectedGameVersion, const wchar_t* apGamePath)
 {
-    constexpr wchar_t kModPageUrl[] = LR"(https://www.nexusmods.com/skyrimspecialedition/mods/69993?tab=files)";
+    constexpr wchar_t kModPageUrl[] = LR"(https://github.com/TabbedScamper/Skyrim_SE_Multiplayer/releases/latest)";
     const auto [steamVer, gogVer] = kSupportedGameVersions;
 
     std::string supportedVersions = steamVer != gogVer ? fmt::format("{} (or {} if GOG)", steamVer, gogVer) : std::string{steamVer};
-    std::string message = fmt::format("Skyrim Together {} requires Skyrim SE {}, but your installed version is {}\n\nUpdate or downgrade to match, then relaunch", BUILD_COMMIT + 1, supportedVersions, apDetectedGameVersion);
+    std::string message = fmt::format(SSM_PRODUCT_NAME " {} requires Skyrim SE {}, but your installed version is {}\n\nUpdate or downgrade to match, then relaunch", BUILD_COMMIT + 1, supportedVersions, apDetectedGameVersion);
     std::wstring wideMessage(message.begin(), message.end());
 
     const auto optionalDetails = fmt::format(L"Installed here: {}", apGamePath);
 
     Base::TaskDialog dia(g_SharedWindowIcon, L"Error", L"Incompatible game version", wideMessage.c_str(), optionalDetails.c_str());
-    dia.AppendButton(0xBEEF, L"Visit Skyrim Together mod page on nexusmods.com");
+    dia.AppendButton(0xBEEF, L"Visit the Skyrim SE Multiplayer page on GitHub");
 
     if (dia.Show() == 0xBEEF)
     {

@@ -243,8 +243,12 @@ struct PlayerControlSync
             return;
         uint32_t live{}, stored{};
         ReadControlState(pMap, live, stored);
+        // A local engine state owns a saved mask; do not overwrite its recovery. Known gap (2026-10-01): after loading a
+        // save made mid-execution, the follower keeps a saved mask from its own cart scene that only the host's scene
+        // clears, and stays locked. A blanket "take the host's mask after 3 s" fix was refuted by Muse (it would override
+        // mounts and legitimate script locks, persistently); a fix must be load-scoped. See FINDINGS 2026-10-01.
         if (stored != 0x80000000u)
-            return; // A local engine state owns a saved mask; do not overwrite its recovery.
+            return;
         const auto before = live & PlayerControlState::kChannels;
         const uint32_t enable = State.Controls & ~before;
         const uint32_t disable = before & ~State.Controls;

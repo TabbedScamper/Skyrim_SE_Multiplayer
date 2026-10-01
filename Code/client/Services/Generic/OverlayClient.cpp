@@ -12,6 +12,11 @@
 #include <Events/SetTimeCommandEvent.h>
 
 #include <World.h>
+#include <Services/CheckpointSaves.h>
+#include <Services/DropInService.h>
+#include <Services/UpdateService.h>
+#include <Services/OverlayService.h>
+#include <OverlayApp.hpp>
 
 OverlayClient::OverlayClient(TransportService& aTransport, TiltedPhoques::OverlayRenderHandler* apHandler)
     : TiltedPhoques::OverlayClient(apHandler)
@@ -81,6 +86,37 @@ bool OverlayClient::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefR
             const auto mode = static_cast<uint8_t>(eventArgs->GetInt(0));
             const String checkpoint = eventArgs->GetString(1).ToString().c_str();
             World::Get().GetPartyService().SelectCampaign(mode, checkpoint);
+        }
+        else if (eventName == "listCheckpoints" || eventName == "listCharacters")
+        {
+            // File reads only, answered right here: the runner's queue does not run at the title screen, where the
+            // lobby lives.
+            auto arguments = CefListValue::Create();
+            const bool characters = eventName == "listCharacters";
+            arguments->SetString(0, characters ? CheckpointSaves::CharactersJson(12) : CheckpointSaves::ListJson(12));
+            if (auto* pApp = World::Get().GetOverlayService().GetOverlayApp())
+                pApp->ExecuteAsync(characters ? "characterList" : "checkpointList", arguments);
+        }
+        else if (eventName == "joinRunningSession")
+        {
+            auto arguments = CefListValue::Create();
+            const auto error = World::Get().GetDropInService().StartJoin(eventArgs->GetString(0).ToString());
+            arguments->SetString(0, error.empty() ? World::Get().GetDropInService().Status() : "failed: " + error);
+            if (auto* pApp = World::Get().GetOverlayService().GetOverlayApp())
+                pApp->ExecuteAsync("dropInStatus", arguments);
+        }
+        else if (eventName == "checkUpdates" || eventName == "downloadUpdate")
+        {
+            auto& updates = World::Get().GetUpdateService();
+            if (eventName == "checkUpdates")
+                updates.CheckNow();
+            else
+                updates.Download();
+            // Answered right away too: the title screen may not run the update tick.
+            auto arguments = CefListValue::Create();
+            arguments->SetString(0, updates.StateJson());
+            if (auto* pApp = World::Get().GetOverlayService().GetOverlayApp())
+                pApp->ExecuteAsync("updateState", arguments);
         }
         else if (eventName == "startTogether")
         {

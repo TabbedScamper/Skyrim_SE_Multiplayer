@@ -110,6 +110,12 @@ struct ModManager
     Mod* GetByName(const char* acpName) const noexcept;
     TESObjectCELL* GetCellFromCoordinates(int32_t aX, int32_t aY, TESWorldSpace* aWorldSpace, bool aSpawnCell) noexcept;
 
+    // Every loaded form of one type (perks 92, spells 22, shouts 119, words of power 120, ...).
+    const GameArray<TESForm*>& FormsOfType(uint8_t aFormType) const noexcept
+    {
+        return *reinterpret_cast<const GameArray<TESForm*>*>(reinterpret_cast<const uint8_t*>(this) + 0x10 + aFormType * 0x18);
+    }
+
     // Form arrays start at 0x10 and are indexed by FormType, 0x18 bytes each.
     uint8_t pad0[0x118];
     GameArray<TESFaction*> factions;

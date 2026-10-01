@@ -34,6 +34,8 @@ void TriggerTimingInstalled() noexcept;
 class QuestService;
 struct QuestItemService;
 struct DoorVoteService;
+struct DropInService;
+struct UpdateService;
 struct BusyLockService;
 struct SharedDropService;
 struct SceneTurnsService;
@@ -71,6 +73,8 @@ struct World : entt::registry
     GameTestService& GetGameTestService() noexcept { return ctx().at<GameTestService>(); }
     QuestService& GetQuestService() noexcept;
     DoorVoteService& GetDoorVoteService() noexcept;
+    DropInService& GetDropInService() noexcept;
+    UpdateService& GetUpdateService() noexcept;
     BusyLockService& GetBusyLockService() noexcept;
     SharedDropService& GetSharedDropService() noexcept;
     SceneTurnsService& GetSceneTurnsService() noexcept;

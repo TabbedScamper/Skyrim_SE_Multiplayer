@@ -1000,6 +1000,15 @@ bool ReviveService::Update(bool aEnabled) noexcept
     }
     const bool combat = player->IsInCombat();
     const bool alive = !player->actorState.IsDeadState() && player->GetActorValue(ActorValueInfo::kHealth) > 0.f;
+    // The player's own view while up (first person 0, third person 9); the bleedout camera (11) replaces it before
+    // the player falls, so the view is recorded here, not when falling.
+    if (alive && !m_down && !m_fallen)
+    {
+        if (const auto view = CameraStateId(); view == 0)
+            m_viewFirstPerson = true;
+        else if (view == 9)
+            m_viewFirstPerson = false;
+    }
     if (now >= m_nextState || combat != m_combat || alive != m_alive)
         SendState(player, now);
     std::erase_if(m_peers, [&](const auto& entry) {
@@ -1081,6 +1090,13 @@ bool ReviveService::Update(bool aEnabled) noexcept
     if (!input || !alive)
     {
         CancelHold();
+        if (alive && now >= m_nextNoPromptLog &&
+            std::any_of(m_peers.begin(), m_peers.end(), [](const auto& acEntry) { return acEntry.second.Data.Down && !acEntry.second.Data.Dead; }))
+        {
+            m_nextNoPromptLog = now + 1000;
+            spdlog::info("Revive: no prompt (no input: menu {}, focused {}, free control {})", paused,
+                window && GetForegroundWindow() == window->hWnd, PlayerCollision::LocalHasFreeControl());
+        }
         if (!ritual)
             PushUi(0, {}, {}, 0, {}, now);
         return true;
@@ -1090,21 +1106,65 @@ bool ReviveService::Update(bool aEnabled) noexcept
     uint32_t target{};
     uint64_t revision{};
     float closest = 200.f * 200.f;
+    // Face the downed player with the camera, not the body: in third person the body keeps its own heading, and the
+    // host stood ~40 u from the downed follower for two minutes without a prompt (2026-09-30 18:38:35).
+    float forwardX = std::sin(player->rotation.z), forwardY = std::cos(player->rotation.z);
+    if (auto* camera = PlayerCamera::Get(); camera && camera->cameraNode)
+    {
+        const auto& rotate = camera->cameraNode->world.rotate;
+        const float x = rotate.entry[0][1], y = rotate.entry[1][1];
+        if (const float length = std::sqrt(x * x + y * y); std::isfinite(length) && length > 0.1f)
+        {
+            forwardX = x / length;
+            forwardY = y / length;
+        }
+    }
+    const char* why = nullptr;
+    uint32_t whyPeer{};
+    float whyDistance{};
     for (const auto& [id, peer] : m_peers)
     {
-        if (!peer.Data.Down || peer.Data.Dead || !Near(player, peer, 250.f))
+        if (!peer.Data.Down || peer.Data.Dead)
             continue;
+        const auto note = [&](const char* aReason, float aDistance = 0.f) { why = aReason; whyPeer = id; whyDistance = aDistance; };
         auto* actor = FindPlayer(id);
-        if (!actor || !actor->GetNiNode() || actor->IsDisabled() || actor->IsDeleted())
+        // The server's cell for a player can be stale (the follower stayed "outside" on the server after entering the
+        // Helgen Keep, 2026-09-30 19:33, 70-90 u from the host): a loaded copy in this player's own cell is the
+        // better witness.
+        const bool sameCellCopy = actor && actor->GetNiNode() && actor->GetParentCellEx() &&
+            actor->GetParentCellEx() == player->GetParentCellEx();
+        if (!sameCellCopy && !Near(player, peer, 250.f))
+        {
+            const auto sent = player->position - static_cast<const glm::vec3&>(peer.Data.Position);
+            note("other space or reported position over 250 u", std::sqrt(glm::dot(sent, sent)));
             continue;
+        }
+        if (!actor || !actor->GetNiNode() || actor->IsDisabled() || actor->IsDeleted())
+        {
+            note("no loaded copy of the downed player");
+            continue;
+        }
         const auto delta = actor->position - player->position;
         const float distance = glm::dot(delta, delta);
-        const float facing = std::sin(player->rotation.z) * delta.x + std::cos(player->rotation.z) * delta.y;
-        if (!std::isfinite(distance) || distance > closest || facing < 0.5f * std::sqrt(delta.x * delta.x + delta.y * delta.y))
+        const float facing = forwardX * delta.x + forwardY * delta.y;
+        if (!std::isfinite(distance) || distance > closest)
+        {
+            note("copy over 200 u away", std::sqrt(distance));
             continue;
+        }
+        if (facing < 0.5f * std::sqrt(delta.x * delta.x + delta.y * delta.y))
+        {
+            note("not facing the downed player", std::sqrt(distance));
+            continue;
+        }
         target = id;
         revision = peer.Data.Revision;
         closest = distance;
+    }
+    if (!target && why && now >= m_nextNoPromptLog)
+    {
+        m_nextNoPromptLog = now + 1000;
+        spdlog::info("Revive: no prompt for {} ({}, {:.0f} u)", Name(whyPeer), why, whyDistance);
     }
     const bool slow = target && CombatAround(player, target);
     const std::string note = slow ? "In combat: reviving takes longer" : std::string();
@@ -1179,7 +1239,9 @@ void ReviveService::EnterFallen(PlayerCharacter* aPlayer, const char* aReason) n
     m_watch = m_cameraOn = 0;
     m_nextCamera = m_nextWatchMove = 0;
     m_prevHeld = m_nextHeld = true;
-    m_wasFirstPerson = CameraStateId() == 0;
+    // Read at bleed-out the camera was already the bleedout camera, so every called-back player came back in third
+    // person (owner, 2026-09-30): use the view recorded while the player was up.
+    m_wasFirstPerson = m_viewFirstPerson;
     CancelHold();
     s_ritualArmed.store(false, std::memory_order_relaxed);
     aPlayer->SetNoBleedoutRecovery(true);
@@ -1213,8 +1275,13 @@ void ReviveService::LeaveFallen(PlayerCharacter* aPlayer, const NotifyRevive* ap
     Recover(aPlayer, apRaise ? 0.5f : 1.f);
     if (auto* camera = PlayerCamera::Get(); camera && camera->state)
     {
-        if (m_wasFirstPerson && camera->state->id != 0)
+        // Through third person first: going straight back left the first-person arms drawn in the third-person view
+        // until the player swapped views by hand (owner, 2026-09-30).
+        if (m_wasFirstPerson)
+        {
+            camera->ForceThirdPerson();
             camera->ForceFirstPerson();
+        }
         else if (camera->state->id != 0 && camera->state->id != 9)
             camera->ForceThirdPerson();
     }

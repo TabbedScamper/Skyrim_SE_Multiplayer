@@ -20,6 +20,10 @@ struct TriggerGate : BSTEventSink<TESLoadGameEvent>
     // Party contacts become one PlayerRef enter/last-leave pair. The action
     // reference is replaced only on the host, after recording the real entrant.
     bool Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*& apActor) noexcept;
+    // Barrier guard, from the engine's enable/disable flag setter and Papyrus SetOpen: true when a quest stage that a
+    // trigger just fired for the first player tries to put a barrier near that trigger (enable a blocking object, or
+    // close a door) before every player is through. The change is skipped and applied once all players are in.
+    static bool DeferBarrier(TESObjectREFR* apRef, bool aDoorClose) noexcept;
     BSTEventResult OnEvent(const TESLoadGameEvent*, const EventDispatcher<TESLoadGameEvent>*) override;
 
 private:

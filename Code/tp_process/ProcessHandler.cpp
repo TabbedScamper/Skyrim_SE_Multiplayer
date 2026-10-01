@@ -58,6 +58,11 @@ void ProcessHandler::OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<C
     CreateFunction("setPartyReady");
     CreateFunction("selectSharedCampaign");
     CreateFunction("startTogether");
+    CreateFunction("listCheckpoints");
+    CreateFunction("listCharacters");
+    CreateFunction("joinRunningSession");
+    CreateFunction("checkUpdates");
+    CreateFunction("downloadUpdate");
 }
 
 void ProcessHandler::OnContextReleased(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context)

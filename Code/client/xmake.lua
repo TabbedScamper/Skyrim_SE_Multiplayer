@@ -73,6 +73,7 @@ target(name)
     add_syslinks(
         "version",
         "dbghelp",
+        "winhttp",
         "kernel32")
 end
 

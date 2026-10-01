@@ -94,7 +94,8 @@ struct TESNPC : TESActorBase
     // Marks the body weight/height trailer Serialize appends after the native NPC save.
     static constexpr char kBodyTrailerTag[4] = {'T', 'P', 'B', 'W'};
     void Serialize(String* apSaveBuffer) const noexcept;
-    bool Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept;
+    // aLocalPlayerSnapshot: only CharacterSnapshots::Apply may load into the local player's own NPC.
+    bool Deserialize(const String& acBuffer, uint32_t aChangeFlags, bool aLocalPlayerSnapshot = false) noexcept;
     void Initialize() noexcept;
 };
 

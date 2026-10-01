@@ -5,6 +5,7 @@
 #include <Services/ObjectService.h>
 #include <Services/WorldStateService.h>
 #include <Services/HarnessService.h>
+#include <Services/DropInService.h>
 #include <Services/QuestService.h>
 #include <Services/QuestItemService.h>
 #include <Services/ServerListService.h>
@@ -61,6 +62,7 @@ World::World()
     ctx().emplace<QuestItemService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
     ctx().emplace<HarnessService>(*this, m_dispatcher);
+    ctx().emplace<DropInService>(*this, m_dispatcher);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher);
     ctx().emplace<BusyLockService>(*this, m_dispatcher);

@@ -27,6 +27,7 @@
 
 #include <ScriptExtender.h>
 #include <Services/DiscordService.h>
+#include <Services/UpdateService.h>
 #include <OverlayApp.hpp>
 
 // #include <imgui_internal.h>
@@ -177,7 +178,7 @@ void TransportService::OnConnected()
 void TransportService::SendAuthenticationRequest()
 {
     AuthenticationRequest request{};
-    request.Version = BUILD_COMMIT;
+    request.Version = SSM_WIRE_VERSION;
     request.SKSEActive = IsScriptExtenderLoaded();
     request.MO2Active = GetModuleHandleW(kMO2DllName);
 
@@ -334,8 +335,24 @@ void TransportService::HandleAuthenticationResponse(const AuthenticationResponse
     {
     case AR::kWrongVersion:
         ErrorInfo += "\"error\": \"wrong_version\", \"data\": {";
-        ErrorInfo += fmt::format("\"expectedVersion\": \"{}\", \"version\": \"{}\"", acMessage.Version, BUILD_COMMIT);
+    {
+        // The server's version text is untrusted: escaped before it goes into the JSON.
+        const auto escape = [](const std::string& acText) {
+            std::string out;
+            for (const unsigned char c : acText)
+            {
+                if (c == '"' || c == '\\')
+                    out += '\\';
+                if (c >= 0x20)
+                    out += static_cast<char>(c);
+            }
+            return out;
+        };
+        const std::string expected = acMessage.Version.c_str();
+        ErrorInfo += fmt::format("\"expectedVersion\": \"{}\", \"version\": \"{}\", \"hint\": \"{}\"", escape(expected),
+                                 SSM_WIRE_VERSION, escape(UpdateService::MismatchText(expected)));
         ErrorInfo += "}";
+    }
         break;
     case AR::kModsMismatch:
     {

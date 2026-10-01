@@ -70,8 +70,10 @@ private:
     void RunDifficultyUpdates() const noexcept;
     void RunLevelUpdates() const noexcept;
     void RunBeastFormDetection() const noexcept;
+    void RunCellHeartbeat() noexcept;
 
     void ToggleDeathSystem(bool aSet) noexcept;
+    uint64_t m_nextCellHeartbeat{};
 
     World& m_world;
     entt::dispatcher& m_dispatcher;

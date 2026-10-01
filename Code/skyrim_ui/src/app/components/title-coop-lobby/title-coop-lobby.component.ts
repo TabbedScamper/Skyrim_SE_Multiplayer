@@ -1,6 +1,6 @@
 import { Component, EventEmitter, HostBinding, HostListener, Input, OnDestroy, OnInit, Output } from '@angular/core';
 import { Subject, takeUntil } from 'rxjs';
-import { CoopLobbyState } from '../../models/coop-lobby-state';
+import { CheckpointEntry, CoopLobbyState, JoinCharacter } from '../../models/coop-lobby-state';
 import { SteamFriend, SteamInvite, SteamLobbyState } from '../../models/steam-lobby-state';
 import { ClientService } from '../../services/client.service';
 import { Sound, SoundService } from '../../services/sound.service';
@@ -24,6 +24,9 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
   public ready = false;
   public campaignMode = 1;
   public checkpointId = '';
+  public checkpoints: CheckpointEntry[] = [];
+  public characters: JoinCharacter[] = [];
+  public dropInStatus = 'idle';
   public lanAddress = '';
   public sessionOpen = false;
   public sessionPassword = '';
@@ -59,7 +62,12 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
       this.checkpointId = value.checkpointId || this.checkpointId;
       this.ready = value.readyPlayerIds.includes(this.client.localPlayerId as unknown as number);
     });
+    this.client.checkpointListChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.checkpoints = value);
+    this.client.characterListChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.characters = value);
+    this.client.dropInStatusChange.pipe(takeUntil(this.destroy$)).subscribe(value => this.dropInStatus = value);
+    this.client.listCharacters();
     this.client.refreshSteamLobby();
+    this.client.listCheckpoints();
   }
 
   public ngOnDestroy(): void {
@@ -202,6 +210,49 @@ export class TitleCoopLobbyComponent implements OnInit, OnDestroy {
     if (this.sessionStarted || !this.isLeader()) return;
     this.campaignMode = mode;
     this.client.selectSharedCampaign(mode, this.checkpointId.trim());
+    if (mode === 2) this.client.listCheckpoints();
+  }
+
+  /** The session is already running and this PC is not in it yet: offer to join with an own character. */
+  public canDropIn(): boolean {
+    return !this.inGame && this.connected && this.lobby.sessionState === 3 && !this.isLeader();
+  }
+
+  public joining(): boolean {
+    return this.dropInStatus !== 'idle' && !this.dropInStatus.startsWith('failed') && this.dropInStatus !== 'joined';
+  }
+
+  public joinWith(character: JoinCharacter): void {
+    if (this.joining()) return;
+    this.client.joinRunningSession(character.path);
+  }
+
+  public dropInLabel(): string {
+    const status = this.dropInStatus;
+    if (status.startsWith('failed: ')) return 'Could not join: ' + status.substring(8);
+    return status.charAt(0).toUpperCase() + status.slice(1) + (status === 'joined' ? '' : '...');
+  }
+
+  public chooseCheckpoint(id: string): void {
+    if (this.sessionStarted || !this.isLeader()) return;
+    this.checkpointId = id;
+    this.client.selectSharedCampaign(2, id);
+  }
+
+  /** An empty choice means the newest checkpoint, which is first in the list. */
+  public isChosen(entry: CheckpointEntry, index: number): boolean {
+    return this.checkpointId ? entry.id === this.checkpointId : index === 0;
+  }
+
+  /** The save's play time, stored as days.hours.minutes ("000.05.09"). */
+  public playTime(value: string): string {
+    const [days, hours, minutes] = (value || '').split('.').map(part => parseInt(part, 10) || 0);
+    return days ? `${days}d ${hours}h ${minutes}m` : `${hours}h ${minutes}m`;
+  }
+
+  public chosenEntry(): CheckpointEntry | undefined {
+    const id = this.lobby.checkpointId || this.checkpointId;
+    return id ? this.checkpoints.find(entry => entry.id === id) : this.checkpoints[0];
   }
 
   public promote(playerId: number): void {

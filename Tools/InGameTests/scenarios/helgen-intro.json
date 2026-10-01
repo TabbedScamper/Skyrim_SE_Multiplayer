@@ -206,7 +206,7 @@
       "op": "teleport",
       "ref": "AA7A3",
       "timeout": 20,
-      "dy": 420,
+      "dy": 520,
       "source": "esm.sqlite ref AA7A3",
       "preconditions": {
         "MQ101": 100,
@@ -652,10 +652,10 @@
       "pace": "walk",
       "step_over": true,
       "timeout": 90,
-      "x": 16448,
+      "x": 16560,
       "y": -83815.765625,
       "z": 8399.41478080534,
-      "source": "esm.sqlite NAVM 2AB79 triangle107 interpolated floor; native grid crossing",
+      "source": "Skyrim.esm NAVM 2AB79 triangle105 floor (z 8399), 176 u past the x=16384 grid line so a follower stopping 120 u short still crosses it (22:59 run: follower stopped at 16383.4, one cell short); native grid crossing",
       "preconditions": {
         "MQ101": 100,
         "scenes": [

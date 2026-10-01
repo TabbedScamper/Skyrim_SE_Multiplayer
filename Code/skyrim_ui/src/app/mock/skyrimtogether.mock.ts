@@ -269,6 +269,16 @@ export class SkyrimtogetherMock extends EventEmitter implements SkyrimTogether {
 
   selectSharedCampaign(_mode: number, _checkpointId: string): void {}
 
+  listCheckpoints(): void {}
+
+  listCharacters(): void {}
+
+  joinRunningSession(_path: string): void {}
+
+  checkUpdates(): void {}
+
+  downloadUpdate(): void {}
+
   startTogether(_mode: number, _checkpointId: string): void {}
 
   createPartyInvite(playerId: number): void {

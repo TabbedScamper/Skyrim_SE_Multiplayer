@@ -14,6 +14,7 @@
 #include <Components/TESFullName.h>
 #include <Components/BGSKeywordForm.h>
 #include <Interface/UI.h>
+#include <Games/References.h>
 #include <Events/UpdateEvent.h>
 #include <Events/DisconnectedEvent.h>
 #include <Messages/DoorVoteRequest.h>
@@ -78,6 +79,26 @@ void OnAutomaticDoor(void* aObject3D, uint32_t aDistanceBand, bool aEntering)
         }
     }
     s_automaticDoor(aObject3D, aDistanceBand, aEntering);
+}
+
+// The player's pending activation target, middle-high process +0xD8 (setter 0x1406F6E10, which also writes +0x470).
+// An activation the vote takes over can leave the door stored there; the next animation activate event (handler
+// 0x1407CE180) then activates it, and the player traveled back through the door minutes later on picking up an item
+// (both owners, 2026-09-30 18:41:25 and 18:47:20, the Helgen Keep door). Door travel (0x1402F1E50) clears it natively.
+void ClearStoredDoorActivation(TESObjectREFR* aDoor) noexcept
+{
+    auto* player = PlayerCharacter::Get();
+    if (!aDoor || !player || !player->currentProcess)
+        return;
+    auto* pHigh = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(player->currentProcess) + 0x10);
+    if (!pHigh)
+        return;
+    auto* pHandle = reinterpret_cast<uint32_t*>(pHigh + 0xD8);
+    if (*pHandle != aDoor->GetHandle().handle.iBits)
+        return;
+    *pHandle = *TESObjectREFR::GetNullHandle();
+    pHigh[0x470] = 0;
+    spdlog::info("Door vote: cleared the stored activation of {:X}", aDoor->formID);
 }
 
 void ReportSkip(TESObjectREFR* aDoor, DoorVotePolicy::Skip aReason, const void* aCaller) noexcept
@@ -211,22 +232,9 @@ bool DoorVoteService::IsVoteDoor(TESObjectREFR* aDoor) noexcept
     if (party.IsLeader() ? !PlayerCollision::LocalHasFreeControl() :
         (!m_leaderFree || party.IsFollowerCinematicInputGated()))
         return report(true, "leader has no free control");
-    InitKeywords();
+    // Quest doors only (owner, 2026-09-30): dungeon and other location doors are free, so a lockpicked or ordinary
+    // door is entered at once like vanilla. The location-keyword rule (dungeons, clearable locations) was removed.
     auto* destination = DestinationDoor(aDoor);
-    auto* cell = destination ? destination->GetParentCellEx() : nullptr;
-    using TGetLocation = LocationView*(const TESObjectCELL*);
-    POINTER_SKYRIMSE(TGetLocation, getLocation, 18905);
-    // Bound traversal also tolerates malformed parent cycles in third-party plugins.
-    auto* location = cell ? getLocation.Get()(cell) : nullptr;
-    for (size_t depth = 0; location && depth < 64; ++depth, location = location->Parent)
-    {
-        for (size_t i = 0; i < std::size(kKeywords); ++i)
-        {
-            // A mine alone is free; Clearable already qualifies independently.
-            if (i != 3 && m_keywords[i] && location->Keywords.Contains(m_keywords[i]))
-                return report(true, kKeywords[i]);
-        }
-    }
     if (auto* mods = ModManager::Get())
     {
         for (auto* quest : mods->quests)
@@ -273,7 +281,7 @@ bool DoorVoteService::IsVoteDoor(TESObjectREFR* aDoor) noexcept
             }
         }
     }
-    return report(false, "no story or dungeon classification");
+    return report(false, "not a quest door");
 }
 
 bool DoorVoteService::TryHold(TESObjectREFR* aDoor, TESObjectREFR* aActivator, uint8_t aUnk1,
@@ -286,6 +294,17 @@ bool DoorVoteService::TryHold(TESObjectREFR* aDoor, TESObjectREFR* aActivator, u
         return held;
     };
     using TPick = void();
+    // A stored activation fired by an animation event (42866 / 0x1407CE180, size 0xCD) at a load door the player is
+    // nowhere near is stale (see ClearStoredDoorActivation): drop it rather than send the player through the door.
+    POINTER_SKYRIMSE(TPick, animActivate, 42866);
+    const auto callerAddress = reinterpret_cast<uintptr_t>(aCaller);
+    const auto animAddress = reinterpret_cast<uintptr_t>(animActivate.Get());
+    if (aDoor && aActivator && aActivator == PlayerCharacter::Get() && callerAddress >= animAddress &&
+        callerAddress < animAddress + 0xCD && aDoor->extraData.Contains(ExtraDataType::Teleport) && !NearDoor(aDoor))
+    {
+        spdlog::warn("Door vote: dropped a stale stored activation of {:X} (player not at the door)", aDoor->formID);
+        return true;
+    }
     POINTER_SKYRIMSE(TPick, pick, 40548);
     POINTER_SKYRIMSE(TPick, choice, 40926);
     const auto& party = m_world.GetPartyService();
@@ -344,6 +363,7 @@ bool DoorVoteService::TryHold(TESObjectREFR* aDoor, TESObjectREFR* aActivator, u
     }
     spdlog::info("Door vote: held {:X} for {} ({} members, {})", aDoor->formID,
         request.Name, party.GetPartyMembers().size(), aAtAutomaticDoor ? "automatic approach" : "player Activate");
+    ClearStoredDoorActivation(aDoor);
     return true;
 }
 
@@ -415,6 +435,7 @@ void DoorVoteService::Reset() noexcept
     {
         if (auto* ui = UI::Get(); ui && ui->numPausesGame > 0)
             --ui->numPausesGame;
+        FadeOutGame(false, true, 1.f, true, 0.f); // everyone in: fade in together
     }
     m_gateHeld = false;
     m_loading = false;
@@ -506,6 +527,7 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
             // TESObjectREFR::Activate calls RealActivate directly, bypassing hold and network echo.
             const bool result = door->Activate(PlayerCharacter::Get(), m_unk1, object, m_count, m_defaultProcessing);
             spdlog::info("Door vote: activated {:X} at tick {} (shared {}, result {})", m_doorForm, m_world.GetTick(), m_state.Tick, result);
+            ClearStoredDoorActivation(door);
             if (!result)
             {
                 SendAction(DoorVoteAction::Failed);
@@ -540,6 +562,10 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
     }
     if (GetTickCount64() >= m_nextLoadedSend)
     {
+        // Black while the party loads, so the first one in sees black instead of a frozen world, and everyone fades
+        // in together on release (owner, 2026-09-30). Re-asserted each resend: the engine's own post-load fade-in
+        // can run after the hold began.
+        FadeOutGame(true, true, 0.f, true, 0.f);
         // Cell-change replication may reach the server after this service's first ready packet.
         SendAction(DoorVoteAction::Loaded);
         m_nextLoadedSend = GetTickCount64() + 500;

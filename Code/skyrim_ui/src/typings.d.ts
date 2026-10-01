@@ -205,6 +205,19 @@ interface SkyrimTogether {
     callback: SkyrimTogetherTypes.PlayerConnectedCallback,
   ): void;
 
+  /** Add listener to when a player's character is renamed (character creator). */
+  on(event: 'playerNameChanged', callback: (playerId: number, name: string) => void): void;
+
+  /** The checkpoint picker's list: a JSON array (id, player, level, location, gameDate, savedMs, image). */
+  on(event: 'checkpointList', callback: (json: string) => void): void;
+
+  /** Characters this PC can join a running session with: a JSON array (path, name, level, location, savedMs, image). */
+  on(event: 'characterList', callback: (json: string) => void): void;
+
+  /** Progress of joining a running session. */
+  on(event: 'dropInStatus', callback: (status: string) => void): void;
+  on(event: 'updateState', callback: (state: string) => void): void;
+
   /** Add listener to when one player disconnect in server. */
   on(
     event: 'playerDisconnected',
@@ -348,6 +361,15 @@ interface SkyrimTogether {
     callback?: SkyrimTogetherTypes.PlayerConnectedCallback,
   ): void;
 
+  off(event: 'playerNameChanged', callback?: (playerId: number, name: string) => void): void;
+
+  off(event: 'checkpointList', callback?: (json: string) => void): void;
+
+  off(event: 'characterList', callback?: (json: string) => void): void;
+
+  off(event: 'dropInStatus', callback?: (status: string) => void): void;
+  off(event: 'updateState', callback?: (state: string) => void): void;
+
   /** Add listener to when one player disconnect in server. */
   off(
     event: 'playerDisconnected',
@@ -483,6 +505,21 @@ interface SkyrimTogether {
   selectSharedCampaign(mode: number, checkpointId: string): void;
 
   startTogether(mode: number, checkpointId: string): void;
+
+  /** Asks for the checkpoint picker's list; it arrives as 'checkpointList'. */
+  listCheckpoints(): void;
+
+  /** Asks for the joinable characters; they arrive as 'characterList'. */
+  listCharacters(): void;
+
+  /** Joins the running session as the character in a .snap file. */
+  joinRunningSession(path: string): void;
+
+  /** Checks the GitHub latest release now; the answer arrives as 'updateState'. */
+  checkUpdates(): void;
+
+  /** Downloads and verifies the available update; the starter applies it at the next launch. */
+  downloadUpdate(): void;
 
   hostSteamSession(): void;
 

@@ -8,6 +8,7 @@
 #include <Services/PapyrusService.h>
 #include <Services/DoorVoteService.h>
 #include <Services/WorldStateService.h>
+#include <Services/TriggerGate.h>
 #include <Services/Generic/BusyLockService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Events/ActivateEvent.h>
@@ -135,7 +136,7 @@ void TESObjectREFR::Save_Reversed(const uint32_t aChangeFlags, Buffer::Writer& a
 // AIProcess: an NPC's pending door activation (39408 / 0x1406F6E40). The native takes the door handle from the
 // middle-high process (+0xD8), clears it, activates the door (ActivateRef 19796, through our hook) and then writes
 // middleHigh+0x470 = 0 through a fresh read of process+0x10. A load door into a cell the local player has not loaded
-// unloads the actor inside that activation and frees the middle-high process, so the write hit a null pointer
+// unloads the actor inside that activation and frees the high process data (AIProcess+0x10; SkyrimAtlas P1), so the write hit a null pointer
 // (host crash 2026-09-28 18:02:24 at 0x1406F6ED7: Ralof leaving Helgen's cave while the host was still inside and
 // the follower had already left). Same steps; the write is skipped when the process is gone.
 using TRunPendingDoor = bool(void* apProcess, TESObjectREFR* apActor);
@@ -143,10 +144,10 @@ static TRunPendingDoor* RealRunPendingDoor = nullptr;
 
 static bool HookRunPendingDoor(void* apProcess, TESObjectREFR* apActor)
 {
-    auto** ppMiddleHigh = reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(apProcess) + 0x10);
-    if (!*ppMiddleHigh)
+    auto** ppHigh = reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(apProcess) + 0x10);
+    if (!*ppHigh)
         return false;
-    auto* pHandle = reinterpret_cast<uint32_t*>(*ppMiddleHigh + 0xD8);
+    auto* pHandle = reinterpret_cast<uint32_t*>(*ppHigh + 0xD8);
     // Hold the door's reference across the activation like the native (17201 adds one; released below): the
     // activation can unload cells.
     using TGetRefrByHandle = void(uint32_t&, TESObjectREFR*&);
@@ -164,8 +165,8 @@ static bool HookRunPendingDoor(void* apProcess, TESObjectREFR* apActor)
         POINTER_SKYRIMSE(TActivate, s_activateEntry, 19796);
         TiltedPhoques::ThisCall(s_activateEntry.Get(), pDoor, apActor, 0, nullptr, 1, 0);
         activated = true;
-        if (auto* pMiddleHigh = *ppMiddleHigh)
-            pMiddleHigh[0x470] = 0;
+        if (auto* pHigh = *ppHigh)
+            pHigh[0x470] = 0;
         else
             spdlog::info("Pending door {:X}: actor {:X} lost its middle-high process during the activation (unloaded)",
                 doorId, apActor ? apActor->formID : 0);
@@ -1401,9 +1402,21 @@ bool HookWorldOpen(TESObjectREFR* ref, bool open, bool snap)
     if (result) WorldStateService::ObserveId(id, WorldStateKind::Open, open, 1);
     return result;
 }
+// TESObjectREFR::Enable (19800 / 0x1402F2840) as a whole: it sets the flag (14646), enables linked children and
+// loads 3D, so a deferred barrier must skip the entire call, never the flag setter alone.
+using WorldEnableFn = void(TESObjectREFR*, bool);
+WorldEnableFn* s_worldEnable{};
+void HookWorldEnable(TESObjectREFR* ref, bool resetInventory)
+{
+    if (ref && ref->IsDisabled() && TriggerGate::DeferBarrier(ref, false))
+        return;
+    s_worldEnable(ref, resetInventory);
+}
 void HookWorldSetOpen(void* vm, uint32_t stack, TESObjectREFR* ref, bool open)
 {
     const auto id = ref ? ref->formID : 0;
+    if (ref && !open && TriggerGate::DeferBarrier(ref, true))
+        return;
     s_worldSetOpen(vm, stack, ref, open);
     // Only script SetOpen; player Activate/DoorVote is already replicated.
     WorldStateService::ObserveId(id, WorldStateKind::Open, open);
@@ -1428,7 +1441,17 @@ static TiltedPhoques::Initializer s_worldStateHooks([] {
     TP_HOOK(&s_worldSet3D, HookWorldSet3D);
     TP_HOOK(&s_worldSetOpen, HookWorldSetOpen);
     TP_HOOK(&s_worldOpen, HookWorldOpen);
+    POINTER_SKYRIMSE(WorldEnableFn, enable, 19800);
+    s_worldEnable = enable.Get();
+    TP_HOOK(&s_worldEnable, HookWorldEnable);
 });
+}
+
+// The barrier guard's deferred door close, applied through the hooked native so the change replicates.
+void WorldStateSetDoorOpen(TESObjectREFR* apRef, bool aOpen) noexcept
+{
+    if (apRef && s_worldOpen)
+        HookWorldOpen(apRef, aOpen, false);
 }
 
 uint32_t WorldStateService::EnableParent(TESObjectREFR* ref) noexcept
