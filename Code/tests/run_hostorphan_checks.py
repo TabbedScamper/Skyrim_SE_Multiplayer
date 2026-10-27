@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(tempfile.mkdtemp(prefix="hostorphan-checks-"))
 print(f"Artifacts: {OUT}", flush=True)
 
-# Reject a successful-looking run if another writer changed this task's input
+# Reject a successful-looking run if another writer changed this run's input
 # while MSVC was checking it. Other workstreams can continue editing their files.
 INPUTS = (
     "Code/server/GameServer.cpp", "Code/server/Game/Player.cpp", "Code/server/Game/Player.h",

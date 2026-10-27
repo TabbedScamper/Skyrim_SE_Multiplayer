@@ -4,7 +4,7 @@ Built 2026-09-24 by Reviewer A. Supersedes `ACCESS_NEEDED.md`: the exe **is** re
 
 ## What exists
 
-`C:\Tools\skyrim_re\` (outside the repo; nothing Bethesda-derived is committed here):
+the RE toolkit's `` (outside the repo; nothing Bethesda-derived is committed here):
 
 | Path | What |
 |---|---|
@@ -27,15 +27,15 @@ Facts established while building it:
 ## How to query (no Ghidra launch per question)
 
 ```
-C:\Tools\skyrim_re\sk.cmd id 38533                     # Address Library ID -> address + function
-C:\Tools\skyrim_re\sk.cmd find "ControlMap"             # functions by name
-C:\Tools\skyrim_re\sk.cmd fn Papyrus_Game_DisablePlayerControls   # decompiled C
-C:\Tools\skyrim_re\sk.cmd fn 0x140693200               # by VA (also rva:xxxx, id:NNNN)
-C:\Tools\skyrim_re\sk.cmd callers ControlMap::ToggleControls
-C:\Tools\skyrim_re\sk.cmd callees Actor::SetLifeState
-C:\Tools\skyrim_re\sk.cmd str "You are bleeding out"   # string -> the code that uses it
-C:\Tools\skyrim_re\sk.cmd grep "ToggleControls\(singleton" 20   # regex over all decompiled C
-C:\Tools\skyrim_re\sk.cmd vt "^FirstPersonState$"      # vtable slots
+the RE toolkit's `sk.cmd` id 38533                     # Address Library ID -> address + function
+the RE toolkit's `sk.cmd` find "ControlMap"             # functions by name
+the RE toolkit's `sk.cmd` fn Papyrus_Game_DisablePlayerControls   # decompiled C
+the RE toolkit's `sk.cmd` fn 0x140693200               # by VA (also rva:xxxx, id:NNNN)
+the RE toolkit's `sk.cmd` callers ControlMap::ToggleControls
+the RE toolkit's `sk.cmd` callees Actor::SetLifeState
+the RE toolkit's `sk.cmd` str "You are bleeding out"   # string -> the code that uses it
+the RE toolkit's `sk.cmd` grep "ToggleControls\(singleton" 20   # regex over all decompiled C
+the RE toolkit's `sk.cmd` vt "^FirstPersonState$"      # vtable slots
 ```
 
 A name matching several functions prints the candidates. Pass the VA to disambiguate.

@@ -3,8 +3,8 @@
 Build the main tree with `--harness=y`, then run:
 
 ```powershell
-powershell -File C:/Tools/skyrim_re/Run-Harness.ps1 -Deploy -Scenario helgen-intro
-powershell -File C:/Tools/skyrim_re/Run-Harness.ps1 -Scenario helgen-intro-assisted
+powershell -File the RE toolkit's `Run-Harness.ps1` -Deploy -Scenario helgen-intro
+powershell -File the RE toolkit's `Run-Harness.ps1` -Scenario helgen-intro-assisted
 ```
 
 The first scenario is the **collision-on qualification**. The second is a separate
@@ -68,7 +68,7 @@ to256 steps, each at most4096 bytes. Every step includes a `preconditions` objec
 | assert / finish | optional cell and door_vote; finish must end scenario |
 
 All staging coordinates derive from esm.sqlite references, triggers and markers.
-The source audit is round6/harness-route-current.json; full quest exports are
+The source audit is local evidence; full quest exports are
 harness-mq101-current.json and harness-dragon-current.json. Stage35 staging uses
 the trigger's rotated thin-axis boundary and CD697's floor. Floor and landing
 suitability still require live validation. Teleports cannot cross physical
@@ -94,7 +94,7 @@ engine performance.
 Offline frame-gap statistics exclude only the first record, which has no earlier
 captured frame in that run; its raw value is retained as `firstFrameGapMs`.
 
-Results are under round6/capture/harness-<stamp>, with paired logs, statuses,
+Results are under local evidence, with paired logs, statuses,
 server log, diagnostics, result.json, summary.md and offline analysis. A crash
 classification needs process exit and a complete full-memory exception dump for
 the launched PID. Informational406D1388 startup dumps and handled first-chance

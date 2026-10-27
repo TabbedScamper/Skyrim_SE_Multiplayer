@@ -1,7 +1,7 @@
 """Exercise the ledger's actual SQL schema without compiling or building the mod.
 
 This checks schema constraints and SQLite rollback, not the C++ Ledger methods.
-Run CampaignCoreTests and TPTests when the coordinator builds the changed code.
+Run CampaignCoreTests and TPTests when the maintainer builds the changed code.
 """
 import pathlib
 import re

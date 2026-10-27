@@ -25,7 +25,6 @@
 #include <cmath>
 #include <atomic>
 
-// Research handoff for docs/REFERENCE_RESEARCH.md (outside this task's edit allowlist):
 // CommonLibSSE-NG src/RE/P/PlayerCharacter.cpp maps ActivatePickRef to AE ID 40548.
 // https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/src/RE/P/PlayerCharacter.cpp
 // TiltedEvolution's TESObjectREFR.cpp supplies the existing ActivateRef detour/replay.

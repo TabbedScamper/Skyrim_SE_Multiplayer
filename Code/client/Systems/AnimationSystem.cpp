@@ -73,7 +73,6 @@ struct GraphUpdateData
 static_assert(sizeof(GraphUpdateData) == 0x30);
 static_assert(offsetof(GraphUpdateData, Visible) == 0x2C);
 
-// Research handoff for docs/REFERENCE_RESEARCH.md (outside this task's write scope):
 // PLANCK src/main.cpp::BShkbAnimationGraph_PreGenerate_Hook uses forceUpdate for
 // active actors. Adopt that policy, not its VR cull-state offsets. CommonLib's
 // BSAnimationUpdateData supplies the layout; the 1.7.104 corpus supplies semantics:

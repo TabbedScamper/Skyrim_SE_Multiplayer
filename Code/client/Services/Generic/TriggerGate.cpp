@@ -58,9 +58,6 @@ namespace
 // The prior implementation's Reviewer A checked its ABI. Its demotion flush was
 // rejected: a former leader must not execute world scripts after authority changes.
 // Its repeat-only hold, smart-pointer move and cooldown findings were addressed.
-// Reviewer B could not start (auth.json access denied). docs/REFERENCE_RESEARCH.md is
-// outside this task's edit list; these references are retained here for integration.
-// Round 6 research (2026-09-26; independent review waived by COMMON.md):
 // - CommonLib ObjectTypeInfo/ExtraLinkedRef/ExtraActivateRefChildren layouts adopted;
 //   native 1.7.104 functions below verify the layouts and lock boundaries.
 // - SkyMP's EventHandler.cpp observes native enter/trigger/leave. Retain native

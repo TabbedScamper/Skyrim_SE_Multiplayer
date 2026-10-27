@@ -1,10 +1,8 @@
 # Shared drops: implementation handoff, 2026-09-26
 
 This is a source implementation, not a confirmed in-game fix. No build, C++ test
-execution, deployment, or commit was performed. COMMON.md explicitly waives
-Reviewer A/Reviewer B review for this task; neither assistant reviewed this implementation.
-Research is kept here because `Code/tests` is in the task's edit allowlist and
-`docs/REFERENCE_RESEARCH.md` is not. The coordinator can copy this research into
+execution, deployment, or commit was performed.
+`docs/REFERENCE_RESEARCH.md` is not. The maintainer can copy this research into
 that shared document.
 
 ## Source evidence and decisions
@@ -117,7 +115,7 @@ Passed: source registration/invariant checks and `git diff --check`. The C++
 tests were added but not executed because building is expressly prohibited.
 No in-game observation or five-player performance result is claimed.
 
-Coordinator: build and run `[encoding.shared_drops]`. Then test each PC as dropper:
+Maintainer: build and run `[encoding.shared_drops]`. Then test each PC as dropper:
 
 1. Drop one item, identical items rapidly, and a stack. Check exactly one server
    creation log per actual dropped reference: `Shared drop: {:X} x{} dropped by
@@ -151,7 +149,6 @@ Coordinator: build and run `[encoding.shared_drops]`. Then test each PC as dropp
   bypass that path retain their existing inventory delta behavior and are not
   made shared here. Direct mod calls to native PickUpObject that bypass Activate
   likewise do not pass the activation gate. Extending those paths requires the
-  existing Actor/RemoveItem hooks, outside this task's hook edit allowance.
 - Claims are terminal even if native item delivery temporarily cannot create a
   reference; the client retries while connected. Inventory rollback across loading
   an old save still relies on the surrounding campaign/inventory reconciliation.

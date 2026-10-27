@@ -1,6 +1,6 @@
 """Isolated scale-pass tests/compile checks; never invokes xmake or writes build/.
 
-Uses installed dependency flags from the coordinator's existing manifests.
+Uses installed dependency flags from the maintainer's existing manifests.
 Run with Python 3; --syntax also checks the changed production translation units.
 """
 import argparse

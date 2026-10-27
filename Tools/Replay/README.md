@@ -15,7 +15,7 @@ $py = 'C:/Users/mwalt/AppData/Local/Programs/Python/Python312/python.exe'
 ```
 
 This compiles only `replay.cpp` and the actual pure `NpcInventory.cpp` in a
-separate temporary directory, using the coordinator's cached compiler/library
+separate temporary directory, using the maintainer's cached compiler/library
 paths and existing Catch main object. It never invokes xmake or writes `build/`.
 An already built TPTests picks up `replay.cpp` through its existing `*.cpp` glob:
 
@@ -42,8 +42,8 @@ Re-extract from immutable captures, across all 32 worker processes:
 
 ```powershell
 & $py Tools/Replay/extract.py --workers 32 `
-  --captures C:/Tools/skyrim_re/agent/captures `
-  --out C:/Tools/skyrim_re/agent/replay-layer1 `
+  --captures the RE toolkit's `agent/captures` `
+  --out the RE toolkit's `agent/replay-layer1` `
   --fixtures Code/tests/fixtures/replay
 ```
 
@@ -128,7 +128,7 @@ Trigger membership uses the existing event-driven hash set and O(P) storage per
 occupied trigger. Tests cover P=5 and P=10 policy behavior, **not** performance
 or in-game correctness at those party sizes.
 
-COMMON.md explicitly waives local Reviewer A/B for this job. Neither reviewed
+Neither reviewed
 this layer; no review approval is implied. No PCs or game processes were used.
 
 ## FOLLOW-UP
@@ -141,7 +141,7 @@ this layer; no review approval is implied. No PCs or game processes were used.
    actual native producer remains unresolved by these captures.
 2. **CorpseRagdollService owner:** integrate quaternion/error units after the
    current rewrite; record matched body keys, position/quaternion/velocity,
-   settled/falling state and measurement phase. A live edit during this task
+   settled/falling state and measurement phase. A live edit during this change
    added velocity prediction, which is outside the copied rotation/metric
    blocks. Do not mistake these counterparts for the entire current service.
 3. **NakedNpcGuard / InventoryService / NpcLootService owners:** connect the
@@ -160,6 +160,6 @@ this layer; no review approval is implied. No PCs or game processes were used.
 6. **CreatorTogether / BoundPoseKeeper / SaveLoad.cpp / Forms.cpp owners:** no
    extraction attempted while owned. Later supply creator/load boundaries and
    pose rebuild events as replay resets; do not infer them from worn arrays.
-7. Once a reviewed candidate passes headless replay, the coordinator rebuilds
+7. Once a reviewed candidate passes headless replay, the maintainer rebuilds
    and uses paired in-game observations for final proof. Replays cannot model
    Havok contacts, native ragdoll ownership, attached armor clones or rendering.

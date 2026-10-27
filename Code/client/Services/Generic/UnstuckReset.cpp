@@ -40,7 +40,7 @@ static TiltedPhoques::Initializer s_unstuckHooks([] {
 });
 
 // Research, 1.7.104 (kept here because docs/REFERENCE_RESEARCH.md is outside
-// this task's edit list):
+// this change's edit list):
 // https://github.com/alandtse/CommonLibSSE-NG/blob/ng/src/RE/A/Actor.cpp
 // https://github.com/alandtse/CommonLibSSE-NG/blob/ng/src/RE/A/AIProcess.cpp
 // https://github.com/ersh1/OpenAnimationReplacer/blob/main/src/Hooks.cpp

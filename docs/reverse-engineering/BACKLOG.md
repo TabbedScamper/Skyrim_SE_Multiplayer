@@ -1,7 +1,7 @@
 # Backlog — ordered slices
 
 Dependency order; each slice lists acceptance evidence and rollback risk.
-`AGENTS.md` applies: prior-art research recorded, in-game confirmation before
+Project rules apply: prior-art research recorded, in-game confirmation before
 any "fixed" claim.
 
 1. **Pin versions.** Record `TiltedEvolution/dev` SHA; pin CommonLibSSE-NG

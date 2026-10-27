@@ -1966,7 +1966,7 @@ bool WorldStateService::Apply(TESObjectREFR* ref, const WorldState& state) noexc
     }
     case WorldStateKind::DestructionHealth:
     case WorldStateKind::FinishedSequence:
-        // Withdraw this task's speculative restore paths. A flag/name or native
+        // Withdraw this change's speculative restore paths. A flag/name or native
         // return value does not establish graph, replacement-model or collision
         // convergence. Keep authoritative state pending for a verified adapter.
         return false;

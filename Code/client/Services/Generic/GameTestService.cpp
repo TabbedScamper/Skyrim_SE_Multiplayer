@@ -92,7 +92,7 @@
 extern std::atomic<bool> g_copyNativeTracking; // AnimationSystem.cpp
 
 // Research handoff: perf2-r1-check/reference-research.patch records the native
-// call paths and prior art. This task cannot edit the shared research document.
+// call paths and prior art. This change cannot edit the shared research document.
 namespace HostFrameCost
 {
 // 0 cull, 1 capture, 2 headtrack, 3 lips, 4 naked, 5 trigger, 6 doors, 7 players,
@@ -5690,7 +5690,7 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             return Result(id, fmt::format("\"introStopped\":{},\"missing\":\"{}\"", JsonBool(pIntro != nullptr && !keepQuest),
                 missing));
         }
-        // Testing ground (docs: C:\Tools\skyrim_re\testground.ps1). Move this PC's player to a
+        // Testing ground (docs: the RE toolkit's `testground.ps1`). Move this PC's player to a
         // persistent reference (a map marker), offset sideways so players do not overlap.
         if (command == "teleport_player")
         {

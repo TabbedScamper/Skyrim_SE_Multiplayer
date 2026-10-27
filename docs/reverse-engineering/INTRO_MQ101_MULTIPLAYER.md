@@ -61,7 +61,7 @@ actor, or advance MQ101 again.
 ### `CharacterCreationBarrier`
 
 The installed `Skyrim.esm` maps MQ101 stage 75 to `Fragment_13`, whose only
-operation is `Game.ShowRaceMenu()`. The coordinator intercepts that transition,
+operation is `Game.ShowRaceMenu()`. The maintainer intercepts that transition,
 allows the host to enter the native creator, and orders every follower into an
 isolated local creator. Host progression to stage 80 is deferred until the ready
 barrier commits: stage 80's `Fragment_11` exits chargen, requests the vanilla
@@ -83,7 +83,7 @@ world before followers are ready.
   lobby. There is no silent timeout that strands the quest half-advanced.
 
 Followers must not execute MQ101's local `ShowRaceMenu` fragment as a quest
-stage consequence. The session coordinator invokes character creation in an
+stage consequence. The session maintainer invokes character creation in an
 isolated player transaction and suppresses reflected quest events.
 
 ### `HostCinematicResume`

@@ -68,7 +68,7 @@ Reborn behavior.
 | Loose-object physics | Leader while awake; canonical settled transform afterward | Kinematic/interpolated proxy | Latest transform and sleep state |
 | Death/ragdoll/corpses | Leader simulation for NPCs; each player owns their death request | Display streamed pose, then freeze the canonical final corpse pose | Actor lifecycle generation plus corpse pose |
 | Time/weather/cell resets | Leader session clock | Render received state; never advance reset clocks independently | Clock, weather and cell-reset snapshot |
-| Save/checkpoint | Shared session coordinator | Persist player-specific projection at the same watermark | Last committed checkpoint plus journal tail |
+| Save/checkpoint | Shared session maintainer | Persist player-specific projection at the same watermark | Last committed checkpoint plus journal tail |
 
 ## Interaction contracts
 
@@ -218,7 +218,7 @@ or:
 3. Main-menu Steam lobby and shared-campaign bootstrap.
 4. Leader-only NPC authority and actor lifecycle reconciliation.
 5. Exclusive dialogue leases, shared dialogue presentation, and scene gating.
-6. Door transition coordinator.
+6. Door transition maintainer.
 7. Atomic inventory/container/drop transactions and leader physics ownership.
 8. NPC death/ragdoll final-pose replication.
 9. Quest transaction capture, alias/global/scene state, and save projections.

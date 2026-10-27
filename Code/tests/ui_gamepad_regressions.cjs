@@ -4,7 +4,6 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 
-// Research (docs/REFERENCE_RESEARCH.md is outside this task's write allowlist):
 // https://github.com/schlangster/skyui/blob/master/src/ModConfigPanel/MenuDialog.as
 // initContent/handleInput/onMenuListPress keep list focus and consume dialog input.
 // Adopt a custom list with separate highlighted and committed choices; use explicit

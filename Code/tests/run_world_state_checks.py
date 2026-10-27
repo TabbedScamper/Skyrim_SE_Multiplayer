@@ -51,7 +51,7 @@ def compile_file(source, target, manifest, syntax=False, forced=None):
 
 objects = []
 sources = ["Code/encoding/Messages/WorldState.cpp", "Code/encoding/Messages/ClientMessageFactory.cpp", "Code/encoding/Messages/ServerMessageFactory.cpp"]
-# Concurrent engineers can register new messages before the coordinator rebuilds
+# Concurrent engineers can register new messages before the maintainer rebuilds
 # the encoding library. Compile those additions read-only into this test binary.
 additions = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "Code/encoding"], cwd=ROOT, text=True)
 sources += [path for path in additions.splitlines() if path.endswith(".cpp") and path not in sources]

@@ -296,7 +296,7 @@ struct State {
         // INSERT FOLLOW REPORT
     }
     void Before(std::chrono::steady_clock::time_point now) {
-        // Ungated loop from the reviewed round6 worktree, not 25fa030d.
+        // Ungated loop from the reviewed earlier worktree, not 25fa030d.
         for (auto& [body, probe] : s_followProbes) {
             if (probe.Steps && now >= probe.NextSteerLog && probe.Gap > 10.f) {
                 reports.push_back(probe); probe.NextSteerLog=now+2s;

@@ -1,6 +1,6 @@
 # Host-only quest and scene authority (design; no client patch)
 
-Scope: SkyrimSE.exe 1.7.104.0, the current shared-campaign implementation, and the MQ101 failure observed on 2026-09-24. This document is a design for the implementer's separate implementation worktree; it does not claim a working hook or a verified cure. VAs assume image base `0x140000000`; IDs are from the local 1.7.104 Address Library. Query with `C:\Tools\skyrim_re\sk.cmd fn id:<ID>`.
+Scope: SkyrimSE.exe 1.7.104.0, the current shared-campaign implementation, and the MQ101 failure observed on 2026-09-24. This document is a design for the implementer's separate implementation worktree; it does not claim a working hook or a verified cure. VAs assume image base `0x140000000`; IDs are from the local 1.7.104 Address Library. Query with the RE toolkit's `sk.cmd` fn id:<ID>`.
 
 ## Decision
 

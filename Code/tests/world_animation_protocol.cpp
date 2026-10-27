@@ -13,7 +13,7 @@
 namespace
 {
 // Executed by the compiler even under /Zs. The runtime replay/factory cases
-// below still need the coordinator's test executable.
+// below still need the maintainer's test executable.
 consteval bool CheckAnimationGrammar()
 {
     auto bytes = WorldAnimationFixture();

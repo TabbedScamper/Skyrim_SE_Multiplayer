@@ -1,7 +1,7 @@
 # Havok parity: physics objects and ragdolls 1:1
 
 Reviewer A, 2026-09-24. Every engine claim is read from the 1.7.104 exe corpus
-(`EXE_CORPUS.md`, `C:\Tools\skyrim_re\sk.cmd`). IDs are Address Library IDs, and VAs assume base 0x140000000.
+(`EXE_CORPUS.md`, the RE toolkit's `sk.cmd`). IDs are Address Library IDs, and VAs assume base 0x140000000.
 
 ## Why two PCs can never simulate the same thing
 

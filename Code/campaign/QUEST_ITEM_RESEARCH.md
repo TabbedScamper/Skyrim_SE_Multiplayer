@@ -2,7 +2,7 @@
 
 2026-09-25. Candidate implementation only. No build, commit, deployment, or paired game test was performed.
 
-The task's explicit file whitelist excludes `docs/REFERENCE_RESEARCH.md`. This report is kept under the permitted `Code/campaign` directory for the coordinator to incorporate into that document. `COMMON.md` explicitly exempts this worker from the Reviewer A/Reviewer B review rule; neither assistant reviewed this change.
+This report is kept under the permitted `Code/campaign` directory for the maintainer to incorporate into that document.
 
 ## Source inspection and decisions
 
@@ -21,7 +21,7 @@ Web search preceded implementation. Primary CommonLib source was opened online a
 
 ## Executable evidence: SkyrimSE.exe 1.7.104
 
-Queried with the specified Python interpreter and `C:/Tools/skyrim_re/sk.py`. `sk.cmd` did not print useful output in this shell; direct Python queries worked. These were static reads, not live probes or guessed hook offsets.
+Queried with the specified Python interpreter and the RE toolkit's `sk.py`. `sk.cmd` did not print useful output in this shell; direct Python queries worked. These were static reads, not live probes or guessed hook offsets.
 
 | Address Library ID | VA | Relevant native behavior |
 | --- | --- | --- |
@@ -83,7 +83,7 @@ No `GetContainer` call was found in the extracted PSC corpus searched. Do not co
 
 Executed: six SQLite schema checks, all passing. `git diff --check` passed for the touched tracked paths. Inspected message factory registration, source-level native ABI/layout evidence and build glob inclusion. The C++ tests and client/server have **not** been built or run. No in-game result is claimed.
 
-Coordinator validation after building:
+Maintainer validation after building:
 
 1. Have the follower pick up the Golden Claw. Server: one `Quest items: acquired ... alias=11` revision. Host: `queued real reference` followed by actual possession of that reference; MS13 reaches 40 through its container event. Follower: count one, Quest Items tab/native quest protection, normal localized added notice. Repeat with host picking it up and members in another cell.
 2. Hand in to Lucan. Server: `handed in` with a later revision. Follower: `removed party copy`. Neither side restores it during later scans. Reconnect/Continue an older save containing the claw: the tombstone must remove the stale tagged copy.

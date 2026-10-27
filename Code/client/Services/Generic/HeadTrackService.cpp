@@ -43,7 +43,7 @@ constexpr float kLookStrength = 0.75f; // TDM's default; retain native bone/cone
 // AIProcess+10 -> HighProcess+158 (six priority flags), without changing them.
 // NiCamera::WindowPointToRay ID 70630 / 140EF0050 confirms forward is column 0
 // of world.rotate (7C, 88, 94); parent camera-root axes are different.
-// Reference-research handoff (docs/REFERENCE_RESEARCH.md is outside edit scope):
+// Reference-research handoff:
 // TDM 57b913a src/Hooks.cpp:1394-1534 and DirectionalMovementHandler.cpp:2307-2351:
 // adopt native point targeting and Settings.h:113's 0.75 strength; retain the
 // native limits instead of the round-6 180-degree override. Its optional spine

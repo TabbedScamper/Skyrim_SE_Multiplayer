@@ -1,6 +1,6 @@
 # Playthrough 2026-09-28: Helgen to the cave exit (host + follower)
 
-Owner report after the first full two-player run of the intro. Logs: `C:\Tools\skyrim_re\playthrough-20260928`
+Owner report after the first full two-player run of the intro. Logs: the RE toolkit's `playthrough-20260928`
 (host 16:49-18:02 complete; follower only 17:36-18:01, the rotation kept 3 x 5 MB). MQ101 timeline from the host
 log: stage 0 at 17:31:50, execution stages 20-37 at 17:34-17:35, dragon attack 45-70 at 17:35:28-17:36:00, keep
 80-100 at 17:39-17:41, cave exit and crash 18:02:24.

@@ -35,7 +35,6 @@ struct LipCost
     }
     ~LipCost() { Stop(); }
 };
-// Research, SkyrimSE 1.7.104 (kept here because this task's edit allowlist
 // excludes docs/REFERENCE_RESEARCH.md):
 // CommonLibSSE-NG, inspected BSFaceGenAnimationData.h, BSFaceGenNiNode.h,
 // BSFaceGenKeyframeMultiple.h, BSSoundInfo.h and src/RE/B/BSSoundHandle.cpp:

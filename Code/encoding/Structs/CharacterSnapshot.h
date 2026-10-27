@@ -11,7 +11,7 @@ using TiltedPhoques::Vector;
 // A guest's character, separate from any world (owner design 2026-09-30: the host's world rules, the guest keeps its
 // own character and takes its levels and loot home). Character fields only: never the native PlayerCharacter change
 // form, which also carries the source world's objectives, location, factions and control state
-// (C:\Tools\skyrim_re\agent\character-snapshot-design.md). Forms travel as GameId (plugin + local id).
+// (the RE toolkit's `agent\character-snapshot-design.md`). Forms travel as GameId (plugin + local id).
 struct CharacterSnapshot
 {
     static constexpr uint32_t kVersion = 1;

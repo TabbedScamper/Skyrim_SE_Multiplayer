@@ -48,7 +48,6 @@ void InputService::NotifyControllerInput() noexcept
 // Vanilla Skyrim never calls ClipCursor (exe corpus: no callers), so without
 // the confinement the real pointer leaves a windowed/borderless game and
 // clicks land on other applications.
-// Focus research (docs/REFERENCE_RESEARCH.md is outside this task's edit scope):
 // SSEDisplayTweaks/SSETweaks/window.cpp:93-131,220-228,406-414 releases on
 // deactivation and runs after vanilla. Adopt those two rules, but gate resize
 // recapture on focus as well. Source:
