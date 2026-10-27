@@ -42,5 +42,7 @@ struct ActorExtension
     ReconciliationStage Reconciliation{ReconciliationStage::None};
 
 private:
-    uint32_t onlineFlags{0};
+    // Equip/inventory hooks read these on job threads while ownership changes.
+    // The flags do not publish the registry or the rest of this extension.
+    std::atomic<uint32_t> onlineFlags{0};
 };

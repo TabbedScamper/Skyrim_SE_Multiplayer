@@ -1,11 +1,17 @@
 #include <Services/CreatorTogether.h>
+#include <cmath>
 #include <limits>
 #include <Services/SmoothClock.h>
+#include <Services/OverlayService.h>
+#include <OverlayApp.hpp>
+#include <Services/ObjectService.h>
 #include <Services/CorpseRagdollService.h>
 #include "Forms/TESObjectCELL.h"
 #include "Forms/TESWorldSpace.h"
 #include "Services/PapyrusService.h"
 #include <Services/PartyService.h>
+#include <Services/LobbyService.h>
+#include <Utils/MainThread.h>
 
 #include <Services/CharacterService.h>
 #include <Services/Generic/HeadTrackService.h>
@@ -71,6 +77,7 @@
 #include <Messages/NotifyRespawn.h>
 #include <Messages/PlayerAppearanceRequest.h>
 #include <Messages/NotifyPlayerAppearance.h>
+#include <Messages/NotifyPlayerLevel.h>
 #include <Messages/SyncExperienceRequest.h>
 #include <Messages/NotifySyncExperience.h>
 #include <Messages/DialogueRequest.h>
@@ -175,6 +182,9 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher,
 
     m_notifyRespawnConnection = m_dispatcher.sink<NotifyRespawn>().connect<&CharacterService::OnNotifyRespawn>(this);
     m_notifyPlayerAppearanceConnection = m_dispatcher.sink<NotifyPlayerAppearance>().connect<&CharacterService::OnNotifyPlayerAppearance>(this);
+    // Another player's level onto their copy (owner 2026-10-02: the lobby's CHARACTERS showed every other player at
+    // level 1; the level only ever reached the overlay's party list). Kept per player, so a copy spawned later gets it.
+    m_notifyPlayerLevelConnection = m_dispatcher.sink<NotifyPlayerLevel>().connect<&CharacterService::OnNotifyPlayerLevel>(this);
     m_beastFormChangeConnection = m_dispatcher.sink<BeastFormChangeEvent>().connect<&CharacterService::OnBeastFormChange>(this);
 
     m_addExperienceEventConnection = m_dispatcher.sink<AddExperienceEvent>().connect<&CharacterService::OnAddExperienceEvent>(this);
@@ -383,9 +393,10 @@ void CharacterService::RunScriptedActorUpdates() noexcept
                 ++it;
                 continue;
             }
+            // Resuming: moved first, then enabled at the destination (MoveActor keeps that order across threads).
             if (state.Phase == ScriptedActorPhase::Resume)
-                MoveActor(pActor, state.WorldSpaceId, state.CellId, state.Position);
-            if ((parked.DisabledByUs || state.Phase == ScriptedActorPhase::Resume) && pActor->IsDisabled())
+                MoveActor(pActor, state.WorldSpaceId, state.CellId, state.Position, true);
+            else if (parked.DisabledByUs && pActor->IsDisabled())
                 pActor->EnableImpl();
         }
         else if (state.Phase == ScriptedActorPhase::Park)
@@ -758,6 +769,8 @@ void CharacterService::OnActorAdded(const ActorAddedEvent& acEvent) noexcept
     if (it != std::end(view))
     {
         Actor* pActor = Cast<Actor>(TESForm::GetById(acEvent.FormId));
+        if (!pActor)
+            return;
         pActor->GetExtension()->SetRemote(!m_world.all_of<LeaderNativeClaim>(*it));
 
         entity = *it;
@@ -812,7 +825,7 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
     m_world.remove<LeaderNativeClaim>(cId);
 
     auto& formIdComponent = view.get<FormIdComponent>(cId);
-    CancelServerAssignment(*entityIt, formIdComponent.Id);
+    CancelServerAssignment(*entityIt, formIdComponent.Id, true);
 
     m_world.remove<EarlyAnimationBufferComponent, DeferredAssignmentComponent>(cId);
 
@@ -825,8 +838,83 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
     spdlog::info("Actor removed, form id: {:X}", acEvent.FormId);
 }
 
+namespace
+{
+std::unordered_map<uint32_t, uint16_t> s_playerLevels; // player id -> level, as last sent
+
+// Every copy whose owner's level is known wears that level (its own NPC record: GetLevel, the lobby, dialogue checks).
+void ApplyPlayerLevels(World& aWorld) noexcept
+{
+    auto view = aWorld.view<PlayerComponent, FormIdComponent>();
+    for (auto entity : view)
+    {
+        const auto level = s_playerLevels.find(view.get<PlayerComponent>(entity).Id);
+        if (level == s_playerLevels.end())
+            continue;
+        auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        auto* pNpc = pActor && pActor->GetExtension() && pActor->GetExtension()->IsRemotePlayer() ? Cast<TESNPC>(pActor->baseForm) : nullptr;
+        if (pNpc && pNpc->actorData.level != level->second)
+            pNpc->actorData.level = level->second;
+    }
+}
+
+// A look that arrived before its copy here had a form (the lobby sends it as the copy spawns): kept, by server id, and
+// applied once the copy is bound in the shared world. The newest per player wins.
+std::mutex s_unboundLooksLock;
+std::unordered_map<uint32_t, std::pair<NotifyPlayerAppearance, uint64_t>> s_unboundLooks;
+} // namespace
+
 void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
+    // New actors created last frame are in the form table now: the next queued creation may go.
+    m_createdThisFrame = false;
+    if (!MT::CutM6bEnabled())
+    {
+        auto* ui = UI::Get();
+        const bool loading = m_holdSpawns || !ui || ui->GetMenuOpen(BSFixedString("Loading Menu"));
+        if (!loading)
+        {
+            std::vector<NotifyPlayerAppearance> ready;
+            {
+                std::lock_guard lock(s_unboundLooksLock);
+                auto bound = m_world.view<FormIdComponent, RemoteComponent>();
+                const auto now = GetTickCount64();
+                for (auto it = s_unboundLooks.begin(); it != s_unboundLooks.end();)
+                {
+                    const bool found = std::any_of(bound.begin(), bound.end(),
+                        [&bound, id = it->first](auto entity) { return bound.get<RemoteComponent>(entity).Id == id; });
+                    if (found)
+                        ready.push_back(std::move(it->second.first));
+                    if (found || now - it->second.second > 30000)
+                        it = s_unboundLooks.erase(it);
+                    else
+                        ++it;
+                }
+            }
+            for (const auto& look : ready)
+                OnNotifyPlayerAppearance(look);
+            if (!m_nextFrameSpawns.empty())
+            {
+                auto spawn = std::move(m_nextFrameSpawns.front());
+                m_nextFrameSpawns.pop_front();
+                OnCharacterSpawn(spawn);
+            }
+            ApplyPlayerLevels(m_world);
+        }
+        if (m_holdSpawns)
+        {
+            auto* player = PlayerCharacter::Get();
+            if (!loading && player && player->parentCell && player->GetNiNode() &&
+                (m_holdSawLoading || GetTickCount64() - m_holdSince > 90000))
+            {
+                m_holdSpawns = false;
+                auto held = std::move(m_heldSpawns);
+                m_heldSpawns.clear();
+                for (const auto& spawn : held)
+                    OnCharacterSpawn(spawn);
+            }
+        }
+    }
     RunAnimObjectUpdates();
     RunScriptedActorUpdates();
     EngineFixes::OnFrame();
@@ -837,6 +925,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
         UpdateLeaderScriptedPackage();
     }
     SendCreatorAppearance();
+    SendNameIfChanged();
     PoseCopyAuthority::SetCurrentTick(SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick());
     static uint64_t s_nextPoseRegistryMs = 0;
     if (const auto registryNow = GetTickCount64(); registryNow >= s_nextPoseRegistryMs)
@@ -882,6 +971,72 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     ProcessLeveledConforms();
 }
 
+void CharacterService::DrainWorldHoldOnMainFrame() noexcept
+{
+    if (!LobbyService::SharedWorld())
+        return;
+    m_holdSpawns = false;
+    // Actor::New may reuse a temporary form ID until the next frame.
+    if (!m_nextFrameSpawns.empty())
+    {
+        auto spawn = std::move(m_nextFrameSpawns.front());
+        m_nextFrameSpawns.pop_front();
+        OnCharacterSpawn(spawn);
+    }
+    else if (!m_heldSpawns.empty())
+    {
+        auto spawn = std::move(m_heldSpawns.front());
+        m_heldSpawns.erase(m_heldSpawns.begin());
+        OnCharacterSpawn(spawn);
+    }
+    if (!m_heldAssignmentOrder.empty())
+    {
+        const auto id = m_heldAssignmentOrder.front();
+        m_heldAssignmentOrder.pop_front();
+        if (auto it = m_heldAssignments.find(id); it != m_heldAssignments.end())
+        {
+            auto waiting = m_world.view<WaitingForAssignmentComponent>();
+            const bool bound = std::any_of(waiting.begin(), waiting.end(),
+                [&waiting, cookie = it->second.Cookie](auto entity) {
+                    return waiting.get<WaitingForAssignmentComponent>(entity).Cookie == cookie;
+                });
+            if (bound)
+            {
+                auto assignment = std::move(it->second);
+                m_heldAssignments.erase(it);
+                OnAssignCharacter(assignment);
+            }
+            else
+                m_heldAssignmentOrder.push_back(id);
+        }
+    }
+    std::vector<NotifyPlayerAppearance> ready;
+    {
+        std::lock_guard lock(s_unboundLooksLock);
+        auto bound = m_world.view<FormIdComponent, RemoteComponent>();
+        for (auto it = s_unboundLooks.begin(); it != s_unboundLooks.end();)
+        {
+            const bool found = std::any_of(bound.begin(), bound.end(),
+                [&bound, id = it->first](auto entity) { return bound.get<RemoteComponent>(entity).Id == id; });
+            if (found)
+            {
+                ready.push_back(std::move(it->second.first));
+                it = s_unboundLooks.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+    for (const auto& look : ready)
+        OnNotifyPlayerAppearance(look);
+    static uint64_t s_nextLevels{};
+    if (const auto now = GetTickCount64(); now >= s_nextLevels)
+    {
+        s_nextLevels = now + 250;
+        ApplyPlayerLevels(m_world);
+    }
+}
+
 void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept
 {
     Utils::InitializeEntityIndex(m_world);
@@ -908,6 +1063,14 @@ void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const
 
 void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept
 {
+    // Spawns held or queued for the old connection name nothing now (ReleaseForReload re-arms the hold after this).
+    ClearMainFrameWork();
+    m_holdSpawns = false;
+    m_heldSpawns.clear();
+    m_heldAssignments.clear();
+    m_heldAssignmentOrder.clear();
+    m_nextFrameSpawns.clear();
+    { std::lock_guard lock(s_unboundLooksLock); s_unboundLooks.clear(); }
     m_loadedActorLocations.clear();
     m_restoredOwnershipGrants.clear();
     for (const auto entity : m_world.view<LeaderNativeClaim>())
@@ -943,6 +1106,7 @@ void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEve
 
     m_world.clear<WaitingForAssignmentComponent, DeferredAssignmentComponent,
         LocalComponent, RemoteComponent>();
+    InterpolationSystem::ResetRemoteStates();
 
     for (const auto& [formId, pickFormId] : m_pendingLeveledConforms)
     {
@@ -960,8 +1124,66 @@ void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEve
     m_pendingLeveledConforms.clear();
 }
 
+void CharacterService::ReleaseForReload() noexcept
+{
+    auto heldSpawns = std::move(m_heldSpawns);
+    auto heldAssignments = std::move(m_heldAssignments);
+    auto heldAssignmentOrder = std::move(m_heldAssignmentOrder);
+    auto nextFrameSpawns = std::move(m_nextFrameSpawns);
+    decltype(s_unboundLooks) heldLooks;
+    { std::lock_guard lock(s_unboundLooksLock); heldLooks.swap(s_unboundLooks); }
+    // The local player keeps its tracking: it is the same PlayerCharacter and the same server character across the
+    // load, and a load does not re-register it (only a connect does). Dropping it stopped this player's movement
+    // stream, so the other player's copy stayed at its pre-wipe spot outside the loaded area and never appeared.
+    std::optional<entt::entity> self;
+    std::optional<LocalComponent> selfLocal;
+    for (auto entity : m_world.view<FormIdComponent, LocalComponent>())
+        if (m_world.get<FormIdComponent>(entity).Id == 0x14)
+        {
+            self = entity;
+            selfLocal = m_world.get<LocalComponent>(entity);
+        }
+    // The disconnect cleanup: remote player copies deleted, NPC copies back to local simulation, pending maps cleared.
+    OnDisconnected(DisconnectedEvent{});
+    m_heldSpawns = std::move(heldSpawns);
+    m_heldAssignments = std::move(heldAssignments);
+    m_heldAssignmentOrder = std::move(heldAssignmentOrder);
+    m_nextFrameSpawns = std::move(nextFrameSpawns);
+    { std::lock_guard lock(s_unboundLooksLock); s_unboundLooks.swap(heldLooks); }
+    if (self && selfLocal && m_world.valid(*self))
+        m_world.emplace_or_replace<LocalComponent>(*self, *selfLocal);
+    // Then no entity may outlive the world it tracked: OnActorRemoved during the menu teardown would find it and
+    // relinquish ownership, and later updates would resolve its stale form id.
+    std::vector<entt::entity> tracked;
+    for (auto entity : m_world.view<FormIdComponent>())
+        tracked.push_back(entity);
+    for (auto entity : m_world.view<LeaderNativeClaim>())
+        tracked.push_back(entity);
+    for (auto entity : m_world.view<WaitingForAssignmentComponent>())
+        tracked.push_back(entity);
+    std::sort(tracked.begin(), tracked.end());
+    tracked.erase(std::unique(tracked.begin(), tracked.end()), tracked.end());
+    for (auto entity : tracked)
+        if (m_world.valid(entity) && entity != self)
+            m_world.destroy(entity);
+    m_loadedActorLocations.clear();
+    m_parkedActors.clear();
+    m_holdSpawns = true;
+    m_holdSawLoading = false;
+    m_holdSince = GetTickCount64();
+    spdlog::info("Party wipe: {} tracked actors forgotten before the reload", tracked.size());
+}
+
 void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept
 {
+    if (MT::CutM6bEnabled() && (!LobbyService::SharedWorld() || MT::CurrentSlot() != MT::Slot::S3_2))
+    {
+        if (!m_heldAssignments.count(acMessage.ServerId))
+            m_heldAssignmentOrder.push_back(acMessage.ServerId);
+        MT::HeldAssignments.fetch_add(1, std::memory_order_relaxed);
+        m_heldAssignments[acMessage.ServerId] = acMessage;
+        return;
+    }
     spdlog::info("Received for cookie {:X}, server id {:X}", acMessage.Cookie, acMessage.ServerId);
 
     auto view = m_world.view<WaitingForAssignmentComponent>();
@@ -1189,10 +1411,40 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
 
 void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
+    if (m_holdSpawns || (MT::CutM6bEnabled() &&
+        (!LobbyService::SharedWorld() || MT::CurrentSlot() != MT::Slot::S3_2)))
+    {
+        MT::HeldSpawns.fetch_add(1, std::memory_order_relaxed);
+        // Bounded while a load drags on: the newest request per server id replaces an older one.
+        const auto same = std::find_if(m_heldSpawns.begin(), m_heldSpawns.end(),
+            [&acMessage](const CharacterSpawnRequest& acHeld) { return acHeld.ServerId == acMessage.ServerId; });
+        if (same != m_heldSpawns.end())
+            *same = acMessage;
+        else
+            m_heldSpawns.push_back(acMessage);
+        return;
+    }
+    // A load the reload hold does not cover (the lobby's own world load, a New Game's reset): wait it out frame by frame.
+    if (auto* pUI = UI::Get(); !pUI || pUI->GetMenuOpen(BSFixedString("Loading Menu")))
+    {
+        m_nextFrameSpawns.push_back(acMessage);
+        return;
+    }
+    if (acMessage.IsPlayer)
+        spdlog::info("Player spawn: server {:X} form {:X}:{:X} epoch {}", acMessage.ServerId, acMessage.FormId.ModId,
+            acMessage.FormId.BaseId, acMessage.OwnershipEpoch);
     if (acMessage.FormId != GameId{} && IsActorDiscoverySuppressed(m_world.GetModSystem().GetGameId(acMessage.FormId)))
+    {
+        if (acMessage.IsPlayer)
+            spdlog::warn("Player spawn {:X} dropped: discovery suppressed", acMessage.ServerId);
         return;
+    }
     if (const auto existing = Utils::FindEntityByServerId(acMessage.ServerId); existing && m_world.all_of<LocalComponent>(*existing))
+    {
+        if (acMessage.IsPlayer)
+            spdlog::warn("Player spawn {:X} dropped: that server id is a local actor here", acMessage.ServerId);
         return;
+    }
     if (acMessage.OwnershipEpoch == 0)
     {
         spdlog::warn("Ignored spawn for actor {:X} because the ownership epoch is invalid", acMessage.ServerId);
@@ -1214,8 +1466,23 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     // Custom forms
     // A player always needs a private NPC base, even if a peer supplied a BaseId.
-    if (acMessage.IsPlayer || acMessage.FormId == GameId{})
+    // A temporary (FF) reference id is the owner's own and names nothing here: resolving it bound a peer's temporary
+    // Thalmor soldier onto the freshly created copy of the other player, which shares that local FF id (2026-09-29,
+    // after a party reload: the player's copy became the soldier). Temporaries always get their own copy.
+    const bool temporaryForm = acMessage.FormId != GameId{} &&
+        (acMessage.FormId.ModId == std::numeric_limits<uint32_t>::max() ||
+            (m_world.GetModSystem().GetGameId(acMessage.FormId) >> 24) == 0xFF);
+    if (temporaryForm)
+        spdlog::info("Temporary spawn {:X} (owner's form {:X}:{:X}) gets its own copy", acMessage.ServerId,
+            acMessage.FormId.ModId, acMessage.FormId.BaseId);
+    if (acMessage.IsPlayer || acMessage.FormId == GameId{} || temporaryForm)
     {
+        if (m_createdThisFrame)
+        {
+            m_nextFrameSpawns.push_back(acMessage);
+            return;
+        }
+        m_createdThisFrame = true;
         TESNPC* pNpc = nullptr;
 
         entity = m_world.create();
@@ -1248,7 +1515,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
             FaceGenSystem::Setup(m_world, *entity, acMessage.FaceTints);
         }
 
-        pActor = Actor::Create(pNpc);
+        pActor = Actor::Create(pNpc, acMessage.IsPlayer);
     }
     else
     {
@@ -1381,6 +1648,10 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         auto& interpolationComponent = view.get<InterpolationComponent>(*itor);
         auto& animationComponent = view.get<RemoteAnimationComponent>(*itor);
         const auto& movement = update.UpdatedMovement;
+        // The owner's sample time: the relay stamps its 20 ms batch with the server's clock, up to a batch or more
+        // after the owner sampled. Played at the relay stamp, each position sat 0-50 ms off its true time (Lokir,
+        // 2026-09-30: along-track error spread 10 ms, follower frame-to-frame velocity change 4x the host's).
+        const uint64_t sampleTick = acMessage.Tick > update.SampleAge ? acMessage.Tick - update.SampleAge : acMessage.Tick;
 
         // Read-only interval diagnostics, per player/ownership lifetime. No
         // event deduplication by name: repeated same-tick actions can be valid.
@@ -1485,13 +1756,18 @@ void CharacterService::OnReferencesMoveRequest(const ServerReferencesMoveRequest
         }
 
         InterpolationComponent::TimePoint point;
-        point.Tick = acMessage.Tick;
+        point.Tick = sampleTick;
         point.Position = movement.Position;
         point.Rotation = {movement.Rotation.x, 0.f, movement.Rotation.y};
         point.Variables = movement.Variables;
         point.Direction = movement.Direction;
+        point.LifeState = movement.LifeState;
+        point.Essential = movement.Essential;
+        point.Fleeing = movement.Fleeing;
 
         InterpolationSystem::AddPoint(interpolationComponent, point);
+        if (const auto* traced = m_world.try_get<FormIdComponent>(*itor))
+            ObjectService::MotionTraceReceived(traced->Id, sampleTick, movement.Position);
         if (acMessage.Tick >= animationComponent.LastReceivedCombatTargetTick)
         {
             animationComponent.LastReceivedCombatTargetTick = acMessage.Tick;
@@ -1593,7 +1869,7 @@ void CharacterService::OnFactionsChanges(const NotifyFactionsChanges& acEvent) c
 
             auto* const pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
             if (!pActor)
-                return;
+                continue;
 
             auto& cacheComponent = view.get<CacheComponent>(*itor);
             cacheComponent.FactionsContent = factions;
@@ -1858,6 +2134,50 @@ bool CharacterService::GetCreatorDisplayOffset(const uint32_t aFormId, NiPoint3&
     return true;
 }
 
+// The local character's name whenever it differs from the last one sent (after the creator's ChangeName, after
+// loading a named save): a rename-only appearance packet. Checked every 2 s.
+void CharacterService::NotifyUiPlayerName(const uint32_t aPlayerId, const char* apName) const noexcept
+{
+    auto pArguments = CefListValue::Create();
+    pArguments->SetInt(0, static_cast<int>(aPlayerId));
+    pArguments->SetString(1, apName);
+    m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("playerNameChanged", pArguments);
+}
+
+void CharacterService::SendNameIfChanged() noexcept
+{
+    const auto now = GetTickCount64();
+    if (now < m_nextNameCheckMs)
+        return;
+    m_nextNameCheckMs = now + 2000;
+    if (!m_transport.IsConnected())
+    {
+        m_sentName.clear();
+        return;
+    }
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+    if (!pNpc || !pNpc->fullName.value.data)
+        return;
+    const std::string name = pNpc->fullName.value.AsAscii();
+    if (name.empty() || name == m_sentName)
+        return;
+    auto view = m_world.view<FormIdComponent>();
+    const auto it = std::find_if(view.begin(), view.end(), [view](auto entity) { return view.get<FormIdComponent>(entity).Id == 0x14; });
+    if (it == view.end())
+        return;
+    const auto serverId = Utils::GetServerId(*it);
+    if (!serverId)
+        return;
+    PlayerAppearanceRequest request;
+    request.ServerId = *serverId;
+    request.Name = name.c_str();
+    m_transport.Send(request);
+    m_sentName = name;
+    spdlog::info("This player's character is called {}", name);
+    NotifyUiPlayerName(m_transport.GetLocalPlayerId(), name.c_str());
+}
+
 // While the creator (RaceSex Menu) is open: this player's look, once a second when it changed,
 // and the final look when the creator closes. Receivers apply it to this player's character.
 void CharacterService::SendCreatorAppearance() noexcept
@@ -1873,33 +2193,9 @@ void CharacterService::SendCreatorAppearance() noexcept
         return;
     m_nextCreatorAppearanceMs = now + 1000;
 
-    auto* pPlayer = PlayerCharacter::Get();
-    auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
-    if (!pNpc)
-        return;
-    auto view = m_world.view<FormIdComponent>();
-    const auto it = std::find_if(view.begin(), view.end(), [view](auto entity) { return view.get<FormIdComponent>(entity).Id == 0x14; });
-    if (it == view.end())
-        return;
-    const auto serverId = Utils::GetServerId(*it);
-    if (!serverId)
-        return;
-
     PlayerAppearanceRequest request;
-    request.ServerId = *serverId;
-    pNpc->MarkChanged(0x2000800);
-    request.ChangeFlags = pNpc->GetChangeFlags();
-    pNpc->Serialize(&request.AppearanceBuffer);
-    const auto& tints = pPlayer->GetTints();
-    request.FaceTints.Entries.resize(tints.length);
-    for (auto i = 0u; i < tints.length; ++i)
-    {
-        request.FaceTints.Entries[i].Alpha = tints[i]->alpha;
-        request.FaceTints.Entries[i].Color = tints[i]->color;
-        request.FaceTints.Entries[i].Type = tints[i]->type;
-        if (tints[i]->texture)
-            request.FaceTints.Entries[i].Name = tints[i]->texture->name.AsAscii();
-    }
+    if (!BuildLook(request))
+        return;
     // Still editing until Done (the creator stays open while the others finish; CreatorTogether).
     request.InCreator = creatorOpen && !CreatorTogether::IsDone();
 
@@ -1921,6 +2217,63 @@ void CharacterService::SendCreatorAppearance() noexcept
         spdlog::info("Character creator closed: sent the final look");
 }
 
+bool CharacterService::SendLookNow() noexcept
+{
+    if (!m_transport.IsConnected())
+        return false;
+    PlayerAppearanceRequest request;
+    if (!BuildLook(request))
+        return false;
+    m_transport.Send(request);
+    spdlog::info("Sent this player's look as server {:X} ({} bytes, {} tint layers)", request.ServerId, request.AppearanceBuffer.size(),
+        request.FaceTints.Entries.size());
+    return true;
+}
+
+// This player's look as the others apply it to their copy (CreatorTogether::QueueAppearance): race, face, sex, tints, name.
+bool CharacterService::BuildLook(PlayerAppearanceRequest& aRequest) noexcept
+{
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+    if (!pNpc)
+        return false;
+    auto view = m_world.view<FormIdComponent>();
+    const auto it = std::find_if(view.begin(), view.end(), [view](auto entity) { return view.get<FormIdComponent>(entity).Id == 0x14; });
+    if (it == view.end())
+        return false;
+    const auto serverId = Utils::GetServerId(*it);
+    if (!serverId)
+        return false;
+    auto& request = aRequest;
+    request.ServerId = *serverId;
+    // Race (0x2000000), face (0x800) and sex (0x1000000, CHANGE_NPC_GENDER). The native sex toggle
+    // (TESActorBaseData::SetActorBaseFlag, 0x1401DD2C0) CLEARS the gender flag when the sex returns to the base
+    // record's, so the packet then carried no sex and the copy kept the last one it got: the host looked female on
+    // the follower until a load (session 2026-09-29). With the flag, the save writes the sex and the load sets it.
+    pNpc->MarkChanged(0x3000800);
+    request.ChangeFlags = pNpc->GetChangeFlags();
+    pNpc->Serialize(&request.AppearanceBuffer);
+    const auto& tints = pPlayer->GetTints();
+    request.FaceTints.Entries.resize(tints.length);
+    for (auto i = 0u; i < tints.length; ++i)
+    {
+        request.FaceTints.Entries[i].Alpha = tints[i]->alpha;
+        request.FaceTints.Entries[i].Color = tints[i]->color;
+        request.FaceTints.Entries[i].Type = tints[i]->type;
+        if (tints[i]->texture)
+            request.FaceTints.Entries[i].Name = tints[i]->texture->name.AsAscii();
+    }
+    if (pNpc->fullName.value.data)
+        request.Name = pNpc->fullName.value.AsAscii();
+    return true;
+}
+
+void CharacterService::OnNotifyPlayerLevel(const NotifyPlayerLevel& acMessage) noexcept
+{
+    s_playerLevels[acMessage.PlayerId] = acMessage.NewLevel;
+    ApplyPlayerLevels(m_world);
+}
+
 // Another player's look (live while they edit): coalesced and applied to their character on the
 // main thread, before the creator sets its preview visibility.
 void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& acMessage) noexcept
@@ -1928,13 +2281,37 @@ void CharacterService::OnNotifyPlayerAppearance(const NotifyPlayerAppearance& ac
     auto view = m_world.view<FormIdComponent, RemoteComponent>();
     const auto entityIt = std::find_if(view.begin(), view.end(),
         [view, id = acMessage.ServerId](auto aEntity) { return view.get<RemoteComponent>(aEntity).Id == id; });
-    if (entityIt == view.end())
+    if (!acMessage.InCreator)
+        spdlog::info("Look for server {:X} ({} bytes): {}", acMessage.ServerId, acMessage.AppearanceBuffer.size(),
+            entityIt == view.end() ? "no copy with a form here yet; kept until there is" : "applying to its copy");
+    // Never write a remote look into a form while a load runs (2026-10-03: the follower crashed in TESNPC::Load, applying
+    // the host's look while its own lobby world was still loading): keep it until the load is over.
+    auto* pUI = UI::Get();
+    const bool loading = m_holdSpawns || !pUI || pUI->GetMenuOpen(BSFixedString("Loading Menu")) ||
+        (MT::CutM6bEnabled() && (!LobbyService::SharedWorld() || MT::CurrentSlot() != MT::Slot::S3_2));
+    if (entityIt == view.end() || loading)
+    {
+        MT::HeldLooks.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lock(s_unboundLooksLock);
+        s_unboundLooks[acMessage.ServerId] = {acMessage, GetTickCount64()};
         return;
+    }
     auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(*entityIt).Id));
     auto* pNpc = pActor ? Cast<TESNPC>(pActor->baseForm) : nullptr;
     if (!pNpc || pActor == PlayerCharacter::Get() || pActor->formID == 0x14 ||
         !pActor->GetExtension() || !pActor->GetExtension()->IsRemotePlayer())
         return;
+    // Its name (the crosshair and dialogue show the copy's TESNPC name).
+    if (!acMessage.Name.empty())
+    {
+        pNpc->fullName.value.Set(acMessage.Name.c_str());
+        spdlog::info("Player copy {:X} is called {}", pActor->formID, acMessage.Name);
+        // The party list names players from their connect (everyone is "Prisoner" before the creator).
+        if (const auto* pPlayer = m_world.try_get<PlayerComponent>(*entityIt))
+            NotifyUiPlayerName(pPlayer->Id, acMessage.Name.c_str());
+    }
+    if (acMessage.AppearanceBuffer.empty())
+        return; // a rename only
 
     {
         std::lock_guard lock(s_creatorPlayersLock);
@@ -2016,6 +2393,7 @@ void CharacterService::OnBeastFormChange(const BeastFormChangeEvent& acEvent) co
         return;
     }
 
+    pNpc->MarkChanged(0x3000800); // race, sex and face: see SendCreatorAppearance
     pNpc->Serialize(&request.AppearanceBuffer);
     request.ChangeFlags = pNpc->GetChangeFlags();
 
@@ -2092,6 +2470,18 @@ void CharacterService::OnNotifyMount(const NotifyMount& acMessage) noexcept
         return;
     if (!acMessage.MountId)
     {
+        // A dismount after this PC already started the mount package: stop it. Erasing the relation alone left the
+        // native package running (2026-09-30 15:03:39: Hadvar's copy began mounting 654E1 0.5 s before the owner's
+        // dismount arrived; the horse stayed face down in the dirt, spinning, on the follower only).
+        const auto pending = m_pendingMounts.find(acMessage.RiderId);
+        const bool started = pending != m_pendingMounts.end() && (pending->second.StartedAtMs || pending->second.WasSeated);
+        auto* pRider = Utils::GetByServerId<Actor>(acMessage.RiderId);
+        if (pRider && pRider->GetExtension()->IsRemote() && (started || pRider->GetNativeMountFormId()))
+        {
+            spdlog::info("Mount: owner dismounted rider {:X} (native mount {:X}, package started {}); released here",
+                pRider->formID, pRider->GetNativeMountFormId(), started);
+            InterpolationSystem::QueueStopInteracting(pRider->formID);
+        }
         m_pendingMounts.erase(acMessage.RiderId);
         return;
     }
@@ -2123,6 +2513,14 @@ void CharacterService::RunPendingMounts() noexcept
             ++it;
             continue;
         }
+        const auto knockState = (pRider->actorState.flags1 >> 25) & 7;
+        if (pRider->GetExtension()->IsRemote() && knockState != 0)
+        {
+            // The owner relation remains pending; only its get-up can resume native seating.
+            pending.NextAttemptMs = now + 100;
+            ++it;
+            continue;
+        }
         if (pRider->GetNativeMountFormId() == pMount->formID)
         {
             // The engine must continue processing a remotely owned rider's
@@ -2150,6 +2548,30 @@ void CharacterService::RunPendingMounts() noexcept
                 continue;
             }
         }
+        // A relation that waited for 3D can be stale: a rider still in the owner's saddle is streamed onto its horse.
+        // Start (and restart) the mount only while the copy is near the horse (a stale mount began just before the
+        // owner's dismount arrived, 2026-09-30 15:03:39).
+        if (pRider->GetExtension()->IsRemote())
+        {
+            // A package that never seats is restarted every ~5 s forever: a follower copy of rider 198BC re-mounted
+            // horse 527F1 about every 8 s for two minutes while the owner's rider was far away (2026-09-30 18:26:57).
+            // Each restart replays the mount animation. Give up after three starts; a newer relation re-arms it.
+            if (pending.Starts >= 3 && now - pending.StartedAtMs >= 5000)
+            {
+                spdlog::info("Deferred mount rider {:X} horse {:X}: not seated after {} starts, giving up",
+                    it->first, pending.MountId, pending.Starts);
+                it = m_pendingMounts.erase(it);
+                continue;
+            }
+            const auto gap = glm::length(glm::vec3(pRider->position.x - pMount->position.x,
+                pRider->position.y - pMount->position.y, pRider->position.z - pMount->position.z));
+            if (gap > 200.f)
+            {
+                pending.NextAttemptMs = now + 250;
+                ++it;
+                continue;
+            }
+        }
         // A successful start merely queues the engine package. Give native
         // processing time to seat the rider before re-initiating it.
         if (pending.StartedAtMs && now - pending.StartedAtMs < 5000)
@@ -2170,6 +2592,7 @@ void CharacterService::RunPendingMounts() noexcept
         if (started)
         {
             ++m_mountApplied;
+            ++pending.Starts;
             pending.StartedAtMs = now;
             pending.NextAttemptMs = now + 100;
             spdlog::info("Started deferred mount rider {:X} horse {:X} after {} attempts",
@@ -2181,6 +2604,26 @@ void CharacterService::RunPendingMounts() noexcept
         ++m_mountRejected;
         pending.NextAttemptMs = now + 500;
         ++it;
+    }
+}
+
+void CharacterService::SendDismountBeforeRagdoll(const uint32_t aRiderId, const uint32_t aOwnershipEpoch,
+    Actor* apRider) noexcept
+{
+    if (!apRider || !m_transport.IsConnected()) return;
+    auto& sent = m_localMountSent[aRiderId];
+    // The mount event can precede the 200 ms owner poll, so its send cache can still be empty.
+    // A redundant zero relation is harmless; omitting it leaves that earlier mount live on the copy.
+    MountRequest request{};
+    request.RiderId = aRiderId;
+    request.RiderOwnershipEpoch = aOwnershipEpoch;
+    if (m_transport.Send(request))
+    {
+        spdlog::info("Mount: sent dismount for rider {:X} before first ragdoll sample", apRider->formID);
+        sent.MountId = 0;
+        sent.OwnershipEpoch = aOwnershipEpoch;
+        sent.LastSentMs = GetTickCount64();
+        sent.ZeroObservedAtMs = sent.LastSentMs;
     }
 }
 
@@ -2394,17 +2837,22 @@ void CharacterService::OnNotifyNewPackage(const NotifyNewPackage& acMessage) con
 
 void CharacterService::OnAddExperienceEvent(const AddExperienceEvent& acEvent) noexcept
 {
-    m_cachedExperience += acEvent.Experience;
+    if (acEvent.Skill >= 0 && acEvent.Skill < static_cast<int32_t>(m_cachedExperience.size()) &&
+        std::isfinite(acEvent.Experience) && acEvent.Experience > 0.f)
+        m_cachedExperience[acEvent.Skill] += acEvent.Experience;
 }
 
 void CharacterService::OnNotifySyncExperience(const NotifySyncExperience& acMessage) noexcept
 {
     PlayerCharacter* pPlayer = PlayerCharacter::Get();
 
-    if (PlayerCharacter::LastUsedCombatSkill == -1)
+    const auto skill = acMessage.Skill;
+    if (skill != 6 && skill != 7 && skill != 8 && skill != 9 && skill != 18 && skill != 19 && skill != 20 && skill != 21 && skill != 22)
+        return;
+    if (!std::isfinite(acMessage.Experience) || acMessage.Experience <= 0.f)
         return;
 
-    pPlayer->AddSkillExperience(PlayerCharacter::LastUsedCombatSkill, acMessage.Experience);
+    pPlayer->AddSkillExperience(skill, acMessage.Experience);
 }
 
 void CharacterService::OnDialogueEvent(const DialogueEvent& acEvent) noexcept
@@ -2555,19 +3003,154 @@ void CharacterService::OnPartyJoinedEvent(const PartyJoinedEvent& acEvent) noexc
     }
 }
 
-void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept
+namespace
+{
+// Owner crash 2026-09-29 15:30 (dump SkyrimTogether.exe.67508): a teleport notice was handled in the client update,
+// which runs off the main thread (the Papyrus VM update hook), and MoveActor loaded the destination cell there
+// (TESWorldSpace::LoadCell 20460 -> form allocation) while the game loaded cells itself: CRT invalid-parameter abort.
+// Cell loads and MoveTo run on the main thread only; moves asked for elsewhere wait for the next main frame.
+struct PendingMove
+{
+    uint32_t FormId{};
+    GameId WorldSpaceId{};
+    GameId CellId{};
+    Vector3_NetQuantize Position{};
+    bool EnableAfter{};
+    bool CorpseCorrection{};
+};
+std::mutex s_pendingMovesLock;
+std::deque<PendingMove> s_pendingMoves;
+std::atomic<uint32_t> s_mainThreadId{};
+}
+
+// Owner report 2026-09-29: the follower got no Search prompt on a body the host killed and could not pick it up. The
+// engine moves a dying actor's body to the dead-body collision layer (32, DEADBIP) in its death path 0x1406A9E50 (37896)
+// only when the knock state is 0 or 6; a copy killed by sync is usually already ragdolling from the synced knock
+// (state 1), so its bodies stayed on the living layer (8) while the owner's were on 32 (corpse_test: host L32,
+// follower L8). Do what the death path does: NiAVObject::SetCollisionLayer (77998) with 32 on the copy's 3D, repeated
+// for 30 s so a body that attaches or rebuilds after the kill gets it too. Bounded by recent deaths.
+namespace
+{
+std::mutex s_deadLayerLock;
+Vector<std::pair<uint32_t, uint64_t>> s_deadLayers; // form id, until (GetTickCount64)
+uint64_t s_nextDeadLayerPass{};
+}
+
+void CharacterService::ClearMainFrameWork() noexcept
+{
+    {
+        std::lock_guard lock(s_deadLayerLock);
+        s_deadLayers.clear();
+    }
+    std::lock_guard lock(s_pendingMovesLock);
+    s_pendingMoves.clear();
+}
+
+void CharacterService::NoteRemoteDeath(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_deadLayerLock);
+    // 30 s: a body that dies in its death animation (no knock) gets its ragdoll seconds later (corpse_test, no-knock kill).
+    const auto until = GetTickCount64() + 30000;
+    for (auto& entry : s_deadLayers)
+        if (entry.first == aFormId)
+        {
+            entry.second = until;
+            return;
+        }
+    s_deadLayers.emplace_back(aFormId, until);
+    spdlog::info("Dead copy {:X}: body goes to the dead-body collision layer", aFormId);
+}
+
+void CharacterService::ApplyMovesOnMainFrame() noexcept
+{
+    s_mainThreadId.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    if (const auto now = GetTickCount64(); now >= s_nextDeadLayerPass)
+    {
+        s_nextDeadLayerPass = now + 250;
+        Vector<uint32_t> bodies;
+        {
+            std::lock_guard lock(s_deadLayerLock);
+            std::erase_if(s_deadLayers, [now](const auto& aEntry) { return now >= aEntry.second; });
+            for (const auto& entry : s_deadLayers)
+                bodies.push_back(entry.first);
+        }
+        using TSetCollisionLayer = void(NiAVObject*, uint32_t);
+        POINTER_SKYRIMSE(TSetCollisionLayer, setCollisionLayer, 77998);
+        for (const auto formId : bodies)
+            // Life state 1 (dying) or 2 (dead): the bits, not the Papyrus IsDead path.
+            if (auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                pActor && (((pActor->actorState.flags1 >> 21) & 0xF) == 1 || ((pActor->actorState.flags1 >> 21) & 0xF) == 2))
+                if (auto* pRoot = pActor->GetNiNode())
+                    setCollisionLayer.Get()(pRoot, 32);
+    }
+    // Kept (not dropped) until the world exists.
+    if (!entt::locator<World>::has_value())
+        return;
+    auto& service = World::Get().GetCharacterService();
+    // Retry only a bounded number of changed actors each frame, including moves into cells not yet attached.
+    size_t count;
+    {
+        std::lock_guard lock(s_pendingMovesLock);
+        count = std::min<size_t>(32, s_pendingMoves.size());
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        PendingMove move;
+        {
+            std::lock_guard lock(s_pendingMovesLock);
+            if (s_pendingMoves.empty())
+                break;
+            move = s_pendingMoves.front();
+            s_pendingMoves.pop_front();
+        }
+        if (auto* pActor = Cast<Actor>(TESForm::GetById(move.FormId)); pActor && !pActor->IsDeleted())
+            service.MoveActor(pActor, move.WorldSpaceId, move.CellId, move.Position, move.EnableAfter, move.CorpseCorrection);
+    }
+}
+
+void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+    bool aEnableAfter, bool aCorpseCorrection) const noexcept
+{
+    if (!apActor)
+        return;
+    // Off the main thread, or before the main loop has named it: wait for the main loop.
+    if (const auto mainThread = s_mainThreadId.load(std::memory_order_relaxed); !mainThread || GetCurrentThreadId() != mainThread)
+    {
+        std::lock_guard lock(s_pendingMovesLock);
+        // The newest request per actor wins (an enable request is kept); bounded by the number of actors.
+        const auto same = std::find_if(s_pendingMoves.begin(), s_pendingMoves.end(),
+            [apActor](const PendingMove& acMove) { return acMove.FormId == apActor->formID; });
+        PendingMove move{apActor->formID, acWorldSpaceId, acCellId, acPosition, aEnableAfter, aCorpseCorrection};
+        if (same != s_pendingMoves.end())
+        {
+            move.EnableAfter |= same->EnableAfter;
+            *same = move;
+        }
+        else
+            s_pendingMoves.push_back(move);
+        return;
+    }
+    if (MoveActorNow(apActor, acWorldSpaceId, acCellId, acPosition, aEnableAfter, aCorpseCorrection) &&
+        aEnableAfter && apActor->IsDisabled())
+        apActor->EnableImpl();
+}
+
+bool CharacterService::MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+    bool aEnableAfter, bool aCorpseCorrection) const noexcept
 {
     // Never a remote actor that is dying, dead, knocked down or ragdolling (ActorState1 lifeState
     // bits 21-24, knockState 25-27): MoveTo disables and re-enables it, reloading its 3D, which
     // showed as the falling intro prisoner going naked and landing at the owner's final spot. The
     // owner's ragdoll stream places its body (CorpseRagdollService).
-    if (apActor && apActor->GetExtension() && apActor->GetExtension()->IsRemote())
+    // The settled corpse cell correction is the exception: it exists to move a dead copy to the owner's cell (it was
+    // blocked here too, so it never ran; review 2026-09-29).
+    if (!aCorpseCorrection && apActor && apActor->GetExtension() && apActor->GetExtension()->IsRemote())
     {
         const uint32_t flags1 = apActor->actorState.flags1;
         if (((flags1 >> 21) & 0xF) != 0 || ((flags1 >> 25) & 0x7) != 0 || apActor->IsDead())
         {
             spdlog::info("Left {:X} where it is: dying or ragdolling, its owner's ragdoll places it", apActor->formID);
-            return;
+            return false;
         }
     }
     TESObjectCELL* pCell = nullptr;
@@ -2590,8 +3173,27 @@ void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, c
 
     if (!pCell)
     {
+        if (!acWorldSpaceId)
+        {
+            std::lock_guard lock(s_pendingMovesLock);
+            const auto same = std::find_if(s_pendingMoves.begin(), s_pendingMoves.end(),
+                [apActor](const PendingMove& acMove) { return acMove.FormId == apActor->formID; });
+            if (same == s_pendingMoves.end())
+                s_pendingMoves.push_back({apActor->formID, acWorldSpaceId, acCellId, acPosition, aEnableAfter, aCorpseCorrection});
+            return false;
+        }
         spdlog::error(__FUNCTION__ ": failed to fetch cell to teleport, actor: {:X}, worldspace: {:X}, cell: {:X}, position: {}, {}, {}", apActor->formID, acWorldSpaceId.BaseId, acCellId.BaseId, acPosition.x, acPosition.y, acPosition.z);
-        return;
+        return false;
+    }
+
+    if (!acWorldSpaceId && !pCell->IsAttached())
+    {
+        std::lock_guard lock(s_pendingMovesLock);
+        const auto same = std::find_if(s_pendingMoves.begin(), s_pendingMoves.end(),
+            [apActor](const PendingMove& acMove) { return acMove.FormId == apActor->formID; });
+        if (same == s_pendingMoves.end())
+            s_pendingMoves.push_back({apActor->formID, acWorldSpaceId, acCellId, acPosition, aEnableAfter, aCorpseCorrection});
+        return false;
     }
 
     // Moving either participant of an active native interaction through
@@ -2599,9 +3201,10 @@ void CharacterService::MoveActor(Actor* apActor, const GameId& acWorldSpaceId, c
     // Keep the pair intact; ordinary host position updates use interpolation.
     if (apActor->GetParentCellEx() == pCell &&
         apActor->GetNativeMountState().InteractionExtra)
-        return;
+        return true;
 
     apActor->MoveTo(pCell, acPosition);
+    return true;
 }
 
 void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
@@ -2633,7 +3236,23 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
             // receive cell leases only when the leader is unavailable.
             spdlog::info("Requesting cell-validated ownership for actor {:X} with server id {:X}", pActor->formID, pRemoteComponent->Id);
 
-            RequestOwnership(pActor->formID, pRemoteComponent->Id, aEntity);
+            // The engine carried this actor into the leader's own cell (an escort following the player through a
+            // load door). The server's recorded cell is the owner's copy, which stayed behind: Ralof followed the
+            // host out of Helgen's cave, the follower's copy in the cave kept pulling him back, and he was lost on
+            // both PCs (2026-09-30 19:40:33). The leader's native placement wins, as vanilla's player would.
+            auto* pPlayer = PlayerCharacter::Get();
+            if (party.IsLeader() && pPlayer && pActor->GetParentCellEx() && pActor->GetParentCellEx() == pPlayer->GetParentCellEx() &&
+                !pActor->GetExtension()->IsRemotePlayer() && !pActor->IsPlayerSummon() && pRemoteComponent->OwnershipEpoch)
+            {
+                RequestOwnershipClaim claim;
+                claim.ServerId = pRemoteComponent->Id;
+                claim.ExpectedOwnershipEpoch = pRemoteComponent->OwnershipEpoch;
+                claim.Carry = 3;
+                m_transport.Send(claim);
+                spdlog::info("Leader claim: {:X} is in the leader's own cell", pActor->formID);
+            }
+            else
+                RequestOwnership(pActor->formID, pRemoteComponent->Id, aEntity);
         }
         else
             spdlog::info("New entity remotely managed, form id: {:X}, server id: {:X}", pActor->formID, pRemoteComponent->Id);
@@ -2709,7 +3328,7 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
 
     if (isPlayer)
     {
-        pNpc->MarkChanged(0x2000800);
+        pNpc->MarkChanged(0x3000800); // race, sex and face: see SendCreatorAppearance
     }
 
     const auto changeFlags = pNpc->GetChangeFlags();
@@ -2816,7 +3435,7 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
     }
 }
 
-void CharacterService::CancelServerAssignment(const entt::entity aEntity, const uint32_t aFormId) const noexcept
+void CharacterService::CancelServerAssignment(const entt::entity aEntity, const uint32_t aFormId, const bool aFromDiscovery) const noexcept
 {
     if (m_world.all_of<RemoteComponent>(aEntity))
     {
@@ -2859,6 +3478,19 @@ void CharacterService::CancelServerAssignment(const entt::entity aEntity, const 
 
         if (Actor* pActor = Cast<Actor>(TESForm::GetById(aFormId)))
         {
+            // The leader's quest disabled or deleted its own temporary actor with the party right there: it is gone,
+            // not orphaned. Released as usual, the server handed it to the follower, whose copy stayed enabled and
+            // idle (Helgen Keep Stormcloaks, session 2026-09-29). Scripted departures of placed actors park instead.
+            const auto* pCell = pActor->GetParentCellEx();
+            const auto& party = m_world.GetPartyService();
+            // Discovery removal only: a respawn cancels its assignment first and must not delete the actor.
+            if (aFromDiscovery && pActor->IsTemporary() && (pActor->IsDisabled() || pActor->IsDeleted()) && !pActor->IsDead() &&
+                party.IsInParty() && party.IsLeader() && !pActor->GetExtension()->IsRemotePlayer() && pCell && pCell->IsAttached())
+            {
+                request.Reason = OwnershipReleaseReason::ScriptRemoved;
+                spdlog::info("Leader's scripts removed temporary actor {:X} (server {:X}, disabled {}, deleted {})", aFormId,
+                    request.ServerId, pActor->IsDisabled(), pActor->IsDeleted());
+            }
             if (!pActor->IsTemporary())
             {
                 auto& modSystem = m_world.GetModSystem();
@@ -2934,7 +3566,7 @@ Actor* CharacterService::CreateCharacterForEntity(entt::entity aEntity) const no
             FaceGenSystem::Setup(m_world, aEntity, acMessage.FaceTints);
         }
 
-        pActor = Actor::Create(pNpc);
+        pActor = Actor::Create(pNpc, acMessage.IsPlayer);
     }
 
     auto& remoteComponent = m_world.get<RemoteComponent>(aEntity);
@@ -3136,6 +3768,9 @@ void CharacterService::ProcessLeveledConforms() noexcept
 // default. Live-tunable through the sync_level bridge command to back off if bandwidth or the server lags.
 std::atomic<uint32_t> g_syncBatchMs{0};
 
+// A/B switch for the snapshot stamp clock (test command smooth_stamp); on in production.
+std::atomic<bool> g_smoothSnapshotStamp{true};
+
 void CharacterService::RunLocalUpdates() const noexcept
 {
     static std::chrono::steady_clock::time_point nextSendTimePoint;
@@ -3168,7 +3803,12 @@ void CharacterService::RunLocalUpdates() const noexcept
     }
 
     ClientReferencesMoveRequest message;
-    message.Tick = m_transport.GetClock().GetCurrentTick();
+    // Stamp on the same smooth shared clock the receivers play back on. The transport clock moves only when the
+    // transport updates it and steps on each resync: its stamps put these positions and poses a few ms off their
+    // true time, which receivers showed as a wobble growing with speed (2026-09-28 trace: follower frame-to-frame
+    // velocity change 559 u/s vs the host's 35 on the flying dragon, 4.6 u mean wobble).
+    message.Tick = SmoothClock::NowTick() && g_smoothSnapshotStamp.load(std::memory_order_relaxed) ? SmoothClock::NowTick() :
+        m_transport.GetClock().GetCurrentTick();
 
     auto animatedLocalView = m_world.view<LocalComponent, LocalAnimationComponent, FormIdComponent>();
 
@@ -3281,6 +3921,8 @@ void CharacterService::RunLocalUpdates() const noexcept
         auto& animationComponent = animatedLocalView.get<LocalAnimationComponent>(entity);
         auto& formIdComponent = animatedLocalView.get<FormIdComponent>(entity);
         auto* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
+        if (!pActor) // gone while a leave or quit tears the world down
+            continue;
         if (IsLeaderNativeActor(pActor) && !IsLoadedActor(pActor))
             continue;
 
@@ -3371,6 +4013,7 @@ void CharacterService::RunRemoteUpdates() noexcept
     const auto delay = static_cast<uint64_t>(GetPresentationDelayMs());
     const auto tick = now > delay ? now - delay : 0;
     PoseCopyAuthority::SetPresentationDelayMs(static_cast<uint32_t>(delay));
+    InterpolationSystem::SetPresentationDelayMs(static_cast<uint32_t>(delay));
     VisualPoseMailbox::SetPresentationTick(tick);
     PoseCopyAuthority::SetPresentationTick(tick);
 
@@ -3552,7 +4195,7 @@ void CharacterService::RunRemoteUpdates() noexcept
             pActor->actorState.IsDeadState())
         {
             MoveActor(pActor, correction.WorldSpaceId, correction.CellId,
-                correction.Position);
+                correction.Position, false, true);
             spdlog::info("Corpse cell correction actor={:X} sourceCell={:X} hostCell={:X} error={} attempt={}",
                 correction.ActorId, correction.PriorCellId,
                 correction.TargetCellId, correction.Error, correction.Attempt);
@@ -3653,6 +4296,7 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         FaceGenSystem::Update(m_world, pActor, faceGenComponent);
     }
+    FaceGenSystem::FlushLocalRestore();
 
     auto waitingView = m_world.view<FormIdComponent, WaitingFor3D>();
 
@@ -3785,20 +4429,22 @@ void CharacterService::RunExperienceUpdates() noexcept
 
     lastSendTimePoint = now;
 
-    if (m_cachedExperience == 0.f)
-        return;
-
     if (!World::Get().GetPartyService().IsInParty())
         return;
 
-    SyncExperienceRequest message;
-    message.Experience = m_cachedExperience;
+    for (uint8_t skill = 0; skill < m_cachedExperience.size(); ++skill)
+    {
+        const float experience = m_cachedExperience[skill];
+        if (!std::isfinite(experience) || experience <= 0.f)
+            continue;
 
-    m_cachedExperience = 0.f;
-
-    m_transport.Send(message);
-
-    spdlog::debug("Sending over experience {}", message.Experience);
+        SyncExperienceRequest message;
+        message.Skill = skill;
+        message.Experience = experience;
+        m_cachedExperience[skill] = 0.f;
+        m_transport.Send(message);
+        spdlog::debug("Sending {} experience for skill {}", experience, skill);
+    }
 }
 
 void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept

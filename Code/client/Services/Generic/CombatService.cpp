@@ -130,6 +130,7 @@ void CombatService::OnProjectileLaunchedEvent(const ProjectileLaunchedEvent& acE
 
     request.UnkBool1 = acEvent.UnkBool1;
     request.UnkBool2 = acEvent.UnkBool2;
+    request.IsDualCasting = acEvent.IsDualCasting;
 
     // Evidence for "archers shot the wrong person" on the follower: owner shot, native aim target.
     auto* pShooter = Cast<Actor>(TESForm::GetById(acEvent.ShooterID));
@@ -241,7 +242,25 @@ void CombatService::OnNotifyProjectileLaunch(const NotifyProjectileLaunch& acMes
         acMessage.ZAngle, copyPosition.x, copyPosition.y, copyPosition.z, pCopyTarget ? pCopyTarget->formID : 0);
 
     SetReplayingLaunch(true);
+    auto* process = pShooterActor ? pShooterActor->currentProcess : nullptr;
+    const auto high = process ? *reinterpret_cast<uint8_t* const*>(reinterpret_cast<uint8_t*>(process) + 0x10) : nullptr;
+    const bool previousDual = high && high[0x45F] != 0;
+    if (process && launchData.pSpell)
+    {
+        using TSetDualCasting = void(AIProcess*, bool);
+        POINTER_SKYRIMSE(TSetDualCasting, s_setDualCasting, 39383);
+        s_setDualCasting.Get()(process, acMessage.IsDualCasting);
+    }
     Projectile::Launch(&result, launchData);
+    if (acMessage.IsDualCasting && result.handle.iBits)
+        if (auto* projectile = Cast<Projectile>(TESObjectREFR::GetByHandle(result.handle.iBits)))
+            *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(projectile) + 0x1D4) |= 0x10000000;
+    if (process && launchData.pSpell)
+    {
+        using TSetDualCasting = void(AIProcess*, bool);
+        POINTER_SKYRIMSE(TSetDualCasting, s_setDualCasting, 39383);
+        s_setDualCasting.Get()(process, previousDual);
+    }
     SetReplayingLaunch(false);
 }
 
@@ -332,9 +351,9 @@ void CombatService::RunTargetUpdates(const float) const noexcept
             }
             if ((partyOpponent || isHostile(actor, target)) && PlayerCombat::DetectionLevel(actor, target) > 0)
             {
-                // Native StartCombat adds an opponent to the group. The standard selector still
+                // Queue native StartCombat for the main-thread quiet window. The standard selector still
                 // scores detection, distance, reachability and attacker count; no target lock.
-                actor->StartCombat(target);
+                Actor::QueueStartCombatNative(actor->formID, target->formID);
                 spdlog::debug("Player combat candidate npc={:X} player={:X}", actor->formID, target->formID);
             }
         }

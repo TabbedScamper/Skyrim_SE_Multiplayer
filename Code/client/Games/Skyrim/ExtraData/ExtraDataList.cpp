@@ -1,12 +1,13 @@
 #include "ExtraDataList.h"
 
 #include <Games/Overrides.h>
+#include <Utils/MainThread.h>
 
 ExtraDataList* ExtraDataList::New() noexcept
 {
     ExtraDataList* pExtraDataList = Memory::Allocate<ExtraDataList>();
     pExtraDataList->data = nullptr;
-    pExtraDataList->lock.m_counter = pExtraDataList->lock.m_tid = 0;
+    pExtraDataList->lock.uiLock = pExtraDataList->lock.uiWriterThread = 0;
     pExtraDataList->bitfield = Memory::Allocate<ExtraDataList::Bitfield>();
     memset(pExtraDataList->bitfield, 0, 0x18);
     return pExtraDataList;
@@ -14,6 +15,8 @@ ExtraDataList* ExtraDataList::New() noexcept
 
 bool ExtraDataList::Contains(ExtraDataType aType) const
 {
+    lock.LockForRead();
+    bool present = false;
     if (bitfield)
     {
         const auto value = static_cast<uint32_t>(aType);
@@ -21,21 +24,32 @@ bool ExtraDataList::Contains(ExtraDataType aType) const
 
         const auto element = bitfield->data[index];
 
-        return (element >> (value % 8)) & 1;
+        present = ((element >> (value % 8)) & 1) != 0;
     }
-
-    return false;
+    lock.UnlockForRead();
+    return present;
 }
 
 BSExtraData* ExtraDataList::GetByType(ExtraDataType aType) const
 {
-    if (!ScopedExtraDataOverride::IsOverriden())
-        lock.Lock();
+    const bool takeLock = !ScopedExtraDataOverride::IsOverriden();
+    if (takeLock)
+    {
+        if (MT::IsMain())
+        {
+            MT::LastExtraRef.store(0, std::memory_order_release);
+            MT::LastExtraLockWord.store(reinterpret_cast<uintptr_t>(&lock), std::memory_order_release);
+        }
+        lock.LockForRead();
+    }
 
     if (!Contains(aType))
     {
-        if (!ScopedExtraDataOverride::IsOverriden())
-            lock.Unlock();
+        if (takeLock)
+        {
+            lock.UnlockForRead();
+            if (MT::IsMain()) MT::LastExtraLockWord.store(0, std::memory_order_release);
+        }
         return nullptr;
     }
 
@@ -45,29 +59,37 @@ BSExtraData* ExtraDataList::GetByType(ExtraDataType aType) const
         pEntry = pEntry->next;
     }
 
-    if (!ScopedExtraDataOverride::IsOverriden())
-        lock.Unlock();
+    if (takeLock)
+    {
+        lock.UnlockForRead();
+        if (MT::IsMain()) MT::LastExtraLockWord.store(0, std::memory_order_release);
+    }
 
     return pEntry;
 }
 
 bool ExtraDataList::Add(ExtraDataType aType, BSExtraData* apNewData)
 {
+    lock.LockForWrite();
     if (Contains(aType))
+    {
+        lock.UnlockForWrite();
         return false;
-
-    BSScopedLock<BSRecursiveLock> _(lock);
+    }
 
     BSExtraData* pNext = data;
     data = apNewData;
     apNewData->next = pNext;
     SetType(aType, false);
 
+    lock.UnlockForWrite();
+
     return true;
 }
 
 uint32_t ExtraDataList::GetCount() const
 {
+    lock.LockForRead();
     uint32_t count = 0;
 
     BSExtraData* pNext = data;
@@ -77,6 +99,7 @@ uint32_t ExtraDataList::GetCount() const
         pNext = pNext->next;
     }
 
+    lock.UnlockForRead();
     return count;
 }
 

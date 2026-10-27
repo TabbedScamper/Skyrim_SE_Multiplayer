@@ -1,4 +1,6 @@
 <app-dialogue-listen></app-dialogue-listen>
+<app-revive-prompt></app-revive-prompt>
+<app-lobby-screen></app-lobby-screen>
 <div *ngIf="(creatorView$ | async) as creator" class="creator-view-banner-host">
   <div *ngIf="creator.visible" class="creator-view-banner">
     <span class="creator-view-player">PLAYER {{ creator.player }}/{{ creator.count }}</span>
@@ -41,100 +43,27 @@
 </ng-container>
 
 <ng-container *ngIf="inGame$ | async">
-  <div *ngIf="(pauseMenuAvailable$ | async) && !(active$ | async)" class="pause-menu-shortcuts">
-    <span><kbd>F6</kbd> Co-op</span>
-    <span><kbd>F7</kbd> Mod options</span>
-  </div>
-  <ng-container *ngIf="!(menuOpen$ | async)">
-    <app-debug></app-debug>
+  <!-- The campfire lobby is a live world behind the main menu: none of the in-game widgets (party list, debug panel,
+       shortcut hint, chat notifications) over it (owner 2026-10-02: the party list sat on the lobby's "Now playing"). -->
+  <ng-container *ngIf="!(titleScreen$ | async)">
+    <div *ngIf="(pauseMenuAvailable$ | async) && !(active$ | async)" class="pause-menu-shortcuts">
+      <span><kbd>F6</kbd> Co-op</span>
+      <span><kbd>F7</kbd> Mod options</span>
+    </div>
+    <ng-container *ngIf="!(menuOpen$ | async)">
+      <app-debug></app-debug>
 
-    <app-group></app-group>
+      <app-group></app-group>
+    </ng-container>
   </ng-container>
 
   <app-notification-popup-container
     class="app-notification-popup"
   ></app-notification-popup-container>
 
-  <app-notifications [@notifications]="!(active$ | async)"></app-notifications>
-  <div
-    [hidden]="pausePanelOpen"
-    [@controls]="active$ | async"
-    class="app-root-controls"
-    [class.background-element]="view$ | async"
-  >
-    <app-window border="strip" class="app-root-menu">
-      <button
-        *ngIf="!(connected$ | async) && !(connectionInProgress$ | async)"
-        data-style-ornament="inverted"
-        [attr.data-style-active]="(view$ | async) === RootView.CONNECT"
-        (click)="setView(RootView.CONNECT)"
-      >
-        {{ 'COMPONENT.ROOT.CONNECT' | transloco }}
-      </button>
-      <ng-container *ngIf="connected$ | async">
-        <button
-          data-style-ornament="inverted"
-          [attr.data-style-active]="(view$ | async) === RootView.DISCONNECT"
-          (click)="setView(RootView.DISCONNECT)"
-        >
-          {{ 'COMPONENT.ROOT.DISCONNECT' | transloco }}
-        </button>
-        <!--
-        <button
-          data-style-ornament="inverted"
-          [attr.data-style-active]="(view | async) === RootView.RECONNECT"
-          (click)="reconnect()"
-        >
-          {{ 'COMPONENT.ROOT.RECONNECT' | transloco }}
-        </button>
-        -->
-        <button
-          data-style-ornament="inverted"
-          [attr.data-style-active]="(view$ | async) === RootView.PLAYER_MANAGER"
-          (click)="setView(RootView.PLAYER_MANAGER)"
-        >
-          {{ 'COMPONENT.ROOT.PLAYER_MANAGER' | transloco }}
-        </button>
-        <button data-style-ornament="inverted" (click)="revealPlayers()">
-          <!-- See note in 'root.component.scss' for explanation -->
-          <div style="position: relative;">
-            <span
-              class="cooldown-supporting-text-normal"
-              [class.cooldown-supporting-text-animating]="revealingInProgress$"
-            >
-              {{ 'COMPONENT.ROOT.REVEAL_PLAYERS' | transloco }}
-            </span>
-            <span 
-              style="position: absolute; left: 0; top: 0;"
-              class="text-cooldown-effect" 
-              [class.cooldown-active]="revealingInProgress$"
-              [style.--cooldown-duration]="revealingInProgress$ ? '10s' : '0.3s'"
-            >
-              {{ 'COMPONENT.ROOT.REVEAL_PLAYERS' | transloco }}
-            </span>
-          </div>
-        </button>
-      </ng-container>
-      <button
-        data-style-ornament="inverted"
-        [attr.data-style-active]="(view$ | async) === RootView.SETTINGS"
-        (click)="setView(RootView.SETTINGS)"
-      >
-        {{ 'COMPONENT.ROOT.SETTINGS' | transloco }}
-      </button>
-      <button
-        *ngIf="connectionInProgress$ | async"
-        data-style-ornament="inverted"
-        [attr.data-style-active]="(view$ | async) === RootView.DISCONNECT"
-        (click)="setView(RootView.DISCONNECT)"
-      >
-        {{ 'COMPONENT.ROOT.CONNECTION_IN_PROGRESS' | transloco }}
-      </button>
-    </app-window>
-    <app-window class="app-root-chat">
-      <app-chat #chat></app-chat>
-    </app-window>
-  </div>
+  <app-notifications *ngIf="!(titleScreen$ | async)" [@notifications]="!(active$ | async)"></app-notifications>
+  <!-- The Skyrim Together menu bar and chat window (F2 / Right Ctrl) are gone: the mod opens its own panels from the
+       pause menu (F6 co-op, F7 options) and the main menu. Chat messages still show as notifications. -->
   <div [@fadeInOutActive]="active$ | async" class="app-root-popups">
     <app-loading></app-loading>
 
@@ -151,13 +80,19 @@
       <app-popup *ngSwitchCase="RootView.SERVER_LIST" data-popup="server">
         <app-server-list (done)="closeView()"></app-server-list>
       </app-popup>
-      <app-popup *ngSwitchCase="RootView.SETTINGS" data-popup="settings">
-        <app-settings (done)="closeView()"></app-settings>
-      </app-popup>
-      <app-popup *ngSwitchCase="RootView.COOP_LOBBY" data-popup="coopLobby">
-        <app-title-coop-lobby [inGame]="true" (done)="closeView()"
-          (settingsRequested)="setView(RootView.SETTINGS)"></app-title-coop-lobby>
-      </app-popup>
+      <!-- At the title the campfire lobby is a live world, so inGame$ and titleScreen$ are both true: the title block above
+           owns these two views there (owner 2026-10-02: a second, in-game copy on top hid the friend's Join button). -->
+      <ng-container *ngSwitchCase="RootView.SETTINGS">
+        <app-popup *ngIf="!(titleScreen$ | async)" data-popup="settings">
+          <app-settings (done)="closeView()"></app-settings>
+        </app-popup>
+      </ng-container>
+      <ng-container *ngSwitchCase="RootView.COOP_LOBBY">
+        <app-popup *ngIf="!(titleScreen$ | async)" data-popup="coopLobby">
+          <app-title-coop-lobby [inGame]="true" (done)="closeView()"
+            (settingsRequested)="setView(RootView.SETTINGS)"></app-title-coop-lobby>
+        </app-popup>
+      </ng-container>
       <app-popup
         *ngSwitchCase="RootView.PLAYER_MANAGER"
         data-popup="playerManager"

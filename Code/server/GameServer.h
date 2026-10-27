@@ -98,6 +98,8 @@ struct GameServer final : Server
 
     Player* GetAdminByUsername(const String& acUsername) const noexcept;
     Player const* GetAdminByUsername(const String& acUsername) noexcept;
+    // The login rules for a name, for a player renaming its character in session.
+    String SanitizePlayerName(const String& acUsername) const noexcept { return SanitizeUsername(acUsername); }
 
 protected:
     bool ValidateAuthParams(ConnectionId_t aConnectionId, const UniquePtr<AuthenticationRequest>& acRequest);

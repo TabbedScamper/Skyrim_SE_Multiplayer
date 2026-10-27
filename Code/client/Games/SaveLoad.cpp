@@ -99,8 +99,13 @@ void TP_MAKE_THISCALL(BGSSaveFormBuffer_WriteId, BGSSaveFormBuffer, uint64_t aId
     apThis->WriteId(aId & 0xFFFFFFFF);
 }
 
+// A save file's record being read back out (SaveLook): its 3-byte references through that save's formID array.
+bool SaveLookReadRef(const char* apBuffer, uint32_t aCapacity, uint32_t& aPosition, uint32_t& aFormId) noexcept;
+
 bool TP_MAKE_THISCALL(BGSLoadFormBuffer_LoadFormId, BGSLoadFormBuffer, uint32_t& aFormId)
 {
+    if (SaveLookReadRef(apThis->buffer, static_cast<uint32_t>(apThis->capacity), apThis->position, aFormId))
+        return true;
     if (!ScopedSaveLoadOverride::IsOverriden())
     {
         return TiltedPhoques::ThisCall(RealBGSLoadFormBuffer_ReadFormId, apThis, aFormId);

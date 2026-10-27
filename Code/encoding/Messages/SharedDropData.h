@@ -17,6 +17,8 @@ struct SharedDropData
     static constexpr float PickupDistance = 256.f;
     uint64_t Epoch{}, Token{}, OriginToken{}, Tick{};
     uint32_t Id{}, Generation{}, Owner{}, Creator{}, Replicas{};
+    // Create only: the NPC whose inventory the item left (its server id; a death weapon drop), 0 = the player's own.
+    uint32_t Source{};
     SharedDropAction Action{SharedDropAction::Snapshot};
     Inventory::Entry Item{};
     String Name{}, Winner{};

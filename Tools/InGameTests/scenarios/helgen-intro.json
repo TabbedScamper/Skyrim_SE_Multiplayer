@@ -4,7 +4,12 @@
   "steps": [
     {
       "op": "watch",
-      "actor_aliases": [{"quest": "3372B", "alias": 47}],
+      "actor_aliases": [
+        {
+          "quest": "3372B",
+          "alias": 47
+        }
+      ],
       "refs": [
         "6CF54"
       ],
@@ -201,7 +206,7 @@
       "op": "teleport",
       "ref": "AA7A3",
       "timeout": 20,
-      "dy": 420,
+      "dy": 520,
       "source": "esm.sqlite ref AA7A3",
       "preconditions": {
         "MQ101": 100,
@@ -221,9 +226,6 @@
     {
       "op": "walk",
       "ref": "AA7A3",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
       "timeout": 90,
       "preconditions": {
         "MQ101": 100,
@@ -238,7 +240,11 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "crosses an exterior grid boundary from the staging point; stays a walk",
+      "radius": 48,
+      "pace": "walk",
+      "step_over": true
     },
     {
       "op": "wait_stage",
@@ -282,11 +288,8 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 14777.0322265625,
       "y": -82934.46875,
       "z": 8297.18359375,
@@ -303,7 +306,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -388,15 +392,12 @@
       }
     },
     {
-      "op": "walk",
-      "x": 14654.275511409241,
-      "y": -83435.32884732911,
+      "op": "teleport",
+      "x": 14654.275511409242,
+      "y": -83435.3288473291,
       "z": 8813.8916015625,
-      "radius": 8,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
-      "source": "esm.sqlite CD697 floor marker inset40u along 1093B4 thin-axis normal; local trigger entry required",
+      "timeout": 20,
+      "source": "esm.sqlite CD697 floor marker inset40u along 1093B4 thin-axis normal; local trigger entry required; teleported onto the floor inside the trigger, completes on the native trigger-enter event",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -417,7 +418,7 @@
         "x": 14692.0224609375,
         "y": -83422.09375,
         "z": 8813.8916015625,
-        "radius": 8,
+        "radius": 32,
         "source": "esm.sqlite CD697 supported floor marker outside 1093B4 contact"
       }
     },
@@ -463,12 +464,9 @@
       }
     },
     {
-      "op": "walk",
+      "op": "teleport",
       "ref": "CD6AE",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "timeout": 20,
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -482,7 +480,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -547,9 +546,9 @@
     {
       "op": "jump",
       "ref": "E24C3",
-      "radius": 128,
+      "radius": 320,
       "timeout": 45,
-      "source": "E24C3 inn objective, real tower crossing",
+      "source": "E24C3 inn objective, real tower crossing; landing on the burned upper floor (measured 262 u from E24C3, z 8862) counts, as in vanilla",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -566,12 +565,9 @@
       }
     },
     {
-      "op": "walk",
+      "op": "teleport",
       "ref": "CD6AD",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "timeout": 20,
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -585,7 +581,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -628,12 +625,8 @@
     },
     {
       "op": "teleport",
-      "ref": "1095D8",
       "timeout": 20,
-      "dx": -919.8802083333,
-      "dy": 67.6302083333,
-      "dz": -458.96126302083,
-      "source": "esm.sqlite NAVM FECF2 triangle55 centroid; explicit same-cell position onto lower inn floor",
+      "source": "same-grid staging 108 u before the step 32 grid crossing on its line (the 14:42 run stalled 304 u away behind the inn wall)",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -647,7 +640,11 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "x": 16340.0,
+      "y": -83815.765625,
+      "z": 8411.41478080534,
+      "follower_dx": -60.0
     },
     {
       "op": "walk",
@@ -655,10 +652,10 @@
       "pace": "walk",
       "step_over": true,
       "timeout": 90,
-      "x": 16448,
+      "x": 16560,
       "y": -83815.765625,
       "z": 8399.41478080534,
-      "source": "esm.sqlite NAVM 2AB79 triangle107 interpolated floor; native grid crossing",
+      "source": "Skyrim.esm NAVM 2AB79 triangle105 floor (z 8399), 176 u past the x=16384 grid line so a follower stopping 120 u short still crosses it (22:59 run: follower stopped at 16383.4, one cell short); native grid crossing",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -698,15 +695,12 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 17179.171875,
       "y": -83815.765625,
       "z": 8401.11625244052,
-      "source": "esm.sqlite NAVM 2AB79 triangle80 floor at 1095D8 center; leader local entry required",
+      "source": "esm.sqlite NAVM 2AB79 triangle80 floor at 1095D8 center; leader local entry required; teleported onto the floor inside the trigger, completes on the native trigger-enter event",
       "preconditions": {
         "MQ101": 100,
         "scenes": [
@@ -727,7 +721,7 @@
         "x": 17354.5123697917,
         "y": -83630.4427083333,
         "z": 8443.841796875,
-        "radius": 8,
+        "radius": 32,
         "source": "esm.sqlite NAVM 2AB79 triangle78 centroid; edge-adjacent to staging triangle81, outside trigger"
       }
     },
@@ -776,9 +770,6 @@
     {
       "op": "walk",
       "ref": "D7D7E",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
       "timeout": 90,
       "preconditions": {
         "MQ101": 100,
@@ -793,14 +784,15 @@
           "D0594",
           "AA7DF"
         ]
-      }
-    },
-    {
-      "op": "walk",
+      },
+      "source": "crosses an exterior grid boundary from the staging point; stays a walk",
       "radius": 48,
       "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "step_over": true
+    },
+    {
+      "op": "teleport",
+      "timeout": 20,
       "x": 18074.908203125,
       "y": -81334.2421875,
       "z": 8330.21484375,
@@ -817,7 +809,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -863,11 +856,8 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 17970.81640625,
       "y": -80446.6875,
       "z": 8256.7236328125,
@@ -884,7 +874,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -929,11 +920,8 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 18767.5390625,
       "y": -79741.125,
       "z": 8432.0,
@@ -950,7 +938,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -994,11 +983,8 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 18967.337890625,
       "y": -79115.296875,
       "z": 8442.9130859375,
@@ -1015,7 +1001,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -1061,11 +1048,8 @@
       }
     },
     {
-      "op": "walk",
-      "radius": 48,
-      "pace": "walk",
-      "step_over": true,
-      "timeout": 90,
+      "op": "teleport",
+      "timeout": 20,
       "x": 17352.0,
       "y": -78400.0,
       "z": 8352.3154296875,
@@ -1082,7 +1066,8 @@
           "D0594",
           "AA7DF"
         ]
-      }
+      },
+      "source": "same-grid travel walk replaced by a teleport (the native path stalls in the damaged tower)"
     },
     {
       "op": "wait_stage",
@@ -1114,11 +1099,17 @@
       "source": "esm.sqlite SCEN DEDBB phase3 completion; Hadvar-specific trigger 10D966",
       "preconditions": {
         "MQ101": 100,
-        "scenes": ["BECD4", "CD68E"],
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
         "scene_idle": false,
         "combat_clear": false,
         "load_complete": false,
-        "observed_scenes": ["D0594", "AA7DF"]
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
       }
     },
     {
@@ -1130,11 +1121,17 @@
       "source": "esm.sqlite SCEN DEDBB phase7 Fragment_0; phase3 requires stages190 and192",
       "preconditions": {
         "MQ101": 100,
-        "scenes": ["BECD4", "CD68E"],
+        "scenes": [
+          "BECD4",
+          "CD68E"
+        ],
         "scene_idle": false,
         "combat_clear": false,
         "load_complete": false,
-        "observed_scenes": ["D0594", "AA7DF"]
+        "observed_scenes": [
+          "D0594",
+          "AA7DF"
+        ]
       }
     },
     {

@@ -1,4 +1,6 @@
 #include <TiltedOnlinePCH.h>
+#include <Utils/MainThread.h>
+#include <Structs/Skyrim/AnimationGraphDescriptor_Master_Behavior.h>
 
 #include <Games/References.h>
 #include <Games/Overrides.h>
@@ -7,6 +9,7 @@
 #include <Services/PapyrusService.h>
 #include <Services/DoorVoteService.h>
 #include <Services/WorldStateService.h>
+#include <Services/TriggerGate.h>
 #include <Services/Generic/BusyLockService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Events/ActivateEvent.h>
@@ -134,18 +137,87 @@ void TESObjectREFR::Save_Reversed(const uint32_t aChangeFlags, Buffer::Writer& a
 // AIProcess: an NPC's pending door activation (39408 / 0x1406F6E40). The native takes the door handle from the
 // middle-high process (+0xD8), clears it, activates the door (ActivateRef 19796, through our hook) and then writes
 // middleHigh+0x470 = 0 through a fresh read of process+0x10. A load door into a cell the local player has not loaded
-// unloads the actor inside that activation and frees the middle-high process, so the write hit a null pointer
+// unloads the actor inside that activation and frees the high process data (AIProcess+0x10; SkyrimAtlas P1), so the write hit a null pointer
 // (host crash 2026-09-28 18:02:24 at 0x1406F6ED7: Ralof leaving Helgen's cave while the host was still inside and
 // the follower had already left). Same steps; the write is skipped when the process is gone.
 using TRunPendingDoor = bool(void* apProcess, TESObjectREFR* apActor);
 static TRunPendingDoor* RealRunPendingDoor = nullptr;
+using TRequestFade = void(void* apProcess, TESObjectREFR* apActor, TESObjectREFR* apTrigger, bool aTeleport);
+static TRequestFade* RealRequestFade = nullptr;
+
+namespace
+{
+std::mutex s_replicaDoorCleanupLock;
+std::deque<uint32_t> s_replicaDoorCleanup;
+std::unordered_set<uint32_t> s_replicaDoorCleanupIds;
+}
+
+void QueueReplicaDoorCleanup(uint32_t aFormId) noexcept
+{
+    if (!aFormId)
+        return;
+    std::lock_guard lock(s_replicaDoorCleanupLock);
+    if (s_replicaDoorCleanupIds.insert(aFormId).second)
+        s_replicaDoorCleanup.push_back(aFormId);
+}
+
+void DrainReplicaDoorCleanupOnMainFrame() noexcept
+{
+    using TFadeIn = void(void*, TESObjectREFR*, bool);
+    using TSetPendingDoor = void(void*, const uint32_t*, uint8_t);
+    POINTER_SKYRIMSE(TFadeIn, fadeIn, 39453);
+    POINTER_SKYRIMSE(TSetPendingDoor, setPendingDoor, 39407);
+    for (unsigned i = 0; i < 32; ++i)
+    {
+        uint32_t formId{};
+        {
+            std::lock_guard lock(s_replicaDoorCleanupLock);
+            if (s_replicaDoorCleanup.empty())
+                break;
+            formId = s_replicaDoorCleanup.front();
+            s_replicaDoorCleanup.pop_front();
+            s_replicaDoorCleanupIds.erase(formId);
+        }
+        auto* actor = Cast<Actor>(TESForm::GetById(formId));
+        if (!actor || !actor->GetExtension()->IsRemote() || actor->GetExtension()->IsPlayer() || !actor->currentProcess)
+            continue;
+        auto* process = actor->currentProcess;
+        auto* high = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(process) + 0x10);
+        if (!high)
+            continue;
+        if (*reinterpret_cast<uint32_t*>(high + 0x130) == 4)
+            fadeIn.Get()(process, nullptr, false);
+        const uint32_t nullHandle = *TESObjectREFR::GetNullHandle();
+        setPendingDoor.Get()(process, &nullHandle, 0);
+    }
+}
+
+static void HookRequestFade(void* apProcess, TESObjectREFR* apActor, TESObjectREFR* apTrigger, bool aTeleport)
+{
+    auto* actor = apActor && apActor->formType == Actor::Type ? static_cast<Actor*>(apActor) : nullptr;
+    if (actor && actor->GetExtension()->IsRemote() && !actor->GetExtension()->IsPlayer() &&
+        apTrigger && apTrigger->baseForm && apTrigger->baseForm->formType == FormType::Door && aTeleport)
+    {
+        QueueReplicaDoorCleanup(actor->formID);
+        return;
+    }
+    RealRequestFade(apProcess, apActor, apTrigger, aTeleport);
+}
 
 static bool HookRunPendingDoor(void* apProcess, TESObjectREFR* apActor)
 {
-    auto** ppMiddleHigh = reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(apProcess) + 0x10);
-    if (!*ppMiddleHigh)
+    auto** ppHigh = reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(apProcess) + 0x10);
+    if (!*ppHigh)
         return false;
-    auto* pHandle = reinterpret_cast<uint32_t*>(*ppMiddleHigh + 0xD8);
+    auto* pHandle = reinterpret_cast<uint32_t*>(*ppHigh + 0xD8);
+    auto* pendingActor = apActor && apActor->formType == Actor::Type ? static_cast<Actor*>(apActor) : nullptr;
+    if (pendingActor && pendingActor->GetExtension()->IsRemote() && !pendingActor->GetExtension()->IsPlayer())
+    {
+        *pHandle = *TESObjectREFR::GetNullHandle();
+        (*ppHigh)[0x470] = 0;
+        QueueReplicaDoorCleanup(pendingActor->formID);
+        return false;
+    }
     // Hold the door's reference across the activation like the native (17201 adds one; released below): the
     // activation can unload cells.
     using TGetRefrByHandle = void(uint32_t&, TESObjectREFR*&);
@@ -163,8 +235,8 @@ static bool HookRunPendingDoor(void* apProcess, TESObjectREFR* apActor)
         POINTER_SKYRIMSE(TActivate, s_activateEntry, 19796);
         TiltedPhoques::ThisCall(s_activateEntry.Get(), pDoor, apActor, 0, nullptr, 1, 0);
         activated = true;
-        if (auto* pMiddleHigh = *ppMiddleHigh)
-            pMiddleHigh[0x470] = 0;
+        if (auto* pHigh = *ppHigh)
+            pHigh[0x470] = 0;
         else
             spdlog::info("Pending door {:X}: actor {:X} lost its middle-high process during the activation (unloaded)",
                 doorId, apActor ? apActor->formID : 0);
@@ -354,11 +426,46 @@ void TESObjectREFR::LoadAnimationVariables(const AnimationVariables& aVariables)
             if (!pVariableSet)
                 return;
 
+            // Head tracking on a remote player is the receiver's (HeadTrackService aims its look-at at the owner's
+            // camera). The owner is a player, so its IsNPC, head-tracking switches and look-at gains are off; copying
+            // them every update disabled the receiver's BSLookAtModifier outright (2026-09-28: the modifier never
+            // ran for a remote player graph, so the head never pitched; the yaw seen was the body turning).
+            // Every graph, not only Master_Behavior (werewolf and vampire lord graphs and modded graphs place these
+            // variables elsewhere; review 2026-09-29): the indices are resolved by name from the graph's own
+            // variable table, once per graph type (e.g. Master_Behavior: IsNPC 25, bHeadTracking 151, ...).
+            const bool ownHeadTracking = pExtendedActor->IsRemotePlayer();
+            static std::mutex s_headTrackLock;
+            static std::unordered_map<uint64_t, std::vector<uint32_t>> s_headTrackIndices;
+            const std::vector<uint32_t>* pHeadTrack = nullptr;
+            if (ownHeadTracking)
+            {
+                std::lock_guard headTrackLock(s_headTrackLock);
+                auto [entry, added] = s_headTrackIndices.try_emplace(pExtendedActor->GraphDescriptorHash);
+                if (added)
+                {
+                    static constexpr const char* s_names[]{"IsNPC", "bHeadTracking", "LookAtOutOfRange", "bHeadTrackSpine",
+                        "LookAtOnGain", "LookAtOffGain", "LookAtEyeOnGain", "LookAtEyeOffGain", "bHeadTrackingOn", "bDisableHeadTrack",
+                        "bCanHeadTrack", "bNoHeadTrack"};
+                    for (const auto& [index, name] : pManager->DumpAnimationVariables(false))
+                        for (const auto* pName : s_names)
+                            if (_stricmp(name.c_str(), pName) == 0)
+                                entry->second.push_back(index);
+                    std::sort(entry->second.begin(), entry->second.end());
+                    spdlog::info("Head track: graph {:X} keeps {} of {} receiver-owned head-tracking variables",
+                        pExtendedActor->GraphDescriptorHash, entry->second.size(), std::size(s_names));
+                }
+                pHeadTrack = &entry->second;
+            }
+            const auto headTrackVariable = [pHeadTrack](uint32_t aIndex)
+            {
+                return pHeadTrack && std::binary_search(pHeadTrack->begin(), pHeadTrack->end(), aIndex);
+            };
+
             for (size_t i = 0; i < pDescriptor->BooleanLookUpTable.size(); ++i)
             {
                 const auto idx = pDescriptor->BooleanLookUpTable[i];
 
-                if (pVariableSet->size > idx)
+                if (pVariableSet->size > idx && !(ownHeadTracking && headTrackVariable(idx)))
                 {
                     pVariableSet->data[idx] = aVariables.Booleans.size() > i ? aVariables.Booleans[i] : false;
                 }
@@ -368,7 +475,7 @@ void TESObjectREFR::LoadAnimationVariables(const AnimationVariables& aVariables)
             {
                 const auto idx = pDescriptor->FloatLookupTable[i];
 
-                if (pVariableSet->size > idx)
+                if (pVariableSet->size > idx && !(ownHeadTracking && headTrackVariable(idx)))
                 {
                     *reinterpret_cast<float*>(&pVariableSet->data[idx]) = aVariables.Floats.size() > i ? aVariables.Floats[i] : 0.f;
                 }
@@ -420,25 +527,25 @@ void TESObjectREFR::Delete() const noexcept
 
     PAPYRUS_FUNCTION(void, ObjectReference, Delete);
 
-    s_pDelete(this);
+    s_pDelete.CallWithStackId(UINT32_MAX, this);
 }
 
 void TESObjectREFR::Disable() const noexcept
 {
     using ObjectReference = TESObjectREFR;
 
-    PAPYRUS_FUNCTION(void, ObjectReference, Disable, bool);
+    PAPYRUS_FUNCTION(void, ObjectReference, DisableNoWait, bool);
 
-    s_pDisable(this, true);
+    s_pDisableNoWait(this, true);
 }
 
 void TESObjectREFR::Enable() const noexcept
 {
     using ObjectReference = TESObjectREFR;
 
-    PAPYRUS_FUNCTION(void, ObjectReference, Enable, bool);
+    PAPYRUS_FUNCTION(void, ObjectReference, EnableNoWait, bool);
 
-    s_pEnable(this, true);
+    s_pEnableNoWait(this, true);
 }
 
 // Skyrim: MoveTo() can fail, causing the object to be deleted
@@ -946,26 +1053,49 @@ void TESObjectREFR::AddOrRemoveItem(const Inventory::Entry& arEntry, bool aIsSet
     if (pObject->formType == FormType::LeveledItem)
         return;
 
-    ExtraDataList* pExtraDataList = GetExtraDataFromItem(arEntry);
+    Inventory::Entry unwornEntry = arEntry;
+    unwornEntry.ExtraWorn = false;
+    unwornEntry.ExtraWornLeft = false;
+    ExtraDataList* pExtraDataList = GetExtraDataFromItem(arEntry.Count > 0 ? unwornEntry : arEntry);
 
     if (arEntry.Count > 0)
     {
-        bool isWorn = false;
-        bool isWornLeft = false;
-        if (pExtraDataList)
-        {
-            isWorn = pExtraDataList->Contains(ExtraDataType::Worn);
-            isWornLeft = pExtraDataList->Contains(ExtraDataType::WornLeft);
-        }
-
         spdlog::debug("Adding item {:X}, count {}", pObject->formID, arEntry.Count);
         AddObjectToContainer(pObject, pExtraDataList, arEntry.Count, nullptr);
 
-        // TODO: check Actor cast first?
-        if (isWorn)
-            EquipManager::Get()->Equip(Cast<Actor>(this), pObject, nullptr, arEntry.Count, DefaultObjectManager::Get().rightEquipSlot, false, true, false, false);
-        else if (isWornLeft)
-            EquipManager::Get()->Equip(Cast<Actor>(this), pObject, nullptr, arEntry.Count, DefaultObjectManager::Get().leftEquipSlot, false, true, false, false);
+        if ((arEntry.ExtraWorn || arEntry.ExtraWornLeft) && Cast<Actor>(this))
+        {
+            // AddItem may merge and free the supplied list. Find the surviving instance.
+            ExtraDataList* matchingList = nullptr;
+            bool alreadyWorn = false;
+            if (const auto* changes = GetContainerChanges(); changes && changes->entries)
+                for (auto* entry : *changes->entries)
+                {
+                    if (!entry || entry->form != pObject || !entry->dataList)
+                        continue;
+                    for (auto* extra : *entry->dataList)
+                    {
+                        if (!extra)
+                            continue;
+                        Inventory::Entry candidate;
+                        candidate.BaseId = arEntry.BaseId;
+                        GetItemFromExtraData(candidate, extra);
+                        const bool wornRight = candidate.ExtraWorn;
+                        const bool wornLeft = candidate.ExtraWornLeft;
+                        candidate.ExtraWorn = candidate.ExtraWornLeft = false;
+                        if (!candidate.IsExtraDataEquals(unwornEntry))
+                            continue;
+                        if ((arEntry.ExtraWorn && wornRight) || (arEntry.ExtraWornLeft && wornLeft))
+                            alreadyWorn = true;
+                        if (!wornRight && !wornLeft)
+                            matchingList = extra;
+                    }
+                }
+            if (!alreadyWorn && (matchingList || !unwornEntry.ContainsExtraData()))
+                EquipManager::Get()->Equip(Cast<Actor>(this), pObject, matchingList, 1,
+                    arEntry.ExtraWornLeft ? DefaultObjectManager::Get().leftEquipSlot : DefaultObjectManager::Get().rightEquipSlot,
+                    false, true, false, false);
+        }
     }
     else if (arEntry.Count < 0)
     {
@@ -1031,7 +1161,7 @@ bool TESObjectREFR::PlayAnimationAndWait(BSFixedString* apAnimation, BSFixedStri
     PAPYRUS_FUNCTION(bool, ObjectReference, PlayAnimationAndWait, BSFixedString*, BSFixedString*);
 
     s_cancelAnimationWaitEvent = true;
-    bool result = s_pPlayAnimationAndWait(this, apAnimation, apEventName);
+    bool result = s_pPlayAnimationAndWait.CallWithStackId(UINT32_MAX, this, apAnimation, apEventName);
     s_cancelAnimationWaitEvent = false;
     return result;
 }
@@ -1085,6 +1215,15 @@ bool TP_MAKE_THISCALL(HookPlayAnimation, void, uint32_t auiStackID, TESObjectREF
 
 bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, uint8_t aUnk1, TESBoundObject* apObjectToGet, int32_t aCount, char aDefaultProcessing)
 {
+    Actor* pActivator = Cast<Actor>(apActivator);
+    if (pActivator && pActivator->GetExtension()->IsRemote() && !pActivator->GetExtension()->IsPlayer() &&
+        !ScopedActivateOverride::IsOverriden())
+    {
+        if (apThis->baseForm && apThis->baseForm->formType == FormType::Door)
+            QueueReplicaDoorCleanup(pActivator->formID);
+        return false;
+    }
+
     if (World::Get().GetSharedDropService().TryHold(apThis, apActivator))
         return true;
 
@@ -1093,8 +1232,6 @@ bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, u
 
     if (World::Get().GetBusyLockService().TryHold(apThis, apActivator, aUnk1, apObjectToGet, aCount, aDefaultProcessing, _ReturnAddress()))
         return true;
-
-    Actor* pActivator = Cast<Actor>(apActivator);
 
     // Exclude books from activation since only reading them removes them from the cell
     // Note: Books are now unsynced 
@@ -1271,6 +1408,9 @@ static TiltedPhoques::Initializer s_objectReferencesHooks(
         POINTER_SKYRIMSE(TRunPendingDoor, s_runPendingDoor, 39408);
         RealRunPendingDoor = s_runPendingDoor.Get();
         TP_HOOK(&RealRunPendingDoor, HookRunPendingDoor);
+        POINTER_SKYRIMSE(TRequestFade, s_requestFade, 39454);
+        RealRequestFade = s_requestFade.Get();
+        TP_HOOK(&RealRequestFade, HookRequestFade);
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);
         TP_HOOK(&RealRemoveInventoryItem, HookRemoveInventoryItem);
         TP_HOOK(&RealPlayAnimationAndWait, HookPlayAnimationAndWait);
@@ -1296,6 +1436,10 @@ WorldFinishedFn* s_worldFinished{};
 WorldSet3DFn* s_worldSet3D{};
 WorldSetOpenFn* s_worldSetOpen{};
 WorldOpenFn* s_worldOpen{};
+struct PendingWorldOpen { bool Before{}; uint64_t Until{}; };
+std::mutex s_worldOpenChecksLock;
+std::deque<uint32_t> s_worldOpenChecks;
+std::unordered_map<uint32_t, PendingWorldOpen> s_worldOpenPending;
 
 float WorldHealth(TESObjectREFR* ref)
 {
@@ -1314,6 +1458,11 @@ uint32_t WorldOpenState(TESObjectREFR* ref)
     using Fn = uint32_t(TESObjectREFR*);
     POINTER_SKYRIMSE(Fn, fn, 14288);
     return fn.Get()(ref);
+}
+bool WorldActivationBlocked(TESObjectREFR* ref)
+{
+    const auto* extra = ref->extraData.GetByType(static_cast<ExtraDataType>(0xA0));
+    return extra && (reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(extra) + 0x10)[0] & 1);
 }
 const char* WorldFinished(TESObjectREFR* ref)
 {
@@ -1361,16 +1510,47 @@ void HookWorldSet3D(TESObjectREFR* ref, NiNode* node, bool queue)
 bool HookWorldOpen(TESObjectREFR* ref, bool open, bool snap)
 {
     const auto id = ref ? ref->formID : 0;
+    using IsOpenAction = bool(TESObjectREFR*, uint32_t);
+    POINTER_SKYRIMSE(IsOpenAction, isOpenAction, 19682);
+    const bool before = ref && isOpenAction.Get()(ref, 4);
     const auto result = s_worldOpen(ref, open, snap);
-    if (result) WorldStateService::ObserveId(id, WorldStateKind::Open, open, 1);
+    const bool after = ref && isOpenAction.Get()(ref, 4);
+    if (before != after)
+        WorldStateService::ObserveId(id, WorldStateKind::Open, after, 1);
+    else if (result && id)
+    {
+        std::lock_guard lock(s_worldOpenChecksLock);
+        if (s_worldOpenPending.emplace(id, PendingWorldOpen{before, GetTickCount64() + 1000}).second)
+            s_worldOpenChecks.push_back(id);
+    }
     return result;
+}
+// TESObjectREFR::Enable (19800 / 0x1402F2840) as a whole: it sets the flag (14646), enables linked children and
+// loads 3D, so a deferred barrier must skip the entire call, never the flag setter alone.
+using WorldEnableFn = void(TESObjectREFR*, bool);
+WorldEnableFn* s_worldEnable{};
+void HookWorldEnable(TESObjectREFR* ref, bool resetInventory)
+{
+    if (ref && ref->IsDisabled() && TriggerGate::DeferBarrier(ref, false))
+        return;
+    s_worldEnable(ref, resetInventory);
 }
 void HookWorldSetOpen(void* vm, uint32_t stack, TESObjectREFR* ref, bool open)
 {
     const auto id = ref ? ref->formID : 0;
+    if (ref && !open && TriggerGate::DeferBarrier(ref, true))
+        return;
     s_worldSetOpen(vm, stack, ref, open);
     // Only script SetOpen; player Activate/DoorVote is already replicated.
     WorldStateService::ObserveId(id, WorldStateKind::Open, open);
+}
+using WorldBlockActivationFn = void(void*, uint32_t, TESObjectREFR*, bool);
+WorldBlockActivationFn* s_worldBlockActivation{};
+void HookWorldBlockActivation(void* vm, uint32_t stack, TESObjectREFR* ref, bool blocked)
+{
+    const auto id = ref ? ref->formID : 0;
+    s_worldBlockActivation(vm, stack, ref, blocked);
+    WorldStateService::ObserveId(id, WorldStateKind::BlockActivation, blocked);
 }
 static TiltedPhoques::Initializer s_worldStateHooks([] {
     POINTER_SKYRIMSE(WorldFlagFn, disabled, 14646);
@@ -1380,10 +1560,12 @@ static TiltedPhoques::Initializer s_worldStateHooks([] {
     POINTER_SKYRIMSE(WorldFinishedFn, finished, 19513);
     POINTER_SKYRIMSE(WorldSet3DFn, set3D, 19729);
     POINTER_SKYRIMSE(WorldSetOpenFn, setOpen, 56233);
+    POINTER_SKYRIMSE(WorldBlockActivationFn, blockActivation, 56148);
     POINTER_SKYRIMSE(WorldOpenFn, open, 14287);
     s_worldDisabled = disabled.Get(); s_worldDestroyed = destroyed.Get();
     s_worldDamage = damage.Get(); s_worldClear = clear.Get();
     s_worldFinished = finished.Get(); s_worldSet3D = set3D.Get(); s_worldSetOpen = setOpen.Get(); s_worldOpen = open.Get();
+    s_worldBlockActivation = blockActivation.Get();
     TP_HOOK(&s_worldDisabled, HookWorldDisabled);
     TP_HOOK(&s_worldDestroyed, HookWorldDestroyed);
     TP_HOOK(&s_worldDamage, HookWorldDamage);
@@ -1391,17 +1573,88 @@ static TiltedPhoques::Initializer s_worldStateHooks([] {
     TP_HOOK(&s_worldFinished, HookWorldFinished);
     TP_HOOK(&s_worldSet3D, HookWorldSet3D);
     TP_HOOK(&s_worldSetOpen, HookWorldSetOpen);
+    TP_HOOK(&s_worldBlockActivation, HookWorldBlockActivation);
     TP_HOOK(&s_worldOpen, HookWorldOpen);
+    POINTER_SKYRIMSE(WorldEnableFn, enable, 19800);
+    s_worldEnable = enable.Get();
+    TP_HOOK(&s_worldEnable, HookWorldEnable);
 });
+}
+
+void DrainWorldOpenChecksOnMainFrame() noexcept
+{
+    using IsOpenAction = bool(TESObjectREFR*, uint32_t);
+    POINTER_SKYRIMSE(IsOpenAction, isOpenAction, 19682);
+    size_t count{};
+    {
+        std::lock_guard lock(s_worldOpenChecksLock);
+        count = (std::min)(size_t{32}, s_worldOpenChecks.size());
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        uint32_t id{};
+        PendingWorldOpen pending{};
+        {
+            std::lock_guard lock(s_worldOpenChecksLock);
+            if (s_worldOpenChecks.empty())
+                break;
+            id = s_worldOpenChecks.front();
+            s_worldOpenChecks.pop_front();
+            pending = s_worldOpenPending.find(id)->second;
+        }
+        auto* ref = Cast<TESObjectREFR>(TESForm::GetById(id));
+        const bool door = ref && ref->baseForm && ref->baseForm->formType == FormType::Door;
+        const bool after = door && isOpenAction.Get()(ref, 4);
+        if (door && pending.Before != after)
+            WorldStateService::ObserveId(id, WorldStateKind::Open, after, 1);
+        std::lock_guard lock(s_worldOpenChecksLock);
+        if (door && pending.Before == after && GetTickCount64() < pending.Until)
+            s_worldOpenChecks.push_back(id);
+        else
+        {
+            s_worldOpenPending.erase(id);
+        }
+    }
+}
+
+// The barrier guard's deferred door close, applied through the hooked native so the change replicates.
+void WorldStateSetDoorOpen(TESObjectREFR* apRef, bool aOpen) noexcept
+{
+    if (apRef && s_worldOpen)
+        HookWorldOpen(apRef, aOpen, false);
 }
 
 uint32_t WorldStateService::EnableParent(TESObjectREFR* ref) noexcept
 {
     if (!ref) return UINT32_MAX;
-    const auto* extra = ref->extraData.GetByType(static_cast<ExtraDataType>(0x36));
-    if (!extra) return 0;
+    // The main loop cannot wait for a worker's extra-data lock. Use the engine read protocol and retry next frame.
+    auto& lock = ref->extraData.lock;
+    MT::LastExtraRef.store(ref->formID, std::memory_order_release);
+    MT::LastExtraLockWord.store(reinterpret_cast<uintptr_t>(&lock), std::memory_order_release);
+    if (!lock.TryLockForRead())
+    {
+        MT::LastExtraLockWord.store(0, std::memory_order_release);
+        MT::ExtraBusy.fetch_add(1, std::memory_order_relaxed);
+        static uint32_t s_lastBusyRef{};
+        if (s_lastBusyRef != ref->formID)
+        {
+            s_lastBusyRef = ref->formID;
+            spdlog::warn("mtd_extra_busy ref={:X} owner={} count={} total={}; retried next frame", ref->formID,
+                lock.uiWriterThread, lock.uiLock, MT::ExtraBusy.load(std::memory_order_relaxed));
+        }
+        return UINT32_MAX;
+    }
+    const BSExtraData* extra{};
     uint32_t handle{};
-    std::memcpy(&handle, reinterpret_cast<const uint8_t*>(extra) + 0x14, sizeof(handle));
+    {
+        ScopedExtraDataOverride noRelock;
+        extra = ref->extraData.GetByType(static_cast<ExtraDataType>(0x36));
+        if (extra)
+            std::memcpy(&handle, reinterpret_cast<const uint8_t*>(extra) + 0x14, sizeof(handle));
+    }
+    lock.UnlockForRead();
+    MT::LastExtraLockWord.store(0, std::memory_order_release);
+    if (!extra) return 0;
     using Resolve = bool(uint32_t&, TESObjectREFR*&);
     POINTER_SKYRIMSE(Resolve, resolve, 17201);
     TESObjectREFR* parent{};
@@ -1524,6 +1777,46 @@ std::string WorldGraphDiagnostic(BSAnimationGraphManager* manager)
     }
     return result + fmt::format("],\"graphsTruncated\":{}", manager->animationGraphs.size > count);
 }
+
+// Every active state machine clone's (node, current state) of the active graph, hashed: equal digests mean the graph
+// sits in the same states.
+uint64_t WorldGraphStateDigest(BSAnimationGraphManager* manager)
+{
+    using namespace ActorPoseDiagnosticViews;
+    if (!manager)
+        return 0;
+    BSScopedLock<BSRecursiveLock> lock(manager->lock);
+    if (manager->animationGraphIndex >= manager->animationGraphs.size)
+        return 0;
+    auto* graph = manager->animationGraphs.Get(manager->animationGraphIndex);
+    BehaviorGraph behavior{};
+    ActiveNodeList nodes{};
+    if (!graph || !WorldProbeRead(graph->behaviorGraph, behavior) || !WorldProbeRead(behavior.activeNodes, nodes) ||
+        nodes.size <= 0 || nodes.size > 1024 || !nodes.data)
+        return 0;
+    uint64_t digest = 1469598103934665603ull;
+    for (int i = 0; i < (std::min)(nodes.size, 256); ++i)
+    {
+        ActiveNodeInfo info{};
+        StateMachine state{};
+        if (!WorldProbeRead(static_cast<const ActiveNodeInfo*>(nodes.data) + i, info) || !info.nodeClone ||
+            !Cast<hkbStateMachine>(reinterpret_cast<hkbGenerator*>(info.nodeClone)) || !WorldProbeRead(info.nodeClone, state))
+            continue;
+        digest = (digest ^ state.nodeID) * 1099511628211ull;
+        digest = (digest ^ static_cast<uint32_t>(state.currentStateID)) * 1099511628211ull;
+    }
+    return digest;
+}
+}
+
+uint64_t TESObjectREFR::GetGraphStateDigest() noexcept
+{
+    BSAnimationGraphManager* pManager = nullptr;
+    if (!animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return 0;
+    const auto digest = WorldGraphStateDigest(pManager);
+    pManager->Release();
+    return digest;
 }
 
 std::string WorldStateService::AnimationDiagnostic(TESObjectREFR* ref) noexcept
@@ -1552,6 +1845,7 @@ std::string WorldStateService::AnimationDiagnostic(TESObjectREFR* ref) noexcept
 void WorldStateService::Sample(TESObjectREFR* ref) noexcept
 {
     if (!Eligible(ref)) return;
+    Observe(ref, WorldStateKind::BlockActivation, WorldActivationBlocked(ref));
     if (!EnableParent(ref)) Observe(ref, WorldStateKind::Disabled, ref->IsDisabled());
     Observe(ref, WorldStateKind::Destroyed, (ref->flags & 0x800000) != 0);
     if (ref->flags & 0x1000000)
@@ -1575,6 +1869,7 @@ bool WorldStateService::Matches(TESObjectREFR* ref, const WorldState& state) noe
     switch (state.Kind)
     {
     case WorldStateKind::Disabled: return ref->IsDisabled() == (state.Value != 0);
+    case WorldStateKind::BlockActivation: return WorldActivationBlocked(ref) == (state.Value != 0);
     case WorldStateKind::Destroyed: return ((ref->flags & 0x800000) != 0) == (state.Value != 0);
     case WorldStateKind::DestructionHealth: return WorldStage(ref) == state.Value && std::abs(WorldHealth(ref) - state.Scalar) <= 0.001f;
     case WorldStateKind::Open:
@@ -1611,6 +1906,13 @@ bool WorldStateService::Apply(TESObjectREFR* ref, const WorldState& state) noexc
         }
         return Matches(ref, state);
     }
+    case WorldStateKind::BlockActivation:
+    {
+        using SetExtraFlags = void(ExtraDataList*, uint32_t, bool);
+        POINTER_SKYRIMSE(SetExtraFlags, setExtraFlags, 12042);
+        if (!Matches(ref, state)) setExtraFlags.Get()(&ref->extraData, 1, state.Value != 0);
+        return Matches(ref, state);
+    }
     case WorldStateKind::Destroyed:
         s_worldDestroyed(ref, state.Value != 0);
         return Matches(ref, state);
@@ -1618,6 +1920,23 @@ bool WorldStateService::Apply(TESObjectREFR* ref, const WorldState& state) noexc
         if (!WorldStateTable::ShouldDeliverLive(state) && state.Scalar != 2) return false;
         if (ref->baseForm->formType != FormType::Door) return false;
         if (!ref->GetNiNode() || ref->IsDisabled()) return false;
+        {
+            using GetOpener = uint32_t*(ExtraDataList*, uint32_t*);
+            using SetOpener = void(ExtraDataList*, uint32_t*);
+            POINTER_SKYRIMSE(GetOpener, getOpener, 11801);
+            POINTER_SKYRIMSE(SetOpener, setOpener, 11802);
+            uint32_t openerHandle{};
+            getOpener.Get()(&ref->extraData, &openerHandle);
+            if (openerHandle && openerHandle != *TESObjectREFR::GetNullHandle())
+            {
+                auto* opener = Cast<Actor>(TESObjectREFR::GetByHandle(openerHandle));
+                if (opener && !opener->GetExtension()->IsRemote() &&
+                    (WorldOpenState(ref) == 2u || WorldOpenState(ref) == 4u))
+                    return false;
+            }
+            uint32_t nullHandle = *TESObjectREFR::GetNullHandle();
+            setOpener.Get()(&ref->extraData, &nullHandle);
+        }
         // A newly attached node can have a stale pose despite matching flags.
         if (state.Scalar == 2)
             return s_worldOpen(ref, state.Value != 0, true) && Matches(ref, state);
@@ -1625,8 +1944,11 @@ bool WorldStateService::Apply(TESObjectREFR* ref, const WorldState& state) noexc
         {
             const auto open = WorldOpenState(ref);
             // Do not restart an animation already moving toward the requested state.
+            // The native setter (N14287), not Papyrus SetOpen (N56233): SetOpen calls ActivateRef with no activator,
+            // which activates the door's activate children on every peer that applies it (SkyrimAtlas door.open_state,
+            // iteration 10 review). The host's own script already did that once.
             if (open != (state.Value ? 2u : 4u))
-                s_worldSetOpen(nullptr, 0, ref, state.Value != 0);
+                s_worldOpen(ref, state.Value != 0, false);
         }
         // 56233 does not read VM/stack in 1.7.104. Acceptance is not completion.
         return Matches(ref, state);

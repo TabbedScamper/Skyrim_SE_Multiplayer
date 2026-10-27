@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,17 @@ struct Checkpoint
     uint64_t Revision{};
     std::string Snapshot;
     int64_t CreatedAtMs{};
+};
+
+struct RosterEntry
+{
+    std::string CheckpointId;
+    uint64_t SteamId{};
+    std::string CharacterKey, CharacterName;
+    uint32_t WorldMod{}, WorldBase{}, CellMod{}, CellBase{};
+    float X{}, Y{}, Z{}, Heading{};
+    bool Downed{};
+    bool operator==(const RosterEntry&) const = default;
 };
 
 // Plugin IDs refer to the campaign's pinned mod manifest, never a client's load order.
@@ -79,6 +91,11 @@ public:
     [[nodiscard]] std::vector<JournalEntry> ReadAfter(uint64_t aRevision, size_t aLimit = 1024) const;
     [[nodiscard]] uint64_t CreateCheckpoint(const std::string& acSnapshot);
     [[nodiscard]] Checkpoint GetLatestCheckpoint() const;
+    void PutRosterEntry(const RosterEntry& acEntry);
+    [[nodiscard]] std::vector<RosterEntry> ReadRoster(const std::string& acCheckpointId) const;
+    // Name is display metadata retained for caller compatibility; only Steam ID and playthrough key match.
+    [[nodiscard]] std::optional<RosterEntry> FindLatestRoster(uint64_t aSteamId, const std::string& acKey,
+        const std::string& acName) const;
     [[nodiscard]] uint64_t AdvanceAuthorityEpoch(const std::string& acTransactionId, const std::string& acReason);
     [[nodiscard]] std::vector<QuestItem> ReadQuestItems() const;
     // Compare-and-set and journal insertion share one SQLite transaction.

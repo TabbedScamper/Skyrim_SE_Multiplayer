@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <random>
@@ -235,6 +236,13 @@ void Ledger::Initialize()
             "revision INTEGER PRIMARY KEY CHECK(revision >= 0),"
             "snapshot BLOB NOT NULL,"
             "created_at_ms INTEGER NOT NULL)");
+    Execute("CREATE TABLE IF NOT EXISTS checkpoint_roster ("
+            "checkpoint_id TEXT NOT NULL,steam_id TEXT NOT NULL,character_key TEXT NOT NULL,character_name TEXT NOT NULL,"
+            "world_mod INTEGER NOT NULL,world_base INTEGER NOT NULL,cell_mod INTEGER NOT NULL,cell_base INTEGER NOT NULL,"
+            "x REAL NOT NULL,y REAL NOT NULL,z REAL NOT NULL,heading REAL NOT NULL,downed INTEGER NOT NULL,"
+            "saved_at_ms INTEGER NOT NULL,"
+            "PRIMARY KEY(checkpoint_id,steam_id,character_key))");
+    Execute("CREATE INDEX IF NOT EXISTS checkpoint_roster_identity ON checkpoint_roster(steam_id,character_key,saved_at_ms)");
     Execute("CREATE TABLE IF NOT EXISTS quest_items ("
             "mod_id INTEGER NOT NULL,base_id INTEGER NOT NULL,quest_mod_id INTEGER NOT NULL,"
             "quest_base_id INTEGER NOT NULL,alias_id INTEGER NOT NULL,"
@@ -526,6 +534,96 @@ Checkpoint Ledger::GetLatestCheckpoint() const
     checkpoint.Snapshot = ReadBlob(query.Get(), 1);
     checkpoint.CreatedAtMs = sqlite3_column_int64(query.Get(), 2);
     return checkpoint;
+}
+
+void Ledger::PutRosterEntry(const RosterEntry& acEntry)
+{
+    if (acEntry.CheckpointId.empty() || acEntry.CheckpointId.size() > 64 || !acEntry.SteamId ||
+        acEntry.CharacterKey.empty() || acEntry.CharacterKey.size() > 128 ||
+        acEntry.CharacterName.empty() || acEntry.CharacterName.size() > 128 ||
+        !std::isfinite(acEntry.X) || !std::isfinite(acEntry.Y) || !std::isfinite(acEntry.Z) ||
+        !std::isfinite(acEntry.Heading) || (!acEntry.WorldBase && !acEntry.CellBase))
+        throw std::invalid_argument("Invalid checkpoint roster entry");
+    std::scoped_lock lock(m_mutex);
+    Transaction transaction(m_pDatabase);
+    Statement upsert(m_pDatabase, "INSERT INTO checkpoint_roster VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(checkpoint_id,steam_id,character_key) DO UPDATE SET "
+        "character_name=excluded.character_name,world_mod=excluded.world_mod,world_base=excluded.world_base,"
+        "cell_mod=excluded.cell_mod,cell_base=excluded.cell_base,x=excluded.x,y=excluded.y,z=excluded.z,"
+        "heading=excluded.heading,downed=excluded.downed,saved_at_ms=excluded.saved_at_ms");
+    BindText(m_pDatabase, upsert.Get(), 1, acEntry.CheckpointId);
+    BindText(m_pDatabase, upsert.Get(), 2, std::to_string(acEntry.SteamId));
+    BindText(m_pDatabase, upsert.Get(), 3, acEntry.CharacterKey);
+    BindText(m_pDatabase, upsert.Get(), 4, acEntry.CharacterName);
+    const uint32_t ids[]{acEntry.WorldMod, acEntry.WorldBase, acEntry.CellMod, acEntry.CellBase};
+    for (int i = 0; i < 4; ++i)
+        Check(sqlite3_bind_int64(upsert.Get(), i + 5, ids[i]), m_pDatabase);
+    const float values[]{acEntry.X, acEntry.Y, acEntry.Z, acEntry.Heading};
+    for (int i = 0; i < 4; ++i)
+        Check(sqlite3_bind_double(upsert.Get(), i + 9, values[i]), m_pDatabase);
+    Check(sqlite3_bind_int(upsert.Get(), 13, acEntry.Downed), m_pDatabase);
+    Check(sqlite3_bind_int64(upsert.Get(), 14, NowMs()), m_pDatabase);
+    Check(sqlite3_step(upsert.Get()), m_pDatabase);
+    transaction.Commit();
+}
+
+std::vector<RosterEntry> Ledger::ReadRoster(const std::string& acCheckpointId) const
+{
+    std::scoped_lock lock(m_mutex);
+    Statement query(m_pDatabase, "SELECT steam_id,character_key,character_name,world_mod,world_base,cell_mod,"
+        "cell_base,x,y,z,heading,downed FROM checkpoint_roster WHERE checkpoint_id=? ORDER BY steam_id,character_key");
+    BindText(m_pDatabase, query.Get(), 1, acCheckpointId);
+    std::vector<RosterEntry> entries;
+    for (int result; (result = sqlite3_step(query.Get())) != SQLITE_DONE;)
+    {
+        Check(result, m_pDatabase);
+        RosterEntry entry;
+        entry.CheckpointId = acCheckpointId;
+        entry.SteamId = std::stoull(ReadText(query.Get(), 0));
+        entry.CharacterKey = ReadText(query.Get(), 1);
+        entry.CharacterName = ReadText(query.Get(), 2);
+        entry.WorldMod = static_cast<uint32_t>(ReadUnsigned(query.Get(), 3));
+        entry.WorldBase = static_cast<uint32_t>(ReadUnsigned(query.Get(), 4));
+        entry.CellMod = static_cast<uint32_t>(ReadUnsigned(query.Get(), 5));
+        entry.CellBase = static_cast<uint32_t>(ReadUnsigned(query.Get(), 6));
+        entry.X = static_cast<float>(sqlite3_column_double(query.Get(), 7));
+        entry.Y = static_cast<float>(sqlite3_column_double(query.Get(), 8));
+        entry.Z = static_cast<float>(sqlite3_column_double(query.Get(), 9));
+        entry.Heading = static_cast<float>(sqlite3_column_double(query.Get(), 10));
+        entry.Downed = sqlite3_column_int(query.Get(), 11) != 0;
+        entries.push_back(std::move(entry));
+    }
+    return entries;
+}
+
+std::optional<RosterEntry> Ledger::FindLatestRoster(uint64_t aSteamId, const std::string& acKey,
+    const std::string& /*acName*/) const
+{
+    if (!aSteamId || acKey.empty()) return std::nullopt;
+    std::scoped_lock lock(m_mutex);
+    Statement query(m_pDatabase, "SELECT checkpoint_id,world_mod,world_base,cell_mod,cell_base,x,y,z,heading,downed,character_name "
+        "FROM checkpoint_roster WHERE steam_id=? AND character_key=? "
+        "ORDER BY saved_at_ms DESC,rowid DESC LIMIT 1");
+    BindText(m_pDatabase, query.Get(), 1, std::to_string(aSteamId));
+    BindText(m_pDatabase, query.Get(), 2, acKey);
+    const int result = sqlite3_step(query.Get());
+    if (result == SQLITE_DONE) return std::nullopt;
+    Check(result, m_pDatabase);
+    RosterEntry entry;
+    entry.CheckpointId = ReadText(query.Get(), 0);
+    entry.SteamId = aSteamId;
+    entry.CharacterKey = acKey;
+    entry.CharacterName = ReadText(query.Get(), 10);
+    entry.WorldMod = static_cast<uint32_t>(ReadUnsigned(query.Get(), 1));
+    entry.WorldBase = static_cast<uint32_t>(ReadUnsigned(query.Get(), 2));
+    entry.CellMod = static_cast<uint32_t>(ReadUnsigned(query.Get(), 3));
+    entry.CellBase = static_cast<uint32_t>(ReadUnsigned(query.Get(), 4));
+    entry.X = static_cast<float>(sqlite3_column_double(query.Get(), 5));
+    entry.Y = static_cast<float>(sqlite3_column_double(query.Get(), 6));
+    entry.Z = static_cast<float>(sqlite3_column_double(query.Get(), 7));
+    entry.Heading = static_cast<float>(sqlite3_column_double(query.Get(), 8));
+    entry.Downed = sqlite3_column_int(query.Get(), 9) != 0;
+    return entry;
 }
 
 uint64_t Ledger::AdvanceAuthorityEpoch(const std::string& acTransactionId, const std::string& acReason)

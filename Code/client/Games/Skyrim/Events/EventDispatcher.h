@@ -165,7 +165,7 @@ struct TESQuestStageEvent
     void* callback;
     uint32_t formId;
     uint16_t stageId;
-    bool bUnk;
+    uint8_t itemIndex;
 };
 
 struct TESQuestStartStopEvent
@@ -177,7 +177,7 @@ struct TESQuestStageItemDoneEvent
 {
     uint32_t formId;
     uint16_t stageId;
-    bool unk;
+    uint8_t itemIndex;
 };
 
 struct TESResetEvent

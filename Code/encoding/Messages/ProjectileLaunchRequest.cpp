@@ -33,6 +33,7 @@ void ProjectileLaunchRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
 
     Serialization::WriteBool(aWriter, UnkBool1);
     Serialization::WriteBool(aWriter, UnkBool2);
+    Serialization::WriteBool(aWriter, IsDualCasting);
 }
 
 void ProjectileLaunchRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -70,4 +71,5 @@ void ProjectileLaunchRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
 
     UnkBool1 = Serialization::ReadBool(aReader);
     UnkBool2 = Serialization::ReadBool(aReader);
+    IsDualCasting = Serialization::ReadBool(aReader);
 }

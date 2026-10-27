@@ -28,6 +28,12 @@
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
 #include <Services/GameTestService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/CutsceneFollow.h>
+#include <Services/LobbyService.h>
+extern thread_local bool g_mirroringLeaderIdle;
+extern thread_local bool g_forceAnimation;
+#include <PlayerCharacter.h>
+#include <Forms/TESIdleForm.h>
 #include <Services/TransportService.h>
 #include <atomic>
 #include <chrono>
@@ -35,7 +41,11 @@
 #include <limits>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+
+// A/B switch (test command copy_native_tracking): run native head tracking/expressions after a copy's graph update.
+std::atomic<bool> g_copyNativeTracking{true};
 
 extern thread_local const char* g_animErrorCode;
 
@@ -246,7 +256,7 @@ bool ClaimAnimationInterest(Actor* apActor)
 // The host's camera cull suspends an actor's character controller (bhkCharacterController flags +0x218:
 // kNoSim 1<<17, kFarAway 1<<18, kQuickSimulate 1<<20) while its AI path still moves it: owner-reported
 // "horses float and carts go nuts whenever the host looks away", seen by the follower too. For owned actors a
-// remote player is near (this interest set), keep the controller fully simulated. Muse diag-offscreen.
+// remote player is near (this interest set), keep the controller fully simulated. diag-offscreen.
 // Default off: holding kFarAway clear did not change the host float (measured 2026-09-28); kept as a switch.
 std::atomic<bool> s_offscreenSimulate{false};
 std::atomic<uint64_t> s_offscreenClears{};
@@ -499,6 +509,20 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
         // simulated flag; ID 63358 still applies LOD.
         TiltedPhoques::ThisCall(s_realUpdateGraphManager, manager, &data);
         manager->Release();
+        // The native update this replaces (20119 / 0x1402FD930) then runs every biped slot's own graph
+        // (15654 / 0x140217BE0 on entry + 0x60 for 0x2A slots): a beast tail is the slot 10 addon's
+        // TailAnimationGraphManagerHolder, whose bones are not in the actor's graph. Skipping that loop left
+        // every copy's tail in its bind pose (straight out) while the owner's swung (Helgen Keep, 2026-09-29).
+        if (auto* biped = static_cast<uint8_t*>(apThis->actorWeightData))
+            for (uint32_t slot = 0; slot < 0x2A; ++slot)
+            {
+                auto* holder = *reinterpret_cast<IAnimationGraphManagerHolder**>(biped + 0x10 + slot * 0x78 + 0x60);
+                BSAnimationGraphManager* slotManager{};
+                if (!holder || !holder->GetBSAnimationGraph(&slotManager) || !slotManager)
+                    continue;
+                TiltedPhoques::ThisCall(s_realUpdateGraphManager, slotManager, &data);
+                slotManager->Release();
+            }
         if (extension->IsRemotePlayer() && started != std::chrono::steady_clock::time_point{})
         {
             s_playerGraphCalls.fetch_add(1, std::memory_order_relaxed);
@@ -520,7 +544,21 @@ bool UpdateRemoteGraph(Actor* apThis, float aDelta, bool aTransformSynced)
 void TP_MAKE_THISCALL(HookActorUpdateAnimation, Actor, float aDelta)
 {
     if (!UpdateRemoteGraph(apThis, aDelta, false))
-        TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+        return TiltedPhoques::ThisCall(s_realActorUpdateAnimation, apThis, aDelta);
+    // The native update this replaced (37361 / 0x14067D590) follows the graph with head tracking (Actor vtable
+    // slot 0x122, 38009, where HeadTrackService aims a remote player's head at its owner's camera) and the facial
+    // expression update (slot 0x123), gated on a living, upright actor with a processed middle-high process.
+    // Skipping them froze every nearby copy's head (Helgen Keep, 2026-09-29: the owner's pitch arrived, the copy's
+    // look-at override was 5 minutes old). Queued (distant) updates, 20123, never run tracking natively either.
+    const auto flags1 = apThis->actorState.flags1;
+    const auto* process = reinterpret_cast<const uint8_t*>(apThis->currentProcess);
+    if (!g_copyNativeTracking.load(std::memory_order_relaxed) || !apThis->GetNiNode() || !process || process[0x137] || ((flags1 >> 21) & 0xF) != 0 ||
+        (flags1 & 0xE000000) != 0 || (flags1 & 0x3C000) == 0x1C000 || !(aDelta > 0.f) || !std::isfinite(aDelta))
+        return;
+    using TActorFrame = void(Actor*, float);
+    auto** table = *reinterpret_cast<void***>(apThis);
+    reinterpret_cast<TActorFrame*>(table[0x122])(apThis, aDelta);
+    reinterpret_cast<TActorFrame*>(table[0x123])(apThis, aDelta);
 }
 
 void TP_MAKE_THISCALL(HookQueuedAnimationUpdate, TESObjectREFR, float aDelta)
@@ -698,6 +736,13 @@ bool CaptureEvaluatedPose(Actor* apActor, EvaluatedPoseSnapshot& arSnapshot,
 void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationComponent& aAnimationComponent, const uint64_t aTick) noexcept
 {
     auto& actions = aAnimationComponent.TimePoints;
+    // Seated at the lobby's fire: the lobby poses it; its owner's actions (their own mark's idle) are dropped.
+    if (apActor && LobbyService::HoldsRemote(apActor->formID))
+    {
+        actions.clear();
+        aAnimationComponent.CombatTargetTimePoints.clear();
+        return;
+    }
 
     // Retain the established single-action budget until paired observations
     // establish event ordering across native evaluations. Never burst ForceAction.
@@ -782,6 +827,51 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
 
         const auto result = ActorMediator::Get()->ForceAction(&actionData);
         aAnimationComponent.LastRanActionResult = result != 0;
+        // Cutscene follow: this follower's own character plays the leader's scene idles too, so its first-person
+        // camera takes the same motion (measured 2026-09-30: the leader's IdleExecutionerChop_Player dropped his
+        // camera 50 u onto the block while hers stayed at eye height). Walking camera idles belong to CameraService.
+        // ("player" above is only set during a frame-cost session; test the copy itself.)
+        if (first.IdleId && first.IdleId != 0x10C00C && first.IdleId != 0x10C00D &&
+            apActor->GetExtension() && apActor->GetExtension()->IsRemotePlayer() &&
+            apActor->formID == CutsceneFollow::LeaderFormId() && actionData.idleForm &&
+            CutsceneFollow::LeaderIdleNeeded(first.IdleId))
+        {
+            if (auto* pLocal = PlayerCharacter::Get())
+            {
+                // The same forced action as the leader's copy just ran: PlayIdle checks the idle's conditions, which
+                // fail on this character (IdleExecutionerChop_Player refused, 2026-09-30 14:13) because its scene
+                // partner (the headsman) is the leader's, not this PC's.
+                TESActionData mirror(first.Type & 0x3, pLocal, pAction, pTarget);
+                mirror.eventName = BSFixedString(first.EventName.c_str());
+                mirror.idleForm = actionData.idleForm;
+                mirror.someFlag = actionData.someFlag;
+                // Forced like Actor.cpp's replays: not broadcast as this player's own action.
+                g_mirroringLeaderIdle = g_forceAnimation = true;
+                const bool played = ActorMediator::Get()->ForceAction(&mirror) != 0;
+                g_mirroringLeaderIdle = g_forceAnimation = false;
+                if (played)
+                    CutsceneFollow::NoteLeaderIdleMirrored(first.IdleId);
+                // Locomotion idles (turns, move start/stop) refuse on a follower whose movement is off: log each
+                // refused idle once, every played one.
+                static std::unordered_set<uint32_t> s_refusedLogged;
+                if (played || s_refusedLogged.insert(first.IdleId).second)
+                    spdlog::info("Cutscene follow: mirrored the leader's idle {:08X} ('{}') on this player played={}",
+                        first.IdleId, first.EventName, played);
+            }
+        }
+        // Revive check (2026-09-28): the host's copy of a revived player replayed its get-up over and over.
+        if (player)
+        {
+            // Only while the owner is out of the alive state, and 15 s after.
+            static uint64_t s_lifeUntil{};
+            static uint32_t s_logs{};
+            const auto life = (first.State1 >> 21) & 0xF;
+            if (life != 0)
+                s_lifeUntil = GetTickCount64() + 15000;
+            if (GetTickCount64() < s_lifeUntil && s_logs++ < 400)
+                spdlog::info("Remote player action: form={:X} event='{}' action={:X} idle={:X} life={} result={}",
+                    apActor->formID, first.EventName, actionId, first.IdleId, (first.State1 >> 21) & 0xF, result);
+        }
         if (player && !result)
             ++sample->Failures;
 
@@ -960,6 +1050,11 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
     movement.Rotation.y = pActor->rotation.z;
 
     pActor->SaveAnimationVariables(movement.Variables);
+    movement.LifeState = static_cast<uint8_t>((pActor->actorState.flags1 >> 21) & 0xF);
+    movement.Essential = pActor->IsEssential();
+    using TIsFleeing = bool(Actor*);
+    POINTER_SKYRIMSE(TIsFleeing, isFleeing, 37577);
+    movement.Fleeing = isFleeing.Get()(pActor);
 
     if (pActor->currentProcess && pActor->currentProcess->middleProcess)
     {

@@ -5,6 +5,7 @@
 #include <Services/ObjectService.h>
 #include <Services/WorldStateService.h>
 #include <Services/HarnessService.h>
+#include <Services/DropInService.h>
 #include <Services/QuestService.h>
 #include <Services/QuestItemService.h>
 #include <Services/ServerListService.h>
@@ -26,6 +27,7 @@
 #include <Services/DialogueListenService.h>
 #include <Services/BusyLockService.h>
 #include <Services/SharedDropService.h>
+#include <Services/SaidOnceService.h>
 #include <Services/ReviveService.h>
 
 #include <CampaignLedger.h>
@@ -53,6 +55,7 @@ World::World()
     ctx().emplace<CharacterService>(*this, m_dispatcher);
     ctx().emplace<PlayerService>(*this, m_dispatcher);
     ctx().emplace<CalendarService>(*this, m_dispatcher);
+    ctx().emplace<SaidOnceService>(*this, m_dispatcher);
     ctx().emplace<ObjectService>(*this, m_dispatcher);
     ctx().emplace<WorldStateService>(*this, m_dispatcher);
     auto& modsComponent = ctx().emplace<ModsComponent>(sCampaignModManifestPath.value());
@@ -61,6 +64,7 @@ World::World()
     ctx().emplace<QuestItemService>(*this, m_dispatcher);
     ctx().emplace<PartyService>(*this, m_dispatcher);
     ctx().emplace<HarnessService>(*this, m_dispatcher);
+    ctx().emplace<DropInService>(*this, m_dispatcher);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher);
     ctx().emplace<BusyLockService>(*this, m_dispatcher);

@@ -13,8 +13,19 @@ struct InterpolationSystem
     static bool IsUnseatRemotePlayers() noexcept;
 
     static void Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, uint64_t aTick) noexcept;
-    // Main thread: applies the stale-seat releases queued by Update.
+    // Main thread: applies the stale-seat releases queued by Update, and places remote actors (main_frame_placement).
     static void OnMainFrame() noexcept;
+    static bool GetRemoteFleeState(uint32_t aFormId, bool& aFleeing) noexcept;
+    static void SetSkipMountedPlacement(bool aEnabled) noexcept;
+    static bool IsSkipMountedPlacement() noexcept;
+    static void ResetRemoteStates() noexcept;
+    // Remote actors are placed on the main frame at one presentation time per frame (default on). Off: placed from
+    // the world update, which runs inside the Papyrus VM job at a varying point of the frame.
+    static void SetMainFramePlacement(bool aEnabled) noexcept;
+    static bool IsMainFramePlacement() noexcept;
+    static void SetPresentationDelayMs(uint32_t aDelayMs) noexcept;
+    // Any thread: release this actor from furniture or a mount on the next main frame (native quick stop).
+    static void QueueStopInteracting(uint32_t aFormId) noexcept;
     static void AddPoint(InterpolationComponent& aInterpolationComponent, const InterpolationComponent::TimePoint& acPoint) noexcept;
     static InterpolationComponent& Setup(World& aWorld, entt::entity aEntity) noexcept;
     static void Clean(World& aWorld, entt::entity aEntity) noexcept;

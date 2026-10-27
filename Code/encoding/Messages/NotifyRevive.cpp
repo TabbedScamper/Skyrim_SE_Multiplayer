@@ -12,7 +12,10 @@ void NotifyRevive::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexce
     {
         ServerMessage::DeserializeRaw(aReader);
         DeserializeData(aReader);
-        m_valid = Action == ReviveAction::State || Action == ReviveAction::Grant;
+        // Hold/Cancel tell the downed player who is reviving them (the server forwards the reviver's hold).
+        m_valid = Action == ReviveAction::State || Action == ReviveAction::Grant || Action == ReviveAction::Hold ||
+            Action == ReviveAction::Cancel || Action == ReviveAction::Raise ||
+            Action == ReviveAction::Wipe;
     }
     catch (...) {}
 }

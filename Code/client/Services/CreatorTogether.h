@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 struct World;
 struct NiPoint3;
@@ -16,6 +17,10 @@ struct NotifyPlayerAppearance;
 // player's own first, then each other player's, live as they edit); the others are hidden.
 namespace CreatorTogether
 {
+// Follower New Game choice. Ready becomes true only after its chosen appearance is rebuilt.
+bool SkipRequested() noexcept;
+bool SkipReady() noexcept;
+std::string SkipStatus() noexcept;
 // Per frame, from PartyService. aHolding: New Game, in a party, still creating (session state 2).
 void Update(World& aWorld, bool aHolding, bool aCreatorOpen) noexcept;
 // This player clicked Done while the party was still creating (its close is being held).
@@ -37,4 +42,8 @@ std::mutex& AppearanceMutex() noexcept;
 // For InterpolationSystem: where a remote player's character is shown while the creator is open
 // here (on this player's spot, with its heading). False otherwise.
 [[nodiscard]] bool GetDisplay(uint32_t aFormId, NiPoint3& arPosition, float& arHeading) noexcept;
+// Test read-out: creator frames that began with a player character that should be hidden still showing meshes
+// (it rendered on this player's spot), and applied looks.
+[[nodiscard]] uint32_t LeakedFrames() noexcept;
+[[nodiscard]] uint32_t AppliedLooks() noexcept;
 } // namespace CreatorTogether

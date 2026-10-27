@@ -1,4 +1,6 @@
 #pragma once
+#include <Structs/GameId.h>
+#include <atomic>
 
 struct World;
 struct TransportService;
@@ -14,7 +16,8 @@ struct NotifyWeatherChange;
 struct WeatherService
 {
     WeatherService(World& aWorld, TransportService& aTransport, entt::dispatcher& aDispatcher);
-    ~WeatherService() noexcept = default;
+    ~WeatherService() noexcept;
+    static void OnMainFrame() noexcept;
 
     TP_NOCOPYMOVE(WeatherService);
 
@@ -46,11 +49,17 @@ private:
     * For non-leaders, it is used to reapply the server weather if it changes.
     */
     uint32_t m_cachedWeatherId{};
+    uint32_t m_forcedWeatherId{};
+    void* m_lastClimate{};
+    bool m_waitingForClimateWeather{};
+    bool m_releaseOverrideOnMainFrame{};
+    bool m_sendCurrentOnMainFrame{};
 
     // Leader: last sky state sent. Follower: host sky state being held.
     struct SkyState
     {
         bool Valid{};
+        GameId WorldSpaceId{};
         uint32_t LastWeatherId{};
         float Percent{1.f};
         float WindSpeed{};
@@ -59,6 +68,7 @@ private:
     SkyState m_sentSky{};
     uint64_t m_nextSkySendMs{};
     SkyState m_hostSky{};
+    std::atomic_bool m_weatherResyncPending{};
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_disconnectConnection;

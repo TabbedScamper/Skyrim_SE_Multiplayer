@@ -3,37 +3,92 @@ name: Create GitHub Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v*.*.*'
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - id: version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
   build-windows:
+    needs: prepare
     uses: ./.github/workflows/windows-playable-build.yml
+    with:
+      release-version: ${{ needs.prepare.outputs.version }}
+
+  build-installer:
+    needs: build-windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-payload-windows-x64
+          path: release-payload
+      - name: Install Inno Setup and VC++ redistributable
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile vc_redist.x64.exe
+          $signature = Get-AuthenticodeSignature vc_redist.x64.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+            throw 'VC++ redistributable signature verification failed'
+          }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $stage = (Resolve-Path release-payload).Path
+          $redist = (Resolve-Path vc_redist.x64.exe).Path
+          New-Item -ItemType Directory -Force installer-output | Out-Null
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' "/DReleaseVersion=$version" "/DStageDir=$stage" "/DRedistPath=$redist" "/Oinstaller-output" Installer\Skyrim_SE_Multiplayer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-installer
+          path: installer-output/*.exe
+          if-no-files-found: error
 
   build-linux:
+    needs: prepare
     uses: ./.github/workflows/linux.yml
     with:
       build-mode: release
       upload-build-for-next-job: true
 
   publish:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-installer]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - name: Download release assets
         uses: actions/download-artifact@v8
         with:
           path: release-files
-          pattern: '{release-asset-linux-*,SkyrimTogether-*}'
+          pattern: '{release-asset-linux-*,Skyrim_SE_Multiplayer-*,release-installer}'
           merge-multiple: true
+
+      - name: Download staged Data payload
+        uses: actions/download-artifact@v8
+        with:
+          name: release-payload-windows-x64
+          path: release-payload
 
       - name: Verify release assets
         run: |
           version="${GITHUB_REF_NAME#v}"
           expected_assets=(
-            "SkyrimTogether-${version}-windows-x64.zip"
-            "SkyrimTogether-${version}-windows-x64-debug-symbols.zip"
+            "Skyrim_SE_Multiplayer-${version}-windows-x64.zip"
+            "Skyrim_SE_Multiplayer-${version}-windows-x64-debug-symbols.zip"
+            "Skyrim_SE_Multiplayer-${version}-setup.exe"
             "SkyrimTogetherServer-${version}-linux-amd64.tar.gz"
             "SkyrimTogetherServer-${version}-linux-arm64.tar.gz"
           )
@@ -41,6 +96,18 @@ jobs:
           for asset in "${expected_assets[@]}"; do
             test -f "release-files/$asset"
           done
+
+      - name: Generate release notes and manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh api "repos/${GH_REPO}/releases/generate-notes" -f "tag_name=${GITHUB_REF_NAME}" --jq .body > notes.md
+          zip="Skyrim_SE_Multiplayer-${version}-windows-x64.zip"
+          python3 Tools/Release/make-manifest.py release-payload "$version" notes.md "release-files/$zip" \
+            "https://github.com/TabbedScamper/Skyrim_SE_Multiplayer/releases/download/${GITHUB_REF_NAME}/$zip" \
+            --output release-files/latest.json
 
       - name: Create GitHub Release
         env:
@@ -51,5 +118,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             ./release-files/* \
             --verify-tag \
-            --generate-notes \
-            --title "Skyrim Together $version"
+            --notes-file notes.md \
+            --title "Skyrim SE Multiplayer $version"

@@ -8,6 +8,7 @@ void NotifyWeatherChange::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) c
     aWriter.WriteBits(HasSky ? 1 : 0, 8);
     if (!HasSky)
         return;
+    WorldSpaceId.Serialize(aWriter);
     LastId.Serialize(aWriter);
     for (float value : {Percent, WindSpeed, WindAngle})
     {
@@ -27,6 +28,7 @@ void NotifyWeatherChange::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader)
     HasSky = flag != 0;
     if (!HasSky)
         return;
+    WorldSpaceId.Deserialize(aReader);
     LastId.Deserialize(aReader);
     for (float* value : {&Percent, &WindSpeed, &WindAngle})
     {

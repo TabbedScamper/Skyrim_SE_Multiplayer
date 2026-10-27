@@ -2,6 +2,8 @@
 
 #include <Structs/EvaluatedPoseSnapshot.h>
 
+struct Actor;
+
 struct World;
 
 // Fresh owner poses drive networked skeletons. Living actors without a recent sample
@@ -47,6 +49,8 @@ void ClearRagdollAuthority() noexcept;
 [[nodiscard]] bool NeedsLocalGraph(uint32_t aFormId) noexcept;
 // Diagnostic: whether the owner's pose currently overrides this actor's skeleton, and the newest sample's age.
 [[nodiscard]] std::string DescribeOverride(uint32_t aFormId) noexcept;
+// Diagnostic, main thread: per graph, the pose slots of nodes whose name contains acNeedle (JSON members).
+[[nodiscard]] std::string DescribeBoneSlots(Actor* apActor, const std::string& acNeedle) noexcept;
 // Diagnostic, main thread: seated players' pelvis/COM (sent or sampled vs drawn), logged per call.
 void ProbeSeatedPlayers(World& aWorld) noexcept;
 // The graph animating the drawn third-person skeleton (the player has two); caller holds the manager lock.

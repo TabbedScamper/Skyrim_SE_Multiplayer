@@ -1,0 +1,40 @@
+// Skyrim's menu language: Futura Condensed caps with wide tracking, off-white with a hard shadow.
+:host {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  font-family: 'futura-condensed-medium', sans-serif;
+  color: #e5e3df;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+// Top left: the Main Menu has the Bethesda logo bottom left, its news panel top right and its list bottom right.
+.now-playing {
+  position: absolute;
+  left: 4vw;
+  top: 5vh;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 1.2s ease;
+  text-shadow: 0 2px 3px #000;
+
+  &.visible {
+    opacity: 1;
+  }
+
+  .label {
+    font-size: 13px;
+    color: #9d998f;
+  }
+
+  .title {
+    font-size: 18px;
+    color: #e5e3df;
+    letter-spacing: 0.1em;
+  }
+}

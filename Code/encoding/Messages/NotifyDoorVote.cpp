@@ -12,7 +12,7 @@ void NotifyDoorVote::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noex
     {
         ServerMessage::DeserializeRaw(aReader);
         DeserializeData(aReader);
-        m_valid = Action >= DoorVoteAction::State && ReadyCount <= TotalCount;
+        m_valid = Action >= DoorVoteAction::State && Action <= DoorVoteAction::Release && ReadyCount <= TotalCount;
     }
     catch (...) {}
 }

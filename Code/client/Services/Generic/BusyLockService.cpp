@@ -17,10 +17,12 @@
 #include <Messages/BusyLockRequest.h>
 #include <Messages/NotifyBusyLock.h>
 #include <FunctionHook.hpp>
+#include <MainQueue.h>
+#include <Utils/MainThread.h>
 #include <cmath>
+#include <cstring>
 
-// Research for the coordinator's docs/REFERENCE_RESEARCH.md entry (that document
-// is outside this task's edit allowlist): CommonLibSSE-NG source, inspected locally
+// Research for docs/REFERENCE_RESEARCH.md: CommonLibSSE-NG source, inspected locally
 // in C:/Tools/ref/CommonLibSSE-NG and at:
 // https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/include/RE/U/UI.h
 // https://github.com/CharmedBaryon/CommonLibSSE-NG/blob/main/src/RE/C/ContainerMenu.cpp
@@ -82,6 +84,15 @@ uint32_t MenuBit(const char* aName)
     if (std::strcmp(aName, "Lockpicking Menu") == 0) return 8;
     return 0;
 }
+
+struct DirectMenuOpen
+{
+    uint64_t RequestCounter{};
+    uint32_t Handle{}, Lifecycle{}, Cell{}, WorldSpace{};
+    int32_t Mode{};
+    bool Barter{};
+};
+static_assert(sizeof(DirectMenuOpen) <= sizeof(MainQueue::Record::Payload));
 
 void Notice(const std::string& aText)
 {
@@ -185,8 +196,8 @@ bool BusyLockService::TryHoldMenu(TESObjectREFR* aReference, bool aBarter, int32
         return false;
     const auto handle = aReference->GetHandle().handle.iBits;
     const auto lifecycle = m_invalidations.load();
-    // These natives can be called by scripts. Keep registry/transport state and
-    // the delayed native replay on the world runner, using a generational handle.
+    // These natives can be called by scripts. Keep lease bookkeeping on the
+    // world runner and send direct fallback opens to X.00's Ui lane.
     m_world.GetRunner().Queue([this, handle, lifecycle, aBarter, aMode]()
     {
         if (s_service.load() != this || lifecycle != m_invalidations.load())
@@ -199,13 +210,40 @@ bool BusyLockService::TryHoldMenu(TESObjectREFR* aReference, bool aBarter, int32
         activation.Mode = aMode;
         if (Begin(reference, activation, aBarter ? BusyLockKind::Bartering : BusyLockKind::Searching))
             return;
-        if (aBarter)
+        if (!MT::CutEnabled(3))
         {
-            if (auto* actor = Cast<Actor>(reference))
-                s_openBarter(actor);
+            if (!MT::Quiet() || MT::CurrentSlot() != MT::Slot::S3_2)
+                MT::M3aWrongSlot.fetch_add(1, std::memory_order_relaxed);
+            if (aBarter)
+            {
+                if (auto* actor = Cast<Actor>(reference))
+                    s_openBarter(actor);
+            }
+            else
+                s_openContainer(reference, aMode);
+            return;
         }
-        else
-            s_openContainer(reference, aMode);
+        DirectMenuOpen open{};
+        open.RequestCounter = m_nextRequest;
+        open.Handle = handle;
+        open.Lifecycle = lifecycle;
+        open.Mode = aMode;
+        open.Barter = aBarter;
+        if (auto* player = PlayerCharacter::Get(); player && player->GetParentCellEx())
+        {
+            auto* cell = player->GetParentCellEx();
+            open.Cell = cell->formID;
+            open.WorldSpace = cell->worldspace ? cell->worldspace->formID : 0;
+        }
+        MainQueue::Record record{};
+        record.Kind = 1;
+        record.OrderKey = aBarter ? 3 : 2;
+        record.LoadSerial = MT::LoadSerial.load(std::memory_order_acquire);
+        record.ConnectionSerial = MT::ConnectionSerial.load(std::memory_order_acquire);
+        record.Deadline = static_cast<uint32_t>(MT::X00Count.load(std::memory_order_acquire) + 300);
+        std::memcpy(record.Payload.data(), &open, sizeof(open));
+        if (!MainQueue::Get().Ui.Push(record))
+            spdlog::warn("Busy lock: Ui lane full; dropped direct menu open");
     });
     return true;
 }
@@ -273,7 +311,142 @@ void BusyLockService::Reset(BusyLockReason aReason) noexcept
     m_request = {};
     m_activation = {};
     m_waiting = m_leased = m_seenMenu = false;
+    m_replayPending = m_replayEnqueued = false;
     m_closedAt = m_deadline = m_openDeadline = m_nextHeartbeat = 0;
+}
+
+void BusyLockService::QueueReplay() noexcept
+{
+    m_waiting = false;
+    m_replayRequestId = m_request.RequestId;
+    m_replayPending = true;
+    if (MT::CutEnabled(3))
+    {
+        MainQueue::Record record{};
+        record.Kind = 2;
+        record.OrderKey = m_activation.Type == Operation::Container ? 2 :
+            m_activation.Type == Operation::Barter ? 3 :
+            m_request.Kind == BusyLockKind::Lockpicking ? 4 : 1;
+        record.AuthKey[0] = m_replayRequestId;
+        record.LoadSerial = MT::LoadSerial.load(std::memory_order_acquire);
+        record.ConnectionSerial = MT::ConnectionSerial.load(std::memory_order_acquire);
+        m_replayEnqueued = true;
+        if (!MainQueue::Get().Ui.Push(record))
+            m_replayEnqueued = false; // Keep the existing slot-3.2 replay on saturation.
+    }
+}
+
+void BusyLockService::OnMainFrame() noexcept
+{
+    auto* service = s_service.load(std::memory_order_acquire);
+    if (!service)
+        return;
+    bool menuPosted = false;
+    if (MT::CutEnabled(3))
+    {
+        MainQueue::Get().Ui.Drain(8, [service, &menuPosted](const MainQueue::Record& record) noexcept {
+            if (record.Kind != 1 && record.Kind != 2)
+                return MainQueue::Decision::Hold;
+            if (!MT::Quiet() || MT::CurrentSlot() != MT::Slot::S3_2)
+            {
+                MT::M3aWrongSlot.fetch_add(1, std::memory_order_relaxed);
+                return MainQueue::Decision::Hold;
+            }
+            if (menuPosted)
+                return MainQueue::Decision::Hold;
+            if (record.Kind == 2)
+            {
+                if (record.AuthKey[0] != service->m_replayRequestId || !service->m_replayPending)
+                    return MainQueue::Decision::Drop;
+                if (record.LoadSerial != MT::LoadSerial.load(std::memory_order_acquire) ||
+                    record.ConnectionSerial != MT::ConnectionSerial.load(std::memory_order_acquire))
+                    service->Reset(BusyLockReason::Load);
+                service->m_replayEnqueued = false;
+                return MainQueue::Decision::Apply;
+            }
+            DirectMenuOpen open{};
+            std::memcpy(&open, record.Payload.data(), sizeof(open));
+            if (record.LoadSerial != MT::LoadSerial.load(std::memory_order_acquire) ||
+                record.ConnectionSerial != MT::ConnectionSerial.load(std::memory_order_acquire) ||
+                open.Lifecycle != service->m_invalidations.load() ||
+                open.RequestCounter != service->m_nextRequest ||
+                static_cast<int32_t>(MT::X00Count.load(std::memory_order_acquire) - record.Deadline) >= 0)
+                return MainQueue::Decision::Drop;
+            auto* reference = TESObjectREFR::GetByHandle(open.Handle);
+            auto* player = PlayerCharacter::Get();
+            auto* cell = player ? player->GetParentCellEx() : nullptr;
+            if (!reference || reference->IsDeleted() || reference->IsDisabled() || !cell ||
+                (cell->worldspace ? cell->worldspace->formID : 0) != open.WorldSpace ||
+                (!open.WorldSpace && cell->formID != open.Cell))
+                return MainQueue::Decision::Drop;
+            auto* ui = UI::Get();
+            if (!ui || ui->numItemMenus != 0 || (!open.Barter && ui->numDisablePauseMenu != 0))
+                return MainQueue::Decision::Hold;
+            if (!open.Barter)
+            {
+                static VersionDbPtr<void*> queue(400445);
+                using THasPending = bool(void*, const BSFixedString*, int);
+                POINTER_SKYRIMSE(THasPending, hasPending, 82168);
+                const BSFixedString menu("ContainerMenu");
+                if (queue.Get() && *queue.Get() && hasPending.Get() &&
+                    hasPending.Get()(*queue.Get(), &menu, UIMessage::kShow))
+                    return MainQueue::Decision::Hold;
+            }
+            if (open.Barter)
+            {
+                if (auto* actor = Cast<Actor>(reference))
+                {
+                    s_openBarter(actor);
+                    menuPosted = true;
+                }
+            }
+            else
+            {
+                s_openContainer(reference, open.Mode);
+                menuPosted = true;
+            }
+            return MainQueue::Decision::Apply;
+        });
+    }
+    if (!service->m_replayPending || service->m_replayEnqueued || menuPosted)
+        return;
+    if (MT::CutEnabled(3) && (!MT::Quiet() || MT::CurrentSlot() != MT::Slot::S3_2))
+    {
+        MT::M3aWrongSlot.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (service->m_replayRequestId != service->m_request.RequestId)
+    {
+        service->m_replayPending = false;
+        return;
+    }
+    if (!service->CanReplay(TESObjectREFR::GetByHandle(service->m_activation.Handle)))
+    {
+        service->Reset(BusyLockReason::Load);
+        return;
+    }
+    if (service->m_activation.Type != Operation::Activate)
+    {
+        auto* ui = UI::Get();
+        if (!ui || ui->numItemMenus != 0)
+            return;
+        if (service->m_activation.Type == Operation::Container)
+        {
+            // OpenMenu (51140) also refuses while IsPauseMenuDisabled (82076)
+            // is true. Do not consume the replay when that native will return.
+            if (ui->numDisablePauseMenu != 0)
+                return;
+            static VersionDbPtr<void*> s_queue(400445);
+            using THasPending = bool(void*, const BSFixedString*, int);
+            POINTER_SKYRIMSE(THasPending, hasPending, 82168);
+            const BSFixedString menu("ContainerMenu");
+            if (s_queue.Get() && *s_queue.Get() && hasPending.Get() &&
+                hasPending.Get()(*s_queue.Get(), &menu, UIMessage::kShow))
+                return;
+        }
+    }
+    service->m_replayPending = false;
+    service->Replay();
 }
 
 bool BusyLockService::CanReplay(TESObjectREFR* aReference) noexcept
@@ -356,7 +529,7 @@ void BusyLockService::OnNotify(const NotifyBusyLock& aMessage) noexcept
     {
         Send(m_request, BusyLockAction::Release, BusyLockReason::Timeout);
         spdlog::info("Busy lock: {:X} request timed out; allowing activation", m_request.Reference.LogFormat());
-        Replay();
+        QueueReplay();
         return;
     }
     if (aMessage.Action == BusyLockAction::Denied)
@@ -387,7 +560,7 @@ void BusyLockService::OnNotify(const NotifyBusyLock& aMessage) noexcept
         return;
     }
     m_leased = true;
-    Replay();
+    QueueReplay();
 }
 
 uint32_t BusyLockService::OpenMenus(TESObjectREFR* aReference) const noexcept
@@ -437,13 +610,24 @@ void BusyLockService::OnUpdate(const UpdateEvent&) noexcept
         return;
     }
     const auto now = GetTickCount64();
+    if (m_replayPending)
+    {
+        // Waiting for another item menu is not a failed activation. Keep the
+        // replay and lease until the UI is available or its lifecycle ends.
+        if (m_leased && now >= m_nextHeartbeat)
+        {
+            Send(m_request, BusyLockAction::Heartbeat);
+            m_nextHeartbeat = now + 15000;
+        }
+        return;
+    }
     if (m_waiting)
     {
         if (now >= m_deadline)
         {
             Send(m_request, BusyLockAction::Release, BusyLockReason::Timeout);
             spdlog::info("Busy lock: {:X} request timed out; allowing activation", m_request.Reference.LogFormat());
-            Replay();
+            QueueReplay();
         }
         return;
     }

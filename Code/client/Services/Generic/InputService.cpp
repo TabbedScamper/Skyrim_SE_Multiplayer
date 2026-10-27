@@ -1,5 +1,6 @@
 #include <TiltedOnlinePCH.h>
 
+#include <Services/LobbyService.h>
 #include <Services/InputService.h>
 #include <Services/OverlayService.h>
 
@@ -70,6 +71,10 @@ struct MenuCursorCounter
 static_assert(offsetof(MenuCursorCounter, ShowCursorCount) == 0x2C);
 
 std::atomic_bool s_shellOwnsPointer{false}; // Also read by the game input poll.
+// Windows' own move/resize loop (a title-bar or border drag, WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE): the pointer is
+// Windows' until it ends. Confined to the client area, a border could only be dragged inward (owner report
+// 2026-09-29: "i cant drag the window out, it shrinks when grabbing the edges in windowed mode").
+bool s_sizeMoveLoop{};
 std::atomic_bool s_windowDeactivated{false};
 uint32_t s_focusMessageDepth = 0;
 std::optional<bool> s_appliedGameOwnership; // last visibility state applied
@@ -126,7 +131,7 @@ void ClipToClientArea(HWND aWindow) noexcept
 
 bool GameOwnsPointer(HWND aWindow) noexcept
 {
-    return !s_shellOwnsPointer && !s_windowDeactivated && s_focusMessageDepth == 0 &&
+    return !s_shellOwnsPointer && !s_windowDeactivated && !s_sizeMoveLoop && s_focusMessageDepth == 0 &&
         GetForegroundWindow() == aWindow && GetFocus() == aWindow && !IsIconic(aWindow);
 }
 
@@ -285,6 +290,11 @@ void InputService::AfterGameWndProc(HWND hwnd, UINT uMsg) noexcept
             --s_focusMessageDepth;
         if (s_focusMessageDepth == 0)
             UpdateCursorOwnership(hwnd);
+        break;
+    case WM_ENTERSIZEMOVE:
+    case WM_EXITSIZEMOVE:
+        s_sizeMoveLoop = uMsg == WM_ENTERSIZEMOVE;
+        UpdateCursorOwnership(hwnd);
         break;
     case WM_SIZE:
     case WM_MOVE:
@@ -448,10 +458,12 @@ uint32_t GetCefModifiers(uint16_t aVirtualKey)
     return modifiers;
 }
 
-// remember to update this when updating toggle keys
+// The Skyrim Together overlay toggle (F2 / Right Ctrl) is off: its menu bar and chat are replaced by the mod's own
+// menus (pause menu F6 co-op / F7 options, main menu buttons). F2 only gives the hidden lobby layout editor a cursor.
+// Remember to update this when updating toggle keys.
 bool IsToggleKey(int aKey) noexcept
 {
-    return aKey == VK_RCONTROL || aKey == VK_F2;
+    return aKey == VK_F2 && (LobbyService::EditorOpen() || LobbyService::MenuShown());
 }
 
 bool IsDisableKey(int aKey) noexcept
@@ -709,6 +721,8 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         UINT size = sizeof(input);
         if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &size, sizeof(RAWINPUTHEADER)) == UINT(-1))
             return 0;
+        if (input.header.dwType == RIM_TYPEMOUSE)
+            LobbyService::OnRawMouse(input.data.mouse);
         // Check before binding capture or clipping maintenance. The escape key
         // must never become a binding or get forwarded to the browser.
         if (input.header.dwType == RIM_TYPEKEYBOARD && (input.data.keyboard.Flags & RI_KEY_BREAK) == 0 &&
@@ -804,7 +818,13 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             position = GetOverlayMousePosition(pRenderer.get());
         if (s_pOverlay->GetTitleScreen())
             SetMainMenuMouseState(static_cast<float>(position.x), static_cast<float>(position.y));
+        // ImGui reads the Windows cursor, which is not the overlay's raw-input pointer: give it the same point.
+        const auto [width, height] = pRenderer->GetRenderSize();
+        if (width && height)
+            ImguiService::SetPointer(static_cast<float>(position.x) / width, static_cast<float>(position.y) / height);
     }
+    else
+        ImguiService::ClearPointer();
 
     ProcessMouseMove(static_cast<uint16_t>(position.x), static_cast<uint16_t>(position.y));
 

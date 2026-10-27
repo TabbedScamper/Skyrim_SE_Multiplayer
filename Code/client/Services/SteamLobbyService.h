@@ -28,13 +28,21 @@ struct SteamLobbyService
     void ConnectJoinedSession(const String& acPassword) noexcept;
     void LeaveSession() noexcept;
     void PumpCallbacks() noexcept;
+    void RememberParty(const Vector<uint64_t>& acOrderedSteamIds, uint64_t aLeaderSteamId) noexcept;
+    void ForgetParty() noexcept;
+    void BeginHandoff(uint64_t aSuccessorSteamId, const Vector<uint64_t>& acOrderedSteamIds, bool aDeparted = false) noexcept;
+    [[nodiscard]] std::string HandoffStatus() const noexcept;
+    void FinishHandoff() noexcept;
 
-    // CEF title-screen events arrive outside the gameplay update loop. Queue
-    // them here so PollMainMenuOptions can execute them on Skyrim's main
-    // thread while it pumps Steam callbacks.
+    // CEF title-screen events arrive outside the gameplay update loop.
+    // Leave is drained by the main-loop hook so carry-home precedes teardown.
     void QueueHostSession() noexcept;
     void QueueJoinSession(String aLobbyId) noexcept;
-    void QueueLeaveSession() noexcept;
+    void QueueLeaveSession(bool aReturnToMainMenu = false) noexcept;
+    void DrainLeaveOnMainFrame() noexcept;
+    bool TakeQuitToMainMenuRequest() noexcept { return m_quitToMenuPending.exchange(false); }
+    bool HasQuitToMainMenuRequest() const noexcept { return m_quitToMenuPending.load(); }
+    bool IsLobbyOpen() const noexcept { return m_lobbyOpen; }
     void QueueJoinFriend(uint64_t aSteamId) noexcept;
     void QueueInviteFriend() noexcept;
     void QueueInviteFriendDirect(uint64_t aSteamId) noexcept;
@@ -44,6 +52,8 @@ struct SteamLobbyService
 
     // Test bridge: the last state published to the UI, as JSON (any thread).
     std::string TestStateJson() const noexcept;
+    // Steam's local account identity. Zero in farm mode or when Steam is unavailable.
+    uint64_t LocalSteamId() const noexcept;
 
     // Adapter registered with SteamAPI_RegisterCallback (defined in the .cpp).
     struct CallbackBridge;
@@ -103,12 +113,24 @@ private:
     HANDLE m_serverThread{};
     HANDLE m_serverJob{};
     TiltedPhoques::TaskQueue m_titleScreenTasks;
+    std::atomic_int m_leaveRequested{0};
+    std::atomic_bool m_quitToMenuPending{false};
     std::vector<std::unique_ptr<CallbackBridge>> m_callbacks;
     std::vector<Invite> m_invites;          // incoming, newest last
     std::unordered_set<uint64_t> m_invited; // friends invited from this lobby
     std::unordered_set<uint64_t> m_avatarsSent;
     uint64_t m_richPresenceLobby{~0ull};
     uint64_t m_launchLobby{};               // +connect_lobby from the command line
+    Vector<uint64_t> m_partySteamIds;
+    uint64_t m_partyLeaderSteamId{};
+    Vector<uint64_t> m_handoffOrder;
+    uint64_t m_handoffTargetSteamId{};
+    uint64_t m_handoffOldLobbyId{};
+    uint64_t m_handoffDeadlineMs{};
+    uint64_t m_handoffNextRetryMs{};
+    bool m_handoffActive{};
+    bool m_handoffTransitionPending{};
+    std::string m_handoffNotice;
     mutable std::mutex m_testStateLock;
     std::string m_testState{"{}"};
 };

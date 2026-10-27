@@ -13,9 +13,14 @@
 #include <PlayerCharacter.h>
 #include <Services/ObjectService.h>
 #include <Services/CharacterService.h>
+#include <Services/ReviveService.h>
 #include <Services/CreatorTogether.h>
 #include <Services/PlayerCollision.h>
 #include <Services/Generic/HeadTrackService.h>
+#include <Services/SmoothClock.h>
+#include <Services/LobbyService.h>
+#include <deque>
+#include <unordered_map>
 
 namespace
 {
@@ -25,6 +30,66 @@ namespace
 std::atomic<bool> s_unseatRemotePlayers{false}; // no effect at the block (run 20260928-124808): the copy re-seats
 std::mutex s_unseatLock;
 std::vector<uint32_t> s_unseat;
+
+// Remote actor placement on the main frame (owner, 2026-09-30: NPCs jitter slightly on the follower, Lokir most).
+// Measured: the world update, and with it this system, runs inside the Papyrus VM update hook, on varying worker
+// threads at a varying point of the frame; the follower drew Lokir 3.7 u (mean) off the interpolation of the samples
+// it had received and 2.4x as jerky. Update publishes each actor's timeline here; the main frame places every remote
+// actor for one presentation time per frame (fractional ms), just before the engine's frame.
+std::atomic<bool> s_mainFramePlacement{false}; // off: horses and riders tipped sideways with it (owner, 2026-09-30)
+std::atomic<uint32_t> s_presentationDelayMs{100};
+struct Placement
+{
+    std::vector<InterpolationComponent::TimePoint> Points; // positions and rotations only
+    uint64_t PublishedMs{};
+};
+std::mutex s_placementLock;
+std::unordered_map<uint32_t, Placement> s_placements;
+std::atomic<bool> s_skipMountedPlacement{true};
+struct MountCache { bool Mounted{}; bool Queued{}; uint64_t NextPollMs{}; };
+std::mutex s_mountCacheLock;
+std::unordered_map<uint32_t, MountCache> s_mountCache;
+std::deque<uint32_t> s_mountPollQueue;
+
+bool MountedCopyFromCache(const uint32_t aFormId, const uint32_t aSitState) noexcept
+{
+    if (!s_skipMountedPlacement.load(std::memory_order_relaxed) || aSitState != 3) return false;
+    std::lock_guard lock(s_mountCacheLock);
+    auto& cache = s_mountCache[aFormId];
+    if (!cache.Queued)
+    {
+        cache.Queued = true;
+        s_mountPollQueue.push_back(aFormId);
+    }
+    return cache.Mounted;
+}
+struct RemoteNpcState
+{
+    uint8_t LifeState{};
+    bool Essential{};
+    bool Fleeing{};
+    bool Queued{};
+};
+std::mutex s_remoteNpcStateLock;
+std::unordered_map<uint32_t, RemoteNpcState> s_remoteNpcStates;
+std::deque<uint32_t> s_remoteNpcStateQueue;
+constexpr size_t kNpcStatesPerFrame = 32;
+
+void PublishRemoteNpcState(const uint32_t aFormId, const InterpolationComponent::TimePoint& acPoint) noexcept
+{
+    std::lock_guard lock(s_remoteNpcStateLock);
+    auto& state = s_remoteNpcStates[aFormId];
+    const bool changed = state.LifeState != acPoint.LifeState || state.Essential != acPoint.Essential ||
+        state.Fleeing != acPoint.Fleeing;
+    state.LifeState = acPoint.LifeState;
+    state.Essential = acPoint.Essential;
+    state.Fleeing = acPoint.Fleeing;
+    if (changed && !state.Queued)
+    {
+        state.Queued = true;
+        s_remoteNpcStateQueue.push_back(aFormId);
+    }
+}
 
 void QueueUnseat(const uint32_t aFormId) noexcept
 {
@@ -36,6 +101,12 @@ void QueueUnseat(const uint32_t aFormId) noexcept
 
 void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterpolationComponent, const uint64_t aDefaultTick) noexcept
 {
+    // Seated at the lobby's fire: the lobby places it on its mark; its owner's stream (their own mark) is dropped.
+    if (apActor && LobbyService::HoldsRemote(apActor->formID))
+    {
+        aInterpolationComponent.TimePoints.clear();
+        return;
+    }
     uint64_t aTick = aDefaultTick;
     const bool vehicleTimeline = ObjectService::VehiclePresentationTick(apActor, aTick);
     World::Get().GetHeadTrackService().UpdateRemote(apActor, aTick);
@@ -92,17 +163,17 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     // bookkeeping, but do not teleport the dead reference or reload its
     // movement graph every presentation frame.
     // A dying copy that follows the owner's ragdoll takes its heading from that stream (CorpseRagdollService);
-    // a second writer here raced it (Muse refute-corpse).
+    // a second writer here raced it (refute-corpse).
     if (apActor->actorState.IsDeadState() || CorpseRagdollService::IsFollowingOwner(apActor->formID))
         return;
 
-    // Seated (ActorState1 sitSleepState, bits 14-17: 2 sitting down, 3 sitting): this PC's engine
-    // attaches the actor to its seat every frame, as the host's does, on a chair or on a moving cart
-    // alike. Placing it from the actor stream instead fought the seat and left the cart's driver
-    // and passengers trailing their cart. The owner's pose still drives the body.
+    // A native mount with sit state 3 owns rider placement. Mount identity is polled on the main frame because
+    // GetMount (38702) takes an extra-data lock; this world update may run on a job thread.
     const uint32_t sitSleepState = (apActor->actorState.flags1 >> 14) & 0xF;
+    const bool nativeRider = !vehicleTimeline && apActor->GetExtension() && apActor->GetExtension()->IsRemote() &&
+        MountedCopyFromCache(apActor->formID, sitSleepState);
     // A remote dragon never keeps a local perch: its local AI picked its own perch (Alduin drawn 210-265 u from the host's
-    // on the Helgen tower, Muse diag-alduin); unseated, the owner's stream places it (ForcePosition below).
+    // on the Helgen tower, diag-alduin); unseated, the owner's stream places it (ForcePosition below).
     // Off: measured, the perched copy already matches the owner within 1 u (run 20260928-143935); the audit's 200 u was
     // two snapshots of a dragon flying at over 1000 u/s taken at different moments, and the unseat never stuck.
     constexpr bool kUnseatRemoteDragons = false;
@@ -219,9 +290,29 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
                 "sit state {}", apActor->formID, jump, apActor->position.x, apActor->position.y, apActor->position.z, position.x,
                 position.y, position.z, sitSleepState);
     }
-    if (!vehicleTimeline || creatorPreview)
+    const bool mainPlacement = s_mainFramePlacement.load(std::memory_order_relaxed) && !vehicleTimeline && !creatorPreview && !nativeRider;
+    if (mainPlacement)
+    {
+        Placement placement;
+        placement.PublishedMs = GetTickCount64();
+        for (const auto& point : movements)
+        {
+            if (placement.Points.size() >= 6)
+                break;
+            InterpolationComponent::TimePoint slim;
+            slim.Tick = point.Tick;
+            slim.Position = point.Position;
+            slim.Rotation = point.Rotation;
+            placement.Points.push_back(slim);
+        }
+        std::lock_guard lock(s_placementLock);
+        s_placements[apActor->formID] = std::move(placement);
+    }
+    else if ((!vehicleTimeline || creatorPreview) && !nativeRider)
         apActor->ForcePosition(position);
     const auto& discrete = aTick >= second.Tick ? second : first;
+    if (const auto* extension = apActor->GetExtension(); extension && extension->IsRemote() && !extension->IsPlayer())
+        PublishRemoteNpcState(apActor->formID, discrete);
     apActor->LoadAnimationVariables(discrete.Variables);
 
     if (apActor->currentProcess && apActor->currentProcess->middleProcess)
@@ -261,7 +352,7 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
             newest ? second.Position : position, newest ? second.Rotation : NiPoint3{glm::vec3{finalX, finalY, finalZ}},
             velocity, angular);
     }
-    else
+    else if (!mainPlacement)
         apActor->SetRotation(finalX, finalY, creatorPreview ? creatorHeading : finalZ);
 }
 
@@ -292,14 +383,230 @@ InterpolationComponent& InterpolationSystem::Setup(World& aWorld, const entt::en
 
 void InterpolationSystem::Clean(World& aWorld, const entt::entity aEntity) noexcept
 {
+    if (const auto* form = aWorld.try_get<FormIdComponent>(aEntity))
+    {
+        std::lock_guard lock(s_remoteNpcStateLock);
+        s_remoteNpcStates.erase(form->Id);
+        std::lock_guard mountLock(s_mountCacheLock);
+        s_mountCache.erase(form->Id);
+    }
     if (aWorld.all_of<InterpolationComponent>(aEntity))
         aWorld.remove<InterpolationComponent>(aEntity);
 }
 
 // Main thread (HookMainLoop): leave a stale seat with the engine's quick stop-interacting
 // (Actor::StopInteractingQuick, ID 38697, VA 0x1406D2A40).
+void InterpolationSystem::SetMainFramePlacement(const bool aEnabled) noexcept
+{
+    s_mainFramePlacement.store(aEnabled, std::memory_order_relaxed);
+    if (!aEnabled)
+    {
+        std::lock_guard lock(s_placementLock);
+        s_placements.clear();
+    }
+    spdlog::info("Remote actor placement: {}", aEnabled ? "main frame" : "world update");
+}
+
+bool InterpolationSystem::IsMainFramePlacement() noexcept
+{
+    return s_mainFramePlacement.load(std::memory_order_relaxed);
+}
+
+void InterpolationSystem::QueueStopInteracting(const uint32_t aFormId) noexcept
+{
+    QueueUnseat(aFormId);
+}
+
+void InterpolationSystem::SetPresentationDelayMs(const uint32_t aDelayMs) noexcept
+{
+    s_presentationDelayMs.store(aDelayMs, std::memory_order_relaxed);
+}
+
+bool InterpolationSystem::GetRemoteFleeState(const uint32_t aFormId, bool& aFleeing) noexcept
+{
+    std::lock_guard lock(s_remoteNpcStateLock);
+    const auto it = s_remoteNpcStates.find(aFormId);
+    if (it == s_remoteNpcStates.end()) return false;
+    aFleeing = it->second.Fleeing;
+    return true;
+}
+
+void InterpolationSystem::SetSkipMountedPlacement(const bool aEnabled) noexcept
+{
+    s_skipMountedPlacement.store(aEnabled, std::memory_order_relaxed);
+}
+
+bool InterpolationSystem::IsSkipMountedPlacement() noexcept
+{
+    return s_skipMountedPlacement.load(std::memory_order_relaxed);
+}
+
+void InterpolationSystem::ResetRemoteStates() noexcept
+{
+    {
+        std::lock_guard lock(s_remoteNpcStateLock);
+        s_remoteNpcStates.clear();
+        s_remoteNpcStateQueue.clear();
+    }
+    {
+        std::lock_guard lock(s_mountCacheLock);
+        s_mountCache.clear();
+        s_mountPollQueue.clear();
+    }
+}
+
 void InterpolationSystem::OnMainFrame() noexcept
 {
+    size_t mountBudget{};
+    {
+        std::lock_guard lock(s_mountCacheLock);
+        mountBudget = (std::min)(size_t{32}, s_mountPollQueue.size());
+    }
+    for (size_t i = 0; i < mountBudget; ++i)
+    {
+        uint32_t formId{};
+        {
+            std::lock_guard lock(s_mountCacheLock);
+            formId = s_mountPollQueue.front();
+            s_mountPollQueue.pop_front();
+        }
+        auto* actor = Cast<Actor>(TESForm::GetById(formId));
+        if (!actor || ((actor->actorState.flags1 >> 14) & 0xF) != 3)
+        {
+            std::lock_guard lock(s_mountCacheLock);
+            s_mountCache.erase(formId);
+            continue;
+        }
+        {
+            std::lock_guard lock(s_mountCacheLock);
+            const auto it = s_mountCache.find(formId);
+            if (it == s_mountCache.end()) continue;
+            if (GetTickCount64() < it->second.NextPollMs)
+            {
+                s_mountPollQueue.push_back(formId);
+                continue;
+            }
+        }
+        const bool mounted = actor->GetNativeMountFormId() != 0;
+        std::lock_guard lock(s_mountCacheLock);
+        if (const auto it = s_mountCache.find(formId); it != s_mountCache.end())
+        {
+            it->second.Mounted = mounted;
+            it->second.NextPollMs = GetTickCount64() + 100;
+            s_mountPollQueue.push_back(formId);
+        }
+    }
+    size_t stateBudget{};
+    {
+        std::lock_guard lock(s_remoteNpcStateLock);
+        stateBudget = (std::min)(kNpcStatesPerFrame, s_remoteNpcStateQueue.size());
+    }
+    for (size_t i = 0; i < stateBudget; ++i)
+    {
+        uint32_t formId{};
+        RemoteNpcState desired{};
+        {
+            std::lock_guard lock(s_remoteNpcStateLock);
+            if (s_remoteNpcStateQueue.empty()) break;
+            formId = s_remoteNpcStateQueue.front();
+            s_remoteNpcStateQueue.pop_front();
+            const auto it = s_remoteNpcStates.find(formId);
+            if (it == s_remoteNpcStates.end()) continue;
+            desired = it->second;
+            it->second.Queued = false;
+        }
+        auto* actor = Cast<Actor>(TESForm::GetById(formId));
+        if (actor && actor->GetExtension() && actor->GetExtension()->IsRemote() &&
+            !actor->GetExtension()->IsPlayer() && !actor->IsDead())
+        {
+            const auto actual = (actor->actorState.flags1 >> 21) & 0xF;
+            if (desired.LifeState == 7 || desired.LifeState == 8)
+            {
+                // The local AI revives a nonessential state-7 copy on its next tick. The owner alone ends down.
+                actor->SetEssential(true);
+                actor->SetNoBleedoutRecovery(true);
+                if (actual != desired.LifeState)
+                {
+                    using TSetLifeState = void(Actor*, uint32_t);
+                    POINTER_SKYRIMSE(TSetLifeState, setLifeState, 37612);
+                    setLifeState.Get()(actor, desired.LifeState);
+                    ReviveService::PlayRemoteBleedoutAction(actor, true);
+                    spdlog::info("Remote NPC {:X}: owner life {} restored from {}", formId, desired.LifeState, actual);
+                }
+            }
+            else if (desired.LifeState == 0)
+            {
+                actor->SetEssential(desired.Essential);
+                if (actual == 7 || actual == 8)
+                {
+                    ReviveService::PlayRemoteBleedoutAction(actor, false);
+                    using TSetLifeState = void(Actor*, uint32_t);
+                    POINTER_SKYRIMSE(TSetLifeState, setLifeState, 37612);
+                    setLifeState.Get()(actor, 0);
+                    actor->SetNoBleedoutRecovery(false);
+                    spdlog::info("Remote NPC {:X}: owner got up from {}", formId, actual);
+                }
+            }
+            else if (desired.LifeState == 1 || desired.LifeState == 2)
+                actor->SetEssential(false);
+        }
+        if (desired.LifeState == 7 || desired.LifeState == 8)
+        {
+            std::lock_guard lock(s_remoteNpcStateLock);
+            if (const auto it = s_remoteNpcStates.find(formId); it != s_remoteNpcStates.end() && !it->second.Queued)
+            {
+                it->second.Queued = true;
+                s_remoteNpcStateQueue.push_back(formId);
+            }
+        }
+    }
+    if (s_mainFramePlacement.load(std::memory_order_relaxed))
+    {
+        const double sharedNow = SmoothClock::NowMs();
+        const double at = sharedNow - static_cast<double>(s_presentationDelayMs.load(std::memory_order_relaxed));
+        const auto nowMs = GetTickCount64();
+        std::vector<std::pair<uint32_t, Placement>> placements;
+        {
+            std::lock_guard lock(s_placementLock);
+            // An actor the world update stopped publishing (dead, ragdoll, vehicle, gone) is left alone.
+            std::erase_if(s_placements, [nowMs](const auto& entry) { return nowMs - entry.second.PublishedMs > 250; });
+            placements.assign(s_placements.begin(), s_placements.end());
+        }
+        for (const auto& [formId, placement] : placements)
+        {
+            const auto& points = placement.Points;
+            if (sharedNow <= 0.0 || points.size() < 2)
+                continue;
+            auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+            if (!pActor || !pActor->GetNiNode() || pActor->actorState.IsDeadState() ||
+                CorpseRagdollService::IsFollowingOwner(formId))
+                continue;
+            size_t i = 0;
+            while (i + 2 < points.size() && at > static_cast<double>(points[i + 1].Tick))
+                ++i;
+            const auto& first = points[i];
+            const auto& second = points[i + 1];
+            float delta = 0.f;
+            if (at >= static_cast<double>(second.Tick))
+                delta = 1.f;
+            else if (at > static_cast<double>(first.Tick) && second.Tick > first.Tick)
+                delta = static_cast<float>((at - static_cast<double>(first.Tick)) / static_cast<double>(second.Tick - first.Tick));
+            const NiPoint3 position{TiltedPhoques::Lerp(first.Position, second.Position, delta)};
+            const auto sitState = (pActor->actorState.flags1 >> 14) & 0xF;
+            if (!(s_skipMountedPlacement.load(std::memory_order_relaxed) && sitState == 3 &&
+                pActor->GetExtension() && pActor->GetExtension()->IsRemote() && pActor->GetNativeMountFormId()))
+                pActor->ForcePosition(position);
+            const auto& rotA = first.Rotation;
+            const auto& rotB = second.Rotation;
+            auto finalX = TiltedPhoques::Mod(rotA.x + TiltedPhoques::DeltaAngle(rotA.x, rotB.x, true) * delta, float(TiltedPhoques::Pi * 2));
+            if (finalX > 0.f && finalX > float(TiltedPhoques::Pi / 2))
+                finalX -= TiltedPhoques::Pi * 2;
+            const auto finalY = TiltedPhoques::Mod(rotA.y + TiltedPhoques::DeltaAngle(rotA.y, rotB.y, true) * delta, float(TiltedPhoques::Pi * 2));
+            const auto finalZ = TiltedPhoques::Mod(rotA.z + TiltedPhoques::DeltaAngle(rotA.z, rotB.z, true) * delta, float(TiltedPhoques::Pi * 2));
+            pActor->SetRotation(finalX, finalY, finalZ);
+        }
+    }
+
     std::vector<uint32_t> unseat;
     {
         std::lock_guard lock(s_unseatLock);

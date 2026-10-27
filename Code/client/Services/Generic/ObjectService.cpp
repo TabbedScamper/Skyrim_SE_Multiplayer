@@ -14,6 +14,9 @@
 #include <Events/ActivateEvent.h>
 #include <Events/LockChangeEvent.h>
 #include <Events/ScriptAnimationEvent.h>
+#include <Messages/RequestOwnershipClaim.h>
+#include <Messages/PhysicsLeaseRequest.h>
+#include <Messages/NotifyPhysicsLease.h>
 #include <Messages/ServerTimeSettings.h>
 #include <Messages/AssignObjectsRequest.h>
 #include <Messages/AssignObjectsResponse.h>
@@ -43,6 +46,13 @@
 #include <intrin.h>
 #include <mutex>
 #include <glm/gtc/quaternion.hpp>
+
+namespace
+{
+// Hold-to-grab physics leases (defined with ObjectService::OnPhysicsLease).
+bool LeasedToOthers(uint32_t aLocalPlayer) noexcept;
+void ClearLeases() noexcept;
+}
 
 namespace
 {
@@ -1065,7 +1075,7 @@ void KeyframeBodyMotion(NiAVObject* apNode) noexcept
 // and re-lock a held mutex: the follower froze at the first cart keyframe (run 223229, Application Hang).
 // They run at the start of the next ApplyRemotePhysics, before any of our locks are taken.
 std::vector<std::shared_ptr<NiAVObject>> s_pendingKeyframes; // main thread only
-// Restore guarantee (Muse refute-cartreplay): every node replay keyframed, and the nodes replayed this pass.
+// Restore guarantee (refute-cartreplay): every node replay keyframed, and the nodes replayed this pass.
 // Any keyframed node not replayed in a pass goes back to dynamic at the start of the next, which covers every
 // exit (toggle off, disconnect, epoch/leader change, assembly or pose erase, stream stall) in one place.
 std::unordered_map<NiAVObject*, std::shared_ptr<NiAVObject>> s_replayKeyframed; // main thread only
@@ -1680,6 +1690,10 @@ struct FollowProbe
     float MaxErrorUnits{};
     std::chrono::steady_clock::time_point NextLog{};
     std::chrono::steady_clock::time_point NextSteerLog{};
+    // Placed exactly on the host's resting pose and left asleep (host at rest, copy within 10 u).
+    bool RestPlaced{};
+    uint32_t RestPlacements{};
+    std::chrono::steady_clock::time_point NextRestPlace{};
 };
 std::unordered_map<void*, FollowProbe> s_followProbes;
 std::mutex s_stepTargetsLock;
@@ -1942,6 +1956,36 @@ int RunNativeStep(void* apWorld, float aDeltaTime, NativeStep&& aNativeStep, boo
                     driveExact.Get()(position, rotation, 1.f / aDeltaTime, target.Body);
                     continue;
                 }
+                // Host at rest: place the copy exactly on the host's pose once, clear its motion and let it sleep, then
+                // stop driving it. A broom leaning on a wall in Helgen Keep, driven toward the resting pose every step,
+                // slid 5 u back and forth against gravity and the wall on the follower while the host's stood still
+                // (2026-09-30: 300 steps per 5 s, gap up to 7.1 u, never settled). At any distance: a copy that fell
+                // over on load (36.6 u off, 17 u low) was never lifted back by the drive. Re-placed at most once a
+                // second while it stays more than 2 u off.
+                if (!hostMoving)
+                {
+                    if (gap <= 300.f)
+                    {
+                        if ((!probe.RestPlaced || gap > 2.f) && started >= probe.NextRestPlace)
+                        {
+                            probe.NextRestPlace = started + std::chrono::seconds(1);
+                            alignas(16) float position[4]{wanted.x, wanted.y, wanted.z, 0.f};
+                            alignas(16) float quaternion[4]{target.Rotation[0], target.Rotation[1], target.Rotation[2], target.Rotation[3]};
+                            s_placeBody.Get()(target.Body, position, quaternion);
+                            for (int axis = 0; axis < 3; ++axis)
+                                pBody->linearVelocity[axis] = pBody->angularVelocity[axis] = 0.f;
+                            using DeactivateFn = void(void*);
+                            POINTER_SKYRIMSE(DeactivateFn, requestDeactivation, 60850);
+                            requestDeactivation.Get()(target.Body);
+                            probe.RestPlaced = true;
+                            ++probe.RestPlacements;
+                        }
+                        continue;
+                    }
+                    probe.RestPlaced = false;
+                }
+                else
+                    probe.RestPlaced = false;
                 if (glm::length(error) > kFollowTeleport)
                     ++probe.Teleports;
                 bool placed = false;
@@ -2581,6 +2625,7 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     m_scriptAnimationNotifyConnection = aDispatcher.sink<NotifyScriptAnimation>().connect<&ObjectService::OnNotifyScriptAnimation>(this);
     m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&ObjectService::OnUpdate>(this);
     m_physicsMoveConnection = aDispatcher.sink<NotifyPhysicsReferencesMove>().connect<&ObjectService::OnPhysicsReferencesMove>(this);
+    m_physicsLeaseConnection = aDispatcher.sink<NotifyPhysicsLease>().connect<&ObjectService::OnPhysicsLease>(this);
 
     EventDispatcherManager::Get()->activateEvent.RegisterSink(this);
     EventDispatcherManager::Get()->objectLoadedEvent.RegisterSink(this);
@@ -2639,7 +2684,7 @@ void ObjectService::RefreshPhysicsReference(uint32_t aFormId) noexcept
     const bool shared = reference && drops.IsShared(aFormId);
     const bool admitted = reference && reference->loadedState && reference->parentCell &&
         reference->parentCell->IsAttached() && !Cast<Actor>(reference) &&
-        (shared ? drops.IsOwner(aFormId) : (m_physicsLeader && !reference->IsTemporary()));
+        (shared ? drops.IsOwner(aFormId) : StreamsReference(aFormId, reference));
     // Body replacement needs no retained native pointer: admission classifies once, and
     // capture resolves the current root/collision/body chain each time it samples.
     bool passive = admitted && !shared && IsPassivePhysicsReference(reference);
@@ -2748,6 +2793,8 @@ void ObjectService::RefreshPhysicsCandidates() noexcept
     const auto epoch = m_world.GetPartyService().GetStartEpoch();
     if (leader != m_physicsLeader || epoch != m_physicsEpoch)
     {
+        // A new leader or campaign epoch (a wipe reload) starts with the leader streaming everything.
+        ClearLeases();
         std::lock_guard lock(m_hostPhysicsLock);
         m_physicsLeader = leader;
         m_physicsEpoch = epoch;
@@ -2902,7 +2949,7 @@ void ObjectService::FlushPhysicsSnapshots() noexcept
                 if (drops.IsOwner(captured.FormId) && drops.PhysicsGeneration(captured.FormId) == captured.Generation)
                     drops.SendPhysics(captured.FormId, update, request.Tick);
             }
-            else if (m_world.GetPartyService().IsLeader())
+            else if (StreamsReference(captured.FormId, nullptr))
                 request.Updates.push_back(std::move(update));
             if (request.Updates.size() == PhysicsReferenceUpdate::MaxUpdates)
             {
@@ -3004,6 +3051,7 @@ bool ShouldSyncObject(const TESObjectREFR* apObject, const Set<const TESObjectRE
 
 void ObjectService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
+    ClearLeases();
     s_assemblyFollower.store(false, std::memory_order_release);
     RestoreKinematicProbe();
     std::lock_guard remoteLock(m_remotePhysicsLock);
@@ -3146,7 +3194,8 @@ void ObjectService::OnUpdate(const UpdateEvent&) noexcept
         OnPhysicsReferencesMove(message);
         s_sharedDropGeneration = 0;
     }
-    if (m_world.GetPartyService().IsLeader() && !m_world.GetSharedDropService().HasRemoteReferences())
+    if (m_world.GetPartyService().IsLeader() && !m_world.GetSharedDropService().HasRemoteReferences() &&
+        !LeasedToOthers(m_transport.GetLocalPlayerId()))
     {
         // Promoted to leader: no host-driven bodies here any more; the native step must not keep
         // steering the last published ones.
@@ -3311,8 +3360,7 @@ void ObjectService::CaptureHostPhysics(const bool aUpdateThread) noexcept
         auto& previous = poseIt->second;
         auto& sharedDrops = m_world.GetSharedDropService();
         const bool shared = previous.Shared;
-        if (shared ? !sharedDrops.IsOwner(pReference->formID) :
-            (!m_world.GetPartyService().IsLeader() || pReference->IsTemporary()))
+        if (shared ? !sharedDrops.IsOwner(pReference->formID) : !StreamsReference(pReference->formID, pReference))
             return;
 
         // Reject distant loaded-grid references before walking their native
@@ -3923,7 +3971,8 @@ void ObjectService::CaptureHazards() noexcept
         return;
     s_nextCapture = nowMs + 50;
     PhysicsReferencesMoveRequest request;
-    request.Tick = m_transport.GetClock().GetCurrentTick();
+    // The smooth shared clock, like the body snapshots above (receivers play back on it).
+    request.Tick = SmoothClock::NowTick() ? SmoothClock::NowTick() : m_transport.GetClock().GetCurrentTick();
     for (auto it = s_hostHazards.begin(); it != s_hostHazards.end();)
     {
         auto& hazard = it->second;
@@ -4016,6 +4065,348 @@ void ObjectService::SendHazardPackets() noexcept
         m_transport.Send(request);
 }
 
+// Hold-to-grab physics leases (owner report 2026-09-29: a follower's grab only jiggled the object, because every
+// physics step steered it back to the leader's streamed pose). formId -> carrying player; absent = the leader streams.
+// Threads: the grab hooks run on the main thread and only publish atomics; the lease map is shared under its lock;
+// everything else about the local grab belongs to UpdateGrabLease on the main frame.
+namespace
+{
+std::mutex s_leaseLock;
+std::unordered_map<uint32_t, uint32_t> s_leases;
+// Published by the hooks and the network thread.
+std::atomic<uint32_t> s_grabbed{};       // the reference the local player holds now (0 = none)
+std::atomic<bool> s_grabReleased{};      // the engine let go of it
+std::atomic<uint32_t> s_forceRelease{};  // someone else streams it: drop the local grab
+// Main frame only: the grab being tracked (it outlives s_grabbed through the throw).
+struct TrackedGrab
+{
+    uint32_t FormId{};
+    bool Corpse{};
+    GameId Id{};            // loose object
+    uint32_t ServerId{};    // corpse
+    uint32_t Epoch{};       // corpse ownership epoch at pickup
+    bool Requested{};
+    bool Released{};
+    uint64_t ReleasedAt{};
+    uint64_t StillSince{};
+    uint64_t NextCarryRefresh{};
+    uint64_t NextLeaseRefresh{};
+    NiPoint3 LastPosition{};
+};
+TrackedGrab s_tracked{};
+
+using TGrabObject = void*(PlayerCharacter*, TESObjectREFR*, uint32_t, float, bool);
+TGrabObject* s_realGrabObject{};
+using TReleaseGrab = void(PlayerCharacter*);
+TReleaseGrab* s_realReleaseGrab{};
+
+void* HookGrabObject(PlayerCharacter* apPlayer, TESObjectREFR* apReference, uint32_t aType, float aDistance, bool aFlag)
+{
+    auto* pResult = s_realGrabObject(apPlayer, apReference, aType, aDistance, aFlag);
+    // Loose objects and corpses (a living actor is never grabbed this way).
+    auto* pActor = Cast<Actor>(apReference);
+    if (pResult && apPlayer == PlayerCharacter::Get() && apReference && (!pActor || pActor->IsDead()))
+        ObjectService::NoteLocalGrab(apReference);
+    return pResult;
+}
+
+void HookReleaseGrab(PlayerCharacter* apPlayer)
+{
+    if (apPlayer == PlayerCharacter::Get() && s_grabbed.load())
+    {
+        spdlog::info("Physics lease: grab of {:X} released by the engine (caller {})", s_grabbed.load(), _ReturnAddress());
+        ObjectService::NoteLocalRelease();
+    }
+    s_realReleaseGrab(apPlayer);
+}
+
+TiltedPhoques::Initializer s_grabHooks([]()
+{
+    // PlayerCharacter grab spring attach (40555 / 0x140752630, called by StartGrabObject 40552 after its mass check)
+    // and PlayerCharacter::DestroyMouseSprings (40557 / 0x140754110).
+    POINTER_SKYRIMSE(TGrabObject, grab, 40555);
+    POINTER_SKYRIMSE(TReleaseGrab, release, 40557);
+    s_realGrabObject = grab.Get();
+    s_realReleaseGrab = release.Get();
+    TP_HOOK(&s_realGrabObject, HookGrabObject);
+    TP_HOOK(&s_realReleaseGrab, HookReleaseGrab);
+});
+
+bool LeasedToOthers(uint32_t aLocalPlayer) noexcept
+{
+    std::lock_guard lock(s_leaseLock);
+    return std::any_of(s_leases.begin(), s_leases.end(), [aLocalPlayer](const auto& aEntry) { return aEntry.second != aLocalPlayer; });
+}
+
+void ClearLeases() noexcept
+{
+    {
+        std::lock_guard lock(s_leaseLock);
+        s_leases.clear();
+    }
+    // The main frame sees no grab and drops its tracking without sending anything.
+    s_grabbed.store(0);
+    s_grabReleased.store(false);
+    s_forceRelease.store(0);
+}
+
+// Where the thing is drawn: a corpse's pelvis bone (its ragdoll moves the bones), else the reference.
+NiPoint3 GrabPosition(TESObjectREFR* apReference) noexcept
+{
+    static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+    if (Cast<Actor>(apReference))
+        if (auto* pRoot = apReference->GetNiNode())
+            if (auto* pBone = pRoot->GetByName(s_pelvis))
+                return pBone->world.translate;
+    return apReference->position;
+}
+}
+
+void ObjectService::NoteLocalGrab(TESObjectREFR* apReference) noexcept
+{
+    s_grabbed.store(apReference->formID);
+    s_grabReleased.store(false);
+}
+
+void ObjectService::NoteLocalRelease() noexcept
+{
+    if (s_grabbed.load())
+        s_grabReleased.store(true);
+}
+
+uint32_t ObjectService::LeaseHolder(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_leaseLock);
+    const auto it = s_leases.find(aFormId);
+    return it == s_leases.end() ? 0 : it->second;
+}
+
+bool ObjectService::StreamsReference(uint32_t aFormId, const TESObjectREFR* apReference) const noexcept
+{
+    {
+        std::lock_guard lock(s_leaseLock);
+        if (const auto it = s_leases.find(aFormId); it != s_leases.end())
+            return it->second == m_transport.GetLocalPlayerId();
+    }
+    return m_world.GetPartyService().IsLeader() && !(apReference && apReference->IsTemporary());
+}
+
+void ObjectService::OnPhysicsLease(const NotifyPhysicsLease& acMessage) noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    if (!acMessage.IsValid() || !party.IsInParty() || acMessage.Epoch != party.GetStartEpoch())
+        return;
+    const auto formId = m_world.GetModSystem().GetGameId(acMessage.Id);
+    if (!formId)
+        return;
+    const auto localId = m_transport.GetLocalPlayerId();
+    {
+        std::lock_guard lock(s_leaseLock);
+        if (acMessage.HolderId)
+            s_leases[formId] = acMessage.HolderId;
+        else
+            s_leases.erase(formId);
+    }
+    // First holder wins: whoever else is holding it here (a refused grab, or the leader while a follower carries it)
+    // lets go, or its grab spring would fight the carrier's stream (the original jiggle). The main frame does it.
+    // Also when it goes back to the leader while a follower still holds it (the lease lapsed or was cleared): the
+    // leader's stream would pull the follower's grab again (review 2026-09-29).
+    const bool otherStreams = acMessage.HolderId ? acMessage.HolderId != localId : !party.IsLeader();
+    if (otherStreams && s_grabbed.load() == formId)
+        s_forceRelease.store(formId);
+    // The new streamer admits the object; everyone else drops what it streamed.
+    QueuePhysicsRefresh(formId);
+    spdlog::info("Physics lease: {:X} streamed by {}", formId, acMessage.HolderId ? fmt::format("player {}", acMessage.HolderId) :
+        std::string("the leader"));
+}
+
+void ObjectService::UpdateGrabLease() noexcept
+{
+    const auto& party = m_world.GetPartyService();
+    const auto now = GetTickCount64();
+    const auto grabbed = s_grabbed.load();
+    const bool active = m_transport.IsConnected() && party.IsInParty() && party.GetSessionState() >= 2;
+    auto& tracked = s_tracked;
+
+    // Someone else carries what the local player holds: let go (DestroyMouseSprings), keep nothing.
+    if (const auto force = s_forceRelease.exchange(0); force && force == grabbed)
+    {
+        if (auto* pPlayer = PlayerCharacter::Get())
+            s_realReleaseGrab(pPlayer);
+        s_grabbed.store(0);
+        s_grabReleased.store(false);
+        if (tracked.FormId == force)
+            tracked = {};
+        spdlog::info("Physics lease: {:X} is carried by another player, local grab dropped", force);
+        return;
+    }
+
+    // Hand back what is being tracked: to the server as a release (object) or a set-down (corpse).
+    const auto handBack = [&]()
+    {
+        if (!tracked.FormId || !tracked.Requested || !active)
+            return;
+        if (tracked.Corpse)
+        {
+            RequestOwnershipClaim claim{};
+            claim.ServerId = tracked.ServerId;
+            claim.Carry = 2;
+            m_transport.Send(claim);
+            spdlog::info("Corpse carry: {:X} set down", tracked.FormId);
+        }
+        else if (!party.IsLeader())
+        {
+            PhysicsLeaseRequest request{};
+            request.Id = tracked.Id;
+            request.Hold = false;
+            request.Epoch = party.GetStartEpoch();
+            m_transport.Send(request);
+            spdlog::info("Physics lease: {:X} handed back", tracked.FormId);
+        }
+    };
+
+    if (!active)
+    {
+        tracked = {};
+        return;
+    }
+    // A new grab while the previous one was still settling: the previous one is done now.
+    if (grabbed && tracked.FormId && tracked.FormId != grabbed)
+    {
+        handBack();
+        tracked = {};
+    }
+    if (!tracked.FormId)
+    {
+        if (!grabbed)
+            return;
+        auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(grabbed));
+        if (!pReference)
+        {
+            s_grabbed.store(0);
+            return;
+        }
+        tracked.FormId = grabbed;
+        tracked.LastPosition = GrabPosition(pReference);
+        if (auto* pCorpse = Cast<Actor>(pReference))
+        {
+            // A corpse: its ragdoll belongs to the actor's owner, so the carrier asks for the actor itself.
+            tracked.Corpse = true;
+            for (auto entity : m_world.view<FormIdComponent>())
+            {
+                if (m_world.get<FormIdComponent>(entity).Id != grabbed)
+                    continue;
+                if (const auto* pRemote = m_world.try_get<RemoteComponent>(entity))
+                {
+                    tracked.ServerId = pRemote->Id;
+                    tracked.Epoch = pRemote->OwnershipEpoch;
+                }
+                else if (const auto* pLocal = m_world.try_get<LocalComponent>(entity))
+                {
+                    tracked.ServerId = pLocal->Id;
+                    tracked.Epoch = pLocal->OwnershipEpoch;
+                }
+                break;
+            }
+            if (!tracked.ServerId)
+            {
+                tracked = {};
+                s_grabbed.store(0);
+                return;
+            }
+        }
+        else if (pReference->IsTemporary() || !m_world.GetModSystem().GetServerModId(grabbed, tracked.Id))
+        {
+            tracked = {};
+            s_grabbed.store(0);
+            return;
+        }
+    }
+    auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(tracked.FormId));
+    if (!pReference)
+    {
+        tracked = {};
+        return;
+    }
+    if (!tracked.Requested || (tracked.Corpse && !tracked.Released && now >= tracked.NextCarryRefresh))
+    {
+        // Asked at pickup; a corpse's carry is renewed every 20 s while held (the server's protection lasts 60 s).
+        tracked.Requested = true;
+        if (tracked.Corpse)
+        {
+            RequestOwnershipClaim claim{};
+            claim.ServerId = tracked.ServerId;
+            claim.ExpectedOwnershipEpoch = tracked.Epoch;
+            claim.Carry = 1;
+            m_transport.Send(claim);
+            tracked.NextCarryRefresh = now + 20000;
+            spdlog::info("Corpse carry: carrying {:X} (server {:X})", tracked.FormId, tracked.ServerId);
+        }
+        else
+        {
+            // The leader already streams every loose object; a follower asks for this one's stream. Taken locally at
+            // once (the grab must not fight the old stream while the grant travels); the server's notice confirms it,
+            // or names the first holder and this grab is dropped.
+            if (!party.IsLeader())
+            {
+                {
+                    std::lock_guard lock(s_leaseLock);
+                    s_leases[tracked.FormId] = m_transport.GetLocalPlayerId();
+                }
+                QueuePhysicsRefresh(tracked.FormId);
+            }
+            PhysicsLeaseRequest request{};
+            request.Id = tracked.Id;
+            request.Hold = true;
+            request.Epoch = party.GetStartEpoch();
+            m_transport.Send(request);
+            tracked.NextLeaseRefresh = now + 5000;
+            spdlog::info("Physics lease: grabbed {:X}, stream requested", tracked.FormId);
+        }
+        return;
+    }
+    if (!tracked.Released)
+    {
+        if (grabbed == tracked.FormId && !s_grabReleased.load())
+        {
+            // Held: renew a follower's lease every 5 s, so a still hand (few stream updates) never lets it lapse.
+            if (!tracked.Corpse && !party.IsLeader() && now >= tracked.NextLeaseRefresh)
+            {
+                tracked.NextLeaseRefresh = now + 5000;
+                PhysicsLeaseRequest request{};
+                request.Id = tracked.Id;
+                request.Hold = true;
+                request.Epoch = party.GetStartEpoch();
+                m_transport.Send(request);
+            }
+            return;
+        }
+        tracked.Released = true;
+        tracked.ReleasedAt = now;
+        if (grabbed == tracked.FormId)
+        {
+            s_grabbed.store(0);
+            s_grabReleased.store(false);
+        }
+    }
+    // Released: keep simulating the throw until it has lain still (object 1 s, body 1.5 s) or 10/15 s pass.
+    const auto position = GrabPosition(pReference);
+    const auto delta = position - tracked.LastPosition;
+    tracked.LastPosition = position;
+    if (glm::dot(delta, delta) > 1.f)
+        tracked.StillSince = 0;
+    else if (!tracked.StillSince)
+        tracked.StillSince = now;
+    const uint64_t rest = tracked.Corpse ? 1500 : 1000;
+    const uint64_t limit = tracked.Corpse ? 15000 : 10000;
+    if ((tracked.StillSince && now - tracked.StillSince >= rest) || now - tracked.ReleasedAt >= limit)
+    {
+        handBack();
+        tracked = {};
+    }
+}
+
+
 void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& acMessage) noexcept
 {
     std::lock_guard lock(m_remotePhysicsLock);
@@ -4038,14 +4429,15 @@ void ObjectService::OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove& a
         const bool shared = update.Id.ModId == SharedDropData::PhysicsModId;
         if (shared && !s_sharedDropGeneration)
             continue;
-        if (!shared && party.IsLeader())
-            continue;
         if (!std::isfinite(update.Position.x) || !std::isfinite(update.Position.y) ||
             !std::isfinite(update.Position.z) || !std::isfinite(update.Rotation.x) ||
             !std::isfinite(update.Rotation.y) || !std::isfinite(update.Rotation.z))
             continue;
         const uint32_t formId = shared ? m_world.GetSharedDropService().ResolvePhysics(update.Id) :
             m_world.GetModSystem().GetGameId(update.Id);
+        // What this PC streams itself (the leader's objects, or one it carries) never takes an incoming pose.
+        if (!shared && StreamsReference(formId, nullptr))
+            continue;
         auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
         if (!pReference || Cast<Actor>(pReference) || !pReference->loadedState)
             continue;
@@ -4164,6 +4556,7 @@ void ObjectService::OnMainFrame() noexcept
     auto* pService = s_objectService.load(std::memory_order_acquire);
     if (!pService)
         return;
+    pService->UpdateGrabLease();
     DrainRetiredBodies();
     DrainActorSceneUpdates();
     {
@@ -4203,7 +4596,7 @@ void ObjectService::OnMainFrame() noexcept
         // Latch "in the camera view this frame" on every owned NPC: Actor boolBits (flags1, +0xE8) kWasInFrustrum
         // (1 << 21) is the per-frame cull RESULT the engine's off-screen shortcuts read (skeleton world update used
         // by E37320 placement, controller -> reference writeback). Setting cull inputs (NiAVObject kNotVisible /
-        // kAlwaysDraw / kForceUpdate, kFarAway) did not move the float rate (Muse diag-cull, run 20260928-082058).
+        // kAlwaysDraw / kForceUpdate, kFarAway) did not move the float rate (diag-cull, run 20260928-082058).
         // Plain bit write on the main thread; the cull pass re-evaluates it for drawing every frame.
         size_t latched = 0;
         if (want)
@@ -4471,8 +4864,8 @@ void ObjectService::OnMainFrame() noexcept
         spdlog::info("Cart steer {:X}: gap {:.1f} u vel {:.1f} host-age {} ms fighter unresolved; {} steps {} teleports",
             probe.FormId, probe.Gap, probe.Speed, probe.HostAgeMs, probe.Steps, probe.Teleports);
     for (const auto& probe : summaries)
-        spdlog::info("Follow body {:X}: {} steps, {} teleports, 0 keyframed placements, largest gap {:.1f} u",
-            probe.FormId, probe.Steps, probe.Teleports, probe.MaxErrorUnits);
+        spdlog::info("Follow body {:X}: {} steps, {} teleports, {} rest placements, largest gap {:.1f} u",
+            probe.FormId, probe.Steps, probe.Teleports, probe.RestPlacements, probe.MaxErrorUnits);
     pService->m_physicsMaintenanceReportUs += maintenanceUs;
     pService->ApplyRemotePhysics();
 }
@@ -4736,6 +5129,27 @@ bool ObjectService::IsCartCurve() noexcept
     return s_cartCurve.load(std::memory_order_relaxed);
 }
 
+void ObjectService::MotionTraceReceived(const uint32_t aFormId, const uint64_t aTick, const glm::vec3& acPosition) noexcept
+{
+    if (!s_motionTraceOn.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard lock(s_motionTraceLock);
+    if (s_motionTrace.size() >= kMotionTraceMax ||
+        std::find(s_motionTraceIds.begin(), s_motionTraceIds.end(), aFormId) == s_motionTraceIds.end())
+        return;
+    const double steady = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    MotionTraceRecord r{};
+    r.SteadyMs = steady;
+    r.SharedMs = static_cast<double>(aTick);
+    r.FormId = aFormId;
+    r.X = r.RefX = r.RootX = r.SkelX = acPosition.x;
+    r.Y = r.RefY = r.RootY = r.SkelY = acPosition.y;
+    r.Z = r.RefZ = r.RootZ = r.SkelZ = acPosition.z;
+    r.Sit = 0xFFFF;
+    s_motionTrace.push_back(r);
+}
+
 std::string ObjectService::MotionTrace(const std::string& aIds, const std::string& aBone, const std::string& aDump) noexcept
 {
     // The bridge runs on the window thread; the recorder on the main frame. One lock covers both.
@@ -4939,7 +5353,7 @@ void ObjectService::ApplyRemotePhysics() noexcept
             !pReference || Cast<Actor>(pReference) || !pReference->loadedState ||
             !pReference->parentCell || !pReference->parentCell->IsAttached() ||
             (shared && generation->second != m_world.GetSharedDropService().PhysicsGeneration(it->first)) ||
-            (shared ? m_world.GetSharedDropService().IsOwner(it->first) : m_world.GetPartyService().IsLeader()) ||
+            (shared ? m_world.GetSharedDropService().IsOwner(it->first) : StreamsReference(it->first, nullptr)) ||
             it->second.AuthorityEpoch != m_world.GetPartyService().GetStartEpoch())
         {
             it = m_remoteReferencePoses.erase(it);
@@ -5532,6 +5946,13 @@ void ObjectService::OnActivateNotify(const NotifyActivate& acMessage) noexcept
 
     if (pObject->baseForm->formType == FormType::Door)
     {
+        if (pObject->extraData.Contains(ExtraDataType::Teleport) && pActor->GetExtension()->IsRemote())
+        {
+            if (!pActor->GetExtension()->IsPlayer())
+                QueueReplicaDoorCleanup(pActor->formID);
+            spdlog::debug("Skip remote load-door replay door={:X} actor={:X}", pObject->formID, pActor->formID);
+            return;
+        }
         auto remotePreActivationState = static_cast<TESObjectREFR::OpenState>(acMessage.PreActivationOpenState);
         TESObjectREFR::OpenState localState = pObject->GetOpenState();
 
@@ -5653,7 +6074,7 @@ void ObjectService::OnNotifyScriptAnimation(const NotifyScriptAnimation& acMessa
     else
     {
         BSFixedString animation(acMessage.Animation.c_str());
-        pObject->PlayAnimationAndWait(&animation, &eventName);
+        pObject->PlayAnimation(&animation);
     }
 }
 

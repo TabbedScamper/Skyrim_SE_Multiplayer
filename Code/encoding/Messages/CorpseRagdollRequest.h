@@ -35,7 +35,7 @@ struct CorpseRagdollRequest final : ClientMessage
     bool operator==(const CorpseRagdollRequest& acRhs) const noexcept
     {
         return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && Tick == acRhs.Tick && Bodies == acRhs.Bodies &&
-               Limb == acRhs.Limb && DismemberTick == acRhs.DismemberTick && Settled == acRhs.Settled && Active == acRhs.Active && Dying == acRhs.Dying &&
+               Limb == acRhs.Limb && DismemberTick == acRhs.DismemberTick && Settled == acRhs.Settled && Active == acRhs.Active && Dying == acRhs.Dying && KnockState == acRhs.KnockState &&
                std::equal(std::begin(Origin), std::end(Origin), std::begin(acRhs.Origin)) && Heading == acRhs.Heading;
     }
 
@@ -48,6 +48,7 @@ struct CorpseRagdollRequest final : ClientMessage
     bool Settled{};
     bool Active{true};
     bool Dying{};
+    uint8_t KnockState{};
     // The owner's actor position; body positions are offsets from it. Placing them from the
     // receiver's own actor position followed that copy wherever its local ragdoll dragged it.
     float Origin[3]{};

@@ -73,8 +73,8 @@ bool HookContact(uint8_t* apEntry, const uint8_t* apBody, TESObjectREFR** apTrig
     if (!pPlayer || !IsRemotePlayer(pEntrant))
         return s_contact(apEntry, apBody, apTrigger);
 
-    // Native activator keyword filtering (not IsPlayerRef). Evaluate the same
-    // requirement against PlayerRef, consistent with the VM action-ref proxy.
+    // Native activator keyword filtering checks the entering reference. The
+    // remote proxy must carry the entrant's keywords for this to match.
     auto* pBase = (*apTrigger)->baseForm;
     if (pBase && pBase->formType == FormType::Activator)
     {
@@ -83,8 +83,8 @@ bool HookContact(uint8_t* apEntry, const uint8_t* apBody, TESObjectREFR** apTrig
         if (auto* pKeyword = keyword.Get()(pBase))
         {
             using HasKeyword = bool(TESObjectREFR*, const void*);
-            const auto hasKeyword = reinterpret_cast<HasKeyword*>((*reinterpret_cast<void***>(pPlayer))[0x48]);
-            if (!hasKeyword(pPlayer, pKeyword))
+            const auto hasKeyword = reinterpret_cast<HasKeyword*>((*reinterpret_cast<void***>(pEntrant))[0x48]);
+            if (!hasKeyword(pEntrant, pKeyword))
                 return false;
         }
     }

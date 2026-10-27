@@ -22,6 +22,7 @@ struct BusyLockService : BSTEventSink<MenuOpenCloseEvent>, BSTEventSink<TESLoadG
     BSTEventResult OnEvent(const MenuOpenCloseEvent*, const EventDispatcher<MenuOpenCloseEvent>*) override;
     BSTEventResult OnEvent(const TESLoadGameEvent*, const EventDispatcher<TESLoadGameEvent>*) override;
     BSTEventResult OnEvent(const TESDeathEvent*, const EventDispatcher<TESDeathEvent>*) override;
+    static void OnMainFrame() noexcept;
 
 private:
     enum class Operation : uint8_t { Activate, Container, Barter };
@@ -40,6 +41,7 @@ private:
     bool CanReplay(TESObjectREFR* aReference) noexcept;
     uint32_t OpenMenus(TESObjectREFR* aReference) const noexcept;
     void Replay() noexcept;
+    void QueueReplay() noexcept;
     void Reset(BusyLockReason aReason) noexcept;
     void Send(const BusyLockData& aData, BusyLockAction aAction, BusyLockReason aReason = BusyLockReason::Closed) noexcept;
     void OnUpdate(const UpdateEvent&) noexcept;
@@ -53,6 +55,9 @@ private:
     uint64_t m_nextRequest{}, m_deadline{}, m_openDeadline{}, m_nextHeartbeat{}, m_closedAt{};
     uint32_t m_lifecycle{};
     bool m_waiting{}, m_leased{}, m_seenMenu{};
+    bool m_replayPending{};
+    bool m_replayEnqueued{};
+    uint64_t m_replayRequestId{};
     EventDispatcher<MenuOpenCloseEvent>* m_menuSource{};
     std::atomic_bool m_acceptMenuRequests{};
     std::atomic_uint32_t m_invalidations{}, m_menuEvents{};

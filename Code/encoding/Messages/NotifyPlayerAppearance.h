@@ -14,7 +14,8 @@ struct NotifyPlayerAppearance final : ServerMessage
     bool operator==(const NotifyPlayerAppearance& acRhs) const noexcept
     {
         return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && ChangeFlags == acRhs.ChangeFlags &&
-               AppearanceBuffer == acRhs.AppearanceBuffer && FaceTints == acRhs.FaceTints && InCreator == acRhs.InCreator;
+               AppearanceBuffer == acRhs.AppearanceBuffer && FaceTints == acRhs.FaceTints && InCreator == acRhs.InCreator &&
+               Name == acRhs.Name;
     }
 
     uint32_t ServerId{};
@@ -22,4 +23,7 @@ struct NotifyPlayerAppearance final : ServerMessage
     TiltedPhoques::String AppearanceBuffer{};
     Tints FaceTints{};
     bool InCreator{};
+    // The player's character name (2026-09-29: everyone stayed "Prisoner", the name at connect time). An empty
+    // AppearanceBuffer with a Name is a rename only: the look is unchanged.
+    TiltedPhoques::String Name{};
 };

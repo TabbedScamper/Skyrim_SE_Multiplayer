@@ -45,6 +45,161 @@ std::atomic<uint32_t> s_indexOutsideReads{}, s_indexOutsideWrites{};
 std::atomic<uint64_t> s_dispatchCalls{}, s_dispatchNextLog{};
 std::atomic_bool s_dispatchStarted{};
 
+// Native inventory/equip hooks can run on job threads. Publish ownership through
+// component signals so those hooks never touch an entt pool.
+class OwnershipTokenIndex;
+std::atomic<OwnershipTokenIndex*> s_ownershipTokens{};
+
+class OwnershipTokenIndex
+{
+public:
+    explicit OwnershipTokenIndex(entt::registry& aRegistry)
+    {
+        // Mirror pool order on the writer lane. Duplicate form IDs must retain
+        // the baseline view's first-match policy without reading EnTT in a hook.
+        m_forms.Size = aRegistry.view<FormIdComponent>().size();
+        m_locals.Size = aRegistry.view<LocalComponent>().size();
+        m_remotes.Size = aRegistry.view<RemoteComponent>().size();
+        m_connections[0] = aRegistry.on_construct<FormIdComponent>().connect<&OwnershipTokenIndex::Refresh>(this);
+        m_connections[1] = aRegistry.on_update<FormIdComponent>().connect<&OwnershipTokenIndex::Refresh>(this);
+        m_connections[2] = aRegistry.on_destroy<FormIdComponent>().connect<&OwnershipTokenIndex::RemoveAll>(this);
+        m_connections[3] = aRegistry.on_construct<LocalComponent>().connect<&OwnershipTokenIndex::Refresh>(this);
+        m_connections[4] = aRegistry.on_update<LocalComponent>().connect<&OwnershipTokenIndex::Refresh>(this);
+        m_connections[5] = aRegistry.on_destroy<LocalComponent>().connect<&OwnershipTokenIndex::RemoveLocal>(this);
+        m_connections[6] = aRegistry.on_construct<RemoteComponent>().connect<&OwnershipTokenIndex::Refresh>(this);
+        m_connections[7] = aRegistry.on_update<RemoteComponent>().connect<&OwnershipTokenIndex::Refresh>(this);
+        m_connections[8] = aRegistry.on_destroy<RemoteComponent>().connect<&OwnershipTokenIndex::RemoveRemote>(this);
+        for (auto entity : aRegistry.view<FormIdComponent>())
+            Refresh(aRegistry, entity);
+        s_ownershipTokens.store(this, std::memory_order_release);
+    }
+
+    ~OwnershipTokenIndex()
+    {
+        s_ownershipTokens.store(nullptr, std::memory_order_release);
+    }
+
+    std::optional<ActorOwnershipToken> Find(uint32_t aFormId, bool aRemote) const
+    {
+        std::lock_guard lock(m_mutex);
+        const auto& tokens = aRemote ? m_remote : m_local;
+        const auto it = tokens.find(aFormId);
+        if (it == tokens.end())
+            return std::nullopt;
+        const auto& owners = aRemote ? m_remotes : m_locals;
+        // EnTT 3.10 selects the smallest pool (FormId wins ties), then walks
+        // it backwards. Only candidates for this form are examined.
+        const auto& order = owners.Size < m_forms.Size ? owners : m_forms;
+        const ActorOwnershipToken* selected = nullptr;
+        size_t selectedRank{};
+        for (const auto& [entity, token] : it->second)
+        {
+            const auto rank = order.Positions.find(entity);
+            // An incomplete publication cannot establish baseline selection.
+            // Reject it instead of throwing through a noexcept hook accessor.
+            if (rank == order.Positions.end())
+                return std::nullopt;
+            if (!selected || rank->second > selectedRank)
+            {
+                selected = &token;
+                selectedRank = rank->second;
+            }
+        }
+        return selected && selected->OwnershipEpoch ? std::optional<ActorOwnershipToken>{*selected} : std::nullopt;
+    }
+
+private:
+    struct PoolOrder
+    {
+        size_t Size{};
+        std::unordered_map<entt::entity, size_t> Positions;
+
+        template <class T> void Publish(entt::registry& aRegistry, entt::entity aEntity)
+        {
+            const auto& pool = aRegistry.view<T>().handle();
+            Size = pool.size();
+            if (pool.contains(aEntity))
+                Positions[aEntity] = pool.index(aEntity);
+        }
+
+        template <class T> void Remove(entt::registry& aRegistry, entt::entity aEntity)
+        {
+            // on_destroy runs before swap-and-pop. Publish the resulting rank
+            // of the last element, including when it belongs to another key.
+            const auto& pool = aRegistry.view<T>().handle();
+            const auto last = pool.data()[pool.size() - 1];
+            Positions[last] = pool.index(aEntity);
+            Positions.erase(aEntity);
+            Size = pool.size() - 1;
+        }
+    };
+
+    void Erase(entt::entity aEntity, bool aRemote)
+    {
+        auto& keys = aRemote ? m_remoteKeys : m_localKeys;
+        auto& tokens = aRemote ? m_remote : m_local;
+        if (const auto it = keys.find(aEntity); it != keys.end())
+        {
+            if (auto entries = tokens.find(it->second); entries != tokens.end())
+            {
+                std::erase_if(entries->second, [aEntity](const auto& entry) { return entry.first == aEntity; });
+                if (entries->second.empty())
+                    tokens.erase(entries);
+            }
+            keys.erase(it);
+        }
+    }
+
+    void Refresh(entt::registry& aRegistry, entt::entity aEntity)
+    {
+        const auto* form = aRegistry.try_get<FormIdComponent>(aEntity);
+        const auto* local = aRegistry.try_get<LocalComponent>(aEntity);
+        const auto* remote = aRegistry.try_get<RemoteComponent>(aEntity);
+        std::lock_guard lock(m_mutex);
+        m_forms.Publish<FormIdComponent>(aRegistry, aEntity);
+        m_locals.Publish<LocalComponent>(aRegistry, aEntity);
+        m_remotes.Publish<RemoteComponent>(aRegistry, aEntity);
+        Erase(aEntity, false);
+        Erase(aEntity, true);
+        if (form && local)
+        {
+            m_local[form->Id].emplace_back(aEntity, ActorOwnershipToken{local->Id, local->OwnershipEpoch});
+            m_localKeys[aEntity] = form->Id;
+        }
+        if (form && remote)
+        {
+            m_remote[form->Id].emplace_back(aEntity, ActorOwnershipToken{remote->Id, remote->OwnershipEpoch});
+            m_remoteKeys[aEntity] = form->Id;
+        }
+    }
+
+    void RemoveAll(entt::registry& aRegistry, entt::entity aEntity)
+    {
+        std::lock_guard lock(m_mutex);
+        m_forms.Remove<FormIdComponent>(aRegistry, aEntity);
+        Erase(aEntity, false);
+        Erase(aEntity, true);
+    }
+    void RemoveLocal(entt::registry& aRegistry, entt::entity aEntity)
+    {
+        std::lock_guard lock(m_mutex);
+        m_locals.Remove<LocalComponent>(aRegistry, aEntity);
+        Erase(aEntity, false);
+    }
+    void RemoveRemote(entt::registry& aRegistry, entt::entity aEntity)
+    {
+        std::lock_guard lock(m_mutex);
+        m_remotes.Remove<RemoteComponent>(aRegistry, aEntity);
+        Erase(aEntity, true);
+    }
+
+    mutable std::mutex m_mutex;
+    PoolOrder m_forms, m_locals, m_remotes;
+    std::unordered_map<uint32_t, std::vector<std::pair<entt::entity, ActorOwnershipToken>>> m_local, m_remote;
+    std::unordered_map<entt::entity, uint32_t> m_localKeys, m_remoteKeys;
+    std::array<entt::scoped_connection, 9> m_connections;
+};
+
 void ObserveDispatchStack(const char* aKind)
 {
     // Only called for the first eight overlaps/reentries. A changing worker
@@ -178,7 +333,7 @@ struct ClientEntityIndex
           LocalIds(aRegistry, IdentityKey<LocalComponent>),
           RemoteIds(aRegistry, IdentityKey<RemoteComponent>),
           ObjectIds(aRegistry, IdentityKey<ObjectComponent>),
-          RemoteForms(aRegistry, IdentityKey<FormIdComponent>) {}
+          RemoteForms(aRegistry, IdentityKey<FormIdComponent>), Ownership(aRegistry) {}
 
     EntityViewIndex<FormIdComponent, LocalComponent> LocalForms;
     EntityViewIndex<RemoteComponent, FormIdComponent> RemoteActors;
@@ -187,6 +342,7 @@ struct ClientEntityIndex
     EntityViewIndex<RemoteComponent> RemoteIds;
     EntityViewIndex<ObjectComponent> ObjectIds;
     EntityViewIndex<FormIdComponent, RemoteComponent> RemoteForms;
+    OwnershipTokenIndex Ownership;
 };
 
 ClientEntityIndex& EntityIndex(entt::registry& aRegistry)
@@ -321,30 +477,14 @@ std::optional<entt::entity> FindRemoteActorByServerId(uint32_t aServerId) noexce
 
 std::optional<ActorOwnershipToken> GetLocalOwnershipToken(const uint32_t aFormId) noexcept
 {
-    auto view = World::Get().view<FormIdComponent, LocalComponent>();
-    const auto it = std::find_if(view.begin(), view.end(), [view, aFormId](const entt::entity aEntity) { return view.get<FormIdComponent>(aEntity).Id == aFormId; });
-    if (it == view.end())
-        return std::nullopt;
-
-    const auto& localComponent = view.get<LocalComponent>(*it);
-    if (localComponent.OwnershipEpoch == 0)
-        return std::nullopt;
-
-    return ActorOwnershipToken{localComponent.Id, localComponent.OwnershipEpoch};
+    auto* tokens = s_ownershipTokens.load(std::memory_order_acquire);
+    return tokens ? tokens->Find(aFormId, false) : std::nullopt;
 }
 
 std::optional<ActorOwnershipToken> GetRemoteOwnershipToken(const uint32_t aFormId) noexcept
 {
-    auto view = World::Get().view<FormIdComponent, RemoteComponent>();
-    const auto it = std::find_if(view.begin(), view.end(), [view, aFormId](const entt::entity aEntity) { return view.get<FormIdComponent>(aEntity).Id == aFormId; });
-    if (it == view.end())
-        return std::nullopt;
-
-    const auto& remoteComponent = view.get<RemoteComponent>(*it);
-    if (remoteComponent.OwnershipEpoch == 0)
-        return std::nullopt;
-
-    return ActorOwnershipToken{remoteComponent.Id, remoteComponent.OwnershipEpoch};
+    auto* tokens = s_ownershipTokens.load(std::memory_order_acquire);
+    return tokens ? tokens->Find(aFormId, true) : std::nullopt;
 }
 
 void ShowHudMessage(const TiltedPhoques::String& acMessage)

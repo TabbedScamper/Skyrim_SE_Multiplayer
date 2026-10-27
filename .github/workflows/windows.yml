@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - master
+      - main
   workflow_call:
     inputs:
       build-mode:
@@ -15,9 +15,14 @@ on:
         required: false
         type: boolean
         default: false
+      release-version:
+        required: false
+        type: string
+        default: ''
 
 env:
   BUILD_MODE: ${{ inputs.build-mode || 'releasedbg' }}
+  SSM_RELEASE_VERSION: ${{ inputs.release-version || '' }}
 
 jobs:
   build:
@@ -43,17 +48,21 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --force --recursive --depth=1
 
-      - name: Checkout master on tag push
+      - name: Checkout main on tag push
         if: github.ref_type == 'tag'
         run: |
-          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
-          git checkout -B master HEAD
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          git checkout -B main HEAD
 
       - name: Resolve artifact version
         if: ${{ inputs.upload-build-for-next-job }}
         run: |
-          version="$(git describe --tags --always)"
+          version="${SSM_RELEASE_VERSION:-$(git describe --tags --always)}"
           echo "ARTIFACT_VERSION=${version#v}" >> "$GITHUB_ENV"
+
+      - name: Set release build version
+        if: ${{ inputs.release-version != '' }}
+        run: echo "SSM_RELEASE_VERSION=${SSM_RELEASE_VERSION#v}" >> "$GITHUB_ENV"
 
       - name: Cache xmake dependencies
         uses: actions/cache@v6
@@ -108,46 +117,57 @@ jobs:
         if: ${{ inputs.upload-build-for-next-job }}
         run: |
           mkdir -p str-build/SkyrimTogetherReborn str-pdb
-          mv "$STR_BUILD_DIR"/* str-build/SkyrimTogetherReborn/
+          cp -r "$STR_BUILD_DIR"/. str-build/SkyrimTogetherReborn/
           cp -r GameFiles/Skyrim/* str-build/
+          test -f str-build/SkyrimTogetherReborn/SkyrimTogether.exe
+          test -f str-build/SkyrimTogetherReborn/Skyrim_SE_Multiplayer.exe
 
       - name: Remove unnecessary build files, keep .pdb
         if: ${{ inputs.upload-build-for-next-job }}
         run: |
-          mv str-build/SkyrimTogetherReborn/SkyrimTogether.pdb str-pdb/
-          mv str-build/SkyrimTogetherReborn/SkyrimTogetherServer.pdb str-pdb/
-          rm -f str-build/SkyrimTogetherReborn/*.pdb str-build/SkyrimTogetherReborn/*.lib str-build/SkyrimTogetherReborn/*.exp
-          rm -f str-build/SkyrimTogetherReborn/*Tests.exe
+          find str-build -type f -iname '*.pdb' -exec cp --parents {} str-pdb/ \;
+          find str-build -type f \( -iname '*.pdb' -o -iname '*.lib' -o -iname '*.exp' -o -iname '*.log' -o -iname '*Tests.exe' -o -iname 'GameTestKeyHelper.exe' -o -iname 'Inspect-Minidump.exe' -o -iname 'SkyrimPapyrus*.exe' -o -iname 'SkyrimProtocolBot.exe' \) -delete
+          rm -rf str-build/SkyrimTogetherReborn/{tests,Tests,snapshots,Snapshots,harness,Harness}
+          python Tools/Release/check-payload.py str-build
 
       - name: Create Windows release zips
         if: ${{ inputs.upload-build-for-next-job }}
         run: |
           mkdir -p release-assets
           (cd str-build && 7z a -tzip \
-            "../release-assets/SkyrimTogether-${ARTIFACT_VERSION}-windows-${{ matrix.arch }}.zip" \
+            "../release-assets/Skyrim_SE_Multiplayer-${ARTIFACT_VERSION}-windows-${{ matrix.arch }}.zip" \
             .)
           (cd str-pdb && 7z a -tzip \
-            "../release-assets/SkyrimTogether-${ARTIFACT_VERSION}-windows-${{ matrix.arch }}-debug-symbols.zip" \
+            "../release-assets/Skyrim_SE_Multiplayer-${ARTIFACT_VERSION}-windows-${{ matrix.arch }}-debug-symbols.zip" \
             .)
 
       - name: Upload playable build
         if: ${{ inputs.upload-build-for-next-job }}
         uses: actions/upload-artifact@v7
         with:
-          name: SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}
+          name: Skyrim_SE_Multiplayer-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}
           # Direct downloads should receive the existing zip without another zip layer
           archive: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
           retention-days: 7
           if-no-files-found: error
-          path: release-assets/SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}.zip
+          path: release-assets/Skyrim_SE_Multiplayer-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}.zip
 
       - name: Upload debug symbols
         if: ${{ inputs.upload-build-for-next-job }}
         uses: actions/upload-artifact@v7
         with:
-          name: SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}-debug-symbols
+          name: Skyrim_SE_Multiplayer-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}-debug-symbols
           # Direct downloads should receive the existing zip without another zip layer
           archive: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
           retention-days: 7
           if-no-files-found: error
-          path: release-assets/SkyrimTogether-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}-debug-symbols.zip
+          path: release-assets/Skyrim_SE_Multiplayer-${{ env.ARTIFACT_VERSION }}-windows-${{ matrix.arch }}-debug-symbols.zip
+
+      - name: Upload installer payload
+        if: ${{ inputs.upload-build-for-next-job && inputs.release-version != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-payload-windows-x64
+          retention-days: 7
+          if-no-files-found: error
+          path: str-build/

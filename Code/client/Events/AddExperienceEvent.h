@@ -5,10 +5,12 @@
  */
 struct AddExperienceEvent
 {
-    AddExperienceEvent(float aExperience)
-        : Experience(aExperience)
+    AddExperienceEvent(int32_t aSkill, float aExperience)
+        : Skill(aSkill)
+        , Experience(aExperience)
     {
     }
 
+    int32_t Skill{};
     float Experience{};
 };

@@ -41,7 +41,7 @@ private:
         uint64_t Pending{}, Deadline{};
         bool Ready{}, Grant{}, Terminal{};
     };
-    struct NativeDrop { uint32_t Reference{}, Base{}; int32_t Count{}; uint64_t Token{}; };
+    struct NativeDrop { uint32_t Reference{}, Base{}; int32_t Count{}; uint64_t Token{}; uint32_t Dropper{}; };
     TESObjectREFR* Spawn(const SharedDropData&, bool aForPickup = false) noexcept;
     void RemoveCopy(Copy&, bool aKeep) noexcept;
     void Queue(const SharedDropData&, SharedDropAction, uint64_t aToken = 0) noexcept;

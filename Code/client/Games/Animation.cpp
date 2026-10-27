@@ -23,6 +23,8 @@ static TPerformAction* RealPerformAction;
 
 // TODO: make scoped override
 thread_local bool g_forceAnimation = false;
+// Set while AnimationSystem plays a mirrored leader idle on this follower's character (CutsceneFollow).
+thread_local bool g_mirroringLeaderIdle = false;
 
 uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apAction)
 {
@@ -57,6 +59,14 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
                 apAction->target ? apAction->target->formID : 0,
                 fmt::ptr(_ReturnAddress()));
         }
+        // A follower's own scene playing an idle already mirrored from the leader: once is enough.
+        if (!g_forceAnimation && !g_mirroringLeaderIdle && pActor->formID == 0x14 && apAction->idleForm &&
+            CutsceneFollow::LeaderFormId() && apAction->idleForm->formID != 0x10C00C &&
+            apAction->idleForm->formID != 0x10C00D && !CutsceneFollow::ClaimLocalIdle(apAction->idleForm->formID))
+        {
+            spdlog::info("Cutscene follow: skipped this player's own play of mirrored idle {:08X}", apAction->idleForm->formID);
+            return 0;
+        }
         ActionEvent action;
         action.State1 = pActor->actorState.flags1;
         action.State2 = pActor->actorState.flags2;
@@ -69,6 +79,13 @@ uint8_t TP_MAKE_THISCALL(HookPerformAction, ActorMediator, TESActionData* apActi
         pActor->SaveAnimationVariables(action.Variables);
 
         const auto res = TiltedPhoques::ThisCall(RealPerformAction, apThis, apAction);
+
+        // Execution block (2026-09-30): the leader's first-person camera follows a scene idle the follower's own
+        // camera graph never plays. Record every local player action while cutscene follow is on.
+        if (pActor->formID == 0x14 && CutsceneFollow::IsActive() && pEventName)
+            spdlog::info("Cutscene action: local player event={} target={} idleForm={:08X} result={} forced={}",
+                pEventName, apAction->targetEventName.AsAscii() ? apAction->targetEventName.AsAscii() : "",
+                apAction->idleForm ? apAction->idleForm->formID : 0, res, g_forceAnimation);
 
         if (res && pActor->formID == 0x14 && apAction->idleForm)
         {

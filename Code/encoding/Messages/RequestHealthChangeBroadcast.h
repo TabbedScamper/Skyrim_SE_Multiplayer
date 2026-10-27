@@ -14,8 +14,9 @@ struct RequestHealthChangeBroadcast final : ClientMessage
     void SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept override;
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
 
-    bool operator==(const RequestHealthChangeBroadcast& acRhs) const noexcept { return Id == acRhs.Id && DeltaHealth == acRhs.DeltaHealth && GetOpcode() == acRhs.GetOpcode(); }
+    bool operator==(const RequestHealthChangeBroadcast& acRhs) const noexcept { return Id == acRhs.Id && DeltaHealth == acRhs.DeltaHealth && KillerId == acRhs.KillerId && GetOpcode() == acRhs.GetOpcode(); }
 
     uint32_t Id;
     float DeltaHealth;
+    uint32_t KillerId{};
 };

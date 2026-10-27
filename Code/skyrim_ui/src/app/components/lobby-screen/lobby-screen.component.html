@@ -1,0 +1,5 @@
+<!-- The live lobby's splash and menu are Skyrim's own (LobbyService); this layer only names the playing track. -->
+<div class="now-playing" [class.visible]="!!music">
+  <span class="label">Now playing</span>
+  <span class="title">{{ music }}</span>
+</div>

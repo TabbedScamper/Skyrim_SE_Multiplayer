@@ -138,9 +138,21 @@ void ExecuteNativeConsole(const std::string& command)
         if (!target || !SameTeleportCell(PlayerCharacter::Get(), target, target->position))
             throw std::runtime_error("moveto requires the same physical cell");
     }
+    // The fast scenarios speed the game clock through long scripted stretches: "sgtm <0.1..5>" only.
+    bool timeScale = false;
+    if (command.starts_with("sgtm "))
+    {
+        const auto value = command.substr(5);
+        char* end = nullptr;
+        const double scale = std::strtod(value.c_str(), &end);
+        if (value.empty() || !end || *end || !(scale >= 0.1 && scale <= 5.0))
+            throw std::runtime_error("sgtm needs one value from 0.1 to 5");
+        timeScale = true;
+    }
     // Limit the harness's remote command surface to the requested test actions.
     if (command != "tcl" && command != "tgm" && !command.starts_with("player.moveto ") &&
-        !command.starts_with("player.setav speedmult ")) throw std::runtime_error("console command not allowed by harness");
+        !command.starts_with("player.setav speedmult ") && !timeScale)
+        throw std::runtime_error("console command not allowed by harness");
     using Ctor = void*(void*); using Set = void(void*, const char*);
     using Run = void(void*, void*, int32_t, TESObjectREFR*); using Dtor = void(void*);
     POINTER_SKYRIMSE(Ctor, ctor, 441580); POINTER_SKYRIMSE(Set, set, 21883);
@@ -297,6 +309,14 @@ struct HarnessService::Impl
     std::atomic<uint32_t> Dirty{~0u};
     std::atomic_bool InboxOverflow{};
     std::atomic<uint64_t> TriggerToken{};
+    std::atomic<uint32_t> TriggerEntrant{0x14};
+    // A partner's delivered trip that landed before this PC armed its token (the follower's side of the step can
+    // finish first: 15:10:10 run, 1095D8 tripped by her before the host's teleport armed it), accepted for 30 s
+    // before the step: her staging teleport for the previous step can land in the trigger (15:29:33 run), and a
+    // one-shot trigger then disables itself, so this PC's own entry never fires.
+    std::atomic<uint32_t> LastPartyTrigger{}, LastPartyEntrant{};
+    std::atomic<uint64_t> LastPartyTripMs{};
+    uint64_t StepReceivedMs{};
     uint32_t TriggerGeneration{};
     float PreviousSpeed{100.f};
     NiPoint3 TeleportPosition{};
@@ -625,9 +645,28 @@ BSTEventResult HarnessService::OnEvent(const TESTriggerEnterEvent* event, const 
     auto token = m->TriggerToken.load();
     if (token && event && event->pTrigger && event->pActionRef &&
         event->pTrigger->formID == uint32_t(token) && event->pActionRef->formID == 0x14)
+    {
+        m->TriggerEntrant = 0x14;
         m->TriggerToken.compare_exchange_strong(token, token | (uint64_t(1) << 63));
+    }
     m->Dirty.fetch_or(16);
     return BSTEventResult::kOk;
+}
+void HarnessService::OnPartyTriggerDelivered(uint32_t aTriggerFormId, uint32_t aRemoteFormId) noexcept
+{
+    // In play, whichever party member crosses a quest trigger advances the story for everyone.
+    auto* service = s_service.load();
+    if (!service) return;
+    service->m->LastPartyEntrant = aRemoteFormId;
+    service->m->LastPartyTrigger = aTriggerFormId;
+    service->m->LastPartyTripMs = GetTickCount64();
+    auto token = service->m->TriggerToken.load();
+    if (token && !(token & (uint64_t(1) << 63)) && uint32_t(token) == aTriggerFormId)
+    {
+        service->m->TriggerEntrant = aRemoteFormId;
+        service->m->TriggerToken.compare_exchange_strong(token, token | (uint64_t(1) << 63));
+    }
+    service->m->Dirty.fetch_or(16);
 }
 
 void HarnessService::Tick()
@@ -742,10 +781,11 @@ void HarnessService::Tick()
             s.Run = message.Run; s.Epoch = message.Epoch; s.Sequence = message.Sequence;
             s.Leader = message.Sender; s.Local = session.LocalId;
             s.Step = step; s.Active = true; s.Done = s.Entered = s.Submitted = false;
+            s.StepReceivedMs = GetTickCount64();
             if (step->GetBool("party_trigger"))
             {
                 auto wait = step->GetDictionary("party_wait");
-                if (Str(step, "op") != "walk" || !Id(Str(step, "until_trigger")) || !wait ||
+                if ((Str(step, "op") != "walk" && Str(step, "op") != "teleport") || !Id(Str(step, "until_trigger")) || !wait ||
                     !wait->HasKey("x") || !wait->HasKey("y") || !wait->HasKey("z") ||
                     Num(wait, "radius", 8) < 8 || Num(wait, "radius", 8) > 64)
                     throw std::runtime_error("invalid_party_trigger_wait_target");
@@ -992,17 +1032,63 @@ void HarnessService::Tick()
             }
             else if (!s.Submitted)
             {
-                auto* ref = Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, "ref"))));
+                // Trigger steps teleport onto the floor inside the trigger volume ("x","y","z") and complete on the
+                // game's own trigger-enter event; the party follower lands on "party_wait" beside it instead.
+                const bool intoTrigger = s.Step->HasKey("until_trigger");
+                const bool partyFollower = intoTrigger && s.Step->GetBool("party_trigger") && s.Local != s.Leader;
+                // An absolute point ("x","y","z" without "ref") stages relative to the player's own cell.
+                const bool absolute = !intoTrigger && !s.Step->HasKey("ref") && s.Step->HasKey("x") && s.Step->HasKey("y") && s.Step->HasKey("z");
+                auto* ref = absolute ? static_cast<TESObjectREFR*>(player) :
+                    Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, intoTrigger ? "until_trigger" : "ref"))));
                 if (!ref) throw std::runtime_error("teleport staging reference unavailable");
-                const double dx = Num(s.Step, "dx"), dy = Num(s.Step, "dy"), dz = Num(s.Step, "dz");
-                if (std::abs(dx) > 2048 || std::abs(dy) > 2048 || std::abs(dz) > 2048)
-                    throw std::runtime_error("teleport staging offset exceeds 2048 units");
-                s.TeleportPosition.x = ref->position.x + static_cast<float>(dx);
-                s.TeleportPosition.y = ref->position.y + static_cast<float>(dy);
-                s.TeleportPosition.z = ref->position.z + static_cast<float>(dz);
+                if (absolute)
+                {
+                    s.TeleportPosition.x = static_cast<float>(Num(s.Step, "x"));
+                    s.TeleportPosition.y = static_cast<float>(Num(s.Step, "y"));
+                    s.TeleportPosition.z = static_cast<float>(Num(s.Step, "z"));
+                    if (glm::length(s.TeleportPosition - player->position) > 8192.f)
+                        throw std::runtime_error("absolute teleport point is too far from the player");
+                }
+                else if (intoTrigger)
+                {
+                    auto point = partyFollower ? s.Step->GetDictionary("party_wait") : s.Step;
+                    if (!point || !point->HasKey("x") || !point->HasKey("y") || !point->HasKey("z"))
+                        throw std::runtime_error("trigger teleport needs x, y, z (and party_wait for a party trigger)");
+                    s.TeleportPosition.x = static_cast<float>(Num(point, "x"));
+                    s.TeleportPosition.y = static_cast<float>(Num(point, "y"));
+                    s.TeleportPosition.z = static_cast<float>(Num(point, "z"));
+                    if (glm::length(s.TeleportPosition - ref->position) > 2048.f)
+                        throw std::runtime_error("trigger teleport point is not near the trigger");
+                }
+                else
+                {
+                    const double dx = Num(s.Step, "dx"), dy = Num(s.Step, "dy"), dz = Num(s.Step, "dz");
+                    if (std::abs(dx) > 2048 || std::abs(dy) > 2048 || std::abs(dz) > 2048)
+                        throw std::runtime_error("teleport staging offset exceeds 2048 units");
+                    s.TeleportPosition.x = ref->position.x + static_cast<float>(dx);
+                    s.TeleportPosition.y = ref->position.y + static_cast<float>(dy);
+                    s.TeleportPosition.z = ref->position.z + static_cast<float>(dz);
+                }
+                // Both players teleported onto one point shove each other (14:42 run: the host landed 100 u away and
+                // 80 u up). A step may place the party follower beside the leader ("follower_dx", "follower_dy").
+                if (!intoTrigger && s.Local != s.Leader)
+                {
+                    s.TeleportPosition.x += static_cast<float>(Num(s.Step, "follower_dx"));
+                    s.TeleportPosition.y += static_cast<float>(Num(s.Step, "follower_dy"));
+                }
                 if (!SameTeleportCell(player, ref, s.TeleportPosition))
                     throw std::runtime_error("teleport staging would cross a physical cell boundary");
                 s.WorldRef.GetGameTestService().HarnessDriverTick("{\"command\":\"walk_cancel\"}");
+                if (intoTrigger && !partyFollower)
+                {
+                    s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
+                    s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | ref->formID;
+                    if (s.LastPartyTrigger == ref->formID && s.LastPartyTripMs + 30000 >= s.StepReceivedMs)
+                    {
+                        s.TriggerEntrant = s.LastPartyEntrant.load();
+                        s.TriggerToken = s.TriggerToken | (uint64_t(1) << 63);
+                    }
+                }
                 s.TeleportCell = cell->formID;
                 // Actor slot A9 / 1406770A0 synchronizes position, controller and 3D.
                 // Native Havok-moved 19826 uses 19799 for cell/world reconciliation.
@@ -1019,7 +1105,43 @@ void HarnessService::Tick()
             {
                 if (cell->formID != s.TeleportCell) throw std::runtime_error("teleport changed physical cell");
                 const auto delta = player->position - s.TeleportPosition;
-                if (now >= s.NextRetry && glm::length(delta) <= 96.f)
+                const auto token = s.TriggerToken.load();
+                if (s.Step->HasKey("until_trigger") && token)
+                {
+                    // Leader: done once the native trigger event (local, or a partner's delivered trip) fires.
+                    if (token & (uint64_t(1) << 63))
+                    {
+                        auto d = CefDictionaryValue::Create(); d->SetInt("trigger", uint32_t(token));
+                        d->SetInt("leaderId", s.Leader); d->SetInt("localId", s.Local);
+                        d->SetInt("generation", (token >> 32) & 0x7fffffff);
+                        const auto entrant = s.TriggerEntrant.exchange(0x14); d->SetInt("entrant", entrant);
+                        d->SetDouble("x", player->position.x); d->SetDouble("y", player->position.y); d->SetDouble("z", player->position.z);
+                        s.Record(entrant == 0x14 ? "local_trigger_enter" : "party_trigger_enter", d);
+                        s.TriggerToken = 0; s.Complete();
+                    }
+                }
+                else if (s.Step->HasKey("until_trigger") && s.Step->GetBool("party_trigger") && s.Local != s.Leader)
+                {
+                    // Party follower: landed beside the trigger; same proximity evidence as the walk.
+                    auto wait = s.Step->GetDictionary("party_wait");
+                    auto* trigger = Cast<TESObjectREFR>(TESForm::GetById(Id(Str(s.Step, "until_trigger"))));
+                    const auto targetDistance = glm::length(delta);
+                    if (trigger && now >= s.NextRetry && targetDistance <= Num(wait, "radius", 8))
+                    {
+                        auto evidence = wait->Copy(false);
+                        evidence->SetInt("leaderId", s.Leader); evidence->SetInt("localId", s.Local);
+                        evidence->SetString("proximityTo", "trigger");
+                        evidence->SetInt("trigger", trigger->formID);
+                        evidence->SetDouble("targetDistance", targetDistance);
+                        evidence->SetDouble("triggerDistance", glm::length(player->position - trigger->position));
+                        evidence->SetDouble("actualX", player->position.x); evidence->SetDouble("actualY", player->position.y);
+                        evidence->SetDouble("actualZ", player->position.z);
+                        evidence->SetDouble("triggerX", trigger->position.x); evidence->SetDouble("triggerY", trigger->position.y);
+                        evidence->SetDouble("triggerZ", trigger->position.z);
+                        s.Record("party_trigger_proximity_arrived", evidence); s.Complete();
+                    }
+                }
+                else if (now >= s.NextRetry && glm::length(delta) <= 96.f)
                 {
                     s.Record("teleport_arrived"); s.Complete();
                 }
@@ -1048,6 +1170,14 @@ void HarnessService::Tick()
                     for (const auto* axis : {"x", "y", "z"}) request->SetDouble(axis, Num(wait, axis));
                     request->SetDouble("radius", Num(wait, "radius", 8));
                 }
+                // Both players walked to one point: the leader stood on it and the follower stopped 44 u from the
+                // leader's body, 66 u from the point, failing "no path progress" (21:40 run, step 32 out of the inn).
+                // The party follower arrives within 120 u of a walk point (the leader's body is on it). Not an offset
+                // target: in corridors and cells a shifted point can sit inside a wall. Reference walks too: the
+                // follower stopped 56.8 u from AA7A3 with radius 48 (22:28 run, step 12).
+                else if (op == "walk" && s.Local != s.Leader &&
+                         ((request->HasKey("x") && request->HasKey("y")) || request->HasKey("ref") || request->HasKey("form_id")))
+                    request->SetDouble("radius", (std::max)(Num(request, "radius", 48), 120.0));
                 return request;
             };
             const auto consumeTrigger = [&]()
@@ -1058,7 +1188,8 @@ void HarnessService::Tick()
                 d->SetInt("leaderId", s.Leader); d->SetInt("localId", s.Local);
                 d->SetInt("generation", (token >> 32) & 0x7fffffff);
                 if (player) { d->SetDouble("x", player->position.x); d->SetDouble("y", player->position.y); d->SetDouble("z", player->position.z); }
-                d->SetInt("entrant", 0x14); s.Record("local_trigger_enter", d);
+                const auto entrant = s.TriggerEntrant.exchange(0x14);
+                d->SetInt("entrant", entrant); s.Record(entrant == 0x14 ? "local_trigger_enter" : "party_trigger_enter", d);
                 s.TriggerToken = 0;
                 s.WorldRef.GetGameTestService().HarnessDriverTick("{\"command\":\"walk_cancel\"}");
                 s.Complete();
@@ -1080,6 +1211,11 @@ void HarnessService::Tick()
                     if (!trigger || op != "walk") throw std::runtime_error("until_trigger_requires_walk_and_reference");
                     s.TriggerGeneration = (s.TriggerGeneration + 1) & 0x7fffffff;
                     s.TriggerToken = (uint64_t(s.TriggerGeneration) << 32) | trigger;
+                    if (s.LastPartyTrigger == trigger && s.LastPartyTripMs + 30000 >= s.StepReceivedMs)
+                    {
+                        s.TriggerEntrant = s.LastPartyEntrant.load();
+                        s.TriggerToken = s.TriggerToken | (uint64_t(1) << 63);
+                    }
                     auto start = CefDictionaryValue::Create(); start->SetInt("trigger", trigger);
                     start->SetInt("generation", s.TriggerGeneration);
                     start->SetDouble("x", player->position.x); start->SetDouble("y", player->position.y); start->SetDouble("z", player->position.z);
@@ -1112,6 +1248,18 @@ void HarnessService::Tick()
                 if (s.Recovering)
                 {
                     if (!state->GetBool("active")) { s.Recovering = s.Submitted = false; s.NextRetry = now + 500; }
+                }
+                else if (op == "jump" && result == "jump_finished" && s.Recoveries < 2 &&
+                    Str(state, "reason").find("air state not observed") != std::string::npos &&
+                    Num(state, "distance", 1e9) > Num(s.Step, "radius", 96))
+                {
+                    // The native jump (37257) was issued but the controller never left OnGround, so the player is
+                    // still at the take-off point (four tower-jump failures on 2026-09-30/10-01, two on a loaded PC).
+                    // Re-issue it rather than failing the run.
+                    s.Record("jump_retry", state->Copy(false));
+                    ++s.Recoveries;
+                    s.Submitted = false;
+                    s.NextRetry = now + 750;
                 }
                 else if (op == "jump" && (result == "jump_landed" || result == "jump_finished"))
                 {
@@ -1174,6 +1322,11 @@ void HarnessService::Tick()
                         s.Record("objective_leg_ended", state->Copy(false));
                         s.Submitted = false; s.NextRetry = now + 1000;
                     }
+                    else if (op == "jump" && Str(state, "reason").find("(airborne or settling)") != std::string::npos)
+                    {
+                        // Just teleported: wait for the player to land; the step timeout still bounds it.
+                        s.Submitted = false; s.NextRetry = now + 500;
+                    }
                     else if (s.Step->GetBool("step_over") && s.Recoveries < 3 && Num(state, "distance") < 1200)
                     {
                         s.Record("path_stall_recovery", state->Copy(false));
@@ -1182,8 +1335,12 @@ void HarnessService::Tick()
                         else if (!request->HasKey("x"))
                             request->SetString("form_id", fmt::format("{:X}", static_cast<uint32_t>(Num(state, "targetId"))));
                         s.Driver = s.WorldRef.GetGameTestService().HarnessDriverTick(Json(request));
-                        s.Submitted = Parse(s.Driver)->GetBool("active"); s.Recovering = s.Submitted; ++s.Recoveries;
-                        if (!s.Submitted) throw std::runtime_error("native walking recovery refused: " + s.Driver);
+                        auto recovery = Parse(s.Driver);
+                        s.Submitted = recovery->GetBool("active"); s.Recovering = s.Submitted;
+                        if (!s.Submitted && Str(recovery, "reason").find("(airborne or settling)") != std::string::npos)
+                            s.NextRetry = now + 500; // still landing: retry the walk; the step timeout bounds it
+                        else if (!s.Submitted) throw std::runtime_error("native walking recovery refused: " + s.Driver);
+                        else ++s.Recoveries;
                     }
                     else if (Str(s.Step, "fallback") == "tower_jump" && !s.Tcl)
                     {

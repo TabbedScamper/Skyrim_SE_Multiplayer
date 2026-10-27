@@ -12,10 +12,12 @@ struct NotifyQuestAliasFills final : ServerMessage
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
     bool operator==(const NotifyQuestAliasFills& acRhs) const noexcept
     {
-        return Fills == acRhs.Fills && Revision == acRhs.Revision && LeaderPlayerId == acRhs.LeaderPlayerId;
+        return Fills == acRhs.Fills && Revision == acRhs.Revision &&
+            LeaderPlayerId == acRhs.LeaderPlayerId && Replay == acRhs.Replay;
     }
 
     QuestAliasFills Fills;
     uint64_t Revision{};
     uint32_t LeaderPlayerId{};
+    bool Replay{};
 };

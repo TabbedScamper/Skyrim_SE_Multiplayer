@@ -102,11 +102,27 @@ void SharedDropService::OnRequest(const PacketEvent<RequestSharedDrop>& aEvent) 
             drop.Data.OriginToken = request.Token;
             Send(player, drop, SharedDropAction::Local, request.Token);
         };
-        const auto delta = request.Physics.Position - movement->Position;
-        if (!Near(player, drop) || !std::isfinite(glm::dot(delta, delta)) || glm::dot(delta, delta) > 512.f * 512.f ||
-            character->IsDead() || m_receipts.size() >= 16384) { refuse(); return; }
+        // A death drop comes from an NPC the requester owns: backed by and debited from that NPC's inventory, and
+        // placed by the NPC's body (a kill can be far from the killer).
+        auto* sourceInventory = inventory;
+        const MovementComponent* sourceMovement = movement;
+        bool sourceAlive = !character->IsDead();
+        if (request.Source)
+        {
+            const auto npc = static_cast<entt::entity>(request.Source);
+            const auto* npcOwner = m_world.valid(npc) ? m_world.try_get<OwnerComponent>(npc) : nullptr;
+            const auto* npcCharacter = m_world.valid(npc) ? m_world.try_get<CharacterComponent>(npc) : nullptr;
+            sourceInventory = m_world.valid(npc) ? m_world.try_get<InventoryComponent>(npc) : nullptr;
+            sourceMovement = m_world.valid(npc) ? m_world.try_get<MovementComponent>(npc) : nullptr;
+            if (!npcOwner || npcOwner->GetOwner() != player || !npcCharacter || npcCharacter->IsPlayer() || !sourceInventory ||
+                !sourceMovement) { refuse(); return; }
+            sourceAlive = true; // it is dying: its weapon falls
+        }
+        const auto delta = request.Physics.Position - sourceMovement->Position;
+        if ((!request.Source && !Near(player, drop)) || !std::isfinite(glm::dot(delta, delta)) || glm::dot(delta, delta) > 512.f * 512.f ||
+            !sourceAlive || m_receipts.size() >= 16384) { refuse(); return; }
         int64_t available{};
-        for (const auto& entry : inventory->Content.Entries)
+        for (const auto& entry : sourceInventory->Content.Entries)
             if (entry.BaseId == request.Item.BaseId && !entry.IsQuestItem && entry.Count > 0) available += entry.Count;
         if (available < request.Item.Count)
         {
@@ -117,7 +133,7 @@ void SharedDropService::OnRequest(const PacketEvent<RequestSharedDrop>& aEvent) 
         }
         // Debit the inventory once, from the authoritative entries (which may still be worn).
         int32_t remaining = request.Item.Count;
-        auto entries = inventory->Content.Entries;
+        auto entries = sourceInventory->Content.Entries;
         // Charge/poison/tempering can change without an inventory event. The
         // drop owner's actual reference supplies those values; quantity still
         // must be backed by the server. Prefer an exact instance when possible.
@@ -130,16 +146,18 @@ void SharedDropService::OnRequest(const PacketEvent<RequestSharedDrop>& aEvent) 
                 const auto count = (std::min)(remaining, entry.Count);
                 auto debit = entry;
                 debit.Count = -count;
-                inventory->Content.AddOrRemoveEntry(debit);
+                sourceInventory->Content.AddOrRemoveEntry(debit);
                 entry.Count -= count;
                 remaining -= count;
             }
         }
-        inventory->HasAuthoritativeMutation = true;
+        sourceInventory->HasAuthoritativeMutation = true;
+        const auto sourceEntity = request.Source ? static_cast<entt::entity>(request.Source) : actor;
         NotifyInventoryChanges change;
-        change.ServerId = World::ToInteger(actor); change.OwnershipEpoch = owner->OwnershipEpoch;
+        change.ServerId = World::ToInteger(sourceEntity);
+        change.OwnershipEpoch = m_world.get<OwnerComponent>(sourceEntity).OwnershipEpoch;
         change.Item = request.Item; change.Item.Count = -request.Item.Count; change.Drop = false;
-        GameServer::Get()->SendToPlayersInRange(change, actor, aEvent.GetSender());
+        GameServer::Get()->SendToPlayersInRange(change, sourceEntity, aEvent.GetSender());
 
         const auto entity = m_world.create();
         drop.Data.Id = World::ToInteger(entity);

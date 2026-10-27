@@ -140,7 +140,7 @@ Inventory::Entry Unworn(Inventory::Entry item) noexcept
 }
 
 // Reuse the real extra list; never synthesize an enchanted/tempered/quest item.
-bool FindExtraList(Actor* apActor, TESObjectARMO* apArmor, const Inventory::Entry& acItem,
+bool FindExtraList(Actor* apActor, TESBoundObject* apObject, const Inventory::Entry& acItem,
     ExtraDataList*& apResult) noexcept
 {
     apResult = nullptr;
@@ -148,7 +148,7 @@ bool FindExtraList(Actor* apActor, TESObjectARMO* apArmor, const Inventory::Entr
     if (!changes || !changes->entries) return false;
     for (auto* pEntry : *changes->entries)
     {
-        if (!pEntry || pEntry->form != apArmor || !pEntry->dataList)
+        if (!pEntry || pEntry->form != apObject || !pEntry->dataList)
             continue;
         for (auto* pExtra : *pEntry->dataList)
         {
@@ -167,7 +167,13 @@ bool FindExtraList(Actor* apActor, TESObjectARMO* apArmor, const Inventory::Entr
     // A nullptr extra list is valid only when positive plain stock remains
     // after subtracting all live instances, not merely when the wire item is plain.
     Inventory stock;
-    if (Unworn(acItem).ContainsExtraData() || !ReadArmor(World::Get(), apActor, stock)) return false;
+    if (Unworn(acItem).ContainsExtraData()) return false;
+    if (apObject->formType == FormType::Armor)
+    {
+        if (!ReadArmor(World::Get(), apActor, stock)) return false;
+    }
+    else
+        stock = apActor->GetActorInventory();
     int64_t plain = 0;
     for (const auto& item : stock.Entries)
         if (item.BaseId == acItem.BaseId && !item.ContainsExtraData()) plain += item.Count;
@@ -262,11 +268,18 @@ void NakedNpcGuard::OnTransfer(const NotifyOwnershipTransfer& message) noexcept
 void NakedNpcGuard::Reset() noexcept
 {
     std::lock_guard lock(m_lock);
-    m_input.clear(); m_targets.clear(); m_active = false;
+    m_input.clear(); m_targets.clear(); m_dirty.clear(); m_active = false;
     m_nextTargets = m_session = 0;
     ++m_generation;
 }
 void NakedNpcGuard::OnDisconnected(const DisconnectedEvent&) noexcept { Reset(); }
+
+void NakedNpcGuard::MarkDirty(uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(m_lock);
+    if (m_dirty.size() < 64 && std::find(m_dirty.begin(), m_dirty.end(), aFormId) == m_dirty.end())
+        m_dirty.push_back(aFormId);
+}
 
 void NakedNpcGuard::Update() noexcept
 {
@@ -275,7 +288,7 @@ void NakedNpcGuard::Update() noexcept
     std::lock_guard lock(m_lock);
     if (!connected || (m_session && session != m_session))
     {
-        m_input.clear(); m_targets.clear(); ++m_generation;
+        m_input.clear(); m_targets.clear(); m_dirty.clear(); ++m_generation;
         m_nextTargets = 0;
     }
     m_session = session; m_active = connected;
@@ -324,6 +337,11 @@ void NakedNpcGuard::ApplyInput(const Input& input, uint64_t now) noexcept
             state.Worn = message.Worn;
             state.Unmapped = std::any_of(state.Worn.Entries.begin(), state.Worn.Entries.end(), [&](const auto& item) {
                 return item.Count > 0 && item.IsWorn() && !TESForm::GetById(m_world.GetModSystem().GetGameId(item.BaseId));
+            });
+            state.Weapons = message.Worn;
+            state.Weapons.RemoveByFilter([&](const auto& item) {
+                auto* form = TESForm::GetById(m_world.GetModSystem().GetGameId(item.BaseId));
+                return item.Count <= 0 || !item.IsWorn() || !form || form->formType != FormType::Weapon;
             });
             state.Worn.RemoveByFilter([&](const auto& item) { return item.Count <= 0 || !item.IsWorn() || !Armor(m_world, item.BaseId); });
             state.FormOnly.clear(); state.Complete = true;
@@ -382,21 +400,25 @@ void NakedNpcGuard::UpdateNative() noexcept
     GuardCost cost;
     Vector<Input> input;
     Vector<Target> targets;
+    Vector<uint32_t> dirty;
     uint64_t generation;
     bool active;
     {
         std::lock_guard lock(m_lock);
         generation = m_generation.load(); active = m_active;
-        input.swap(m_input); targets = m_targets;
+        input.swap(m_input); dirty.swap(m_dirty); targets = m_targets;
     }
     if (m_nativeGeneration != generation)
     {
         m_states.clear(); m_nativeGeneration = generation;
-        m_nextHeartbeat = 0; m_checkedActors = 0; m_cursor = 0;
+        m_nextHeartbeat = 0; m_checkedActors = 0; m_cursor = 0; m_nativeDirty.clear();
     }
     if (!active) return;
     const auto now = GetTickCount64();
     for (const auto& event : input) ApplyInput(event, now);
+    for (auto formId : dirty)
+        if (m_nativeDirty.size() < 64 && std::find(m_nativeDirty.begin(), m_nativeDirty.end(), formId) == m_nativeDirty.end())
+            m_nativeDirty.push_back(formId);
     if (!m_nextHeartbeat) m_nextHeartbeat = now + 30000;
     if (now >= m_nextHeartbeat)
     {
@@ -409,10 +431,21 @@ void NakedNpcGuard::UpdateNative() noexcept
     // by readiness, dirty input/lifecycle changes, and the per-actor deadline.
     for (size_t checked = 0; checked < std::min<size_t>(8, targets.size()); ++checked)
     {
-        const auto& target = targets[m_cursor++ % targets.size()];
+        Target target;
+        bool direct = false;
+        if (!m_nativeDirty.empty())
+        {
+            const auto formId = m_nativeDirty.back();
+            m_nativeDirty.pop_back();
+            const auto found = std::find_if(targets.begin(), targets.end(),
+                [formId](const Target& candidate) { return candidate.Form == formId; });
+            if (found != targets.end()) { target = *found; direct = true; }
+        }
+        if (!direct) target = targets[m_cursor++ % targets.size()];
         auto it = m_states.find(target.Id);
         if (it == m_states.end() || it->second.Epoch != target.Epoch) continue;
         auto& state = it->second; state.LastSeen = now;
+        if (direct) { state.NextCheck = 0; state.Observe = true; }
         if (generation != m_generation.load()) return;
         auto* actor = Cast<Actor>(TESForm::GetById(target.Form));
         if (!actor || !actor->GetExtension()->IsRemote() || actor->GetExtension()->IsPlayer()) continue;
@@ -555,6 +588,44 @@ void NakedNpcGuard::UpdateNative() noexcept
         }
         state.NextCheck = now + kCheckIntervalMs;
         ++m_checkedActors;
+        // Hand-held weapons (2026-09-30: Ralof held his iron war axe on the host but not on the follower after an
+        // owner inventory refresh listed only his armor as worn; this guard only restored armor).
+        if (life == 0)
+        {
+            for (const auto& desired : state.Weapons.Entries)
+            {
+                auto* weapon = TESForm::GetById(m_world.GetModSystem().GetGameId(desired.BaseId));
+                if (!weapon || weapon->formType != FormType::Weapon)
+                    continue;
+                const bool left = desired.ExtraWornLeft && !desired.ExtraWorn;
+                const auto inventory = actor->GetActorInventory();
+                if (std::any_of(inventory.Entries.begin(), inventory.Entries.end(), [&](const auto& item) {
+                    return item.Count > 0 && item.IsWorn() && item.ExtraWornLeft == left && NpcSameItem(item, desired, false);
+                }))
+                    continue;
+                const auto candidate = std::find_if(inventory.Entries.begin(), inventory.Entries.end(), [&](const auto& item) {
+                    return item.Count > 0 && !item.IsWorn() && NpcSameItem(item, desired, false);
+                });
+                if (candidate == inventory.Entries.end())
+                {
+                    if (state.WeaponLoggedSequence != state.Sequence)
+                        spdlog::info("Worn weapon deferred: {:X} seq {} weapon {:X}:{:X} stack not in this copy's stock",
+                            target.Form, state.Sequence, desired.BaseId.ModId, desired.BaseId.BaseId);
+                    state.WeaponLoggedSequence = state.Sequence;
+                    continue;
+                }
+                ExtraDataList* extra{};
+                if (!FindExtraList(actor, Cast<TESBoundObject>(weapon), *candidate, extra))
+                    continue;
+                auto* slot = TESForm::GetById(left ? 0x13F43 : 0x13F42); // BGSEquipSlot LeftHand / RightHand
+                EquipManager::Get()->Equip(actor, weapon, extra, 1, slot, false, false, false, true);
+                if (state.WeaponLoggedSequence != state.Sequence)
+                    spdlog::info("Worn weapon: {:X} seq {} equipped {:X} in the {} hand, as its owner holds it (now held: {})",
+                        target.Form, state.Sequence, weapon->formID, left ? "left" : "right",
+                        actor->GetEquippedWeapon(left ? 0 : 1) == weapon);
+                state.WeaponLoggedSequence = state.Sequence;
+            }
+        }
         Inventory stock;
         if (!ReadArmor(m_world, actor, stock))
         {
@@ -639,7 +710,7 @@ void NakedNpcGuard::UpdateNative() noexcept
                 if (total <= 0 || !found) { ++unavailable; continue; }
             }
             ExtraDataList* extra{};
-            if (!FindExtraList(actor, armor, candidate, extra)) { ++unavailable; continue; }
+            if (!FindExtraList(actor, Cast<TESBoundObject>(armor), candidate, extra)) { ++unavailable; continue; }
             ScopedInventoryOverride inventoryOverride;
             // 38894 is void (no success result), resolves a nullptr slot, and
             // the repository wrapper supplies ScopedEquipOverride. Native calls
@@ -661,7 +732,7 @@ void NakedNpcGuard::UpdateNative() noexcept
                     [&](const auto& desired) { return SameInstance(item, desired); })) continue;
                 auto* armor = Armor(m_world, item.BaseId);
                 ExtraDataList* extra{};
-                if (armor && FindExtraList(actor, armor, item, extra))
+                if (armor && FindExtraList(actor, Cast<TESBoundObject>(armor), item, extra))
                 {
                     ScopedInventoryOverride inventoryOverride;
                     EquipManager::Get()->UnEquip(actor, armor, extra, 1, nullptr, false, true, false, true, nullptr);

@@ -74,6 +74,7 @@ void CorpseRagdollRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) 
     aWriter.WriteBits(Settled, 1);
     aWriter.WriteBits(Active, 1);
     aWriter.WriteBits(Dying, 1);
+    aWriter.WriteBits(KnockState, 3);
     for (const float value : Origin)
         TiltedPhoques::Serialization::WriteFloat(aWriter, value);
     TiltedPhoques::Serialization::WriteFloat(aWriter, Heading);
@@ -93,6 +94,9 @@ void CorpseRagdollRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader
         Settled = CheckedRead::Bool(aReader);
         Active = CheckedRead::Bool(aReader);
         Dying = CheckedRead::Bool(aReader);
+        uint64_t knockState{};
+        CheckedRead::Bits(aReader, knockState, 3);
+        KnockState = static_cast<uint8_t>(knockState);
         if (id > (std::numeric_limits<uint32_t>::max)() || limb > 1 || !Tick)
             return;
         ServerId = static_cast<uint32_t>(id);

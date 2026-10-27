@@ -284,6 +284,24 @@ DeploymentScanResult DeploymentScanner::Scan(const std::filesystem::path& acData
             }
 
             std::error_code metadataError;
+            // Never walk into a folder whose files would all be skipped (2026-10-03: 687 deploy rollback folders,
+            // 42,503 files, were walked on every launch before the session could connect; the follower's lobby came
+            // 90 s after launch).
+            if (iterator->is_directory(metadataError) && !metadataError)
+            {
+                std::error_code relativeError;
+                const auto directory = std::filesystem::relative(iterator->path(), acDataDirectory, relativeError);
+                if (!relativeError)
+                {
+                    const auto normalized = NormalizeRelativePath(directory) + "/";
+                    if (ShouldSkip(normalized + "x.esp")) // skipped by its folder alone, never by extension
+                    {
+                        ++result.SkippedFiles;
+                        iterator.disable_recursion_pending();
+                    }
+                }
+                continue;
+            }
             if (!iterator->is_regular_file(metadataError) || metadataError)
                 continue;
 

@@ -9,10 +9,16 @@
 #include <Messages/ServerTimeSettings.h>
 
 #include "Game/Player.h"
+#include <cmath>
+#include <random>
 
 CalendarService::CalendarService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
 {
+    std::random_device random;
+    m_serverNonce = (static_cast<uint64_t>(random()) << 32) | random();
+    if (!m_serverNonce)
+        m_serverNonce = 1;
     m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&CalendarService::OnUpdate>(this);
     m_joinConnection = aDispatcher.sink<PlayerJoinEvent>().connect<&CalendarService::OnPlayerJoin>(this);
 }
@@ -30,32 +36,40 @@ void CalendarService::OnUpdate(const UpdateEvent&) noexcept
 
     auto delta = now - m_lastTick;
     m_lastTick = now;
-    m_dateTime.Update(delta);
+    const double advanced = static_cast<double>(delta) * m_dateTime.m_timeModel.TimeScale + m_gameMsFrac;
+    if (std::isfinite(advanced) && advanced >= 0.0)
+    {
+        const auto whole = static_cast<uint64_t>(advanced);
+        m_gameMsFrac = advanced - static_cast<double>(whole);
+        SetGameMs(m_gameMs + whole);
+    }
+    if (!m_lastResyncTick || now - m_lastResyncTick >= 10000)
+    {
+        m_lastResyncTick = now;
+        GameServer::Get()->SendToPlayers(MakeTimeSettings(now));
+    }
 }
 
 void CalendarService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
 {
-    ServerTimeSettings timeMsg;
-    // the player with the furthest date is used
-    bool playerHasFurthestTime = acEvent.PlayerTime.GetTimeInDays() > m_dateTime.GetTimeInDays();
+    // A joiner's hour and days must come from the same clock sample.
+    const auto& incoming = acEvent.PlayerTime.m_timeModel;
+    const double incomingHours = std::floor(incoming.DaysPassed) * 24.0 + incoming.Time;
+    const auto incomingMs = std::isfinite(incomingHours) && incomingHours >= 0.0 && incomingHours < 1.0e12
+        ? static_cast<uint64_t>(incomingHours * 3600000.0) : 0;
+    const bool playerHasFurthestTime = incomingMs > m_gameMs;
 
     if (playerHasFurthestTime)
     {
-        // Note that this doesn't set timescale because the server config should set that.
-        if (!m_timeSetFromFirstPlayer)
-        {
-            m_dateTime.m_timeModel.Time = acEvent.PlayerTime.m_timeModel.Time;
-            m_timeSetFromFirstPlayer = true;
-        }
-        m_dateTime.m_timeModel.Day = acEvent.PlayerTime.m_timeModel.Day;
-        m_dateTime.m_timeModel.Month = acEvent.PlayerTime.m_timeModel.Month;
-        m_dateTime.m_timeModel.Year = acEvent.PlayerTime.m_timeModel.Year;
+        m_gameMs = incomingMs;
+        m_gameMsFrac = 0.0;
+        m_dateTime.m_timeModel.Day = incoming.Day;
+        m_dateTime.m_timeModel.Month = incoming.Month;
+        m_dateTime.m_timeModel.Year = incoming.Year;
+        m_dateTime.m_timeModel.Time = static_cast<float>(std::fmod(m_gameMs / 3600000.0, 24.0));
+        m_dateTime.m_timeModel.DaysPassed = static_cast<float>(m_gameMs / 86400000.0);
     }
-    timeMsg.timeModel.TimeScale = m_dateTime.m_timeModel.TimeScale;
-    timeMsg.timeModel.Time = m_dateTime.m_timeModel.Time;
-    timeMsg.timeModel.Day = m_dateTime.m_timeModel.Day;
-    timeMsg.timeModel.Month = m_dateTime.m_timeModel.Month;
-    timeMsg.timeModel.Year = m_dateTime.m_timeModel.Year;
+    auto timeMsg = MakeTimeSettings(GameServer::Get()->GetTick());
 
     if (playerHasFurthestTime)
         GameServer::Get()->SendToPlayers(timeMsg);
@@ -65,14 +79,13 @@ void CalendarService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
 
 bool CalendarService::SetTime(int aHours, int aMinutes, float aScale) noexcept
 {
-    m_dateTime.m_timeModel.TimeScale = aScale;
-
-    if (aHours >= 0 && aHours <= 23 && aMinutes >= 0 && aMinutes <= 59)
+    if (aHours >= 0 && aHours <= 23 && aMinutes >= 0 && aMinutes <= 59 &&
+        std::isfinite(aScale) && aScale >= 0.f && aScale <= 1000.f)
     {
-        // encode time as skyrim time
-        auto minutes = static_cast<float>(aMinutes) * 0.17f;
-        minutes = floor(minutes * 100) / 1000;
-        m_dateTime.m_timeModel.Time = static_cast<float>(aHours) + minutes;
+        m_dateTime.m_timeModel.TimeScale = aScale;
+        m_gameMsFrac = 0.0;
+        SetGameMs((m_gameMs / 86400000) * 86400000 +
+            static_cast<uint64_t>(aHours) * 3600000 + static_cast<uint64_t>(aMinutes) * 60000);
 
         SendTimeResync();
 
@@ -101,13 +114,40 @@ bool CalendarService::SetDate(int aDay, int aMonth, float aYear) noexcept
 
 void CalendarService::SendTimeResync() noexcept
 {
-    ServerTimeSettings timeMsg;
-    timeMsg.timeModel.TimeScale = m_dateTime.m_timeModel.TimeScale;
-    timeMsg.timeModel.Time = m_dateTime.m_timeModel.Time;
-    timeMsg.timeModel.Day = m_dateTime.m_timeModel.Day;
-    timeMsg.timeModel.Month = m_dateTime.m_timeModel.Month;
-    timeMsg.timeModel.Year = m_dateTime.m_timeModel.Year;
-    GameServer::Get()->SendToLoaded(timeMsg);
+    GameServer::Get()->SendToPlayers(MakeTimeSettings(GameServer::Get()->GetTick()));
+}
+
+ServerTimeSettings CalendarService::MakeTimeSettings(uint64_t aTick) noexcept
+{
+    ServerTimeSettings message;
+    message.timeModel = m_dateTime.m_timeModel;
+    message.GameMs = m_gameMs;
+    message.SampleTick = aTick;
+    message.Seq = ++m_seq;
+    message.ServerNonce = m_serverNonce;
+    return message;
+}
+
+void CalendarService::SetGameMs(uint64_t aGameMs) noexcept
+{
+    const auto oldDay = m_gameMs / 86400000;
+    const auto newDay = aGameMs / 86400000;
+    for (auto day = oldDay; day < newDay; ++day)
+    {
+        auto& model = m_dateTime.m_timeModel;
+        if (++model.Day > DateTime::GetNumberOfDaysByMonthIndex(model.Month))
+        {
+            model.Day = 1;
+            if (++model.Month >= 12)
+            {
+                model.Month = 0;
+                ++model.Year;
+            }
+        }
+    }
+    m_gameMs = aGameMs;
+    m_dateTime.m_timeModel.Time = static_cast<float>(std::fmod(m_gameMs / 3600000.0, 24.0));
+    m_dateTime.m_timeModel.DaysPassed = static_cast<float>(m_gameMs / 86400000.0);
 }
 
 CalendarService::TTime CalendarService::GetTime() const noexcept
@@ -138,13 +178,7 @@ bool CalendarService::SetTimeScale(float aScale) noexcept
     {
         m_dateTime.m_timeModel.TimeScale = aScale;
 
-        ServerTimeSettings timeMsg;
-        timeMsg.timeModel.TimeScale = m_dateTime.m_timeModel.TimeScale;
-        timeMsg.timeModel.Time = m_dateTime.m_timeModel.Time;
-        timeMsg.timeModel.Day = m_dateTime.m_timeModel.Day;
-        timeMsg.timeModel.Month = m_dateTime.m_timeModel.Month;
-        timeMsg.timeModel.Year = m_dateTime.m_timeModel.Year;
-        GameServer::Get()->SendToPlayers(timeMsg);
+        SendTimeResync();
         return true;
     }
 

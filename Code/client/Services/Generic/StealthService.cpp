@@ -9,8 +9,10 @@
 #include <Combat/CombatController.h>
 #include <Events/UpdateEvent.h>
 #include <Events/DisconnectedEvent.h>
+#include <Events/ChargedCrimeEvent.h>
 #include <Messages/RequestPlayerCombatState.h>
 #include <Messages/NotifyPlayerCombatState.h>
+#include <atomic>
 
 StealthService::StealthService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport)
     : m_world(aWorld), m_transport(aTransport)
@@ -18,6 +20,7 @@ StealthService::StealthService(World& aWorld, entt::dispatcher& aDispatcher, Tra
     , m_disconnect(aDispatcher.sink<DisconnectedEvent>().connect<&StealthService::OnDisconnected>(this))
     , m_notify(aDispatcher.sink<NotifyPlayerCombatState>().connect<&StealthService::OnNotify>(this))
     , m_impact(aDispatcher.sink<PlayerCombat::Impact>().connect<&StealthService::OnImpact>(this))
+    , m_crime(aDispatcher.sink<ChargedCrimeEvent>().connect<&StealthService::OnChargedCrime>(this))
 {
 }
 
@@ -38,13 +41,20 @@ void StealthService::Reset()
     }
     m_tracks.clear();
     m_received.clear();
+    m_reportedCrimes.clear();
     PlayerCombat::Clear();
     m_epoch = 0;
     m_leader = 0;
     m_nextUpdate = 0;
 }
 
-void StealthService::OnDisconnected(const DisconnectedEvent&) { Reset(); }
+void StealthService::OnDisconnected(const DisconnectedEvent&)
+{
+    Reset();
+    std::lock_guard lock(m_crimeMutex);
+    m_pendingCrimes.clear();
+    m_droppedCrimes = 0;
+}
 
 void StealthService::Send(PlayerCombatState aState)
 {
@@ -88,6 +98,21 @@ void StealthService::OnUpdate(const UpdateEvent&)
         m_epoch = party.GetStartEpoch();
         m_leader = party.GetLeaderPlayerId();
     }
+    std::vector<ChargedCrimeEvent> pendingCrimes;
+    uint32_t droppedCrimes = 0;
+    {
+        std::lock_guard lock(m_crimeMutex);
+        droppedCrimes = std::exchange(m_droppedCrimes, 0);
+        for (size_t i = 0; i < 8 && !m_pendingCrimes.empty(); ++i)
+        {
+            pendingCrimes.push_back(std::move(m_pendingCrimes.front()));
+            m_pendingCrimes.pop_front();
+        }
+    }
+    if (droppedCrimes)
+        spdlog::warn("Dropped {} charged crime reports from the runner queue", droppedCrimes);
+    for (const auto& crime : pendingCrimes)
+        ProcessChargedCrime(crime);
     const auto now = GetTickCount64();
     if (now < m_nextUpdate)
         return;
@@ -176,7 +201,7 @@ void StealthService::OnNotify(const NotifyPlayerCombatState& aMessage)
         m_epoch = state.Epoch;
         m_leader = m_world.GetPartyService().GetLeaderPlayerId();
     }
-    const uint64_t key = (uint64_t{state.ActorId} << 2) | state.Type;
+    const uint64_t key = (uint64_t{state.ActorId} << 3) | state.Type;
     auto& received = m_received[key];
     if (received.OwnershipEpoch == state.OwnershipEpoch && state.Sequence <= received.Sequence)
         return;
@@ -217,9 +242,18 @@ void StealthService::OnNotify(const NotifyPlayerCombatState& aMessage)
             !victim->GetExtension()->IsPlayer() && !victim->IsDead() &&
             attackerToken->OwnershipEpoch == state.OwnershipEpoch && victimToken->OwnershipEpoch == state.TargetOwnershipEpoch)
         {
+            // This relay currently starts combat without consulting the native friendly-hit count.
+            static std::atomic<uint64_t> nextFriendlyFireLog{};
+            const auto now = GetTickCount64();
+            auto next = nextFriendlyFireLog.load(std::memory_order_relaxed);
+            if (now >= next && nextFriendlyFireLog.compare_exchange_strong(next, now + 250, std::memory_order_relaxed))
+                spdlog::info("Friendly fire decision: Threat queues StartCombat victim={:X} attacker={:X} seq={} damage={} attackerIsPlayer={} attackerTeammate={} victimIgnoreFriendlyHits={}",
+                    victim->formID, attacker->formID, state.Sequence, state.RawDamage,
+                    attacker == PlayerCharacter::Get(), (attacker->flags1 & (1u << 26)) != 0,
+                    victim->GetIgnoreFriendlyHit());
             // StartCombat adds the aggressor through native combat/group bookkeeping. Do not stop
             // existing combat or overwrite targetHandle: the engine chooses among all opponents.
-            victim->StartCombat(attacker);
+            Actor::QueueStartCombatNative(victim->formID, attacker->formID);
             if (victim->pCombatController)
             {
                 // ID 33224 is the bookkeeping called by native DoDamage before its health write.
@@ -230,6 +264,70 @@ void StealthService::OnNotify(const NotifyPlayerCombatState& aMessage)
             spdlog::debug("Player combat threat seq={} attacker={} victim={}", state.Sequence, state.ActorId, state.TargetId);
         }
     }
+    else if (state.Type == PlayerCombatState::Crime && leader)
+    {
+        auto* offender = Utils::GetByServerIdOnRunner<Actor>(state.ActorId);
+        const auto offenderToken = offender ? Utils::GetRemoteOwnershipTokenOnRunner(offender->formID) : std::nullopt;
+        if (!offender || !offenderToken || offenderToken->OwnershipEpoch != state.OwnershipEpoch ||
+            !offender->GetExtension()->IsRemotePlayer())
+            return;
+        uint32_t guardsQueued = 0;
+        for (const auto& witness : state.Witnesses)
+        {
+            auto* guard = Utils::GetByServerIdOnRunner<Actor>(witness.Id);
+            const auto token = guard ? Utils::GetLocalOwnershipTokenOnRunner(guard->formID) : std::nullopt;
+            if (guard && token && token->OwnershipEpoch == witness.OwnershipEpoch &&
+                !guard->IsDead() && (guard->flags1 & (1u << 30)))
+            {
+                Actor::QueueStartCombatNative(guard->formID, offender->formID);
+                ++guardsQueued;
+            }
+        }
+        spdlog::info("Crime response id={} offender={} witnesses={} guards={}",
+            state.CrimeId, state.ActorId, state.Witnesses.size(), guardsQueued);
+    }
+}
+
+void StealthService::OnChargedCrime(const ChargedCrimeEvent& aEvent)
+{
+    std::lock_guard lock(m_crimeMutex);
+    if (m_pendingCrimes.size() < 64)
+        m_pendingCrimes.push_back(aEvent);
+    else
+        ++m_droppedCrimes;
+}
+
+void StealthService::ProcessChargedCrime(const ChargedCrimeEvent& aEvent)
+{
+    if (!Active() || aEvent.Epoch != m_world.GetPartyService().GetStartEpoch() ||
+        m_world.GetPartyService().IsLeader() ||
+        m_reportedCrimes.contains(aEvent.Id) ||
+        TESObjectREFR::GetByHandle(aEvent.CriminalHandle) != PlayerCharacter::Get())
+        return;
+    const auto own = Utils::GetLocalOwnershipToken(0x14);
+    if (!own)
+        return;
+    PlayerCombatState state;
+    state.Type = PlayerCombatState::Crime;
+    state.ActorId = own->ServerId;
+    state.OwnershipEpoch = own->OwnershipEpoch;
+    state.CrimeId = aEvent.Id;
+    state.CrimeType = static_cast<uint8_t>(aEvent.Type);
+    state.CrimeGold = aEvent.Gold;
+    m_world.GetModSystem().GetServerModId(aEvent.FactionFormId, state.CrimeFaction);
+    for (uint32_t handle : aEvent.WitnessHandles)
+    {
+        auto* witness = Cast<Actor>(TESObjectREFR::GetByHandle(handle));
+        const auto token = witness ? Utils::GetRemoteOwnershipToken(witness->formID) : std::nullopt;
+        if (token && !witness->GetExtension()->IsPlayer())
+            state.Witnesses.push_back({token->ServerId, token->OwnershipEpoch});
+    }
+    if (state.Witnesses.empty() || state.Witnesses.size() > PlayerCombatState::MaxWitnesses)
+        return;
+    m_reportedCrimes.insert(aEvent.Id);
+    spdlog::info("Charged crime report id={} type={} gold={} faction={:X} witnesses={}",
+        aEvent.Id, aEvent.Type, aEvent.Gold, aEvent.FactionFormId, state.Witnesses.size());
+    Send(std::move(state));
 }
 
 void StealthService::OnImpact(const PlayerCombat::Impact& aImpact)

@@ -93,7 +93,7 @@ struct ProtocolBot final : TiltedPhoques::Client
     {
         TransportConnected = true;
         AuthenticationRequest request{};
-        request.Version = BUILD_COMMIT;
+        request.Version = SSM_WIRE_VERSION;
         request.Username = Name;
         request.Token = Password;
         request.Level = 1;

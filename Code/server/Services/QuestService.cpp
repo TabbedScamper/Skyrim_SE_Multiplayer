@@ -73,6 +73,20 @@ void QuestService::OnAliasFills(const PacketEvent<RequestQuestAliasFills>& acMes
     notify.Fills.Status = 0;
     notify.Fills.ClientQuestType = 0;
     notify.Fills.TransactionId = 0;
+    notify.Fills.HasSeq = false;
+    notify.Fills.RecordKind = 0;
+    notify.Fills.QuestSeq = 0;
+    notify.Fills.QuestFlags = 0;
+    notify.Fills.CurrentStageAfter = 0;
+    notify.Fills.HasRun = false;
+    notify.Fills.Forced = false;
+    notify.Fills.MaskOverflow = false;
+    notify.Fills.StageFlagsBefore = 0;
+    notify.Fills.ItemCount = 0;
+    notify.Fills.ItemMask = 0;
+    notify.Fills.RunCount = 0;
+    notify.Fills.HasObjectives = false;
+    notify.Fills.Objectives.clear();
     notify.LeaderPlayerId = pParty->LeaderPlayerId;
     GameServer::Get()->SendToParty(notify, acMessage.pPlayer->GetParty(), acMessage.GetSender());
 }
@@ -124,8 +138,10 @@ bool QuestService::ProcessQuestChanges(const PacketEvent<RequestQuestUpdate>& ac
 
     const auto transactionKey = fmt::format("quest:{}:{}", pPlayer->GetId(), message.TransactionId);
     const auto payload = fmt::format(
-        "mod={};base={};stage={};status={};type={}",
-        message.Id.ModId, message.Id.BaseId, message.Stage, message.Status, message.ClientQuestType);
+        "mod={};base={};stage={};status={};type={};kind={};seq={};runs={};mask={}",
+        message.Id.ModId, message.Id.BaseId, message.Stage, message.Status, message.ClientQuestType,
+        apFills ? apFills->RecordKind : 0, apFills ? apFills->QuestSeq : 0,
+        apFills ? apFills->RunCount : 0, apFills ? apFills->ItemMask : 0);
 
     Campaign::CommitResult commit;
     try
@@ -179,7 +195,7 @@ bool QuestService::ProcessQuestChanges(const PacketEvent<RequestQuestUpdate>& ac
             record.Id = message.Id;
             record.Stage = message.Stage;
 
-            notify.Status = NotifyQuestUpdate::StageUpdate;
+            notify.Status = apFills && apFills->HasSeq ? message.Status : NotifyQuestUpdate::StageUpdate;
         }
     }
     else if (message.Status == RequestQuestUpdate::Stopped)

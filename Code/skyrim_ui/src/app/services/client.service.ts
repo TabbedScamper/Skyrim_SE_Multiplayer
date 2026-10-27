@@ -8,7 +8,7 @@ import { Player } from '../models/player';
 import { AudioDevice, DisplayMode, GameSettings, GameSettingsPayload } from '../models/game-settings';
 import { ControlBindingsState } from '../models/control-bindings';
 import { ChatService } from './chat.service';
-import { CoopLobbyState } from '../models/coop-lobby-state';
+import { CheckpointEntry, CoopLobbyState, JoinCharacter } from '../models/coop-lobby-state';
 import { SteamFriend, SteamInvite, SteamLobbyState } from '../models/steam-lobby-state';
 import { ErrorEvents, ErrorService } from './error.service';
 import { LoadingService } from './loading.service';
@@ -29,6 +29,12 @@ export class ClientService implements OnDestroy {
   public titleScreenStateChange = new BehaviorSubject(false);
   public titleOptionsRequested = new Subject<void>();
   public titleLobbyRequested = new Subject<void>();
+  /** Live main-menu lobby: loading screen and progress (0-1), and the lobby menu once the scene is set. */
+  /** The lobby soundtrack's playing track (official soundtrack title), empty when none. */
+  public lobbyMusic = new BehaviorSubject<string>('');
+  /** The lobby soundtrack's tracks (official titles) and which are on; Options > Audio > Lobby music. */
+  public lobbyPlaylist = new BehaviorSubject<{ title: string; enabled: boolean }[]>([]);
+  public lobbyState = new BehaviorSubject<{ loading: boolean; progress: number; menu: boolean }>({ loading: false, progress: 0, menu: false });
   public pauseMenuAvailable = new BehaviorSubject(false);
   public pausePanelRequested = new Subject<'coop' | 'settings'>();
   public coopLobbyStateChange = new ReplaySubject<CoopLobbyState>(1);
@@ -60,6 +66,20 @@ export class ClientService implements OnDestroy {
 
   /** Connect player to server change. */
   public playerConnectedChange = new Subject<Player>();
+
+  /** A player's character was renamed (the character creator names everyone after "Prisoner"). */
+  public playerNameChange = new Subject<{ id: number; name: string }>();
+
+  /** The checkpoint picker's entries, newest first. */
+  public checkpointListChange = new ReplaySubject<CheckpointEntry[]>(1);
+
+  /** Characters to join a running session with, newest first. */
+  public characterListChange = new ReplaySubject<JoinCharacter[]>(1);
+
+  /** Progress of joining a running session. */
+  public dropInStatusChange = new BehaviorSubject<string>('idle');
+  /** Updater state JSON from the client (Options > Updates); null until the first report. */
+  public updateStateChange = new BehaviorSubject<string | null>(null);
 
   /** Connect party info change. */
   public partyInfoChange = new Subject<PartyInfo>();
@@ -161,11 +181,22 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('exitTitleScreen', () => this.zone.run(() => this.titleScreenStateChange.next(false)));
     skyrimtogether.on('showTitleOptions', () => this.zone.run(() => this.titleOptionsRequested.next()));
     skyrimtogether.on('showTitleLobby', () => this.zone.run(() => this.titleLobbyRequested.next()));
+    skyrimtogether.on('lobbyPlaylist', (titles: string[], enabled: boolean[]) =>
+      this.zone.run(() => this.lobbyPlaylist.next((titles || []).map((title, i) => ({ title, enabled: !!(enabled || [])[i] })))));
+    skyrimtogether.on('lobbyMusic', (title: string) => this.zone.run(() => this.lobbyMusic.next(title || '')));
+    skyrimtogether.on('lobbyState', (loading: boolean, progress: number, menu: boolean) =>
+      this.zone.run(() => this.lobbyState.next({ loading: !!loading, progress: Number(progress) || 0, menu: !!menu })));
     skyrimtogether.on('pauseMenuAvailable', available => this.zone.run(() => this.pauseMenuAvailable.next(available)));
     skyrimtogether.on('showPauseCoop', () => this.zone.run(() => this.pausePanelRequested.next('coop')));
     skyrimtogether.on('showPauseOptions', () => this.zone.run(() => this.pausePanelRequested.next('settings')));
-    skyrimtogether.on('coopLobbyState', (playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected) =>
-      this.zone.run(() => this.coopLobbyStateChange.next({ playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected })));
+    skyrimtogether.on('coopLobbyState', (playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected, localPlayerId) =>
+      this.zone.run(() => {
+        // The game's own id on the session it is in now (a joiner's first id came from its own one-player session).
+        if (typeof localPlayerId === 'number' && localPlayerId > 0) {
+          this.localPlayerId = localPlayerId;
+        }
+        this.coopLobbyStateChange.next({ playerIds, leaderId, readyPlayerIds, campaignMode, sessionState, startEpoch, checkpointId, lobbyOpen, passwordProtected });
+      }));
     skyrimtogether.on('coopGameplaySettings', (difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled) =>
       this.zone.run(() => this.coopGameplaySettingsChange.next({ difficulty, pvpEnabled, deathSystemEnabled, greetingsEnabled })));
     skyrimtogether.on('steamLobbyState', (lobbyId, ownerId, memberIds, memberNames, friendIds, friendNames, open, passwordProtected, waitingForPassword, isHost, social) =>
@@ -193,6 +224,23 @@ export class ClientService implements OnDestroy {
     skyrimtogether.on('debug', this.onDebug.bind(this)); //not needed anymore
     skyrimtogether.on('debugData', this.onUpdateDebug.bind(this));
     skyrimtogether.on('playerConnected', this.onPlayerConnected.bind(this));
+    skyrimtogether.on('playerNameChanged', this.onPlayerNameChanged.bind(this));
+    skyrimtogether.on('characterList', (json: string) => this.zone.run(() => {
+      try {
+        this.characterListChange.next(JSON.parse(json) as JoinCharacter[]);
+      } catch {
+        this.characterListChange.next([]);
+      }
+    }));
+    skyrimtogether.on('dropInStatus', (status: string) => this.zone.run(() => this.dropInStatusChange.next(status)));
+    skyrimtogether.on('updateState', (state: string) => this.zone.run(() => this.updateStateChange.next(state)));
+    skyrimtogether.on('checkpointList', (json: string) => this.zone.run(() => {
+      try {
+        this.checkpointListChange.next(JSON.parse(json) as CheckpointEntry[]);
+      } catch {
+        this.checkpointListChange.next([]);
+      }
+    }));
     skyrimtogether.on(
       'playerDisconnected',
       this.onPlayerDisconnected.bind(this),
@@ -271,6 +319,11 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('debug');
     skyrimtogether.off('debugData');
     skyrimtogether.off('playerConnected');
+    skyrimtogether.off('playerNameChanged');
+    skyrimtogether.off('checkpointList');
+    skyrimtogether.off('characterList');
+    skyrimtogether.off('dropInStatus');
+    skyrimtogether.off('updateState');
     skyrimtogether.off('playerDisconnected');
     skyrimtogether.off('setHealth');
     skyrimtogether.off('setLevel');
@@ -293,6 +346,9 @@ export class ClientService implements OnDestroy {
     skyrimtogether.off('gamepadInput');
     skyrimtogether.off('gamepadScroll');
     skyrimtogether.off('creatorView');
+    skyrimtogether.off('lobbyState');
+    skyrimtogether.off('lobbyMusic');
+    skyrimtogether.off('lobbyPlaylist');
   }
 
   /**
@@ -402,6 +458,18 @@ export class ClientService implements OnDestroy {
     skyrimtogether.resetGameSettings(section);
   }
 
+  public requestLobbyPlaylist(): void {
+    skyrimtogether.requestLobbyPlaylist();
+  }
+
+  public setLobbyTrack(title: string, enabled: boolean): void {
+    skyrimtogether.setLobbyTrack(title, enabled);
+  }
+
+  public lobbyAction(name: string): void {
+    skyrimtogether.lobbyAction(name);
+  }
+
   public openTitleOptions(): void {
     skyrimtogether.openTitleOptions();
   }
@@ -412,6 +480,26 @@ export class ClientService implements OnDestroy {
 
   public setPartyReady(ready: boolean): void {
     skyrimtogether.setPartyReady(ready);
+  }
+
+  public listCharacters(): void {
+    skyrimtogether.listCharacters();
+  }
+
+  public checkUpdates(): void {
+    skyrimtogether.checkUpdates();
+  }
+
+  public downloadUpdate(): void {
+    skyrimtogether.downloadUpdate();
+  }
+
+  public joinRunningSession(path: string): void {
+    skyrimtogether.joinRunningSession(path);
+  }
+
+  public listCheckpoints(): void {
+    skyrimtogether.listCheckpoints();
   }
 
   public selectSharedCampaign(mode: number, checkpointId = ''): void {
@@ -673,6 +761,15 @@ export class ClientService implements OnDestroy {
           cellName: cellName,
         }),
       );
+    });
+  }
+
+  private onPlayerNameChanged(playerId: number, name: string) {
+    this.zone.run(() => {
+      if (playerId === this.localPlayerId) {
+        this.nameChange.next(name);
+      }
+      this.playerNameChange.next({ id: playerId, name });
     });
   }
 

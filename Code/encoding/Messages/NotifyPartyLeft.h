@@ -16,5 +16,8 @@ struct NotifyPartyLeft final : ServerMessage
     void SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept override;
     void DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept override;
 
-    bool operator==(const NotifyPartyLeft& acRhs) const noexcept { return GetOpcode() == acRhs.GetOpcode(); }
+    bool operator==(const NotifyPartyLeft& acRhs) const noexcept { return GetOpcode() == acRhs.GetOpcode() && Forced == acRhs.Forced; }
+
+    // Host removal or END PARTY. The receiver must leave its Steam session and return home.
+    bool Forced{};
 };

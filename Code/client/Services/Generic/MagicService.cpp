@@ -161,25 +161,13 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
 
     MagicItem* pSpell = nullptr;
 
-    pSpell = pActor->magicItems[acMessage.CastingSource];
+    const uint32_t cSpellFormId = World::Get().GetModSystem().GetGameId(acMessage.SpellFormId);
+    if (cSpellFormId != 0)
+        pSpell = Cast<MagicItem>(TESForm::GetById(cSpellFormId));
 
     if (!pSpell)
     {
-        const uint32_t cSpellFormId = World::Get().GetModSystem().GetGameId(acMessage.SpellFormId);
-        if (cSpellFormId == 0)
-        {
-            spdlog::error("Could not find spell form id for GameId base {:X}, mod {:X}", acMessage.SpellFormId.BaseId, acMessage.SpellFormId.ModId);
-            return;
-        }
-
-        TESForm* pSpellForm = TESForm::GetById(cSpellFormId);
-        if (!pSpellForm)
-        {
-            spdlog::error("Cannot find spell form, id: {:X}.", cSpellFormId);
-            return;
-        }
-
-        pSpell = Cast<MagicItem>(pSpellForm);
+        pSpell = pActor->magicItems[acMessage.CastingSource];
     }
 
     if (!pSpell)
@@ -229,7 +217,17 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
         return;
     }
 
+    const auto pSpellItem = Cast<SpellItem>(pSpell);
+    const bool concentration = pSpellItem && pSpellItem->eCastingType == MagicSystem::CastingType::CONCENTRATION;
+    if (concentration && pActor->currentProcess)
+    {
+        using TSetDualCasting = void(AIProcess*, bool);
+        POINTER_SKYRIMSE(TSetDualCasting, s_setDualCasting, 39383);
+        s_setDualCasting.Get()(pActor->currentProcess, acMessage.IsDualCasting);
+    }
     pCaster->CastSpellImmediate(pSpell, false, pDesiredTarget, 1.0f, false, 0.0f);
+    if (concentration)
+        pCaster->SetSkipCheckCast();
 
     spdlog::debug("Successfully casted remote spell");
 }
@@ -293,6 +291,12 @@ void MagicService::OnNotifyInterruptCast(const NotifyInterruptCast& acMessage) c
     }
 
     pCaster->InterruptCast();
+    if (pActor->currentProcess)
+    {
+        using TSetDualCasting = void(AIProcess*, bool);
+        POINTER_SKYRIMSE(TSetDualCasting, s_setDualCasting, 39383);
+        s_setDualCasting.Get()(pActor->currentProcess, false);
+    }
 
     spdlog::debug("Interrupt remote cast successful");
 }
@@ -671,7 +675,7 @@ void MagicService::UpdateRevealOtherPlayersEffect(bool aForceTrigger) noexcept
 
     // When active
 
-    Mod* pSkyrimTogether = ModManager::Get()->GetByName("SkyrimTogether.esp");
+    Mod* pSkyrimTogether = ModManager::Get()->GetByName("SkyrimSEMultiplayer.esp");
     if (!pSkyrimTogether)
         return;
 

@@ -3,6 +3,9 @@
 #include "World.h"
 #include "GameLoopDiagnostic.h"
 #include <Utils.h>
+#include <Actor.h>
+#include <PlayerCharacter.h>
+#include <Games/Skyrim/AI/Movement/PlayerControls.h>
 
 #include <Services/DiscoveryService.h>
 #include <Services/InputService.h>
@@ -20,6 +23,7 @@
 #include <Services/MagicService.h>
 #include <Services/CommandService.h>
 #include <Services/CalendarService.h>
+#include <Services/SaidOnceService.h>
 #include <Services/StringCacheService.h>
 #include <Services/PlayerService.h>
 #include <Services/CombatService.h>
@@ -27,6 +31,7 @@
 #include <Services/WeatherService.h>
 #include <Services/MapService.h>
 #include <Services/SteamLobbyService.h>
+#include <Services/LobbyService.h>
 #include <Services/GameSettingsService.h>
 #include <Services/GameTestService.h>
 #include <Services/HarnessService.h>
@@ -35,6 +40,9 @@
 #include <Services/Generic/SceneTurnsService.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/DoorVoteService.h>
+#include <Services/DropInService.h>
+#include <Services/UpdateService.h>
+#include <Services/FurnitureGraphLink.h>
 #include <Services/Generic/BusyLockService.h>
 #include <Services/Generic/SharedDropService.h>
 #include <Services/TriggerGate.h>
@@ -170,11 +178,13 @@ World::World()
     ctx().emplace<InputService>(ctx().at<OverlayService>());
     ctx().emplace<CharacterService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DebugService>(m_dispatcher, *this, m_transport, ctx().at<ImguiService>());
+    ctx().at<ImguiService>().OnDraw.connect<&LobbyService::DrawEditor>();
     ctx().emplace<PapyrusService>(m_dispatcher);
     ctx().emplace<DiscordService>(m_dispatcher);
     ctx().emplace<ObjectService>(*this, m_dispatcher, m_transport);
     ctx().emplace<WorldStateService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CalendarService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<SaidOnceService>(*this, m_dispatcher, m_transport);
     ctx().emplace<QuestService>(*this, m_dispatcher);
     ctx().emplace<QuestItemService>(*this, m_dispatcher, m_transport);
     ctx().emplace<PartyService>(*this, m_dispatcher, m_transport);
@@ -183,6 +193,9 @@ World::World()
     ctx().emplace<OrphanTrace>(*this, m_dispatcher);
     ctx().emplace<DialogueListenService>(*this, m_dispatcher, m_transport);
     ctx().emplace<DoorVoteService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<DropInService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<UpdateService>(*this, m_dispatcher);
+    ctx().emplace<FurnitureGraphLink>(*this, m_dispatcher);
     ctx().emplace<BusyLockService>(*this, m_dispatcher, m_transport);
     ctx().emplace<SharedDropService>(*this, m_dispatcher, m_transport);
     ctx().emplace<TriggerGate>(*this, m_dispatcher, m_transport);
@@ -254,8 +267,8 @@ void World::Update() noexcept
     const auto afterRunner = std::chrono::steady_clock::now();
     m_dispatcher.trigger(UpdateEvent(cDeltaSeconds));
     const auto afterDispatcher = std::chrono::steady_clock::now();
-    ctx().at<GameTestService>().OnGameThread();
-    const auto afterGameTest = std::chrono::steady_clock::now();
+    // The test-command drain runs on the main thread now (UpdateMainFrame); kept as a zero-length phase in the timing.
+    const auto afterGameTest = afterDispatcher;
     // Long update diagnostic: snapshots are sent from this update, so a slow phase here delays every NPC's stream
     // (periodic ~27 s bursts, 150-220 ms late on the other PC, with this PC's frames smooth).
     {
@@ -298,6 +311,16 @@ TransportService& World::GetTransport() noexcept
 QuestService& World::GetQuestService() noexcept
 {
     return ctx().at<QuestService>();
+}
+
+DropInService& World::GetDropInService() noexcept
+{
+    return ctx().at<DropInService>();
+}
+
+UpdateService& World::GetUpdateService() noexcept
+{
+    return ctx().at<UpdateService>();
 }
 
 DoorVoteService& World::GetDoorVoteService() noexcept
@@ -356,6 +379,26 @@ void World::Create() noexcept
     {
         entt::locator<World>::emplace();
     }
+}
+
+bool World::Exists() noexcept
+{
+    return entt::locator<World>::has_value();
+}
+
+// Main-thread quiet window: HookMainLoop, before Main::Update (N36564) kicks the frame's job lists, so no engine
+// worker runs alongside (docs/threading-design.md, cut 2). World::Update itself still runs in the Papyrus VM job on a
+// worker thread; services move here one family at a time.
+void World::UpdateMainFrame() noexcept
+{
+    GetDropInService().OnMainFrame();
+    PlayerControls::DrainInputRelease();
+    ctx().at<SaidOnceService>().OnMainFrame();
+    PlayerCharacter::DrainQueuedCrimePayments();
+    ActorValueService::DrainQueuedMurders();
+    Actor::DrainChargedCrimes();
+    Actor::DrainStartCombatNative();
+    ctx().at<GameTestService>().OnGameThread();
 }
 
 World& World::Get() noexcept

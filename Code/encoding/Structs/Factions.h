@@ -17,4 +17,6 @@ struct Factions
 
     Vector<Faction> NpcFactions;
     Vector<Faction> ExtraFactions;
+    GameId CrimeFaction{};
+    bool RemoveCrimeFaction{};
 };

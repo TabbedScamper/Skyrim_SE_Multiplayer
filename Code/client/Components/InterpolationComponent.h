@@ -16,6 +16,9 @@ struct InterpolationComponent
         glm::vec3 Rotation{};
         AnimationVariables Variables{};
         float Direction{};
+        uint8_t LifeState{};
+        bool Essential{};
+        bool Fleeing{};
 
         TimePoint() = default;
         TimePoint(const TimePoint&) = default;

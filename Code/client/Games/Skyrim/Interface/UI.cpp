@@ -5,6 +5,7 @@
 #include "immersive_launcher/stubs/DllBlocklist.h"
 
 #include <World.h>
+#include <Services/LobbyService.h>
 
 static bool g_RequestUnpauseAll{false};
 
@@ -149,15 +150,38 @@ static void UnfreezeMenu(IMenu* apEntry)
 static constexpr const char* kAllowList[] = {
     "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu", "MessageBoxMenu",
     "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console",       "Journal Menu",
-    // Paused, it froze the picking PC's world and every actor it simulates on the other screens (owner, 2026-09-28).
-    "Lockpicking Menu"
+    // "Lockpicking Menu" keeps its vanilla pause and freeze-frame (owner, 2026-09-29): unpaused, the minigame drew no
+    // lock and its look/move input moved the character. BusyLockService keeps a lock to one picker at a time.
     //"MapMenu", // MapMenu is disabled till we find a proper fix for first person.
 };
+
+bool UI::HasUnpausedMenuOpen() const
+{
+    for (const char* name : kAllowList)
+        if (GetMenuOpen(BSFixedString(name)))
+            return true;
+    return false;
+}
 
 static void* (*UI_AddToActiveQueue)(UI*, IMenu*, void*);
 
 static void* UI_AddToActiveQueue_Hook(UI* apSelf, IMenu* apMenu, void* apFoundItem /*In reality a reference*/)
 {
+    // The live lobby shows the real Main Menu over its scene: unpaused, so the fire, the poses and the camera keep going.
+    // It also takes menu input: at a normal title there is no world, so the Main Menu never enters the menu input
+    // context and gameplay keys reached the lobby player (owner 2026-10-01: space made him jump).
+    if (apMenu && LobbyService::IsHolding() && apSelf->FindMenuByName("Main Menu") == apMenu)
+    {
+        UnfreezeMenu(apMenu);
+        apMenu->SetFlag(IMenu::kUsesMenuContext);
+    }
+    if (apMenu && apSelf->FindMenuByName("TitleSequence Menu") == apMenu)
+        LobbyService::OnSplashTitleQueued(apMenu);
+    else if (apMenu && apSelf->FindMenuByName("Mist Menu") == apMenu)
+        LobbyService::OnLaunchMenuQueued(apMenu, false);
+    else if (apMenu && apSelf->FindMenuByName("Main Menu") == apMenu)
+        LobbyService::OnLaunchMenuQueued(apMenu, true);
+
     // if the menu is empty we let the real function handle it.
     if (!apMenu || !World::Get().GetTransport().IsConnected() || stubs::g_IsSoulsREActive)
         return UI_AddToActiveQueue(apSelf, apMenu, apFoundItem);

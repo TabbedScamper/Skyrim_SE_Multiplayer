@@ -1,5 +1,7 @@
 #include <Services/PlayerService.h>
 #include <Services/OverlayService.h>
+#include <Services/LobbyService.h>
+#include <Utils/MainThread.h>
 
 #include <World.h>
 
@@ -35,6 +37,9 @@
 #include <AI/AIProcess.h>
 #include <EquipManager.h>
 #include <Forms/TESRace.h>
+#include <Forms/TESWorldSpace.h>
+#include <Interface/UI.h>
+#include <Games/TES.h>
 
 PlayerService::PlayerService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -61,6 +66,54 @@ void PlayerService::OnUpdate(const UpdateEvent&) noexcept
     RunDifficultyUpdates();
     RunLevelUpdates();
     RunBeastFormDetection();
+    RunCellHeartbeat();
+}
+
+// Re-report the cell this player is in every 5 s; the server acts only when its record differs. Two players taking a
+// load door together left the follower recorded outside the Helgen Keep for the rest of the Keep (2026-09-30 19:25).
+void PlayerService::RunCellHeartbeat() noexcept
+{
+    if (MT::CutM6bEnabled() && LobbyService::InLobbyWorld())
+    {
+        if (!m_noWorldReported && m_transport.IsConnected())
+        {
+            EnterInteriorCellRequest noWorld{};
+            noWorld.Heartbeat = true;
+            m_transport.Send(noWorld);
+            m_noWorldReported = true;
+            spdlog::info("shared_world=0 auth_cell=empty (lobby)");
+        }
+        return;
+    }
+    m_noWorldReported = false;
+    const auto now = GetTickCount64();
+    if (now < m_nextCellHeartbeat || !m_transport.IsConnected())
+        return;
+    m_nextCellHeartbeat = now + 5000;
+    auto* pPlayer = PlayerCharacter::Get();
+    auto* pUi = UI::Get();
+    auto* pCell = pPlayer ? pPlayer->GetParentCellEx() : nullptr;
+    if (!pCell || !pUi || pUi->GetMenuOpen(BSFixedString("Loading Menu")) || pUi->GetMenuOpen(BSFixedString("Main Menu")))
+        return;
+    auto& mods = m_world.GetModSystem();
+    if (auto* pWorldSpace = pPlayer->GetWorldSpace())
+    {
+        EnterExteriorCellRequest message;
+        const auto* pTes = TES::Get();
+        if (!pTes || !mods.GetServerModId(pWorldSpace->formID, message.WorldSpaceId) || !mods.GetServerModId(pCell->formID, message.CellId))
+            return;
+        message.CurrentCoords = GridCellCoords(pTes->currentGridX, pTes->currentGridY);
+        message.Heartbeat = true;
+        m_transport.Send(message);
+    }
+    else
+    {
+        EnterInteriorCellRequest message;
+        if (!mods.GetServerModId(pCell->formID, message.CellId))
+            return;
+        message.Heartbeat = true;
+        m_transport.Send(message);
+    }
 }
 
 void PlayerService::OnConnected(const ConnectedEvent& acEvent) noexcept
@@ -75,6 +128,7 @@ void PlayerService::OnConnected(const ConnectedEvent& acEvent) noexcept
 
 void PlayerService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
 {
+    m_noWorldReported = false;
     if (m_previousDifficulty >= 0 && m_previousDifficulty <= 5)
         PlayerCharacter::Get()->SetDifficulty(m_previousDifficulty);
     m_serverDifficulty = m_previousDifficulty = 6;
@@ -145,6 +199,8 @@ void PlayerService::OnNotifyPlayerRespawn(const NotifyPlayerRespawn& acMessage) 
 
 void PlayerService::OnGridCellChangeEvent(const GridCellChangeEvent& acEvent) const noexcept
 {
+    if (MT::CutM6bEnabled() && LobbyService::InLobbyWorld())
+        return;
     uint32_t baseId = 0;
     uint32_t modId = 0;
 
@@ -162,6 +218,8 @@ void PlayerService::OnGridCellChangeEvent(const GridCellChangeEvent& acEvent) co
 
 void PlayerService::OnCellChangeEvent(const CellChangeEvent& acEvent) const noexcept
 {
+    if (MT::CutM6bEnabled() && LobbyService::InLobbyWorld())
+        return;
     if (acEvent.WorldSpaceId)
     {
         EnterExteriorCellRequest message;

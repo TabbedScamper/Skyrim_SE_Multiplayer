@@ -11,7 +11,8 @@ struct SkyrimVM
     uint8_t pad8[0x210 - 0x8];
     BSScript::IVirtualMachine* virtualMachine;
     uint8_t pad218[0x690 - 0x218];
-    int32_t inactive;
+    uint8_t inactive;
+    uint8_t pad691[3];
 };
 
 static_assert(offsetof(SkyrimVM, virtualMachine) == 0x210);

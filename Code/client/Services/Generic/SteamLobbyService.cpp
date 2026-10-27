@@ -4,8 +4,10 @@
 #include <Services/FarmMode.h>
 #include <Services/OverlayService.h>
 #include <Services/TransportService.h>
+#include <Services/UpdateService.h>
 #include <World.h>
 #include <OverlayApp.hpp>
+#include <HandoffPolicy.h>
 
 namespace
 {
@@ -217,6 +219,18 @@ SteamLobbyService::~SteamLobbyService() noexcept
     StopLocalServer();
 }
 
+uint64_t SteamLobbyService::LocalSteamId() const noexcept
+{
+    const HMODULE module = m_steamModule ? m_steamModule : GetModuleHandleW(L"steam_api64.dll");
+    if (!module)
+        return 0;
+    auto getUser = LoadSteamFunction<void*(__cdecl*)()>(module, "SteamAPI_SteamUser_v023");
+    if (!getUser) getUser = LoadSteamFunction<void*(__cdecl*)()>(module, "SteamAPI_SteamUser_v022");
+    if (!getUser) getUser = LoadSteamFunction<void*(__cdecl*)()>(module, "SteamAPI_SteamUser_v021");
+    const auto getId = LoadSteamFunction<uint64_t(__cdecl*)(void*)>(module, "SteamAPI_ISteamUser_GetSteamID");
+    return getUser && getId ? getId(getUser()) : 0;
+}
+
 bool SteamLobbyService::Initialize() noexcept
 {
     if (m_matchmaking && m_utils)
@@ -305,6 +319,11 @@ void SteamLobbyService::OnLobbyInvite(const uint64_t aFriendId, const uint64_t a
 {
     if (!aLobbyId || aLobbyId == m_lobbyId)
         return;
+    if (m_handoffActive && aFriendId == m_handoffTargetSteamId && aLobbyId != m_handoffOldLobbyId)
+    {
+        OnJoinRequested(aLobbyId, aFriendId);
+        return;
+    }
     std::erase_if(m_invites, [aLobbyId](const Invite& acInvite) { return acInvite.LobbyId == aLobbyId; });
     m_invites.push_back({aFriendId, aLobbyId});
     const auto getName = LoadSteamFunction<GetFriendPersonaName>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendPersonaName");
@@ -360,7 +379,8 @@ void SteamLobbyService::UpdateRichPresence() noexcept
     set(m_friends, "status", "In a Skyrim co-op session");
     set(m_friends, "connect", ("+connect_lobby " + lobby).c_str());
     set(m_friends, "steam_player_group", lobby.c_str());
-    set(m_friends, "steam_player_group_size", "2");
+    const auto partySize = std::to_string(std::max<size_t>(1, m_partySteamIds.size()));
+    set(m_friends, "steam_player_group_size", partySize.c_str());
 }
 
 // 32x32 Steam avatar as an uncompressed BMP data URL, sent once per friend.
@@ -423,7 +443,7 @@ void SteamLobbyService::HostSession() noexcept
     if (!createLobby || !StartLocalServer())
         return;
 
-    m_apiCall = createLobby(m_matchmaking, 0, 2); // private/invite-only by default
+    m_apiCall = createLobby(m_matchmaking, 0, 16); // private/invite-only; seats and wire roster allow up to 16
     if (!m_apiCall)
     {
         ShowMessage("Steam refused to create the session.");
@@ -539,8 +559,23 @@ void SteamLobbyService::PumpCallbacks() noexcept
     // World::Update does not reliably run on the title screen. This queue is
     // also drained by PollMainMenuOptions, unlike the gameplay RunnerService.
     m_titleScreenTasks.Drain();
+    if (m_handoffTransitionPending)
+    {
+        m_handoffTransitionPending = false;
+        using TShowHUDMessage = void(const char*, const char*, bool);
+        POINTER_SKYRIMSE(TShowHUDMessage, showHandoff, 52933);
+        showHandoff.Get()(m_handoffNotice.c_str(), nullptr, true);
+        ShowMessage(m_handoffNotice.c_str());
+        LeaveSession();
+        m_world.GetTransport().Close();
+        StopLocalServer();
+        if (LocalSteamId() == m_handoffTargetSteamId)
+            HostSession();
+        else
+            m_handoffNextRetryMs = GetTickCount64();
+    }
 
-    if (!m_autoHostAttempted && GetTickCount64() > 2000)
+    if (!m_handoffActive && !m_autoHostAttempted && GetTickCount64() > 2000)
     {
         m_autoHostAttempted = true;
         if (Initialize() && m_launchLobby)
@@ -565,6 +600,14 @@ void SteamLobbyService::PumpCallbacks() noexcept
         const bool wasHosting = m_isHost;
         if (wasHosting)
         {
+            if (m_partySteamIds.size() > 1 && !m_handoffActive)
+            {
+                const auto successor = HandoffPolicy::Successor(m_partySteamIds, m_partyLeaderSteamId);
+                Vector<uint64_t> order{successor};
+                for (const auto id : m_partySteamIds)
+                    if (id != successor) order.push_back(id);
+                BeginHandoff(successor, order, true);
+            }
             LeaveSession();
             m_world.GetTransport().Close();
             ShowMessage("The session ended because the local server stopped. You can host or join again.");
@@ -573,6 +616,32 @@ void SteamLobbyService::PumpCallbacks() noexcept
     }
 
     const auto now = GetTickCount64();
+    if (m_handoffActive && LocalSteamId() == m_handoffTargetSteamId &&
+        now >= m_handoffNextRetryMs && now < m_handoffDeadlineMs &&
+        m_pending == PendingOperation::None && !m_lobbyId)
+    {
+        m_handoffNextRetryMs = now + 2000;
+        HostSession();
+    }
+    if (m_handoffActive && LocalSteamId() != m_handoffTargetSteamId &&
+        now >= m_handoffNextRetryMs && now < m_handoffDeadlineMs &&
+        m_pending == PendingOperation::None && !m_lobbyId)
+    {
+        m_handoffNextRetryMs = now + 1000;
+        const auto getGame = LoadSteamFunction<GetFriendGamePlayed>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendGamePlayed");
+        FriendGameInfo game{};
+        if (getGame && getGame(m_friends, m_handoffTargetSteamId, &game) && game.LobbyId &&
+            game.LobbyId != m_handoffOldLobbyId)
+            JoinSession(std::to_string(game.LobbyId).c_str());
+    }
+    if (m_handoffActive && now >= m_handoffDeadlineMs)
+    {
+        m_handoffActive = false;
+        m_handoffOrder.clear();
+        m_world.GetPartyService().CancelHandoff();
+        ShowMessage("The new host could not be reached. Open Co-op to join their session.");
+        spdlog::error("Handoff: successor {} was not reachable within 90 s", m_handoffTargetSteamId);
+    }
     if (now >= m_nextLobbyRefresh)
     {
         m_nextLobbyRefresh = now + 1000;
@@ -613,9 +682,30 @@ void SteamLobbyService::QueueJoinSession(String aLobbyId) noexcept
     m_titleScreenTasks.Add([this, lobbyId = std::move(aLobbyId)]() { JoinSession(lobbyId); });
 }
 
-void SteamLobbyService::QueueLeaveSession() noexcept
+void SteamLobbyService::QueueLeaveSession(bool aReturnToMainMenu) noexcept
 {
-    m_titleScreenTasks.Add([this]() { LeaveSession(); });
+    const int wanted = aReturnToMainMenu ? 2 : 1;
+    int current = m_leaveRequested.load();
+    while (current < wanted && !m_leaveRequested.compare_exchange_weak(current, wanted)) {}
+}
+
+void SteamLobbyService::DrainLeaveOnMainFrame() noexcept
+{
+    const int request = m_leaveRequested.exchange(0);
+    if (!request)
+        return;
+    if (m_world.GetPartyService().BeginHostDeparture(request == 2))
+        return;
+    // Main loop: capture the live character before any party, transport or Steam teardown.
+    spdlog::info("Leaving the party: back to this PC's own session");
+    if (m_world.GetPartyService().IsInParty())
+        m_world.GetPartyService().LeaveParty();
+    LeaveSession();
+    m_world.GetTransport().Close();
+    // Reuse the host's local server so its queued forced-leave notices can still reach followers.
+    HostSession();
+    if (request == 2)
+        m_quitToMenuPending.store(true);
 }
 
 void SteamLobbyService::QueueJoinFriend(const uint64_t aSteamId) noexcept
@@ -656,6 +746,10 @@ void SteamLobbyService::QueueConnectJoinedSession(String aPassword) noexcept
 
 void SteamLobbyService::OnConnected(const ConnectedEvent&) noexcept
 {
+    if (m_handoffActive && m_lobbyId && m_lobbyId != m_handoffOldLobbyId)
+    {
+        spdlog::info("Handoff: connected to successor lobby {}", m_lobbyId);
+    }
     if (!m_isHost && m_waitingForPassword)
     {
         m_waitingForPassword = false;
@@ -667,6 +761,28 @@ void SteamLobbyService::OnConnected(const ConnectedEvent&) noexcept
 
 void SteamLobbyService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
+    if (m_handoffActive)
+    {
+        if (m_lobbyId && m_lobbyId != m_handoffOldLobbyId)
+        {
+            LeaveSession();
+            m_handoffNextRetryMs = GetTickCount64() + 1000;
+        }
+        return;
+    }
+    if (m_partySteamIds.size() > 1 && m_partyLeaderSteamId)
+    {
+        const auto leader = std::find(m_partySteamIds.begin(), m_partySteamIds.end(), m_partyLeaderSteamId);
+        if (leader != m_partySteamIds.end())
+        {
+            const uint64_t successor = HandoffPolicy::Successor(m_partySteamIds, m_partyLeaderSteamId);
+            Vector<uint64_t> order{successor};
+            for (const auto id : m_partySteamIds)
+                if (id != successor) order.push_back(id);
+            BeginHandoff(successor, order, true);
+            return;
+        }
+    }
     if (!m_lobbyId)
         return;
 
@@ -674,7 +790,58 @@ void SteamLobbyService::OnDisconnected(const DisconnectedEvent&) noexcept
     LeaveSession();
     if (wasHosting)
         StopLocalServer();
-    ShowMessage("The session ended. You can host or join again.");
+    else
+        QueueLeaveSession(true);
+    ShowMessage(wasHosting ? "The session ended. You can host or join again." :
+        "The host session ended. Returning to your own session.");
+}
+
+void SteamLobbyService::RememberParty(const Vector<uint64_t>& acOrderedSteamIds, uint64_t aLeaderSteamId) noexcept
+{
+    if (m_handoffActive || acOrderedSteamIds.empty()) return;
+    m_partySteamIds = acOrderedSteamIds;
+    m_partyLeaderSteamId = aLeaderSteamId;
+}
+
+void SteamLobbyService::ForgetParty() noexcept
+{
+    m_partySteamIds.clear();
+    m_partyLeaderSteamId = 0;
+}
+
+void SteamLobbyService::FinishHandoff() noexcept
+{
+    if (m_handoffActive && m_lobbyId && m_lobbyId != m_handoffOldLobbyId)
+    {
+        m_handoffActive = false;
+        m_handoffOrder.clear();
+        spdlog::info("Handoff: joined successor party in lobby {}", m_lobbyId);
+    }
+}
+
+void SteamLobbyService::BeginHandoff(uint64_t aSuccessorSteamId, const Vector<uint64_t>& acOrderedSteamIds, bool aDeparted) noexcept
+{
+    if (m_handoffActive || !aSuccessorSteamId || acOrderedSteamIds.empty()) return;
+    m_handoffTargetSteamId = aSuccessorSteamId;
+    m_handoffOrder = acOrderedSteamIds;
+    m_handoffOldLobbyId = m_lobbyId;
+    m_handoffDeadlineMs = GetTickCount64() + 90000;
+    m_handoffActive = true;
+    m_handoffTransitionPending = true;
+    const auto getName = LoadSteamFunction<GetFriendPersonaName>(m_steamModule, "SteamAPI_ISteamFriends_GetFriendPersonaName");
+    const char* name = getName ? getName(m_friends, aSuccessorSteamId) : nullptr;
+    const std::string successorName = name && *name ? name : "A player";
+    const char* oldName = aDeparted && getName ? getName(m_friends, m_partyLeaderSteamId) : nullptr;
+    m_handoffNotice = aDeparted && oldName && *oldName
+        ? fmt::format("{} left. {} is now leading the party.", oldName, successorName)
+        : fmt::format("{} is now leading the party.", successorName);
+    spdlog::info("Handoff: successor={} oldLobby={} members={}", aSuccessorSteamId, m_handoffOldLobbyId, acOrderedSteamIds.size());
+}
+
+std::string SteamLobbyService::HandoffStatus() const noexcept
+{
+    return fmt::format(R"({{"targetSteamId":"{}","active":{},"oldLobbyId":"{}","newLobbyId":"{}","members":{}}})",
+        m_handoffTargetSteamId, m_handoffActive, m_handoffOldLobbyId, m_lobbyId, m_handoffOrder.size());
 }
 
 void SteamLobbyService::CompleteCreate() noexcept
@@ -701,9 +868,18 @@ void SteamLobbyService::CompleteCreate() noexcept
         {
             setData(m_matchmaking, m_lobbyId, "skyrim_se_multiplayer", "1");
             setData(m_matchmaking, m_lobbyId, "server_address", endpoint.c_str());
-            setData(m_matchmaking, m_lobbyId, "build", BUILD_COMMIT);
+            setData(m_matchmaking, m_lobbyId, "build", SSM_WIRE_VERSION);
             setData(m_matchmaking, m_lobbyId, "visibility", "private");
             setData(m_matchmaking, m_lobbyId, "has_password", "0");
+            if (m_handoffActive && LocalSteamId() == m_handoffTargetSteamId)
+                setData(m_matchmaking, m_lobbyId, "handoff_from", std::to_string(m_handoffOldLobbyId).c_str());
+        }
+        if (m_handoffActive && LocalSteamId() == m_handoffTargetSteamId)
+        {
+            const auto invite = LoadSteamFunction<InviteUserToLobby>(m_steamModule, "SteamAPI_ISteamMatchmaking_InviteUserToLobby");
+            for (const auto steamId : m_handoffOrder)
+                if (invite && steamId != m_handoffTargetSteamId)
+                    invite(m_matchmaking, m_lobbyId, steamId);
         }
 
         const auto readyMessage = "Session ready. Lobby ID: " + std::to_string(m_lobbyId);
@@ -738,13 +914,34 @@ void SteamLobbyService::CompleteJoin() noexcept
         const char* pMarker = getData ? getData(m_matchmaking, m_lobbyId, "skyrim_se_multiplayer") : nullptr;
         const char* pBuild = getData ? getData(m_matchmaking, m_lobbyId, "build") : nullptr;
         const char* pEndpoint = getData ? getData(m_matchmaking, m_lobbyId, "server_address") : nullptr;
-        if (!pMarker || strcmp(pMarker, "1") != 0 || !pBuild || strcmp(pBuild, BUILD_COMMIT) != 0)
+        const char* pHandoffFrom = getData ? getData(m_matchmaking, m_lobbyId, "handoff_from") : nullptr;
+        const auto getOwner = LoadSteamFunction<GetLobbyOwner>(m_steamModule, "SteamAPI_ISteamMatchmaking_GetLobbyOwner");
+        const bool expectedHandoff = !m_handoffActive ||
+            (getOwner && getOwner(m_matchmaking, m_lobbyId) == m_handoffTargetSteamId &&
+             pHandoffFrom && std::to_string(m_handoffOldLobbyId) == pHandoffFrom);
+        if (!expectedHandoff)
         {
-            ShowMessage("That friend's session is not a compatible Skyrim SE Multiplayer build.");
+            spdlog::warn("Handoff: rejected lobby {} with unrelated owner or origin", m_lobbyId);
+            LeaveSession();
+            m_handoffNextRetryMs = GetTickCount64() + 1000;
+        }
+        else if (!pMarker || strcmp(pMarker, "1") != 0 || !pBuild || strcmp(pBuild, SSM_WIRE_VERSION) != 0)
+        {
+            const std::string text = pMarker && strcmp(pMarker, "1") == 0 && pBuild
+                                         ? UpdateService::MismatchText(pBuild)
+                                         : std::string("That friend's session is not a compatible Skyrim SE Multiplayer build.");
+            ShowMessage(String(text.c_str()));
             LeaveSession();
         }
         else if (!pEndpoint || !*pEndpoint)
+        {
             ShowMessage("The host has not published a server endpoint.");
+            if (m_handoffActive)
+            {
+                LeaveSession();
+                m_handoffNextRetryMs = GetTickCount64() + 1000;
+            }
+        }
         else
         {
             m_joinEndpoint = pEndpoint;

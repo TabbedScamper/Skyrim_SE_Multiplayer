@@ -21,12 +21,154 @@
 #include <Structs/AnimationVariables.h>
 #include <Structs/PhysicsReferenceUpdate.h>
 #include <Structs/ServerSettings.h>
+#include <Structs/CharacterSnapshot.h>
+#include <Messages/DropIn.h>
+#include <Messages/RequestQuestAliasFills.h>
+#include <Messages/NotifyQuestAliasFills.h>
 #include <Structs/Skyrim/AnimationGraphDescriptor_Master_Behavior.h>
 
 #include <TiltedCore/Math.hpp>
 #include <TiltedCore/Platform.hpp>
 
 using namespace TiltedPhoques;
+
+TEST_CASE("Quest run records roundtrip and reject inconsistent masks", "[encoding.quest]")
+{
+    RequestQuestAliasFills sent;
+    auto& run = sent.Fills;
+    run.Id = GameId(2, 0x3CEDA);
+    run.AuthorityEpoch = 41;
+    run.Sequence = 77;
+    run.HasStage = run.HasSeq = run.HasRun = true;
+    run.RecordKind = QuestAliasFills::SetStage;
+    run.QuestSeq = 3;
+    run.Stage = run.CurrentStageAfter = 10;
+    run.Status = 0;
+    run.TransactionId = 123;
+    run.QuestFlags = 1;
+    run.ItemCount = 6;
+    run.ItemMask = 0x25;
+    run.RunCount = 1;
+    run.HasObjectives = true;
+    run.Objectives = {{10, 1}, {20, 3}};
+    run.Entries = {{1, GameId(0, 0x123)}};
+    REQUIRE(run.IsValid());
+
+    Buffer requestBuffer(4096);
+    Buffer::Writer requestWriter(&requestBuffer);
+    sent.Serialize(requestWriter);
+    Buffer::Reader requestReader(&requestBuffer);
+    uint64_t opcode{};
+    REQUIRE(requestReader.ReadBits(opcode, 8));
+    RequestQuestAliasFills received;
+    received.DeserializeRaw(requestReader);
+    REQUIRE(received.IsValid());
+    REQUIRE(received == sent);
+
+    NotifyQuestAliasFills relay;
+    relay.Fills = run;
+    relay.Fills.Entries.clear();
+    relay.Fills.FillsIncluded = false;
+    relay.Revision = 29;
+    relay.LeaderPlayerId = 4;
+    relay.Replay = true;
+    Buffer relayBuffer(4096);
+    Buffer::Writer relayWriter(&relayBuffer);
+    relay.Serialize(relayWriter);
+    Buffer::Reader relayReader(&relayBuffer);
+    REQUIRE(relayReader.ReadBits(opcode, 8));
+    NotifyQuestAliasFills replayed;
+    replayed.DeserializeRaw(relayReader);
+    REQUIRE(replayed.IsValid());
+    REQUIRE(replayed == relay);
+
+    run.HasRun = false;
+    REQUIRE_FALSE(run.IsValid());
+    run.HasRun = true;
+    run.FillsIncluded = false;
+    REQUIRE_FALSE(run.IsValid());
+}
+
+TEST_CASE("Character snapshot roundtrips every field and refuses a foreign version or oversized list", "[encoding.character]")
+{
+    CharacterSnapshot sent;
+    sent.Name = "Rex";
+    sent.ChangeFlags = 0x1000800;
+    sent.AppearanceBuffer = String("\x01\x02\x00\x7F", 4);
+    sent.Level = 31;
+    sent.Xp = 412.5f;
+    sent.LevelThreshold = 1600.f;
+    sent.PerkPoints = 3;
+    for (uint32_t i = 0; i < CharacterSnapshot::kSkillCount; ++i)
+        sent.Skills.push_back({15.f + i, 0.25f * i, 100.f + i, i % 3});
+    sent.BaseValues = {{24, 250.f}, {25, 180.f}, {26, 210.f}};
+    sent.DragonSouls = 4.f;
+    sent.Perks = {{GameId(0, 0xBABE4), 1}, {GameId(0, 0xBCD2A), 5}};
+    sent.Spells = {GameId(0, 0x12FCD), GameId(1, 0x800)};
+    sent.Shouts = {GameId(0, 0x13E07)};
+    sent.Words = {{GameId(0, 0x602A3), true}, {GameId(0, 0x602A4), false}};
+    Inventory::Entry gold;
+    gold.BaseId = GameId(0, 0xF);
+    gold.Count = 1234;
+    sent.Items.Entries.push_back(gold);
+    sent.ExcludedQuestItems = {GameId(0, 0x2BE4A)};
+
+    Buffer buffer(1 << 14);
+    Buffer::Writer writer(&buffer);
+    sent.Serialize(writer);
+    writer.WriteBits(0xBEEF, 16);
+    Buffer::Reader reader(&buffer);
+    CharacterSnapshot received;
+    REQUIRE(received.Deserialize(reader));
+    uint64_t sentinel{};
+    reader.ReadBits(sentinel, 16);
+    REQUIRE(sentinel == 0xBEEF);
+    REQUIRE(received == sent);
+
+    // A snapshot from another format version is refused rather than misread.
+    Buffer foreign(64);
+    Buffer::Writer foreignWriter(&foreign);
+    Serialization::WriteVarInt(foreignWriter, CharacterSnapshot::kVersion + 1);
+    Buffer::Reader foreignReader(&foreign);
+    CharacterSnapshot unusable;
+    REQUIRE_FALSE(unusable.Deserialize(foreignReader));
+
+    // A skill list longer than the game's 18 skills marks the snapshot corrupt.
+    CharacterSnapshot oversized = sent;
+    oversized.Skills.push_back({});
+    Buffer big(1 << 14);
+    Buffer::Writer bigWriter(&big);
+    oversized.Serialize(bigWriter);
+    Buffer::Reader bigReader(&big);
+    CharacterSnapshot rejected;
+    REQUIRE_FALSE(rejected.Deserialize(bigReader));
+}
+
+TEST_CASE("A hostile inventory count stops at the data instead of allocating without end", "[encoding.inventory]")
+{
+    // Review 2026-09-30: an entry count of 2^32-1 pushed default entries until the game ran out of memory.
+    Buffer buffer(64);
+    Buffer::Writer writer(&buffer);
+    Serialization::WriteVarInt(writer, 0xFFFFFFFFull);
+    Buffer::Reader reader(&buffer);
+    Inventory inventory;
+    inventory.Deserialize(reader);
+    REQUIRE(inventory.Entries.size() <= 16384);
+}
+
+TEST_CASE("A drop-in chunk offset near 2^64 does not wrap past the size check", "[encoding.dropin]")
+{
+    DropInData chunk;
+    chunk.Attempt = 1;
+    chunk.Op = DropInOp::Chunk;
+    chunk.Bytes = "x";
+    chunk.Offset = 0;
+    REQUIRE(chunk.Valid());
+    chunk.Offset = std::numeric_limits<uint64_t>::max();
+    REQUIRE_FALSE(chunk.Valid());
+    chunk.Offset = DropInData::MaxFile;
+    REQUIRE_FALSE(chunk.Valid());
+}
 
 TEST_CASE("Player camera look survives movement encoding", "[encoding.movement]")
 {
@@ -99,6 +241,13 @@ TEST_CASE("Both movement message formats preserve independent player look direct
     ServerReferencesMoveRequest relayed;
     relayed.Tick = received.Tick;
     relayed.Updates = received.Updates;
+    // The relay carries each owner sample's age (Lokir jitter, 2026-09-30): 0, one byte, and multi-byte values.
+    std::vector<uint32_t> ids;
+    for (const auto& entry : relayed.Updates)
+        ids.push_back(entry.first);
+    for (size_t i = 0; i < ids.size(); ++i)
+        relayed.Updates[ids[i]].SampleAge = i == 0 ? 0 : 999;
+    relayed.Updates[42].SampleAge = 17;
     Buffer serverBuffer(8192);
     Buffer::Writer serverWriter(&serverBuffer);
     relayed.Serialize(serverWriter);
@@ -110,6 +259,9 @@ TEST_CASE("Both movement message formats preserve independent player look direct
     REQUIRE(presented.Updates.size() == sent.Updates.size());
     for (const auto& [id, update] : sent.Updates)
         REQUIRE(presented.Updates.at(id).UpdatedMovement == update.UpdatedMovement);
+    for (const auto& [id, update] : relayed.Updates)
+        REQUIRE(presented.Updates.at(id).SampleAge == update.SampleAge);
+    REQUIRE(presented.Updates.at(42).SampleAge == 17);
 }
 
 TEST_CASE("Every server setting participates in equality", "[encoding.settings]")
@@ -1043,6 +1195,42 @@ TEST_CASE("Evaluated pose transport bounds", "[encoding.pose]")
     REQUIRE(pose.IsValid());
     pose.Bones[0].Rotation[0] = std::numeric_limits<float>::infinity();
     REQUIRE_FALSE(pose.IsValid());
+}
+
+TEST_CASE("Evaluated pose carries a dying owner's bone-0 frame", "[encoding.pose]")
+{
+    // Lokir's flash at death (2026-09-30): receivers rebase bone 0 onto the owner's frame at capture.
+    EvaluatedPoseSnapshot pose;
+    pose.GraphDescriptor = 7;
+    pose.SourceTick = 1234;
+    pose.Bones.resize(2);
+    for (auto& bone : pose.Bones)
+    {
+        bone.Translation = {1.f, 2.f, 3.f};
+        bone.Rotation = {0.f, 0.f, 0.f, 1.f};
+        bone.Scale = {1.f, 1.f, 1.f};
+    }
+    for (const bool withParent : {false, true})
+    {
+        pose.HasParent = withParent;
+        pose.ParentTranslation = {16106.f, -82438.f, 8200.f};
+        pose.ParentRotation = {0.866f, -0.5f, 0.f, 0.5f, 0.866f, 0.f, 0.f, 0.f, 1.f};
+        pose.ParentScale = 1.f;
+        Buffer buffer(4096);
+        Buffer::Writer writer(&buffer);
+        pose.Serialize(writer);
+        Buffer::Reader reader(&buffer);
+        EvaluatedPoseSnapshot received;
+        received.Deserialize(reader);
+        REQUIRE(received.HasParent == withParent);
+        REQUIRE(received.Bones.size() == 2);
+        if (withParent)
+        {
+            REQUIRE(received.ParentTranslation == pose.ParentTranslation);
+            REQUIRE(received.ParentRotation == pose.ParentRotation);
+            REQUIRE(received.ParentScale == pose.ParentScale);
+        }
+    }
 }
 
 TEST_CASE("Evaluated pose packing keeps every bone within tolerance", "[encoding.pose]")

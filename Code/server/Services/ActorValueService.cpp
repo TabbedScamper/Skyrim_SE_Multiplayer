@@ -93,8 +93,16 @@ void ActorValueService::OnHealthChangeBroadcast(const PacketEvent<RequestHealthC
     NotifyHealthChangeBroadcast notify;
     notify.Id = message.Id;
     notify.DeltaHealth = message.DeltaHealth;
-
     const entt::entity cEntity = static_cast<entt::entity>(message.Id);
+    if (message.KillerId && acMessage.pPlayer)
+    {
+        const auto killer = static_cast<entt::entity>(message.KillerId);
+        const auto* victim = m_world.try_get<CharacterComponent>(cEntity);
+        const auto* killerCharacter = m_world.try_get<CharacterComponent>(killer);
+        if (acMessage.pPlayer->GetCharacter() == killer && victim && !victim->IsPlayer() &&
+            killerCharacter && killerCharacter->IsPlayer())
+            notify.KillerId = message.KillerId;
+    }
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.pPlayer))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
 }
@@ -118,6 +126,18 @@ void ActorValueService::OnDeathStateChange(const PacketEvent<RequestDeathStateCh
     notify.OwnershipEpoch = message.OwnershipEpoch;
     notify.Id = message.Id;
     notify.IsDead = message.IsDead;
+    if (message.IsDead && message.KillerId)
+    {
+        const auto killer = static_cast<entt::entity>(message.KillerId);
+        const auto* killerCharacter = m_world.try_get<CharacterComponent>(killer);
+        auto* party = m_world.GetPartyService().GetPlayerParty(acMessage.pPlayer);
+        if (killerCharacter && killerCharacter->IsPlayer() && party &&
+            std::any_of(party->Members.begin(), party->Members.end(), [killer](const Player* member)
+            {
+                return member && member->GetCharacter() == killer;
+            }))
+            notify.KillerId = message.KillerId;
+    }
 
     const entt::entity cEntity = static_cast<entt::entity>(message.Id);
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.pPlayer))

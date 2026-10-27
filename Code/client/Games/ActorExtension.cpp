@@ -4,7 +4,7 @@
 
 bool ActorExtension::IsRemote() const noexcept
 {
-    return onlineFlags & kRemote;
+    return onlineFlags.load(std::memory_order_relaxed) & kRemote;
 }
 
 bool ActorExtension::IsLocal() const noexcept
@@ -14,31 +14,31 @@ bool ActorExtension::IsLocal() const noexcept
 
 bool ActorExtension::IsPlayer() const noexcept
 {
-    return onlineFlags & kPlayer;
+    return onlineFlags.load(std::memory_order_relaxed) & kPlayer;
 }
 
 bool ActorExtension::IsRemotePlayer() const noexcept
 {
-    return IsRemote() && IsPlayer();
+    return (onlineFlags.load(std::memory_order_relaxed) & (kRemote | kPlayer)) == (kRemote | kPlayer);
 }
 
 bool ActorExtension::IsLocalPlayer() const noexcept
 {
-    return IsLocal() && IsPlayer();
+    return (onlineFlags.load(std::memory_order_relaxed) & (kRemote | kPlayer)) == kPlayer;
 }
 
 void ActorExtension::SetRemote(bool aSet) noexcept
 {
     if (aSet)
-        onlineFlags |= kRemote;
+        onlineFlags.fetch_or(kRemote, std::memory_order_relaxed);
     else
-        onlineFlags &= ~kRemote;
+        onlineFlags.fetch_and(~kRemote, std::memory_order_relaxed);
 }
 
 void ActorExtension::SetPlayer(bool aSet) noexcept
 {
     if (aSet)
-        onlineFlags |= kPlayer;
+        onlineFlags.fetch_or(kPlayer, std::memory_order_relaxed);
     else
-        onlineFlags &= ~kPlayer;
+        onlineFlags.fetch_and(~kPlayer, std::memory_order_relaxed);
 }

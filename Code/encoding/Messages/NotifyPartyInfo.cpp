@@ -17,9 +17,17 @@ void NotifyPartyInfo::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const
     aWriter.WriteBits(CampaignMode, 2);
     aWriter.WriteBits(SessionState, 2);
     aWriter.WriteBits(StartEpoch, 64);
+    aWriter.WriteBits(LeaderGeneration, 32);
     Serialization::WriteString(aWriter, CheckpointId);
     Serialization::WriteBool(aWriter, LobbyOpen);
     Serialization::WriteBool(aWriter, PasswordProtected);
+    aWriter.WriteBits(SteamIds.size() & 0xFF, 8);
+    for (const auto id : SteamIds)
+        aWriter.WriteBits(id, 64);
+    aWriter.WriteBits(HandoffTargetSteamId, 64);
+    Serialization::WriteString(aWriter, HandoffCheckpointId);
+    Serialization::WriteBool(aWriter, HandoffReady);
+    Serialization::WriteBool(aWriter, HandoffSeeded);
 }
 
 void NotifyPartyInfo::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -46,7 +54,17 @@ void NotifyPartyInfo::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noe
     aReader.ReadBits(value, 2);
     SessionState = value & 0x3;
     aReader.ReadBits(StartEpoch, 64);
+    aReader.ReadBits(value, 32);
+    LeaderGeneration = static_cast<uint32_t>(value);
     CheckpointId = Serialization::ReadString(aReader);
     LobbyOpen = Serialization::ReadBool(aReader);
     PasswordProtected = Serialization::ReadBool(aReader);
+    aReader.ReadBits(count, 8);
+    SteamIds.resize(count);
+    for (auto& id : SteamIds)
+        aReader.ReadBits(id, 64);
+    aReader.ReadBits(HandoffTargetSteamId, 64);
+    HandoffCheckpointId = Serialization::ReadString(aReader);
+    HandoffReady = Serialization::ReadBool(aReader);
+    HandoffSeeded = Serialization::ReadBool(aReader);
 }

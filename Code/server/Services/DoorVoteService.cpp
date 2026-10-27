@@ -1,4 +1,5 @@
 #include <Services/DoorVoteService.h>
+#include <Services/ReviveService.h>
 #include <World.h>
 #include <Components.h>
 #include <GameServer.h>
@@ -19,6 +20,9 @@ bool DoorVoteService::IsNear(Player* aPlayer, const DoorVoteData& aData, float a
 {
     if (!aPlayer || !aPlayer->GetCharacter())
         return false;
+    // A test-cell move has no door to stand at.
+    if (aData.Door && aData.Door == aData.Destination)
+        return true;
     const auto& cell = aPlayer->GetCellComponent();
     if (aData.WorldSpace ? cell.WorldSpaceId != aData.WorldSpace : cell.Cell != aData.Cell)
         return false;
@@ -66,10 +70,18 @@ void DoorVoteService::Cancel(Vote& aVote, const char* aReason) const noexcept
     Broadcast(aVote, DoorVoteAction::Cancel, "Door vote cancelled");
 }
 
-void DoorVoteService::Changed(Vote& aVote) noexcept
+void DoorVoteService::Changed(Vote& aVote, bool aExtendDeadline) noexcept
 {
+    // A fallen member spectates and cannot vote: it is carried through with the party (owner question 2026-09-28).
+    // Downed members still hold the vote, so nobody leaves a bleeding ally behind.
+    for (const auto id : aVote.Members)
+        if (m_world.GetReviveService().IsFallenPlayer(id))
+            aVote.Ready.insert(id);
     aVote.Data.Tick = 0;
-    aVote.Deadline = GameServer::Get()->GetTick() + 120000;
+    // A player's vote restarts the 120 s window; a carry-through or a prune does not (repeated falls could stretch a
+    // vote forever).
+    if (aExtendDeadline)
+        aVote.Deadline = GameServer::Get()->GetTick() + 120000;
     spdlog::info("Door vote: vote {}/{}", aVote.Ready.size(), aVote.Members.size());
     const auto notice = fmt::format("{} wants to go through {}: {}/{} ready. Activate the door to go.",
         aVote.InitiatorName, aVote.Data.Name, aVote.Ready.size(), aVote.Members.size());
@@ -101,6 +113,38 @@ void DoorVoteService::OnRequest(const PacketEvent<DoorVoteRequest>& aEvent) noex
         it = m_votes.end();
     }
     const auto now = GameServer::Get()->GetTick();
+    if (request.Action == DoorVoteAction::TestCell)
+    {
+        // Test harness only: the leader moves the whole party into a cell through the door barrier (Go at a shared
+        // tick, everyone loads, the world gate holds until all have). No door and no proximity.
+        if (party->LeaderPlayerId != player->GetId() || !request.Destination || request.Destination.ModId == UINT32_MAX ||
+            request.Name.empty())
+            return;
+        if (it != m_votes.end())
+        {
+            Cancel(it->second, "test cell move");
+            m_votes.erase(it);
+        }
+        Vote vote;
+        vote.Data = request;
+        vote.Data.Action = DoorVoteAction::Vote;
+        vote.Data.Door = request.Destination;
+        vote.Data.Tick = 0;
+        vote.Data.VoteId = ++m_nextVoteId;
+        vote.Initiator = player->GetId();
+        vote.InitiatorName = player->GetUsername().substr(0, 80);
+        vote.Leader = party->LeaderPlayerId;
+        vote.Deadline = now + 120000;
+        for (const auto* member : party->Members)
+        {
+            vote.Members.insert(member->GetId());
+            vote.Ready.insert(member->GetId());
+        }
+        auto& started = m_votes.emplace(partyId, std::move(vote)).first->second;
+        spdlog::info("Door vote: test cell {:X} for the party of {}", request.Destination.BaseId, player->GetUsername());
+        Changed(started);
+        return;
+    }
     if (request.Action == DoorVoteAction::Vote)
     {
         if (!request.Door || !request.Cell || !request.Destination || request.Door.ModId == UINT32_MAX ||
@@ -193,7 +237,9 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
     for (auto it = m_votes.begin(); it != m_votes.end();)
     {
         auto& vote = it->second;
+        // A fallen initiator spectates from elsewhere (its hidden body follows the camera): not a departure.
         const bool departed = (!vote.Data.Tick || now < vote.Data.Tick) &&
+            !m_world.GetReviveService().IsFallenPlayer(vote.Initiator) &&
             !IsNear(m_world.GetPlayerManager().GetById(vote.Initiator), vote.Data, 400.f);
         if (!IsCurrent(it->first, vote) || now >= vote.Deadline || departed)
         {
@@ -209,10 +255,16 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
         if (!vote.Data.Tick || now < vote.Data.Tick)
         {
             bool changed = false;
+            // A member who fell mid-vote is carried through at once, not at the next vote event (the vote used to
+            // sit until its 120 s deadline; review 2026-09-29).
+            for (const auto id : vote.Members)
+                if (!vote.Ready.count(id) && m_world.GetReviveService().IsFallenPlayer(id))
+                    changed = true;
             for (auto ready = vote.Ready.begin(); ready != vote.Ready.end();)
             {
                 auto* player = m_world.GetPlayerManager().GetById(*ready);
-                if (!IsNear(player, vote.Data, 400.f))
+                // Fallen members spectate from wherever they are; distance does not apply to them.
+                if (!IsNear(player, vote.Data, 400.f) && !m_world.GetReviveService().IsFallenPlayer(*ready))
                 {
                     ready = vote.Ready.erase(ready);
                     vote.Data.Tick = 0;
@@ -224,7 +276,7 @@ void DoorVoteService::OnUpdate(const UpdateEvent&) noexcept
                     ++ready;
             }
             if (changed)
-                Changed(vote);
+                Changed(vote, false);
         }
         ++it;
     }

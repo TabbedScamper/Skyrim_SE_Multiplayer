@@ -1,0 +1,101 @@
+<ng-template #buttonGlyph let-glyph>
+  <svg *ngIf="glyph?.kind === 'face'" class="glyph face" viewBox="0 0 28 28" aria-hidden="true">
+    <circle cx="14" cy="14" r="12.5" />
+    <text *ngIf="glyph.text" x="14" y="19.2">{{ glyph.text }}</text>
+    <path *ngIf="glyph.symbol === 'cross'" class="symbol" d="M9,9 L19,19 M19,9 L9,19" />
+    <circle *ngIf="glyph.symbol === 'circle'" class="symbol" cx="14" cy="14" r="5.5" />
+    <rect *ngIf="glyph.symbol === 'square'" class="symbol" x="9" y="9" width="10" height="10" />
+    <path *ngIf="glyph.symbol === 'triangle'" class="symbol" d="M14,7.8 L20,18.6 L8,18.6 Z" />
+  </svg>
+  <span *ngIf="glyph?.kind === 'pill'" class="glyph pill">{{ glyph.text }}</span>
+  <span *ngIf="glyph?.kind === 'key'" class="key">{{ glyph.text }}</span>
+</ng-template>
+
+<!-- Skyrim's health meter: a tapered capsule whose red fill shrinks from both ends toward the centre. -->
+<ng-template #bleedMeter let-value let-paused="paused" let-small="small">
+  <div class="bleed" [class.small]="small" [class.paused]="paused" role="meter" aria-label="Bleedout"
+       [attr.aria-valuenow]="value * 100" aria-valuemin="0" aria-valuemax="100">
+    <div class="bleed-fill" [style.width.%]="value * 100"></div>
+  </div>
+</ng-template>
+
+<section *ngIf="mode === 1 || mode === 2" class="activate" aria-live="polite">
+  <div class="target">{{ name }}</div>
+  <ng-container *ngIf="bleed >= 0">
+    <ng-container *ngTemplateOutlet="bleedMeter; context: { $implicit: bleed, paused: mode === 2, small: true }"></ng-container>
+  </ng-container>
+  <div class="action" *ngIf="mode === 1">
+    <ng-container *ngTemplateOutlet="buttonGlyph; context: { $implicit: glyph() }"></ng-container>
+    <span>{{ hint || 'Revive' }}</span>
+  </div>
+  <ng-container *ngIf="mode === 2">
+    <div class="action"><span>Reviving</span></div>
+    <div class="revive" role="progressbar" [attr.aria-valuenow]="progress * 100" aria-valuemin="0" aria-valuemax="100">
+      <div class="revive-fill" [style.width.%]="progress * 100"></div>
+    </div>
+  </ng-container>
+  <div class="note" *ngIf="note">{{ note }}</div>
+</section>
+
+<section *ngIf="mode === 3" class="down" aria-live="assertive">
+  <div class="rule" aria-hidden="true"><span></span><i></i><span></span></div>
+  <div class="title">Bleeding out</div>
+  <ng-container *ngTemplateOutlet="bleedMeter; context: { $implicit: bleed, paused: !!name, small: false }"></ng-container>
+  <div class="clock">{{ timeLeft() }}</div>
+  <ng-container *ngIf="name; else waiting">
+    <div class="detail">{{ name }} is reviving you</div>
+    <div class="revive" role="progressbar" [attr.aria-valuenow]="progress * 100" aria-valuemin="0" aria-valuemax="100">
+      <div class="revive-fill" [style.width.%]="progress * 100"></div>
+    </div>
+    <div class="note" *ngIf="note">{{ note }}</div>
+  </ng-container>
+  <ng-template #waiting>
+    <div class="detail">A nearby ally can revive you</div>
+  </ng-template>
+  <div class="rule" aria-hidden="true"><span></span><i></i><span></span></div>
+  <div class="action respawn" *ngIf="hint">
+    <span class="key" *ngIf="key">{{ key }}</span>
+    <span>{{ hint }}</span>
+  </div>
+</section>
+
+<!-- Fallen: spectating the living, like a vanilla banner at the bottom of the screen. -->
+<section *ngIf="mode === 4" class="fallen" aria-live="polite">
+  <div class="rule" aria-hidden="true"><span></span><i></i><span></span></div>
+  <div class="title fallen-title">Fallen</div>
+  <div class="watch" *ngIf="name; else alone">
+    <ng-container *ngIf="gamepad; else keysPrev">
+      <svg class="glyph dpad" viewBox="0 0 28 28" aria-label="D-pad left"><path d="M4,14 L12,7 L12,11 L22,11 L22,17 L12,17 L12,21 Z" /></svg>
+    </ng-container>
+    <ng-template #keysPrev><span class="key">{{ spectateKeys()[0] }}</span></ng-template>
+    <span class="watching">Watching <b>{{ name }}</b></span>
+    <ng-container *ngIf="gamepad; else keysNext">
+      <svg class="glyph dpad" viewBox="0 0 28 28" aria-label="D-pad right"><path d="M24,14 L16,7 L16,11 L6,11 L6,17 L16,17 L16,21 Z" /></svg>
+    </ng-container>
+    <ng-template #keysNext><span class="key">{{ spectateKeys()[1] }}</span></ng-template>
+  </div>
+  <ng-template #alone><div class="watch"><span class="watching">{{ note }}</span></div></ng-template>
+  <div class="count" *ngIf="name && note">{{ note }}</div>
+  <div class="detail small">{{ hint }}</div>
+  <div class="rule" aria-hidden="true"><span></span><i></i><span></span></div>
+</section>
+
+<!-- Call back a fallen ally: hold the Shout key (full magicka, out of combat). -->
+<section *ngIf="mode === 5" class="ritual" aria-live="polite">
+  <div class="action">
+    <ng-container *ngTemplateOutlet="buttonGlyph; context: { $implicit: glyph() }"></ng-container>
+    <span>Hold: {{ hint || 'Call back' }} <b class="ritual-name">{{ name }}</b></span>
+  </div>
+  <div class="revive ritual-bar" *ngIf="progress > 0" role="progressbar" [attr.aria-valuenow]="progress * 100" aria-valuemin="0" aria-valuemax="100">
+    <div class="revive-fill ritual-fill" [style.width.%]="progress * 100"></div>
+  </div>
+  <div class="note" *ngIf="note">{{ note }}</div>
+</section>
+
+<!-- The whole party has fallen: the vanilla death beat before the last save loads. -->
+<section *ngIf="mode === 6" class="wipe" aria-live="assertive">
+  <div class="rule" aria-hidden="true"><span></span><i></i><span></span></div>
+  <div class="title wipe-title">All have fallen</div>
+  <div class="detail small">{{ hint }}</div>
+  <div class="rule" aria-hidden="true"><span></span><i></i><span></span></div>
+</section>

@@ -34,7 +34,7 @@ class QuestItemSchemaTests(unittest.TestCase):
         self.db.execute("INSERT INTO quest_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", tuple(row.values()))
 
     def test_additive_schema_is_repeatable(self):
-        self.assertEqual(len(SCHEMA), 4)
+        self.assertEqual(len(SCHEMA), 5)
         self.insert()
         for sql in SCHEMA:
             self.db.execute(sql)

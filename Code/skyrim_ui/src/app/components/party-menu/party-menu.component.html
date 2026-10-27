@@ -113,7 +113,11 @@
     </div>
   </ng-template>
 
+  <p *ngIf="confirmingLeave" class="leave-confirm">
+    {{ (isPartyLeader$ | async) ? 'End the party? Everyone returns to their own main menu.' : 'Leave the party? Your character keeps what you found.' }}
+  </p>
+  <button *ngIf="confirmingLeave" class="party-menu-button btn" (click)="confirmingLeave = false">Stay</button>
   <button class="party-menu-button btn" (click)="leave()">
-    {{ 'COMPONENT.PARTY_MENU.LEAVE_PARTY' | transloco }}
+    {{ confirmingLeave ? 'Yes' : ((isPartyLeader$ | async) ? 'END PARTY' : ('COMPONENT.PARTY_MENU.LEAVE_PARTY' | transloco)) }}
   </button>
 </ng-template>

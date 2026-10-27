@@ -7,8 +7,28 @@
 #include <imgui/imgui_impl_win32.h>
 #include <imgui.h>
 
+#include <atomic>
+
 // According to imgui documentation we have to do it this way in order to avoid link conflicts with windows.h
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+namespace
+{
+std::atomic<bool> s_pointerSet{};
+std::atomic<float> s_pointerU{}, s_pointerV{};
+} // namespace
+
+void ImguiService::SetPointer(float aU, float aV) noexcept
+{
+    s_pointerU = aU;
+    s_pointerV = aV;
+    s_pointerSet = true;
+}
+
+void ImguiService::ClearPointer() noexcept
+{
+    s_pointerSet = false;
+}
 
 ImguiService::ImguiService()
     : OnDraw(m_drawSignal)
@@ -35,12 +55,23 @@ void ImguiService::Render() const
     ImGui_ImplDX11_NewFrame();
 
     ImGui_ImplWin32_NewFrame();
+    if (s_pointerSet)
+    {
+        auto& io = ImGui::GetIO();
+        io.MousePos = ImVec2(s_pointerU * io.DisplaySize.x, s_pointerV * io.DisplaySize.y);
+    }
     ImGui::NewFrame();
 
     m_drawSignal.publish();
     ImGui::Render();
 
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+}
+
+void ImguiService::DrawLastFrame() const
+{
+    if (ImGui::GetCurrentContext() && ImGui::GetDrawData())
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 }
 
 void ImguiService::Reset() const

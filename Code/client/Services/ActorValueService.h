@@ -2,6 +2,7 @@
 
 #include <Events/EventDispatcher.h>
 #include <Games/Events.h>
+#include <mutex>
 
 struct World;
 
@@ -37,6 +38,7 @@ public:
     // The owner reported this remote actor dead and its death is queued here (the fallback when no
     // ragdoll stream kills it first).
     [[nodiscard]] static bool IsDeathPending(uint32_t aFormId) noexcept;
+    static void DrainQueuedMurders() noexcept;
 
     ActorValueService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept;
     ~ActorValueService() noexcept = default;
@@ -83,7 +85,7 @@ private:
     /**
      * @brief Receives health value changes and applies them locally.
      */
-    void OnHealthChangeBroadcast(const NotifyHealthChangeBroadcast& acMessage) const noexcept;
+    void OnHealthChangeBroadcast(const NotifyHealthChangeBroadcast& acMessage) noexcept;
     /**
      * @brief Receives death state changes and applies them locally.
      */
@@ -124,4 +126,6 @@ private:
 
     //! @brief Server ids and collected health changes.
     Map<uint32_t, float> m_smallHealthChanges;
+    Map<uint32_t, uint32_t> m_pendingKillerIds;
+    std::mutex m_pendingKillerMutex;
 };

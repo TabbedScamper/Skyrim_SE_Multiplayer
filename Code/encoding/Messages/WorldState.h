@@ -7,7 +7,7 @@
 
 enum class WorldStateKind : uint8_t
 {
-    Disabled, Destroyed, DestructionHealth, Open, Lock, FinishedSequence, AnimationEvent, AnimationSnapshot, Count
+    Disabled, Destroyed, DestructionHealth, Open, Lock, FinishedSequence, AnimationEvent, AnimationSnapshot, BlockActivation, Count
 };
 
 // Durable properties and ordered animation inputs. Sequence is per reference.

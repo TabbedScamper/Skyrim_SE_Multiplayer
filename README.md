@@ -41,3 +41,9 @@ Tilted Online is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
+
+## Skyrim SE Multiplayer credits
+
+- Skyrim SE Multiplayer is a fork of Skyrim Together Reborn (Tilted Online) by Tilted Phoques, under the GNU General Public License v3.
+- The multiplayer lobby's campfire locations come from [Interesting Locations](https://www.nexusmods.com/skyrimspecialedition/mods/153298) by DrainvolOFF, included unchanged with the author's permission (re-upload allowed with credit). Installing it also adds its new locations to the open world in regular games. See docs/THIRD_PARTY.md.
+

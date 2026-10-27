@@ -1,4 +1,10 @@
 #include <Services/CreatorTogether.h>
+#include <Games/References.h>
+#include <Services/LobbyService.h>
+#include <Services/PartyService.h>
+#include <Services/CharacterSnapshots.h>
+#include <Services/CharacterService.h>
+#include <Services/CheckpointSaves.h>
 #include <Services/Generic/BoundPoseKeeper.h>
 
 #include <World.h>
@@ -11,6 +17,9 @@
 #include <Games/Skyrim/Interface/IMenu.h>
 #include <Forms/TESNPC.h>
 #include <Forms/TESRace.h>
+#include <Forms/TESQuest.h>
+#include <Games/Skyrim/AI/Movement/PlayerControls.h>
+#include <Messages/PartyStartRequest.h>
 #include <Messages/NotifyPlayerAppearance.h>
 #include <Systems/FaceGenSystem.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
@@ -22,6 +31,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <xinput.h>
 
 namespace
@@ -35,8 +45,49 @@ std::atomic<bool> s_forceReleaseRequested{};
 std::atomic<bool> s_participating{};
 std::atomic<bool> s_done{};
 std::atomic<bool> s_releasing{};
+std::atomic<bool> s_skipEditingLocked{};
 // This player is looking at another player's character: its own customization panels are hidden.
 std::atomic<bool> s_viewingOther{};
+std::atomic<uint32_t> s_leakedFrames{}; // see LeakedFrames
+std::atomic<uint32_t> s_appliedLooks{};
+
+// Main-frame owner of the follower's chosen character. The client update only reads the two atomic barrier bits.
+std::optional<CharacterSnapshot> s_skipSnapshot;
+uint64_t s_choiceWaitSinceMs{};
+std::atomic<bool> s_skipRequested{};
+std::atomic<bool> s_skipReady{};
+std::mutex s_skipStatusLock;
+std::string s_skipChoice{"PRISONER"};
+std::string s_skipStage{"inactive"};
+std::atomic<uint64_t> s_skipEpoch{};
+uint8_t s_skipPhase{};
+std::atomic<bool> s_skipFullState{};
+uint64_t s_unbindSinceMs{};
+uint64_t s_nextCuffCheckMs{};
+std::atomic<uint64_t> s_skipOperation{};
+uint64_t s_publishSinceMs{};
+std::atomic<uint64_t> s_publishEpoch{}, s_publishedEpoch{};
+uint64_t s_nextPublishMs{}; // client-update owner
+uint64_t s_publishAttemptEpoch{};
+uint32_t s_publishAttempts{};
+struct SkipSession
+{
+    bool InParty{}, Leader{};
+    uint8_t Mode{}, State{};
+    uint64_t Epoch{};
+};
+SkipSession s_skipSession; // client update -> main frame, under s_skipStatusLock
+bool s_skipEligible{}; // decided once per epoch, never recomputed on promotion
+std::string s_skipHomeKey;
+
+void SetSkipStage(const char* apStage)
+{
+    {
+        std::lock_guard lock(s_skipStatusLock);
+        s_skipStage = apStage;
+    }
+    spdlog::info("Skip creator: {} ({})", apStage, s_skipChoice);
+}
 
 // RaceSexMenu's begin-closing (ID 52388, VA 14096b7d0; called by ChangeName after Done and the name):
 // Scaleform FadeOut, camera saved, menu byte +0x1a0 = 1 (closing), after which the menu's per-frame
@@ -85,6 +136,232 @@ IMenu* GetCreatorMenu() noexcept
     return pUI && pUI->GetMenuOpen(name) ? pUI->FindMenuByName(name) : nullptr;
 }
 
+void TickSkipCreator(IMenu* apMenu) noexcept
+{
+    SkipSession session;
+    {
+        std::lock_guard lock(s_skipStatusLock);
+        session = s_skipSession;
+    }
+    const uint64_t epoch = session.InParty && session.State >= 1 ? session.Epoch : 0;
+    if (epoch != s_skipEpoch.load())
+    {
+        CharacterSnapshots::CancelApply(s_skipOperation.exchange(0));
+        s_skipSnapshot.reset();
+        s_skipHomeKey.clear();
+        s_skipRequested.store(false);
+        s_skipReady.store(false);
+        s_skipEditingLocked.store(false);
+        s_skipFullState.store(false);
+        s_skipPhase = 0;
+        s_unbindSinceMs = s_nextCuffCheckMs = 0;
+        s_choiceWaitSinceMs = 0;
+        s_skipEpoch = epoch;
+        s_skipEligible = epoch && !session.Leader &&
+            (session.Mode == PartyStartRequest::kNew || session.Mode == PartyStartRequest::kContinue);
+        s_publishEpoch.store(0);
+        s_publishedEpoch.store(0);
+        s_publishSinceMs = 0;
+        {
+            std::lock_guard lock(s_skipStatusLock);
+            s_skipChoice = LobbyService::ChosenCharacterName();
+            s_skipStage = s_skipEligible ? "choosing" : "inactive";
+        }
+    }
+    if (!s_skipEligible || !epoch)
+        return;
+    if (!apMenu && s_skipPhase >= 4)
+        s_skipEditingLocked.store(false);
+    auto* pUi = UI::Get();
+    if (!pUi || pUi->GetMenuOpen(BSFixedString("Loading Menu")) || pUi->GetMenuOpen(BSFixedString("Main Menu")))
+    {
+        if (s_skipPhase >= 2 && s_skipPhase < 7)
+        {
+            CharacterSnapshots::CancelApply(s_skipOperation.exchange(0));
+            s_skipReady.store(false);
+            s_skipEditingLocked.store(false);
+            s_publishEpoch.store(0);
+            s_skipPhase = 8;
+            SetSkipStage("load interrupted character restore");
+        }
+        return;
+    }
+    if (s_skipPhase == 0)
+    {
+        // Continue can reach stage 75 from a checkpoint before creation. It must not import the
+        // lobby character into an ordinary continued campaign that already passed creation.
+        if (session.Mode == PartyStartRequest::kContinue)
+        {
+            auto* pPlayer = PlayerCharacter::Get();
+            auto* pQuest = Cast<TESQuest>(TESForm::GetById(0x3372B));
+            if (session.State < 2 || !pPlayer || !pPlayer->parentCell || !pQuest)
+                return;
+            if (pQuest->IsStageDone(80))
+            {
+                s_skipPhase = 8;
+                SetSkipStage("continued character already past creator");
+                return;
+            }
+        }
+        // The list may still be reading when the party starts: wait for it (bounded), never decide on an empty list.
+        if (!LobbyService::ChosenCharacterReady())
+        {
+            if (!s_choiceWaitSinceMs)
+                s_choiceWaitSinceMs = GetTickCount64();
+            if (GetTickCount64() - s_choiceWaitSinceMs < 20000)
+                return;
+            spdlog::warn("Skip creator: the character list was not read after 20 s; opening the creator");
+        }
+        CharacterSnapshot snapshot;
+        std::string choice;
+        bool fullState{};
+        if (!LobbyService::ChosenCharacterForNewGame(snapshot, fullState, choice))
+        {
+            if (!choice.empty() && choice != "PRISONER")
+                SetSkipStage("chosen character unavailable; opening creator");
+            else
+                SetSkipStage("native creator");
+            s_skipPhase = 8;
+            return;
+        }
+        s_skipFullState.store(fullState);
+        s_skipHomeKey = LobbyService::ChosenOwnPlaythroughKey();
+        {
+            std::lock_guard lock(s_skipStatusLock);
+            s_skipChoice = choice;
+        }
+        s_skipSnapshot = std::move(snapshot);
+        s_skipRequested.store(true);
+        s_skipPhase = 1;
+        SetSkipStage("waiting for intro creator");
+    }
+    if (s_skipPhase == 1 && apMenu && session.State >= 2 && s_holding.load())
+    {
+        // Import while the native creator remains open. Its normal Done path must hold the menu here
+        // so this player can use the shared viewer until the others finish.
+        s_participating.store(true);
+        s_skipEditingLocked.store(true);
+        s_skipOperation = CharacterSnapshots::QueueApplyAppearance(*s_skipSnapshot);
+        s_skipPhase = 2;
+        SetSkipStage("applying look and name in creator");
+    }
+    else if (s_skipPhase == 2)
+    {
+        if (!apMenu)
+        {
+            CharacterSnapshots::CancelApply(s_skipOperation.exchange(0));
+            s_skipPhase = 8;
+            SetSkipStage("creator closed before look was ready; gameplay barrier held");
+            return;
+        }
+        const auto status = CharacterSnapshots::ApplyStatus(s_skipOperation.load());
+        if (status.rfind("done", 0) == 0)
+        {
+            // QueueApplyAppearance has already written the name with the same fullName and
+            // change flag used by RaceSexMenu::ChangeName. Publish the verified look first.
+            s_publishSinceMs = GetTickCount64();
+            s_publishEpoch.store(epoch);
+            s_skipPhase = 3;
+            SetSkipStage("look applied in creator; publishing look");
+        }
+        else if (status.rfind("failed", 0) == 0)
+        {
+            s_skipPhase = 8;
+            SetSkipStage("look failed; gameplay barrier held");
+        }
+    }
+    else if (s_skipPhase == 3)
+    {
+        if (!apMenu)
+        {
+            s_publishEpoch.store(0);
+            s_skipPhase = 8;
+            SetSkipStage("creator closed before look publication; gameplay barrier held");
+            return;
+        }
+        if (s_publishedEpoch.load() != epoch)
+        {
+            if (GetTickCount64() - s_publishSinceMs >= 10000)
+            {
+                s_publishEpoch.store(0);
+                s_skipPhase = 8;
+                SetSkipStage("look publication timed out; gameplay barrier held");
+            }
+            return;
+        }
+        s_publishEpoch.store(0);
+        if (!s_holding.load() || s_releasing.load())
+            return;
+        // Use the native name and Done path after the verified look is published. Its
+        // begin-closing call is held by HookBeginClosing, before the fade or closing flag.
+        using TChangeName = void(void*, const char*);
+        POINTER_SKYRIMSE(TChangeName, s_changeName, 52415);
+        s_changeName.Get()(apMenu, s_skipSnapshot->Name.c_str());
+        s_skipReady.store(true);
+        s_skipPhase = 4;
+        SetSkipStage("Done; look ready; waiting for Keep unbinding");
+    }
+    else if (s_skipPhase == 4)
+    {
+        auto* pQuest = Cast<TESQuest>(TESForm::GetById(0x3372B));
+        auto* pControls = BSInputEnableManager::Get();
+        if (!pQuest || !pQuest->IsStageDone(240) || !pControls)
+            return;
+        uint32_t live{}, stored{};
+        using TGetControls = void(BSInputEnableManager*, uint32_t&, uint32_t&);
+        POINTER_SKYRIMSE(TGetControls, s_getControls, 68548);
+        s_getControls.Get()(pControls, live, stored);
+        if ((live & 0x40) == 0) // kFighting: disabled at stage 160, restored by Fragment_74
+            return;
+        s_unbindSinceMs = GetTickCount64();
+        s_nextCuffCheckMs = s_unbindSinceMs;
+        s_skipPhase = 5; // the non-latent fragment removes cuffs after enabling controls; check next frame
+        SetSkipStage("unbound; restoring character next frame");
+    }
+    else if (s_skipPhase == 5)
+    {
+        const auto now = GetTickCount64();
+        if (now < s_nextCuffCheckMs)
+            return;
+        auto* pPlayer = PlayerCharacter::Get();
+        auto* pCuffs = TESForm::GetById(0x10E039); // installed MQ101's PrisonerCuffsPlayer
+        if (!pPlayer || !pPlayer->parentCell || !pCuffs)
+            return;
+        if (pPlayer->GetItemCountInInventory(pCuffs) > 0)
+        {
+            if (now - s_unbindSinceMs >= 5000)
+            {
+                s_skipPhase = 8;
+                SetSkipStage("Keep cuffs remain; state restore withheld");
+            }
+            s_nextCuffCheckMs = now + 250;
+            return;
+        }
+        if (s_skipFullState)
+            s_skipOperation = CharacterSnapshots::QueueApplyState(*s_skipSnapshot);
+        else
+            s_skipOperation = CharacterSnapshots::QueueApplyItems(*s_skipSnapshot);
+        s_skipPhase = 6;
+        SetSkipStage(s_skipFullState ? "applying full state" : "applying legacy items; stats unavailable");
+    }
+    else if (s_skipPhase == 6)
+    {
+        const auto status = CharacterSnapshots::ApplyStatus(s_skipOperation.load());
+        if (status.rfind("done", 0) == 0)
+        {
+            if (!s_skipHomeKey.empty())
+                CheckpointSaves::SetCarryHomeSource(s_skipHomeKey);
+            s_skipPhase = 7;
+            SetSkipStage(s_skipFullState ? "full state restored" : "legacy items restored; stats unavailable");
+        }
+        else if (status.rfind("failed", 0) == 0)
+        {
+            s_skipPhase = 8;
+            SetSkipStage("state restore failed");
+        }
+    }
+}
+
 void SetPanelsHidden(IMenu* apMenu, bool aHidden) noexcept
 {
     auto* pMovie = apMenu ? apMenu->uiMovie : nullptr;
@@ -102,7 +379,8 @@ void SetPanelsHidden(IMenu* apMenu, bool aHidden) noexcept
         {
             s_movieWasVisible = getVisible(pMovie);
             s_hiddenMovie = pMovie;
-            spdlog::info("Character creator: panels hidden, Backspace or View/Back to edit again");
+            spdlog::info("Character creator: panels hidden{}",
+                s_skipEditingLocked.load() ? " for imported character" : ", Backspace or View/Back to edit again");
         }
         setVisible(pMovie, false);
     }
@@ -120,7 +398,7 @@ TProcessCreatorMessage* s_realProcessCreatorMessage{};
 UI_MESSAGE_RESULTS HookProcessCreatorMessage(IMenu* apMenu, UIMessage& aMessage)
 {
     // SetVisible suppresses drawing, not keyboard/controller events to the focused movie.
-    if (!s_releasing.load() && ((s_holding.load() && s_done.load()) || s_viewingOther.load()) &&
+    if (!s_releasing.load() && (s_skipEditingLocked.load() || (s_holding.load() && s_done.load()) || s_viewingOther.load()) &&
         (aMessage.eType == UIMessage::kScaleformEvent || aMessage.eType == UIMessage::kUserEvent))
         return UI_MESSAGE_RESULTS::kHandled;
     // BoundPoseKeeper observes the shared native rebuild (52391), including
@@ -136,6 +414,10 @@ bool IsRaceSexMenu(const BSFixedString* apName) noexcept
 // Held while the party is still creating: the player's Done closes nothing yet.
 void HookAddMessage(void* apQueue, const BSFixedString* apName, UIMessage::UI_MESSAGE_TYPE aType, void* apData)
 {
+    // The live lobby's splash keeps the smoke and the title menus up until its menu is ready (LobbyService).
+    if ((aType == UIMessage::kHide || aType == UIMessage::kForceHide) && apName &&
+        LobbyService::HoldsMenuOpen(apName->AsAscii()))
+        return;
     if (s_holding.load() && !s_releasing.load() && aType == UIMessage::kHide &&
         IsRaceSexMenu(apName))
     {
@@ -320,8 +602,59 @@ CreatorInput PollCreatorInput(bool aActive) noexcept
 
 namespace CreatorTogether
 {
+bool SkipRequested() noexcept
+{
+    return s_skipRequested.load();
+}
+
+bool SkipReady() noexcept
+{
+    return s_skipReady.load();
+}
+
+std::string SkipStatus() noexcept
+{
+    std::lock_guard lock(s_skipStatusLock);
+    std::string choice;
+    for (const char c : s_skipChoice)
+    {
+        if (c == '"' || c == '\\') choice += '\\';
+        if (static_cast<unsigned char>(c) >= 0x20) choice += c;
+    }
+    return fmt::format("\"skip\":{},\"chosen\":\"{}\",\"stage\":\"{}\",\"fullState\":{},\"epoch\":{},\"operation\":{},\"done\":{},\"ready\":{},\"editingLocked\":{}",
+        s_skipRequested.load(), choice, s_skipStage, s_skipFullState.load(), s_skipEpoch.load(), s_skipOperation.load(),
+        s_done.load(), s_skipReady.load(), s_skipEditingLocked.load());
+}
+
 void Update(World& aWorld, const bool aHolding, const bool aCreatorOpen) noexcept
 {
+    auto& party = aWorld.GetPartyService();
+    const SkipSession session{party.IsInParty(), party.IsLeader(), party.GetCampaignMode(),
+        party.GetSessionState(), party.GetStartEpoch()};
+    const auto epoch = session.InParty && session.State >= 1 ? session.Epoch : 0;
+    {
+        std::lock_guard lock(s_skipStatusLock);
+        if (s_skipSession.Epoch != session.Epoch || (s_skipSession.InParty && !session.InParty) ||
+            (s_skipSession.State >= 1 && session.State == 0))
+            CharacterSnapshots::CancelApply(s_skipOperation.load());
+        s_skipSession = session;
+    }
+    // BuildLook reads the ECS registry: publish on its client-update owner, with a bounded retry rate.
+    // The main-frame owner stops requests after ten seconds, success, cancellation or an epoch change.
+    if (epoch != s_publishAttemptEpoch)
+    {
+        s_publishAttemptEpoch = epoch;
+        s_publishAttempts = 0;
+        s_nextPublishMs = 0;
+    }
+    if (epoch && s_publishEpoch.load() == epoch && s_publishedEpoch.load() != epoch &&
+        s_publishAttempts < 40 && GetTickCount64() >= s_nextPublishMs)
+    {
+        ++s_publishAttempts;
+        s_nextPublishMs = GetTickCount64() + 250;
+        if (aWorld.GetCharacterService().SendLookNow())
+            s_publishedEpoch.store(epoch);
+    }
     s_holding.store(aHolding);
     if (!aCreatorOpen)
     {
@@ -459,7 +792,41 @@ void OnMainFrame() noexcept
     if (!entt::locator<World>::has_value())
         return;
     auto* pMenu = GetCreatorMenu();
+    TickSkipCreator(pMenu);
     BoundPoseKeeper::OnMainFrame(pMenu != nullptr, s_participating.load());
+    if (pMenu)
+    {
+        // Read-only: did a character that is not being viewed render last frame (any leaf mesh not hidden)?
+        std::vector<uint32_t> players;
+        size_t view = SIZE_MAX;
+        {
+            std::lock_guard lock(s_lock);
+            if (s_active)
+            {
+                players = s_players;
+                view = s_view;
+            }
+        }
+        for (size_t i = 0; i < players.size() && view < players.size(); ++i)
+        {
+            // Only a copy this creator already hid: the opening frame still shows it as it was in the world.
+            auto* pActor = i == view || !s_hiddenMeshes.contains(players[i]) ? nullptr : Cast<Actor>(TESForm::GetById(players[i]));
+            auto* pRoot = pActor ? pActor->GetNiNode() : nullptr;
+            if (!pRoot || (pRoot->flags & 1))
+                continue;
+            std::vector<NiAVObject*> leaves;
+            CollectLeaves(pRoot, leaves, 0);
+            const auto shown = std::count_if(leaves.begin(), leaves.end(), [](NiAVObject* apLeaf) { return !(apLeaf->flags & 1); });
+            if (shown)
+            {
+                const auto count = ++s_leakedFrames;
+                if (count <= 20 || count % 100 == 0)
+                    spdlog::info("Character creator together: {:X} is not viewed but {} of {} meshes rendered last frame (leak {})",
+                        players[i], shown, leaves.size(), count);
+                break;
+            }
+        }
+    }
     std::unordered_map<uint32_t, NotifyPlayerAppearance> pending;
     std::unordered_map<uint32_t, uint32_t> remoteActors;
     {
@@ -558,6 +925,7 @@ void OnMainFrame() noexcept
                 }
         });
         s_appliedAppearances[formId] = appearance;
+        ++s_appliedLooks;
         spdlog::info("Player {:X}: {} look applied on main thread, rebuild requested (skeleton {}, race {:X}, head {}, NPC {:X})",
             formId, appearance.InCreator ? "live creator" : "final", newSkeleton,
             pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0,
@@ -582,7 +950,7 @@ void OnMainFrame() noexcept
             }
         }
     }
-    if (input.Edit && s_holding.load() && !s_releaseRequested.load() &&
+    if (input.Edit && !s_skipEditingLocked.load() && s_holding.load() && !s_releaseRequested.load() &&
         !s_releasing.load() && s_done.exchange(false))
     {
         s_heldMenu.store(nullptr);
@@ -598,7 +966,8 @@ void OnMainFrame() noexcept
         s_viewingOther.store(s_active && s_view < s_players.size() && s_players[s_view] != 0x14);
     }
     // Hidden once Done, and while looking at another player's character (back when viewing its own again).
-    SetPanelsHidden(pMenu, !s_releasing.load() && ((s_holding.load() && s_done.load()) || s_viewingOther.load()));
+    SetPanelsHidden(pMenu, !s_releasing.load() && (s_skipEditingLocked.load() ||
+        (s_holding.load() && s_done.load()) || s_viewingOther.load()));
 
     std::vector<uint32_t> players;
     size_t view;
@@ -733,6 +1102,16 @@ bool GetDisplay(const uint32_t aFormId, NiPoint3& arPosition, float& arHeading) 
     arPosition = pPlayer->position;
     arHeading = pPlayer->rotation.z;
     return true;
+}
+
+uint32_t LeakedFrames() noexcept
+{
+    return s_leakedFrames.load();
+}
+
+uint32_t AppliedLooks() noexcept
+{
+    return s_appliedLooks.load();
 }
 } // namespace CreatorTogether
 

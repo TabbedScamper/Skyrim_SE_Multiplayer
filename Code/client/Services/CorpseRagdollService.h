@@ -42,6 +42,8 @@ public:
     // nothing else may move it (the corpse cell correction reloaded it with MoveTo: naked, then
     // teleported to the owner's final position). Any thread.
     static bool IsFollowingOwner(uint32_t aFormId) noexcept;
+    // Called by the native StartGetUp hook; only the owner can release a living copy.
+    static bool BlockNativeGetUp(uint32_t aFormId) noexcept;
     // Testing ground: the actor's ragdoll bodies as JSON (world positions, game units), "[]" if none.
     static std::string DescribeRagdollBodies(Actor* apActor) noexcept;
     static std::string DescribeRagdollRenderPose(Actor* apActor) noexcept;
@@ -57,6 +59,7 @@ private:
         uint64_t LastSentMs{};
         uint64_t LastTick{};
         bool SentSettled{};
+        bool DismountSent{};
         uint64_t DismemberTick{};
     };
     struct Sample
@@ -67,6 +70,7 @@ private:
         Vector<CorpseRagdollBody> Bodies;
         bool Settled{};
         bool Dying{};
+        uint8_t KnockState{};
     };
     struct RemoteRagdoll
     {
@@ -76,6 +80,8 @@ private:
         uint64_t Revision{}, PublishedRevision{};
         // This copy was knocked into ragdoll to follow the owner's stream, and live placement logged.
         bool Knocked{};
+        bool KnockPending{};
+        uint8_t KnockAttempts{};
         // Death watch: for 2 s after the copy's death transition, log every change of its worn list (naked flash).
         uint64_t WatchSinceMs{};
         std::string WatchWorn{"?"};
@@ -86,8 +92,13 @@ private:
         const char* LastSkipReason{};
         // Times the local actor reference was moved onto the owner origin while following.
         uint32_t AnchorMoves{};
+        // The copy's ragdoll drives its drawn body (bound with a driver). Until then it holds its last living pose,
+        // drawn relative to its own reference, so the owner's death-time reference turn must wait.
+        bool DrivesBody{};
         uint64_t DismemberTick{};
         uint64_t EndTick{};
+        uint8_t EndKnockState{};
+        bool OwnerWasKnocked{};
         uint64_t RetryTransitionMs{};
         const void* Root{};
         uint32_t LocalFormId{};

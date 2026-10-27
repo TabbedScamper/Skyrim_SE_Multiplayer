@@ -19,7 +19,7 @@ export interface ErrorEvent {
 
 export interface WrongVersionErrorEvent extends ErrorEvent {
   error: 'wrong_version';
-  data: { version: string; expectedVersion: string };
+  data: { version: string; expectedVersion: string; hint?: string };
 }
 
 export interface ModsMismatchErrorEvent extends ErrorEvent {
@@ -62,6 +62,14 @@ export class ErrorService {
     } else {
       let data: Record<string, any> = error.data;
       switch (error.error) {
+        case 'wrong_version': {
+          // The hint quotes the server's version text; the message is shown as HTML, so it is escaped.
+          const escape = (text: string) =>
+            text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+          const fallback = `This session runs ${error.data.expectedVersion}; you run ${error.data.version}.`;
+          data = { ...error.data, hint: escape(error.data.hint || fallback) };
+          break;
+        }
         case 'mods_mismatch':
           let mods = '';
           const install = error.data.mods

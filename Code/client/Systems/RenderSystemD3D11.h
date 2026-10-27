@@ -23,7 +23,7 @@ struct RenderSystemD3D11
 
     // to make yamashi mad
     void OnDeviceCreation(IDXGISwapChain* apSwapChain, ID3D11Device* apDevice, ID3D11DeviceContext* apContext);
-    void OnRender();
+    void OnRender(bool aDrawOnly = false);
     void OnReset(IDXGISwapChain* apSwapChain);
 
 private:

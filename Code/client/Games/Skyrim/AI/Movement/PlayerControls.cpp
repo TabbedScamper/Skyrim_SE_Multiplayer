@@ -1,5 +1,22 @@
 
 #include "AI/Movement/PlayerControls.h"
+#include <atomic>
+
+namespace { std::atomic_bool s_releaseQueued{}; }
+
+void PlayerControls::QueueInputRelease() noexcept
+{
+    s_releaseQueued.store(true, std::memory_order_release);
+}
+
+void PlayerControls::DrainInputRelease() noexcept
+{
+    if (s_releaseQueued.exchange(false, std::memory_order_acq_rel))
+    {
+        if (auto* controls = GetInstance())
+            controls->MarkInputRelease();
+    }
+}
 
 PlayerControls* PlayerControls::GetInstance()
 {

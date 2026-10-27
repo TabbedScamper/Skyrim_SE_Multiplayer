@@ -40,5 +40,6 @@ struct ExtraDataList
     };
 
     Bitfield* bitfield{};
-    mutable BSRecursiveLock lock{};
+    mutable BSReadWriteLock lock{};
 };
+static_assert(sizeof(ExtraDataList) == 0x20);

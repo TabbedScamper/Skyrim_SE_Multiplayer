@@ -32,6 +32,8 @@ struct CellIdComponent
 
     bool IsInRange(const CellIdComponent& acRhs, bool aIsDragon) const noexcept
     {
+        if (!*this || !acRhs)
+            return false;
         if (IsInInteriorCell())
             return Cell == acRhs.Cell;
 

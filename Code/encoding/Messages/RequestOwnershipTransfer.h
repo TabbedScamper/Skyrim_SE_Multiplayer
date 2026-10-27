@@ -8,7 +8,10 @@
 enum class OwnershipReleaseReason : uint8_t
 {
     Relinquish,
-    DeclineGrant
+    DeclineGrant,
+    // The leader's own scripts disabled or deleted this temporary actor where the party stands: it is gone for
+    // everyone, not handed to another player (session 2026-09-29: Keep Stormcloaks stayed on the follower).
+    ScriptRemoved
 };
 
 struct RequestOwnershipTransfer final : ClientMessage

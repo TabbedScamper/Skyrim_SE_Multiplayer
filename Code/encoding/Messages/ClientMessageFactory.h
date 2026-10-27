@@ -1,5 +1,8 @@
 #pragma once
 #include <Messages/Harness.h>
+#include <Messages/DropIn.h>
+#include <Messages/CheckpointRoster.h>
+#include <Messages/HostHandoff.h>
 #include <Messages/BusyLockRequest.h>
 
 #include <Messages/Message.h>
@@ -50,6 +53,7 @@
 #include <Messages/SendChatMessageRequest.h>
 #include <Messages/TeleportCommandRequest.h>
 #include <Messages/SetTimeCommandRequest.h>
+#include <Messages/RequestSaidOnce.h>
 #include <Messages/PlayerRespawnRequest.h>
 #include <Messages/DialogueRequest.h>
 #include <Messages/SubtitleRequest.h>
@@ -76,6 +80,7 @@
 #include <Messages/RequestPlayerControlState.h>
 #include <Messages/DoorVoteRequest.h>
 #include <Messages/ReviveRequest.h>
+#include <Messages/PhysicsLeaseRequest.h>
 #include <Messages/RequestScriptedCamera.h>
 
 #include <Messages/RequestQuestItems.h>
@@ -98,7 +103,7 @@ struct ClientMessageFactory
 
     template <class T> static auto Visit(T&& func)
     {
-        auto s_visitor = CreateMessageVisitor<RequestHarness, RequestNpcWorn, RequestNpcLoot, RequestWorldState, RequestWorldStateCell, RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
+        auto s_visitor = CreateMessageVisitor<RequestHandoffAck, RequestHandoffSeed, RequestCheckpointAvailability, RequestCheckpointRoster, PhysicsLeaseRequest, RequestDropIn, RequestSaidOnce, RequestHarness, RequestNpcWorn, RequestNpcLoot, RequestWorldState, RequestWorldStateCell, RequestPlayerControlState, RequestSharedDrop, RequestDialogueListen, BusyLockRequest, RequestPlayerCombatState, RequestQuestItems, RequestScriptedCamera, ReviveRequest, DoorVoteRequest, RequestPartyUnstuck, DismemberRequest, RequestQuestAliasFills,
             RequestScriptedActorState, AuthenticationRequest, AssignCharacterRequest, ClientReferencesMoveRequest, EnterInteriorCellRequest, RequestInventoryChanges, RequestFactionsChanges, RequestQuestUpdate, PartyInviteRequest, PartyAcceptInviteRequest, PartyLeaveRequest, PartyCreateRequest,
             PartyChangeLeaderRequest, PartyKickRequest, RequestActorValueChanges, RequestActorMaxValueChanges, EnterExteriorCellRequest, RequestHealthChangeBroadcast, ActivateRequest, LockChangeRequest, AssignObjectsRequest, RequestDeathStateChange, ShiftGridCellRequest,
             RequestOwnershipTransfer, RequestOwnershipClaim, RequestObjectInventoryChanges, SpellCastRequest, ProjectileLaunchRequest, InterruptCastRequest, AddTargetRequest, ScriptAnimationRequest, DrawWeaponRequest, AnimObjectRequest, MountRequest, NewPackageRequest, RequestRespawn, SyncExperienceRequest,

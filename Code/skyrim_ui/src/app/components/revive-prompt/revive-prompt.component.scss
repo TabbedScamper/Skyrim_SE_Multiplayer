@@ -1,0 +1,312 @@
+// Skyrim's HUD language: Futura Condensed caps with wide tracking, off-white text with a hard shadow, the activation
+// prompt below the crosshair, the tapered attribute meter (health red, shrinking toward its centre) and the thin
+// fading rules with a centre diamond used by its location and quest banners.
+:host {
+  position: fixed;
+  inset: 0;
+  z-index: 72;
+  pointer-events: none;
+  font-family: 'futura-condensed-medium', sans-serif;
+  color: #e5e3df;
+  text-shadow: 0 2px 3px #000;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+// ---- activation prompt (reviver) ----
+.activate {
+  position: absolute;
+  top: 56vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.target {
+  font-size: 26px;
+  color: #fff;
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 20px;
+  color: #d9d6cc;
+}
+
+.key {
+  min-width: 26px;
+  padding: 1px 7px;
+  border: 1px solid rgba(229, 227, 223, 0.85);
+  border-radius: 3px;
+  background: rgba(12, 14, 17, 0.55);
+  font-size: 17px;
+  text-align: center;
+  text-shadow: none;
+}
+
+.glyph {
+  flex: 0 0 auto;
+  filter: drop-shadow(0 1px 2px #000);
+}
+
+svg.face {
+  width: 28px;
+  height: 28px;
+
+  circle {
+    fill: rgba(0, 0, 0, 0.55);
+    stroke: #fff;
+    stroke-width: 1.6;
+  }
+
+  text {
+    fill: #fff;
+    font-size: 15px;
+    font-weight: bold;
+    text-anchor: middle;
+  }
+
+  .symbol {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 1.8;
+  }
+}
+
+.pill {
+  padding: 1px 8px;
+  border: 1px solid #fff;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 14px;
+  text-shadow: none;
+}
+
+.note {
+  margin-top: 2px;
+  font-size: 16px;
+  color: #e0a86c;
+  letter-spacing: 0.06em;
+}
+
+// ---- bleedout meter: Skyrim's health bar ----
+.bleed {
+  position: relative;
+  width: 380px;
+  height: 12px;
+  display: flex;
+  justify-content: center;
+  // Tapered frame: a dark capsule with a hairline edge, pointed at both ends.
+  background: rgba(8, 9, 11, 0.72);
+  clip-path: polygon(0 50%, 9px 0, calc(100% - 9px) 0, 100% 50%, calc(100% - 9px) 100%, 9px 100%);
+  box-shadow: inset 0 0 0 1px rgba(211, 210, 198, 0.45);
+
+  &.small {
+    width: 240px;
+    height: 8px;
+    clip-path: polygon(0 50%, 6px 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 6px 100%);
+  }
+}
+
+.bleed-fill {
+  height: 100%;
+  // Centred: the width shrinks toward the middle from both ends, as the health meter does.
+  background: linear-gradient(180deg, #f07a63 0%, #c0301f 45%, #7a130a 100%);
+  box-shadow: 0 0 8px rgba(226, 70, 50, 0.6);
+  transition: width 200ms linear;
+  animation: bleed-pulse 1.6s ease-in-out infinite;
+}
+
+// Held still while an ally revives: no pulse, and the red cools.
+.bleed.paused .bleed-fill {
+  animation: none;
+  filter: saturate(0.55) brightness(1.1);
+}
+
+@keyframes bleed-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.72; }
+}
+
+// ---- revive progress: a thin gold line filling left to right ----
+.revive {
+  position: relative;
+  width: 300px;
+  height: 5px;
+  margin-top: 4px;
+  background: rgba(8, 9, 11, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(211, 210, 198, 0.4);
+}
+
+.revive-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #8a6d2f, #e8cf8a);
+  box-shadow: 0 0 6px rgba(232, 207, 138, 0.55);
+  transition: width 100ms linear;
+}
+
+// ---- downed panel ----
+.down {
+  position: absolute;
+  top: 60vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 40px 14px;
+  background: radial-gradient(ellipse at center, rgba(12, 14, 17, 0.72) 0%, rgba(12, 14, 17, 0) 72%);
+}
+
+.title {
+  font-size: 32px;
+  letter-spacing: 0.22em;
+  color: #e9b2a6;
+  text-shadow: 0 0 12px rgba(200, 40, 25, 0.55), 0 2px 3px #000;
+}
+
+.clock {
+  font-size: 18px;
+  letter-spacing: 0.16em;
+  color: #cfc9bb;
+}
+
+.detail {
+  font-size: 19px;
+  color: #d9d6cc;
+}
+
+.respawn {
+  margin-top: 2px;
+  font-size: 15px;
+  color: #bdbcb7;
+}
+
+// Banner rule: hairlines fading outward with a small diamond in the centre.
+.rule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 420px;
+
+  span {
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(211, 210, 198, 0), rgba(211, 210, 198, 0.75));
+
+    &:last-child {
+      background: linear-gradient(90deg, rgba(211, 210, 198, 0.75), rgba(211, 210, 198, 0));
+    }
+  }
+
+  i {
+    width: 7px;
+    height: 7px;
+    transform: rotate(45deg);
+    border: 1px solid rgba(229, 227, 223, 0.85);
+    background: rgba(12, 14, 17, 0.6);
+  }
+}
+
+// ---- fallen: spectate banner, low on the screen so the watched player stays in view ----
+.fallen {
+  position: absolute;
+  bottom: 9vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 44px 12px;
+  background: radial-gradient(ellipse at center, rgba(12, 14, 17, 0.7) 0%, rgba(12, 14, 17, 0) 72%);
+}
+
+.fallen-title {
+  color: #c9c3d8;
+  text-shadow: 0 0 14px rgba(120, 100, 190, 0.55), 0 2px 3px #000;
+}
+
+.watch {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 21px;
+}
+
+.watching b {
+  color: #fff;
+  font-weight: normal;
+}
+
+.count {
+  font-size: 15px;
+  color: #bdbcb7;
+}
+
+.detail.small {
+  font-size: 16px;
+  color: #bdbcb7;
+}
+
+svg.dpad {
+  width: 28px;
+  height: 28px;
+
+  path {
+    fill: rgba(0, 0, 0, 0.55);
+    stroke: #fff;
+    stroke-width: 1.4;
+    stroke-linejoin: round;
+  }
+}
+
+// ---- call back a fallen ally: activation-style prompt below the crosshair ----
+.ritual {
+  position: absolute;
+  top: 64vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.ritual-name {
+  color: #fff;
+  font-weight: normal;
+}
+
+// Conjuration violet rather than the revive's gold.
+.ritual-fill {
+  background: linear-gradient(90deg, #4b3a86, #b9a6ff);
+  box-shadow: 0 0 8px rgba(160, 140, 255, 0.6);
+}
+
+// ---- party wipe ----
+.wipe {
+  position: absolute;
+  top: 40vh;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 60px;
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.75) 0%, rgba(0, 0, 0, 0) 75%);
+}
+
+.wipe-title {
+  font-size: 44px;
+  letter-spacing: 0.26em;
+  color: #e9b2a6;
+  text-shadow: 0 0 16px rgba(200, 40, 25, 0.6), 0 2px 3px #000;
+}

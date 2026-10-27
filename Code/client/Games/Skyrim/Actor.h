@@ -30,7 +30,7 @@ struct Actor : TESObjectREFR
     // Allocs and calls constructor
     static GamePtr<Actor> New() noexcept;
     // Places a brand new actor in the world
-    static GamePtr<Actor> Create(TESNPC* apBaseForm) noexcept;
+    static GamePtr<Actor> Create(TESNPC* apBaseForm, bool aRemotePlayer = false) noexcept;
     static GamePtr<Actor> Spawn(uint32_t aBaseFormId) noexcept;
 
     virtual void sub_9C();
@@ -46,7 +46,7 @@ struct Actor : TESObjectREFR
     virtual void SetWeaponDrawn(bool aDraw);
     virtual void sub_A7();
     virtual void sub_A8();
-    virtual void SetPosition(const NiPoint3& acPoint, bool aSyncHavok = true);
+    virtual void SetPosition(const NiPoint3& acPoint, bool aUpdateCharController);
     virtual void sub_AA();
     virtual void Resurrect(bool aResetInventory);
     virtual void sub_AC();
@@ -61,7 +61,7 @@ struct Actor : TESObjectREFR
     virtual void sub_B5();
     virtual void sub_B6();
     virtual void sub_B7();
-    virtual void sub_B8();
+    virtual uint32_t GetCrimeGoldValue(const TESFaction* apFaction) const;
     virtual void sub_B9();
     virtual void sub_BA();
     virtual void PayFine(TESFaction* apFaction, bool aGoToJail, bool aRemoveStolenItems);
@@ -228,6 +228,7 @@ struct Actor : TESObjectREFR
     void SetActorInventory(const Inventory& aInventory) noexcept;
     // Runs the biped-part rebuilds SetActorInventory queued (once per actor, after it settles).
     static void FlushPendingReset3D() noexcept;
+    static void DrainChargedCrimes() noexcept;
     // Rebuild this actor's 3D (DoReset3D) shortly, once (same queue as SetActorInventory).
     void QueueReset3D(uint32_t aDelayMs) noexcept;
     // A remote copy dies here when its owner's ragdoll starts on this PC's timeline: ragdoll at once.
@@ -269,9 +270,11 @@ struct Actor : TESObjectREFR
     void DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
     void DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
     void SpeakSound(const char* pFile);
-    void StartCombatEx(Actor* apTarget) noexcept;
     void SetCombatTargetEx(Actor* apTarget) noexcept;
     void StartCombat(Actor* apTarget) noexcept;
+    static void QueueStartCombatNative(uint32_t aActorId, uint32_t aTargetId) noexcept;
+    static void DrainStartCombatNative() noexcept;
+    // Papyrus stop is an asynchronous request; it does not destroy the controller immediately.
     void StopCombat() noexcept;
     bool PlayIdle(TESIdleForm* apIdle) noexcept;
     void FixVampireLordModel() noexcept;

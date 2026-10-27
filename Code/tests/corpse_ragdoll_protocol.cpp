@@ -4,8 +4,11 @@
 #include <TiltedCore/Serialization.hpp>
 #include <TiltedCore/ViewBuffer.hpp>
 #include <catch2/catch.hpp>
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 #include <Messages/CorpseRagdollRequest.h>
 #include <Messages/NotifyCorpseRagdoll.h>
+#include <Structs/Movement.h>
 #include <limits>
 
 using namespace TiltedPhoques;
@@ -25,7 +28,7 @@ template <class T> T RoundTrip(const T& source, size_t trim = 0)
 CorpseRagdollRequest Sample()
 {
     CorpseRagdollRequest result;
-    result.ServerId = 17; result.Tick = 456; result.Dying = true;
+    result.ServerId = 17; result.Tick = 456; result.Dying = true; result.KnockState = 2;
     result.Origin[0] = 50000.f; result.Origin[1] = -70000.f;
     result.Bodies.resize(64);
     for (size_t i = 0; i < result.Bodies.size(); ++i)
@@ -47,7 +50,7 @@ TEST_CASE("Full corpse state survives owner and server relay with all native mot
     REQUIRE(request == source);
     NotifyCorpseRagdoll relay;
     relay.ServerId = request.ServerId; relay.Tick = request.Tick;
-    relay.Dying = request.Dying; relay.Bodies = request.Bodies;
+    relay.Dying = request.Dying; relay.KnockState = request.KnockState; relay.Bodies = request.Bodies;
     std::copy_n(request.Origin, 3, relay.Origin);
     const auto received = RoundTrip(relay);
     REQUIRE(received.IsValid());
@@ -95,4 +98,29 @@ TEST_CASE("Settled heartbeats terminal states and reliable heads retain protocol
     REQUIRE(RoundTrip(source) == source);
     source.Bodies.resize(1);
     REQUIRE_FALSE(RoundTrip(source).IsValid());
+}
+
+TEST_CASE("Owner get-up and NPC combat states survive the wire", "[corpse_ragdoll][combat_copy]")
+{
+    for (uint8_t state = 0; state < 8; ++state)
+    {
+        auto request = Sample();
+        request.Active = false;
+        request.Bodies.clear();
+        request.KnockState = state;
+        REQUIRE(RoundTrip(request) == request);
+
+        Movement movement{};
+        movement.LifeState = state;
+        movement.Essential = (state & 1) != 0;
+        movement.Fleeing = (state & 2) != 0;
+        Buffer buffer(4096);
+        Buffer::Writer writer(&buffer);
+        movement.Serialize(writer);
+        ViewBuffer view(buffer.GetWriteData(), writer.Size());
+        Buffer::Reader reader(&view);
+        Movement received{};
+        received.Deserialize(reader);
+        REQUIRE(received == movement);
+    }
 }

@@ -26,4 +26,7 @@ struct ReferenceUpdate
     Vector<ActionEvent> ActionEvents{};
     EvaluatedPoseSnapshot EvaluatedPose{};
     VisualBoneSnapshot VisualBones{};
+    // Server relay only: how many ms before the relay message's Tick the owner sampled this update. The server
+    // batches the latest state on a 20 ms timer under its own clock; receivers place the sample at Tick - SampleAge.
+    uint32_t SampleAge{0};
 };

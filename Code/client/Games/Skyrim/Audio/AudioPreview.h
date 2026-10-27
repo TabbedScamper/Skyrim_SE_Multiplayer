@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 // Live preview for the volume sliders. While a slider is being adjusted, the
 // other mixer categories are muted and its own category plays continuously
@@ -38,4 +40,23 @@ void SetCategoryVolumeVanilla(uint32_t aCategoryFormId, float aValue) noexcept;
 // keeps its old level. This rescales the playing track's own sound handles to
 // the current Music level (or 0 while another channel is being previewed).
 void SyncMusicVolume() noexcept;
+
+// Live lobby (LobbyService): the title theme keeps playing in the lobby world and the world's own music tracks are
+// held silent, without touching the saved Music level. Main thread.
+// Restarts the Main Menu theme (ID 52185) when it is not playing.
+void EnsureTitleTheme() noexcept;
+// The lobby soundtrack: every named Skyrim, Dawnguard and Dragonborn track (LobbyPlaylist.inl), shuffled each time
+// the lobby opens, played the way the Main Menu plays its theme. Tick returns the playing track's official title.
+void StartLobbyPlaylist() noexcept;
+[[nodiscard]] std::string TickLobbyPlaylist() noexcept;
+void StopLobbyPlaylist(uint16_t aFadeMilliseconds) noexcept;
+[[nodiscard]] bool LobbyPlaylistActive() noexcept;
+// The lobby soundtrack's tracks by official title, in soundtrack order, with whether each is on (Options > Audio).
+// Off titles are kept in Data\SkyrimTogetherReborn\lobby_music.txt; without that file "Blood and Steel" starts off.
+[[nodiscard]] std::vector<std::pair<std::string, bool>> LobbyPlaylistTitles() noexcept;
+void SetLobbyTrackEnabled(const std::string& acTitle, bool aEnabled) noexcept;
+// Fades the title theme out (BSSoundHandle::FadeOutAndRelease) over aMilliseconds.
+void FadeOutTitleTheme(uint16_t aMilliseconds) noexcept;
+// Holds the world's music tracks at zero volume while set.
+void SetWorldMusicMuted(bool aMuted) noexcept;
 } // namespace AudioPreview

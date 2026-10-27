@@ -12,6 +12,7 @@
 #include "Settings.h"
 #include "XAudio27.h"
 #include "utils/Logger.h"
+#include "../../Utils/ExpectedFault.h"
 
 #include <Windows.h>
 #include <objbase.h>
@@ -190,10 +191,16 @@ namespace audioswitch
 		std::string FrameText(DWORD64 a_pc);
 		void LogFault(const char* a_where, const SehInfo& a_seh);
 
-		void* ReadPtr(void* a_base, std::uintptr_t a_off)
+		void* ReadPtrRaw(void* a_base, std::uintptr_t a_off)
 		{
 			__try { return *reinterpret_cast<void**>(static_cast<std::uint8_t*>(a_base) + a_off); }
 			__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+		}
+
+		void* ReadPtr(void* a_base, std::uintptr_t a_off)
+		{
+			ExpectedFault::Scope probing;
+			return ReadPtrRaw(a_base, a_off);
 		}
 
 		void WritePtr(void* a_base, std::uintptr_t a_off, void* a_value)
@@ -872,7 +879,7 @@ namespace audioswitch
 		constexpr UINT32 kMaxSends = 64;
 
 		// Returns the list to hand to XAudio2: the caller's own, or a_tmp holding it without its empty outputs.
-		const VoiceSends* FilterSends(const VoiceSends* a_sends, VoiceSends* a_tmp, SendDescriptor* a_buf, UINT32* a_dropped)
+		const VoiceSends* FilterSendsRaw(const VoiceSends* a_sends, VoiceSends* a_tmp, SendDescriptor* a_buf, UINT32* a_dropped)
 		{
 			*a_dropped = 0;
 			if (!a_sends) { return a_sends; }
@@ -909,6 +916,12 @@ namespace audioswitch
 			void** vtable = *reinterpret_cast<void***>(a_voice);
 			for (const auto& h : g_voiceVtables) { if (h.vtable == vtable) { return h.original; } }
 			return nullptr;
+		}
+
+		const VoiceSends* FilterSends(const VoiceSends* a_sends, VoiceSends* a_tmp, SendDescriptor* a_buf, UINT32* a_dropped)
+		{
+			ExpectedFault::Scope probing;
+			return FilterSendsRaw(a_sends, a_tmp, a_buf, a_dropped);
 		}
 
 		HRESULT STDMETHODCALLTYPE HookSetOutputVoices(IXAudio2Voice* a_this, const VoiceSends* a_sends)
@@ -1311,6 +1324,8 @@ namespace audioswitch
 
 		void PerformSwap()
 		{
+			// Its probes fault on freed voices by design, under their own __except (see ExpectedFault.h).
+			ExpectedFault::Scope probing;
 			const auto start = std::chrono::steady_clock::now();
 			g_swapStep = 1;
 			void* audio = GameAudioObject();
@@ -1606,7 +1621,10 @@ namespace audioswitch
 			bool ok = false;
 			if (SuspendThread(h) != static_cast<DWORD>(-1))
 			{
-				ok = WalkSuspended(h, &a_out) > 0;
+				{
+					ExpectedFault::Scope probing;
+					ok = WalkSuspended(h, &a_out) > 0;
+				}
 				ResumeThread(h);
 			}
 			CloseHandle(h);

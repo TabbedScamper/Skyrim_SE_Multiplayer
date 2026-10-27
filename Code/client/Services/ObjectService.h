@@ -24,6 +24,7 @@ struct AssignObjectsResponse;
 struct NotifyScriptAnimation;
 struct UpdateEvent;
 struct NotifyPhysicsReferencesMove;
+struct NotifyPhysicsLease;
 struct TESObjectREFR;
 
 // Pure incremental membership; snapshots iterate contiguous IDs without allocating.
@@ -181,6 +182,8 @@ public:
     static bool IsCartCurve() noexcept;
     // Per-frame rendered position/heading trace of chosen references (motion_trace). Ids start a trace; dump writes it.
     static std::string MotionTrace(const std::string& aIds, const std::string& aBone, const std::string& aDump) noexcept;
+    // A received network sample (its stamp and position) for a traced id, dumped with "sit":65535. Any thread.
+    static void MotionTraceReceived(uint32_t aFormId, uint64_t aTick, const glm::vec3& acPosition) noexcept;
     static bool IsCartReplayEnabled() noexcept;
     // Lock-free: true for a local horse tethered to a cart. Its native position moves keep their Havok sync
     // (HookSetPosition), called from engine threads about once a frame per horse.
@@ -421,6 +424,20 @@ private:
     void OnNotifyScriptAnimation(const NotifyScriptAnimation&) noexcept;
     void OnUpdate(const UpdateEvent&) noexcept;
     void OnPhysicsReferencesMove(const NotifyPhysicsReferencesMove&) noexcept;
+    void OnPhysicsLease(const NotifyPhysicsLease&) noexcept;
+    // Hold-to-grab physics lease: the carrying player streams a loose object; otherwise the leader does.
+    bool StreamsReference(uint32_t aFormId, const TESObjectREFR* apReference) const noexcept;
+    // Main frame: a local grab asks for the object's stream; a released one is handed back once it lies still.
+    void UpdateGrabLease() noexcept;
+
+public:
+    // PlayerCharacter grab hooks (main thread): 40555 attached a grab spring to apReference; 40557 released it.
+    static void NoteLocalGrab(TESObjectREFR* apReference) noexcept;
+    static void NoteLocalRelease() noexcept;
+    // Test read-out: the lease holder of a reference here (0 = the leader streams it).
+    static uint32_t LeaseHolder(uint32_t aFormId) noexcept;
+
+private:
 
     BSTEventResult OnEvent(const TESActivateEvent*, const EventDispatcher<TESActivateEvent>*) override;
     BSTEventResult OnEvent(const TESObjectLoadedEvent*, const EventDispatcher<TESObjectLoadedEvent>*) override;
@@ -450,6 +467,7 @@ private:
     entt::scoped_connection m_scriptAnimationNotifyConnection;
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_physicsMoveConnection;
+    entt::scoped_connection m_physicsLeaseConnection;
 
     struct ReferencePose
     {

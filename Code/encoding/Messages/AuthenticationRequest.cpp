@@ -4,6 +4,7 @@
 void AuthenticationRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
     Serialization::WriteVarInt(aWriter, DiscordId);
+    Serialization::WriteVarInt(aWriter, SteamId);
     Serialization::WriteBool(aWriter, SKSEActive);
     Serialization::WriteBool(aWriter, MO2Active);
     Serialization::WriteString(aWriter, Token);
@@ -24,6 +25,7 @@ void AuthenticationRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
         ClientMessage::DeserializeRaw(aReader);
 
         DiscordId = CheckedRead::VarInt(aReader);
+        SteamId = CheckedRead::VarInt(aReader);
         SKSEActive = CheckedRead::Bool(aReader);
         MO2Active = CheckedRead::Bool(aReader);
         Token = CheckedRead::String(aReader);

@@ -9,8 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $togetherRoot = Join-Path $GameRoot 'Data\SkyrimTogetherReborn'
-$serverData = Join-Path $togetherRoot 'Data'
-$configPath = Join-Path $togetherRoot 'config\STServer.ini'
+# The server runs from the game root (SteamLobbyService CreateProcessW): it reads Data\loadorder.txt and config\STServer.ini there (Atlas QF-4).
+$serverData = Join-Path $GameRoot 'Data'
+$configPath = Join-Path $GameRoot 'config\STServer.ini'
 $creationPath = Join-Path $GameRoot 'Skyrim.ccc'
 $backupPath = Join-Path $togetherRoot "backups\$BackupStamp-pre-strict-modcheck"
 
@@ -20,7 +21,7 @@ foreach ($requiredPath in @($configPath, $creationPath, $PluginsPath, $SkyrimPre
     }
 }
 
-$requiredMultiplayerPlugins = @('SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp')
+$requiredMultiplayerPlugins = @('Interesting Locations.esp', 'SkyrimSEMultiplayer.esp', 'SkyrimSEMultiplayerQuestPatches.esp')
 $pluginLines = [Collections.Generic.List[string]]::new()
 $pluginLines.AddRange([string[]](Get-Content -LiteralPath $PluginsPath))
 $preservedPluginLines = [Collections.Generic.List[string]]::new()

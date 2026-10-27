@@ -11,6 +11,8 @@
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
 #include <Misc/GameVM.h>
+#include <Services/LobbyService.h>
+#include <Utils/MainThread.h>
 #include <atomic>
 #include <WorldAnimation.h>
 
@@ -49,6 +51,7 @@ void HookPhase()
     auto* vm = SkyrimVM::Get();
     if (!vm || vm->inactive) return;
     s_mainThread.store(GetCurrentThreadId(), std::memory_order_release);
+    if (MT::CutM6bEnabled() && !LobbyService::SharedWorld()) return;
     WorldStateService::MainThreadUpdate();
 }
 static TiltedPhoques::Initializer s_hook([] {
@@ -228,6 +231,15 @@ void WorldStateService::OnState(const NotifyWorldState& message) noexcept
 }
 void WorldStateService::OnUpdate(const UpdateEvent&) noexcept
 {
+    if (MT::CutM6bEnabled() && !LobbyService::SharedWorld())
+    {
+        s_captureEpoch.store(0, std::memory_order_release);
+        s_active.store(false, std::memory_order_release);
+        m_requestedAuthority = {};
+        m_watchdogStart = GetTickCount64();
+        m_watchdogReported = false;
+        return;
+    }
     const auto& party = m_world.GetPartyService();
     Authority authority;
     if (m_transport.IsConnected() && party.IsInParty() && party.GetSessionState() >= 2)
@@ -354,6 +366,12 @@ void WorldStateService::Baseline() noexcept
         Sample(ref);
         s_baselineSampling = false;
         const auto parent = EnableParent(ref);
+        if (parent == UINT32_MAX)
+        {
+            work.Seen.erase(id);
+            work.Pending.push_back(id);
+            break; // The engine writer owns this reference; retry at the next main phase.
+        }
         if (parent && parent != UINT32_MAX && !work.Seen.count(parent)) work.Pending.push_back(parent);
     }
     if (done && work.Pending.empty())
@@ -398,7 +416,7 @@ void WorldStateService::Publish(WorldState state) noexcept
         state.Kind == WorldStateKind::DestructionHealth;
     if (m_watches.count(ref->formID) ||
         (durable && !s_baselineSampling && s_publishLogs.fetch_add(1, std::memory_order_relaxed) < 4000))
-        spdlog::info("World state publish: epoch={} ref={:X} base={:X} kind={} seq={} value={} scalar={}", state.Epoch,
+        spdlog::debug("World state publish: epoch={} ref={:X} base={:X} kind={} seq={} value={} scalar={}", state.Epoch,
             ref->formID, ref->baseForm ? ref->baseForm->formID : 0, static_cast<unsigned>(state.Kind), state.Sequence,
             state.Value, state.Scalar);
     m_latest.insert_or_assign(key, state);
@@ -563,7 +581,7 @@ void WorldStateService::Pump() noexcept
             const bool durable = state.Kind == WorldStateKind::Disabled || state.Kind == WorldStateKind::Destroyed ||
                 state.Kind == WorldStateKind::DestructionHealth;
             if (m_watches.count(state.Reference.BaseId) || (durable && s_receiveLogs.fetch_add(1, std::memory_order_relaxed) < 4000))
-                spdlog::info("World state receive: epoch={} ref={:X} kind={} seq={} accepted={} value={} scalar={} animation={}",
+                spdlog::debug("World state receive: epoch={} ref={:X} kind={} seq={} accepted={} value={} scalar={} animation={}",
                     state.Epoch, state.Reference.BaseId, static_cast<unsigned>(state.Kind), state.Sequence,
                     accepted, state.Value, state.Scalar, state.Animation.c_str());
         }
@@ -582,10 +600,10 @@ void WorldStateService::Pump() noexcept
         const bool animation = WorldAnimationReplay::Handles(state.Kind);
         if ((animation ? WorldAnimation::Eligible(ref) : Eligible(ref)) && (animation ? WorldAnimation::Apply(ref, state) : Apply(ref, state)))
         {
-            if (animation) spdlog::info("World anim: {:X} {} -> follower ({})", ref->formID,
+            if (animation) spdlog::debug("World anim: {:X} {} -> follower ({})", ref->formID,
                 state.Kind == WorldStateKind::AnimationEvent ? state.Animation.c_str() : "graph snapshot",
                 state.Sequence);
-            spdlog::info("World state: {:X} {} -> {} (from host)", ref->formID, static_cast<unsigned>(state.Kind),
+            spdlog::debug("World state: {:X} {} -> {} (from host)", ref->formID, static_cast<unsigned>(state.Kind),
                 state.Animation.empty() ? std::to_string(state.Value) : std::string(state.Animation.c_str()));
             m_follower.Applied(state);
         }

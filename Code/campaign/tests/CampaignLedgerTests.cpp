@@ -34,6 +34,41 @@ public:
 };
 } // namespace
 
+TEST_CASE("Checkpoint roster keeps the last position for the same Steam account and character", "[campaign][roster]")
+{
+    TemporaryDatabase database;
+    Campaign::RosterEntry rex;
+    rex.CheckpointId = "first";
+    rex.SteamId = 76561198000000123ull;
+    rex.CharacterKey = "A1B2C3D4";
+    rex.CharacterName = "Rex";
+    rex.WorldMod = 2; rex.WorldBase = 0x37;
+    rex.CellMod = 2; rex.CellBase = 0x1234;
+    rex.X = 100.f; rex.Heading = 0.5f;
+    {
+        Campaign::Ledger ledger(database.Path);
+        ledger.PutRosterEntry(rex);
+        rex.CheckpointId = "second";
+        rex.X = 900.f;
+        ledger.PutRosterEntry(rex);
+        REQUIRE(ledger.ReadRoster("first").size() == 1);
+        REQUIRE(ledger.ReadRoster("second")[0].X == 900.f);
+    }
+    {
+        Campaign::Ledger ledger(database.Path);
+        const auto found = ledger.FindLatestRoster(rex.SteamId, rex.CharacterKey, rex.CharacterName);
+        REQUIRE(found);
+        REQUIRE(found->CheckpointId == "second");
+        REQUIRE(found->X == 900.f);
+        const auto renamed = ledger.FindLatestRoster(rex.SteamId, rex.CharacterKey, "Renamed Rex");
+        REQUIRE(renamed);
+        REQUIRE(renamed->X == 900.f);
+        REQUIRE(renamed->CharacterName == "Rex"); // Stored display name is metadata, not identity.
+        REQUIRE_FALSE(ledger.FindLatestRoster(rex.SteamId, "different-character", rex.CharacterName));
+        REQUIRE_FALSE(ledger.FindLatestRoster(rex.SteamId + 1, rex.CharacterKey, rex.CharacterName));
+    }
+}
+
 TEST_CASE("Campaign ledger survives reopen with a stable identity", "[campaign][persistence]")
 {
     TemporaryDatabase database;

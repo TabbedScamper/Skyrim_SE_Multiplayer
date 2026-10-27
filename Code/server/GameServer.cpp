@@ -1,4 +1,4 @@
-﻿#include <Components.h>
+#include <Components.h>
 #include <GameServer.h>
 #include <Packet.hpp>
 #include <Messages/NotifyChatMessageBroadcast.h>
@@ -681,6 +681,30 @@ void GameServer::OnUpdate()
     if ((gapMs > 60.0 || updateMs > 30.0) && s_stallLogs.fetch_add(1, std::memory_order_relaxed) < 500)
         spdlog::warn("Server tick stall: {:.1f} ms since the previous tick, this update {:.1f} ms", gapMs, updateMs);
 
+    // Per-player network cost for party-size measurements (farm party mode reads these lines): every 5 s, the
+    // transport's own per-connection rates (GameNetworkingSockets real-time status), one line per player.
+    static auto s_nextNetLog = cNow;
+    if (cNow >= s_nextNetLog)
+    {
+        s_nextNetLog = cNow + std::chrono::seconds(5);
+        auto* pSockets = SteamNetworkingSockets();
+        uint32_t players = 0;
+        for (Player* pPlayer : m_pWorld->GetPlayerManager())
+        {
+            SteamNetConnectionRealTimeStatus_t status{};
+            if (!pPlayer || !pSockets ||
+                pSockets->GetConnectionRealTimeStatus(pPlayer->GetConnectionId(), &status, 0, nullptr) != k_EResultOK)
+                continue;
+            ++players;
+            spdlog::info("Net stats: player {} ping={} ms out={:.0f} B/s in={:.0f} B/s outPkts={:.1f}/s inPkts={:.1f}/s "
+                "queuedReliable={} quality={:.2f}", pPlayer->GetId(), status.m_nPing, status.m_flOutBytesPerSec,
+                status.m_flInBytesPerSec, status.m_flOutPacketsPerSec, status.m_flInPacketsPerSec,
+                status.m_cbPendingReliable, status.m_flConnectionQualityLocal);
+        }
+        if (players)
+            spdlog::info("Net stats: {} players", players);
+    }
+
     if (m_requestStop)
         Close();
 }
@@ -709,7 +733,15 @@ void GameServer::OnConsume(const void* apData, const uint32_t aSize, const Conne
     auto pMessage = factory.Extract(reader);
     if (!pMessage)
     {
-        spdlog::error("Couldn't parse packet from {:x}", aConnectionId);
+        // Which message failed (opcode = the first byte(s), ClientOpcode order in encoding/Opcodes.h) and its size:
+        // an unnamed error once a second hid a whole class of dropped messages (2026-09-29 session, 1168 from the
+        // follower).
+        uint32_t opcode{};
+        if (aSize >= sizeof(ClientOpcode))
+            std::memcpy(&opcode, apData, sizeof(ClientOpcode));
+        static std::atomic<uint32_t> s_parseLogs{};
+        if (s_parseLogs.fetch_add(1, std::memory_order_relaxed) < 200)
+            spdlog::error("Couldn't parse packet from {:x}: opcode {} ({} bytes)", aConnectionId, opcode, aSize);
         return;
     }
 
@@ -974,7 +1006,7 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
     info.m_addrRemote.ToString(remoteAddress, 48, false);
 
     AuthenticationResponse serverResponse;
-    serverResponse.Version = BUILD_COMMIT;
+    serverResponse.Version = SSM_WIRE_VERSION;
 
     using RT = AuthenticationResponse::ResponseType;
     auto sendKick = [&](const RT type)
@@ -986,7 +1018,7 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
     };
 #if 1
     // to make our testing life a bit easier.
-    if (acRequest->Version != BUILD_COMMIT)
+    if (acRequest->Version != SSM_WIRE_VERSION)
     {
         spdlog::info("New player {:x} '{}' tried to connect with client {} - Version mismatch", aConnectionId, remoteAddress, acRequest->Version.c_str());
         sendKick(RT::kWrongVersion);
@@ -1137,6 +1169,7 @@ void GameServer::HandleAuthenticationRequest(const ConnectionId_t aConnectionId,
         Player* pPlayer = m_pWorld->GetPlayerManager().Create(aConnectionId);
         pPlayer->SetEndpoint(remoteAddress);
         pPlayer->SetDiscordId(acRequest->DiscordId);
+        pPlayer->SetSteamId(acRequest->SteamId);
         pPlayer->SetUsername(std::move(acRequest->Username));
         pPlayer->SetMods(playerMods);
         pPlayer->SetModIds(playerModsIds);

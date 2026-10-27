@@ -1,10 +1,15 @@
 #pragma once
+
+#include <deque>
+#include <array>
 #include "Structs/Inventory.h"
 #include "Structs/ActorData.h"
 #include <atomic>
 #include <unordered_map>
 #include <Messages/NotifyScriptedActorState.h>
+#include <Messages/PlayerAppearanceRequest.h>
 #include <Messages/NotifyOwnershipTransfer.h>
+#include <Messages/AssignCharacterResponse.h>
 
 struct ActorAddedEvent;
 struct ActorRemovedEvent;
@@ -77,6 +82,7 @@ struct CharacterService
         uint32_t LastMountId{};
     };
     [[nodiscard]] MountDiagnostic GetMountDiagnostic() const noexcept;
+    void SendDismountBeforeRagdoll(uint32_t aRiderId, uint32_t aOwnershipEpoch, Actor* apRider) noexcept;
     struct LocalPoseProductionDiagnostic
     {
         uint64_t Batches{};
@@ -120,8 +126,29 @@ struct CharacterService
     void OnActorAdded(const ActorAddedEvent& acEvent) noexcept;
     void OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept;
     void OnUpdate(const UpdateEvent& acUpdateEvent) noexcept;
+    void DrainWorldHoldOnMainFrame() noexcept;
     void OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept;
     void OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) noexcept;
+    // Before a party wipe's trip to the main menu: forget every tracked actor, as a fresh launch starts, without
+    // releasing ownership (the server keeps the leader as owner, so its reloaded natives rebind). Entities kept across
+    // the menu referenced unloaded forms: a load with them crashed (19032 on the follower, the host at 140639011), and
+    // actors removed by the menu teardown relinquished the leader's NPCs to whichever player loaded first.
+    void ReleaseForReload() noexcept;
+    // Spawn requests that arrive while this PC reloads (after ReleaseForReload, until the loaded world is in) wait:
+    // handled mid-load they resolved references the load was tearing down (host crash at 140639011, 2026-09-28).
+    // TESLoadGameEvent (DiscoveryService): the reload finished; held spawns go out on the next update.
+    void NoteGameLoaded() noexcept { m_holdSawLoading = true; }
+    bool m_holdSpawns{};
+    bool m_holdSawLoading{};
+    uint64_t m_holdSince{};
+    Vector<CharacterSpawnRequest> m_heldSpawns;
+    std::unordered_map<uint32_t, AssignCharacterResponse> m_heldAssignments;
+    std::deque<uint32_t> m_heldAssignmentOrder;
+    // One new actor per frame: two Actor::Create calls in one frame were given the same temporary form id (the id is
+    // taken at creation but enters the form table later), and the second spawn took over the first copy (a party
+    // reload's replay: the other player's copy became a Thalmor soldier and was later deleted, 2026-09-29).
+    bool m_createdThisFrame{};
+    std::deque<CharacterSpawnRequest> m_nextFrameSpawns;
     void OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept;
     void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept;
     void OnReferencesMoveRequest(const ServerReferencesMoveRequest& acMessage) const noexcept;
@@ -138,6 +165,17 @@ public:
     static void QueueAnimObjectEvent(uint32_t aFormId, uint32_t aAnimObjectId, bool aDraw) noexcept;
     // Main thread (ObjectService::OnMainFrame): received props onto remote copies (Draw writes the scene node).
     static void ApplyAnimObjectsOnMainFrame() noexcept;
+    // Actor moves requested off the main thread (network handlers), applied from the main loop.
+    static void ApplyMovesOnMainFrame() noexcept;
+    // A remote NPC copy was killed by sync (any thread): its body goes to the dead-body collision layer on the main loop.
+    static void NoteRemoteDeath(uint32_t aFormId) noexcept;
+    // Queued moves and dead-body layers of the old connection name nothing after a disconnect.
+    static void ClearMainFrameWork() noexcept;
+    void SendNameIfChanged() noexcept;
+    // Tells the party UI a player's character name (party player id).
+    void NotifyUiPlayerName(uint32_t aPlayerId, const char* apName) const noexcept;
+    std::string m_sentName;
+    uint64_t m_nextNameCheckMs{};
 
 private:
     uint64_t m_nextAnimObjectSnapshot{};
@@ -150,10 +188,14 @@ private:
     void UpdateLeaderScriptedPackage() noexcept;
     void OnNotifyRespawn(const NotifyRespawn& acMessage) const noexcept;
     void OnNotifyPlayerAppearance(const NotifyPlayerAppearance& acMessage) noexcept;
+    void OnNotifyPlayerLevel(const struct NotifyPlayerLevel& acMessage) noexcept;
     // Character creator together: this player's look sent live while editing (see CharacterService.cpp).
     void SendCreatorAppearance() noexcept;
+    bool BuildLook(PlayerAppearanceRequest& aRequest) noexcept;
 
 public:
+    // This player's current look to the others now (the lobby's character swap, a party member joining).
+    bool SendLookNow() noexcept; // false: not sent (not connected, or this player has no server id yet)
     // Where to show another player's character on this PC while they are in the creator: beside
     // this player instead of inside them (everyone stands on the same spot). Any thread.
     static bool GetCreatorDisplayOffset(uint32_t aFormId, NiPoint3& arOffset, float& arHeading) noexcept;
@@ -188,10 +230,17 @@ private:
     void ProcessNewEntity(entt::entity aEntity) const noexcept;
 
 private:
-    void MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
+    // aEnableAfter: enable the actor once it stands at the destination (a parked actor resuming).
+    // aCorpseCorrection: the settled corpse cell correction may move a dead copy (every other caller leaves dying,
+    // dead and ragdolling copies to the owner's ragdoll stream).
+    void MoveActor(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+        bool aEnableAfter = false, bool aCorpseCorrection = false) const noexcept;
+    bool MoveActorNow(Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition,
+        bool aEnableAfter, bool aCorpseCorrection) const noexcept;
 
     void RequestServerAssignment(entt::entity aEntity) const noexcept;
-    void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId) const noexcept;
+    // aFromDiscovery: the actor left the loaded world (discovery removal), the only case that may report a script removal.
+    void CancelServerAssignment(entt::entity aEntity, uint32_t aFormId, bool aFromDiscovery = false) const noexcept;
     void DeleteRemoteEntityComponents(entt::entity aEntity) const noexcept;
     void DeclineOwnership(uint32_t aServerId, uint32_t aOwnershipEpoch) const noexcept;
     void ReconcileActorData(entt::entity aEntity, Actor* apActor, uint32_t aOwnershipEpoch, const ActorData& acActorData, bool aApplyInventory, bool aIsLocalOwner, bool aInitialNativeAssignment = false) noexcept;
@@ -226,7 +275,7 @@ private:
     mutable std::atomic<uint32_t> m_localPoseLastBatchUs{};
     mutable std::atomic<uint32_t> m_localPoseLastBatchActors{};
 
-    float m_cachedExperience = 0.f;
+    std::array<float, 24> m_cachedExperience{};
 
     // TODO: revamp this, read the local anim var like vampire lord?
     struct WeaponDrawData
@@ -270,6 +319,7 @@ private:
         uint64_t NextAttemptMs{};
         uint32_t Attempts{};
         uint64_t StartedAtMs{};
+        uint32_t Starts{};
         bool WasSeated{};
         bool VehicleTrialAttempted{};
     };
@@ -315,6 +365,7 @@ private:
     entt::scoped_connection m_newPackageConnection;
     entt::scoped_connection m_notifyRespawnConnection;
     entt::scoped_connection m_notifyPlayerAppearanceConnection;
+    entt::scoped_connection m_notifyPlayerLevelConnection;
     uint64_t m_nextCreatorAppearanceMs{};
     uint64_t m_lastCreatorAppearanceHash{};
     bool m_creatorWasOpen{};

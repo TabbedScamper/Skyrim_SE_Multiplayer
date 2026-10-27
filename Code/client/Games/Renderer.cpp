@@ -42,7 +42,7 @@ static void HookPresent()
 // unused, never hooked
 static bool HookCreateViewport(void* viewport, ViewportConfig* pConfig, WindowConfig* pWindowConfig, void* a4)
 {
-    pConfig->name = "Skyrim Together | " BUILD_BRANCH "@" BUILD_COMMIT;
+    pConfig->name = SSM_PRODUCT_NAME " | " BUILD_BRANCH "@" BUILD_COMMIT;
 
 #if 0
     pWindowConfig->bBorderlessDisplay = false;

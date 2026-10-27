@@ -17,7 +17,9 @@ struct ServerTimeSettings final : ServerMessage
 
     bool operator==(const ServerTimeSettings& achRhs) const noexcept
     {
-        return GetOpcode() == achRhs.GetOpcode() && timeModel == achRhs.timeModel;
+        return GetOpcode() == achRhs.GetOpcode() && timeModel == achRhs.timeModel &&
+            GameMs == achRhs.GameMs && SampleTick == achRhs.SampleTick && Seq == achRhs.Seq &&
+            ServerNonce == achRhs.ServerNonce;
     }
 
     bool operator!=(const ServerTimeSettings& achRhs) const noexcept
@@ -26,4 +28,8 @@ struct ServerTimeSettings final : ServerMessage
     }
 
     TimeModel timeModel;
+    uint64_t GameMs{};
+    uint64_t SampleTick{};
+    uint32_t Seq{};
+    uint64_t ServerNonce{};
 };

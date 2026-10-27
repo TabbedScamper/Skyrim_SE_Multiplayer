@@ -1,4 +1,5 @@
 #include <Services/CorpseRagdollService.h>
+#include <Services/CharacterService.h>
 #include <Games/Overrides.h>
 
 #include <World.h>
@@ -46,6 +47,8 @@ std::atomic<uint32_t> s_pendingActorWrite{};
 std::mutex s_followingLock;
 std::unordered_map<uint32_t, uint64_t> s_followingSinceMs; // form id -> last sample received
 std::unordered_map<uint32_t, uint32_t> s_followingServerIds;
+struct GetUpGate { uint8_t OwnerState{}; bool Blocked{}; };
+std::unordered_map<uint32_t, GetUpGate> s_getUpGates;
 std::mutex s_dismemberLock;
 struct CreatedLimb
 {
@@ -69,6 +72,10 @@ bool Dynamic(uint8_t aMotion) noexcept
 {
     return aMotion == 1 || aMotion == 2 || aMotion == 3 || aMotion == 6;
 }
+
+// A copy this close to the owner's settled pose may sleep, and stays asleep until it leaves the band.
+constexpr float kSettleNearPosition = 2.f; // game units per body
+constexpr float kSettleNearAngle = 10.f;   // degrees per body
 
 bool Resting(const RigidBody* apBody) noexcept
 {
@@ -1142,8 +1149,11 @@ void CorpseRagdollService::OnHavokStep(void* apWorld, float aDeltaTime, bool aAf
                 for (size_t i = 0; i < binding.Bodies.size(); ++i)
                 {
                     const auto error = MeasureBody(binding.Bodies[i], targets[i], states[i].MotionType);
-                    aligned &= error.Position < 1.f && error.Angle < 1.f;
+                    aligned &= error.Position < kSettleNearPosition && error.Angle < kSettleNearAngle;
                 }
+                // The same band that let it settle keeps it asleep. With a tighter wake band (1 u/1 deg) the joint
+                // solver's relaxation after the exact placement (~1.15 deg) woke it again, and the drive re-settled
+                // it every half second for ten minutes: the corpse crept on the follower (B1695, session 2026-09-29).
                 if (aligned) continue; // heartbeats must not reactivate an island
                 binding.Asleep = false; // resume the entire constrained set
                 binding.RestSinceMs = 0;
@@ -1249,7 +1259,7 @@ void CorpseRagdollService::OnHavokStep(void* apWorld, float aDeltaTime, bool aAf
         // settled and the copy is close, count it as rested so the one-time placement + sleep can finish it.
         bool closeToOwner = true;
         for (size_t i = 0; i < binding.Bodies.size(); ++i)
-            closeToOwner &= observation.Bodies[i].Position < 2.f && observation.Bodies[i].Angle < 10.f;
+            closeToOwner &= observation.Bodies[i].Position < kSettleNearPosition && observation.Bodies[i].Angle < kSettleNearAngle;
         if (settled && valid && (observation.FollowerResting || closeToOwner))
         {
             if (!binding.RestSinceMs) binding.RestSinceMs = now;
@@ -1407,6 +1417,7 @@ void CorpseRagdollService::ResetOnMainFrame() noexcept
         std::lock_guard followingLock(s_followingLock);
         s_followingSinceMs.clear();
         s_followingServerIds.clear();
+        s_getUpGates.clear();
     }
     {
         std::lock_guard dismemberLock(s_dismemberLock);
@@ -1504,6 +1515,20 @@ bool CorpseRagdollService::IsFollowingOwner(const uint32_t aFormId) noexcept
     std::lock_guard lock(s_followingLock);
     const auto it = s_followingSinceMs.find(aFormId);
     return it != s_followingSinceMs.end();
+}
+
+bool CorpseRagdollService::BlockNativeGetUp(const uint32_t aFormId) noexcept
+{
+    std::lock_guard lock(s_followingLock);
+    const auto it = s_getUpGates.find(aFormId);
+    if (it == s_getUpGates.end()) return false;
+    const auto state = it->second.OwnerState;
+    if ((state >= 1 && state <= 4) || state == 7)
+    {
+        it->second.Blocked = true;
+        return true;
+    }
+    return false;
 }
 
 void CorpseRagdollService::RecordDismember(Actor* apActor, bool aCreated) noexcept
@@ -1618,6 +1643,7 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
             acMessage.Tick > ragdoll.EndTick)
         {
             ragdoll.EndTick = acMessage.Tick;
+            ragdoll.EndKnockState = acMessage.KnockState;
             ++ragdoll.Revision;
             m_ended[key] = acMessage.Tick;
         }
@@ -1635,6 +1661,8 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
             if (ragdoll.Binding) ragdoll.Binding->Invalidate();
             ragdoll.RingCount = 0;
             ragdoll.Knocked = false;
+            ragdoll.KnockPending = false;
+            ragdoll.KnockAttempts = 0;
             ragdoll.OwnerDying = false;
             ragdoll.RetryTransitionMs = 0;
         }
@@ -1661,11 +1689,14 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
             {
                 s_followingSinceMs.erase(ragdoll.LocalFormId);
                 s_followingServerIds.erase(ragdoll.LocalFormId);
+                s_getUpGates.erase(ragdoll.LocalFormId);
                 PoseCopyAuthority::SetRagdollPending(ragdoll.LocalFormId, false);
                 PoseCopyAuthority::SetRagdollSimulating(ragdoll.LocalFormId, false);
             }
             s_followingSinceMs[actor->formID] = NowMs();
             s_followingServerIds[actor->formID] = acMessage.ServerId;
+            if ((acMessage.KnockState >= 1 && acMessage.KnockState <= 4) || acMessage.KnockState == 7)
+                s_getUpGates[actor->formID].OwnerState = acMessage.KnockState;
             ragdoll.LocalFormId = actor->formID;
             PoseCopyAuthority::SetRagdollPending(actor->formID, true);
         }
@@ -1674,6 +1705,8 @@ void CorpseRagdollService::OnCorpseRagdoll(const NotifyCorpseRagdoll& acMessage)
     sample.Tick = acMessage.Tick;
     sample.Settled = acMessage.Settled;
     sample.Dying = acMessage.Dying;
+    sample.KnockState = acMessage.KnockState;
+    ragdoll.OwnerWasKnocked |= (acMessage.KnockState >= 1 && acMessage.KnockState <= 4) || acMessage.KnockState == 7;
     std::copy(std::begin(acMessage.Origin), std::end(acMessage.Origin), std::begin(sample.Origin));
     sample.Heading = acMessage.Heading;
     sample.Bodies = acMessage.Bodies;
@@ -1722,6 +1755,7 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             end.ServerId = serverId; end.Limb = limb; end.DismemberTick = found.value().DismemberTick;
             end.Tick = (std::max)(PoseCopyAuthority::GetCurrentTick(), found.value().LastTick + 1);
             end.Active = false;
+            end.KnockState = actor ? static_cast<uint8_t>((actor->actorState.flags1 >> 25) & 0x7) : 0;
             if (!m_transport.Send(end)) return false;
             m_owned.erase(found);
             return true;
@@ -1779,6 +1813,12 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             if (owned.DismemberTick != (limb ? eventTick : 0))
                 owned = {};
             owned.DismemberTick = limb ? eventTick : 0;
+            if (!limb && !owned.DismountSent)
+            {
+                World::Get().GetCharacterService().SendDismountBeforeRagdoll(serverId,
+                    m_world.get<LocalComponent>(entity).OwnershipEpoch, actor);
+                owned.DismountSent = true;
+            }
             const bool moving = Moving(bodies);
             if (moving)
             {
@@ -1800,6 +1840,7 @@ void CorpseRagdollService::CaptureOwned(const uint64_t aNowMs) noexcept
             request.Settled = !moving && aNowMs - owned.SettledSinceMs >= kSettleMs;
             const auto lifeState = (actor->actorState.flags1 >> 21) & 0xF;
             request.Dying = lifeState == 1 || lifeState == 2;
+            request.KnockState = static_cast<uint8_t>((actor->actorState.flags1 >> 25) & 0x7);
             request.Origin[0] = actor->position.x;
             request.Origin[1] = actor->position.y;
             request.Origin[2] = actor->position.z;
@@ -1857,8 +1898,11 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         };
         const auto entity = Utils::FindEntityByServerId(serverId);
         const bool locallyOwned = entity && m_world.all_of<LocalComponent>(*entity);
+        const auto& lastSample = ragdoll.Ring[(ragdoll.RingNext + ragdoll.Ring.size() - 1) % ragdoll.Ring.size()];
+        const bool ownerGetUp = !limb && ragdoll.OwnerWasKnocked && ragdoll.RingCount && lastSample.Tick <= presentation &&
+            !lastSample.Dying && (lastSample.KnockState == 5 || lastSample.KnockState == 6 || lastSample.KnockState == 0);
         const bool end = aRelease || (ragdoll.EndTick && presentation >= ragdoll.EndTick) ||
-            locallyOwned || !m_transport.IsConnected();
+            ownerGetUp || locallyOwned || !m_transport.IsConnected();
         if (end)
         {
             if (ragdoll.Binding)
@@ -1873,11 +1917,44 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             // detached raw world or turn a dynamic corpse back into animation.
             if (ragdoll.LocalFormId && !limb)
             {
+                bool blocked = false;
+                {
+                    std::lock_guard lock(s_followingLock);
+                    if (const auto gate = s_getUpGates.find(ragdoll.LocalFormId); gate != s_getUpGates.end())
+                    {
+                        blocked = gate->second.Blocked;
+                        s_getUpGates.erase(gate);
+                    }
+                }
                 PoseCopyAuthority::SetRagdollSimulating(ragdoll.LocalFormId, false);
                 PoseCopyAuthority::SetRagdollPending(ragdoll.LocalFormId, false);
-                std::lock_guard lock(s_followingLock);
-                s_followingSinceMs.erase(ragdoll.LocalFormId);
-                s_followingServerIds.erase(ragdoll.LocalFormId);
+                {
+                    std::lock_guard lock(s_followingLock);
+                    s_followingSinceMs.erase(ragdoll.LocalFormId);
+                    s_followingServerIds.erase(ragdoll.LocalFormId);
+                }
+                const uint8_t ownerState = ownerGetUp ? lastSample.KnockState : ragdoll.EndKnockState;
+                if (!aRelease && !locallyOwned && m_transport.IsConnected() && actor && !actor->IsDead() &&
+                    !ragdoll.OwnerDying && !lastSample.Dying && (ownerGetUp || ragdoll.EndTick))
+                {
+                    const auto copyState = (actor->actorState.flags1 >> 25) & 7;
+                    if (ownerState == 0 && actor->currentProcess)
+                    {
+                        using TEndKnock = void(AIProcess*, Actor*);
+                        POINTER_SKYRIMSE(TEndKnock, endKnock, 39897);
+                        endKnock.Get()(actor->currentProcess, actor);
+                    }
+                    else if (!blocked && (ownerState == 5 || ownerState == 6) && (copyState == 1 || copyState == 3))
+                    {
+                        using TGetUp = void(Actor*, bool);
+                        using THasRagdoll = void(IAnimationGraphManagerHolder*, bool*);
+                        POINTER_SKYRIMSE(THasRagdoll, hasRagdoll, 38085);
+                        POINTER_SKYRIMSE(TGetUp, getUp, 40150);
+                        bool ragdollPresent = false;
+                        hasRagdoll.Get()(&actor->animationGraphHolder, &ragdollPresent);
+                        getUp.Get()(actor, ragdollPresent);
+                    }
+                }
             }
             m_remote.erase(it);
             continue;
@@ -1902,7 +1979,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             // not moved (aSyncHavok=false), the step drive keeps them on the owner pose.
             const auto size = static_cast<uint32_t>(ragdoll.Ring.size());
             // The PRESENTED sample (newest at or before the presentation clock), the one the bodies are evaluated
-            // at: the newest leads the drawn bodies by the ring depth during the fall (Muse refute-corpse).
+            // at: the newest leads the drawn bodies by the ring depth during the fall (refute-corpse).
             uint32_t presented = (ragdoll.RingNext + size - ragdoll.RingCount) % size;
             for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
             {
@@ -1911,17 +1988,38 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
                     presented = index;
             }
             const auto& newest = ragdoll.Ring[presented];
+            // Interpolate the owner's origin and heading at the presentation clock (between the presented sample and
+            // the next one) and move the reference there every frame, a bounded step at a time. Snapping it to the
+            // newest sample past a 5 u threshold moved it in steps (Lokir 2026-09-30: 33 u at death, then 60 u and a
+            // 127 deg turn one second later); the ragdoll is drawn relative to the reference, so each step flashed
+            // the body out of place for a frame.
             NiPoint3 origin;
-            origin.x = newest.Origin[0];
-            origin.y = newest.Origin[1];
-            origin.z = newest.Origin[2];
-            const float dx = actor->position.x - origin.x, dy = actor->position.y - origin.y,
-                dz = actor->position.z - origin.z;
-            const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (std::isfinite(gap) && gap > 5.f) // review P1-6: no per-frame churn for sub-5 u drift
+            origin.x = newest.Origin[0]; origin.y = newest.Origin[1]; origin.z = newest.Origin[2];
+            float heading = newest.Heading;
+            for (uint32_t i = 0; i + 1 < ragdoll.RingCount; ++i)
             {
-                if (!ragdoll.AnchorMoves || gap > 50.f)
-                    spdlog::info("Ragdoll {:X} (server {:X}): actor reference {:.1f} u from owner origin, re-anchored",
+                const auto& a = ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i) % size];
+                const auto& b = ragdoll.Ring[(ragdoll.RingNext + size - ragdoll.RingCount + i + 1) % size];
+                if (a.Tick <= presentation && presentation < b.Tick && b.Tick > a.Tick)
+                {
+                    const float u = static_cast<float>(static_cast<double>(presentation - a.Tick) / static_cast<double>(b.Tick - a.Tick));
+                    origin.x = a.Origin[0] + (b.Origin[0] - a.Origin[0]) * u;
+                    origin.y = a.Origin[1] + (b.Origin[1] - a.Origin[1]) * u;
+                    origin.z = a.Origin[2] + (b.Origin[2] - a.Origin[2]) * u;
+                    heading = a.Heading + std::remainder(b.Heading - a.Heading, 6.2831853f) * u;
+                    break;
+                }
+            }
+            // Every frame, all at once: the drawn ragdoll sits on the reference, so a partial move is drawn partly
+            // wrong. A held or blended owner pose no longer depends on it: PoseCopyAuthority rebases bone 0 onto the
+            // owner's own frame (the death-time reference turn flashed the held pose 134 deg away; gating this move
+            // instead left the reference 85.7 u behind and jumped the body when the ragdoll took over, 2026-09-30).
+            const float dx = origin.x - actor->position.x, dy = origin.y - actor->position.y, dz = origin.z - actor->position.z;
+            const float gap = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (std::isfinite(gap) && gap > 0.25f)
+            {
+                if (gap > 50.f)
+                    spdlog::info("Ragdoll {:X} (server {:X}): actor reference {:.1f} u from owner origin, moved to it",
                         actor->formID, serverId, gap);
                 // HookSetPosition drops SetPosition on remote actors unless the call is scoped as ours: without this the
                 // re-anchor never applied (run 20260928-072831: reference stayed exactly 88.1 u off every frame).
@@ -1933,13 +2031,13 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             // death (97 -> 306..330 deg for Lokir, then 108 at the settle); the copy stayed at 97, so its drawn
             // body was the owner's pose turned by the difference (151 deg measured = the reference gap, run
             // 20260928-093355), seen as the corpse spinning during the fall.
-            const float turn = std::remainder(newest.Heading - actor->rotation.z, 6.2831853f);
-            if (std::isfinite(turn) && std::abs(turn) > 0.02f)
+            const float turn = std::remainder(heading - actor->rotation.z, 6.2831853f);
+            if (std::isfinite(turn) && std::abs(turn) > 0.002f)
             {
-                if (std::abs(turn) > 0.5f)
+                if (std::abs(turn) > 1.5f)
                     spdlog::info("Ragdoll {:X} (server {:X}): heading {:.0f} deg from the owner's, turned to match",
                         actor->formID, serverId, turn * 57.29578f);
-                actor->SetRotation(actor->rotation.x, actor->rotation.y, newest.Heading);
+                actor->SetRotation(actor->rotation.x, actor->rotation.y, heading);
             }
         }
         if (!limb)
@@ -1966,6 +2064,8 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         {
             ragdoll.Root = root;
             ragdoll.Knocked = false;
+            ragdoll.KnockPending = false;
+            ragdoll.KnockAttempts = 0;
             ragdoll.RetryTransitionMs = 0;
             if (ragdoll.Binding)
                 ragdoll.Binding->Invalidate();
@@ -1987,8 +2087,19 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         bool ownerDyingNow = false;
         for (uint32_t i = 0; i < ragdoll.RingCount; ++i)
             ownerDyingNow |= sample(i).Dying && sample(i).Tick <= presentation;
+        if (ragdoll.KnockPending)
+        {
+            ragdoll.KnockPending = false;
+            const auto knockState = (actor->actorState.flags1 >> 25) & 0x7;
+            ragdoll.Knocked = knockState == 1 || knockState == 2;
+            if (!ragdoll.Knocked)
+                spdlog::warn("Ragdoll {:X}: KnockExplosion attempt {} left state {}; gate 37485 or vfunc 0xC5 refused",
+                    actor->formID, ragdoll.KnockAttempts, knockState);
+        }
         if (!limb && aNowMs >= ragdoll.RetryTransitionMs &&
-            (!ragdoll.Knocked || (ownerDyingNow && !actor->IsDead())))
+            ((!ragdoll.Knocked && ragdoll.KnockAttempts < 8) ||
+             // Bounded too (review 2026-10-02): a copy that never dies (essential, refused kill) retried every 250 ms.
+             (ownerDyingNow && !actor->IsDead() && ragdoll.KnockAttempts < 40)))
         {
             if (!actor->currentProcess)
             {
@@ -1998,22 +2109,43 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
             ragdoll.OwnerDying = ownerDyingNow;
             // "Dying" counted as physics-owned, so a copy still playing its local death animation was never knocked
             // into ragdoll; that animation's root motion kept moving the corpse away from where the owner's fell
-            // (Lokir 50-65 u pull every frame, Muse diag-lokir3). Force the ragdoll whenever the copy is not already
+            // (Lokir 50-65 u pull every frame, diag-lokir3). Force the ragdoll whenever the copy is not already
             // in a knock/ragdoll state (knockState bits 25-27).
             const bool inRagdollState = ((actor->actorState.flags1 >> 25) & 0x7) != 0;
             if (ragdoll.OwnerDying && !actor->IsDead())
+            {
+                // The owner is dying; an earlier essential-down sample must not make this copy refuse its death.
+                actor->SetEssential(false);
                 actor->KillIntoRagdoll();
+                ++ragdoll.KnockAttempts; // counts toward the 40-attempt bound of the owner-dying retry
+            }
             else if (!inRagdollState)
             {
+                if (const auto mountId = actor->GetNativeMountFormId())
+                    spdlog::warn("Ragdoll {:X}: copy still mounted on {:X} before knock; mount relation must be restored after get-up",
+                        actor->formID, mountId);
                 actor->currentProcess->KnockExplosion(actor, &actor->position, 0.f);
+                ragdoll.KnockPending = true;
+                ++ragdoll.KnockAttempts;
                 spdlog::info("Ragdoll {:X}: copy was not ragdolling (flags1 {:08X}); knocked into ragdoll to follow the owner",
                     actor->formID, actor->actorState.flags1);
             }
-            if (!ragdoll.Knocked)
+            if (!ragdoll.Knocked && ragdoll.KnockAttempts <= 1)
+            {
                 ragdoll.WatchSinceMs = aNowMs;
                 s_wornProbeUntilMs.store(GetTickCount64() + 400, std::memory_order_relaxed);
-            ragdoll.Knocked = true;
+            }
+            if (!ragdoll.KnockPending)
+            {
+                const auto knockState = (actor->actorState.flags1 >> 25) & 0x7;
+                ragdoll.Knocked = ownerDyingNow || knockState == 1 || knockState == 2;
+                if (!ragdoll.Knocked) ++ragdoll.KnockAttempts;
+            }
             ragdoll.RetryTransitionMs = aNowMs + 250;
+            // A dead copy following the owner's ragdoll gets the dead-body collision layer whichever path killed it
+            // (a death animation without a knock does not pass the kill hook).
+            if (const auto life = (actor->actorState.flags1 >> 21) & 0xF; life == 1 || life == 2)
+                CharacterService::NoteRemoteDeath(actor->formID);
         }
         if (!limb && ragdoll.WatchSinceMs && aNowMs - ragdoll.WatchSinceMs < 2000)
         {
@@ -2116,6 +2248,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         {
             PoseCopyAuthority::SetControlledRagdollDriver(driver, true);
             PoseCopyAuthority::SetRagdollSimulating(actor->formID, true);
+            ragdoll.DrivesBody = true;
         }
         if (ragdoll.PublishedRevision == ragdoll.Revision)
             continue;
@@ -2139,6 +2272,7 @@ void CorpseRagdollService::ApplyRemote(const uint64_t aNowMs, bool aRelease) noe
         {
             PoseCopyAuthority::SetControlledRagdollDriver(driver, true);
             PoseCopyAuthority::SetRagdollSimulating(actor->formID, true);
+            ragdoll.DrivesBody = true;
         }
     }
 

@@ -11,6 +11,9 @@
 #include <Messages/ServerMessageFactory.h>
 #include <Messages/RequestWeatherChange.h>
 #include <Messages/NotifyWeatherChange.h>
+#include <Structs/Factions.h>
+#include <Structs/TimeModel.h>
+#include <common/DateTime.h>
 
 using namespace TiltedPhoques;
 
@@ -21,6 +24,7 @@ TEST_CASE("Weather change carries the host sky state (blend and wind)", "[encodi
         RequestWeatherChange request;
         request.Id = GameId(0, 0x12F89);
         request.HasSky = true;
+        request.WorldSpaceId = GameId(0, 0x3C);
         request.LastId = GameId(0, 0x10A242);
         request.Percent = 0.375f;
         request.WindSpeed = 0.6117647f;
@@ -38,6 +42,7 @@ TEST_CASE("Weather change carries the host sky state (blend and wind)", "[encodi
         NotifyWeatherChange notify;
         notify.Id = GameId(0, 0x12F89);
         notify.HasSky = true;
+        notify.WorldSpaceId = GameId(0, 0x3C);
         notify.LastId = GameId(0, 0x10A242);
         notify.Percent = 1.f;
         notify.WindSpeed = 0.2f;
@@ -65,4 +70,43 @@ TEST_CASE("Weather change carries the host sky state (blend and wind)", "[encodi
         REQUIRE(*pNotify == plain);
         REQUIRE_FALSE(pNotify->HasSky);
     }
+}
+
+TEST_CASE("Crime faction and calendar day survive network serialization", "[encoding.weather]")
+{
+    Buffer buffer(256);
+    Factions factions;
+    factions.CrimeFaction = GameId(1, 0x1234);
+    factions.RemoveCrimeFaction = true;
+    factions.ExtraFactions.push_back(Faction{});
+    factions.ExtraFactions.back().Id = GameId(1, 0x1234);
+    factions.ExtraFactions.back().Rank = 1;
+    {
+        Buffer::Writer writer(&buffer);
+        factions.Serialize(writer);
+        Buffer::Reader reader(&buffer);
+        Factions decoded;
+        decoded.Deserialize(reader);
+        CHECK(decoded == factions);
+        CHECK(decoded.CrimeFaction == GameId(1, 0x1234));
+        CHECK(decoded.RemoveCrimeFaction);
+    }
+
+    Buffer clockBuffer(128);
+    TimeModel time;
+    time.Time = 23.5f;
+    time.DaysPassed = 109.979164f;
+    {
+        Buffer::Writer writer(&clockBuffer);
+        time.Serialize(writer);
+        Buffer::Reader reader(&clockBuffer);
+        TimeModel decoded;
+        decoded.Deserialize(reader);
+        CHECK(decoded == time);
+        CHECK(decoded.DaysPassed == time.DaysPassed);
+    }
+    DateTime running(time);
+    running.Update(90000); // 90 real seconds at timescale 20 crosses midnight.
+    CHECK(running.m_timeModel.Time < 0.01f);
+    CHECK(running.m_timeModel.DaysPassed == Approx(110.f).margin(0.001f));
 }

@@ -84,6 +84,32 @@ enum ClientOpcode : unsigned char
     kRequestPlayerMirror, // Reserved. Experimental player replay was withdrawn.
     kRequestHarness,
     kAnimObjectRequest,
+    kPhysicsLeaseRequest,
+    kRequestDropIn,
+    kRequestSaidOnce,
+    kRequestCheckpointRoster,
+    kTimeSkipRequest,
+    kRequestQuestResync,
+    kRequestQuestSnapshot,
+    kRequestQuestCursor,
+    kRequestQuestHandoverDone,
+    kScriptOutcomeRequest,
+    kScriptOutcomeResultRequest,
+    kTopicInfoFragmentRunRequest,
+    kActivateResultRequest,
+    kScriptEventForwardRequest,
+    kTimerHandoverRequest,
+    kRequestGlobalValue,
+    // Content matching (CM 3.6, INTEGRATION.md section 3 C13-C17): reserved here so later blocks never shift them.
+    kContentManifestRequest,
+    kContentTransferRequest,
+    kContentStatusRequest,
+    kContentProfileRequest,
+    kContentChunkUpload,
+    // Host hand-off through the lobby (batch b10d), appended after the design table.
+    kRequestHandoffAck,
+    kRequestHandoffSeed,
+    kRequestCheckpointAvailability,
     kClientOpcodeMax
 };
 
@@ -169,5 +195,28 @@ enum ServerOpcode : unsigned char
     kNotifyPlayerMirror, // Reserved. Experimental player replay was withdrawn.
     kNotifyHarness,
     kNotifyAnimObject,
+    kNotifyPhysicsLease,
+    kNotifyDropIn,
+    kNotifySaidOnce,
+    kNotifyCheckpointRoster,
+    kNotifyTimeSkip,
+    kNotifyQuestCommitAck,
+    kNotifyQuestSnapshotRequest,
+    kNotifyQuestSnapshot,
+    kNotifyQuestCursor,
+    kNotifyQuestHandover,
+    kNotifyScriptOutcome,
+    kNotifyScriptOutcomeResult,
+    kNotifyTopicInfoFragmentRun,
+    kNotifyActivateResult,
+    kNotifyScriptEventForward,
+    kNotifyTimerHandover,
+    kNotifyRegionAuthority,
+    kNotifyGlobalValue,
+    // Content matching (CM 3.6, INTEGRATION.md section 3 S15-S17).
+    kNotifyContentPlan,
+    kNotifyContentChunk,
+    kNotifyContentStatus,
+    kNotifyLedgerExtract,
     kServerOpcodeMax
 };

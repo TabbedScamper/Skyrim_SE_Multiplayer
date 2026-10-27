@@ -10,6 +10,7 @@
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
+#include <glm/gtc/quaternion.hpp>
 
 #include <array>
 #include <atomic>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <Services/LobbyService.h>
 
 namespace
 {
@@ -29,7 +31,7 @@ constexpr size_t kRingSize = 12;
 // A captured pose older than this is not sent (the actor is no longer being animated here).
 constexpr uint64_t kCaptureFreshMs = 250;
 // An unbracketed living pose must not freeze a distant actor between low-rate packets.
-// One pose interval plus jitter (Muse diag-stutter cause 1): 75 ms was shorter than the measured 95 ms owner
+// One pose interval plus jitter (diag-stutter cause 1): 75 ms was shorter than the measured 95 ms owner
 // gap, so living copies kept falling back to the local graph and blending back: the visible stutter.
 constexpr uint64_t kLivingHoldMs = 150;
 constexpr uint64_t kLivingBlendMs = 150;
@@ -61,7 +63,54 @@ struct Sample
     uint64_t Tick{};
     uint32_t Count{};
     std::array<QsTransform, kMaxBones> Bones{};
+    // Owner's frame for bone 0 at capture (dying/dead owners): see RebaseRootBone.
+    bool HasParent{};
+    NiTransform Parent{};
 };
+
+// The frame bone 0's local transform is relative to: a flattened bone tree's own node, or a plain node's parent.
+bool RootBoneFrame(const void* apBoneNodes, NiTransform& aOut) noexcept
+{
+    const auto* entries = apBoneNodes ? *reinterpret_cast<const BoneNodeEntry* const*>(apBoneNodes) : nullptr;
+    if (!entries || !entries[0].node)
+        return false;
+    const auto* node = static_cast<const NiAVObject*>(entries[0].node);
+    if (static_cast<int32_t>(entries[0].unk08) < 0)
+        node = node->parent;
+    if (!node)
+        return false;
+    aOut = node->world;
+    return true;
+}
+
+glm::mat3 ToMat3(const NiMatrix3& acMatrix) noexcept
+{
+    glm::mat3 m;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            m[c][r] = acMatrix.entry[r][c];
+    return m;
+}
+
+// Bone 0 of an owner sample, re-expressed from the owner's frame onto this copy's: world = from * local, local' =
+// to^-1 * world. A dying owner's reference turns at death (Lokir 97 -> 330 deg) while its body does not; played
+// against this copy's own frame, the held or blended pose was drawn turned 134 deg away for 8 frames (2026-09-30).
+QsTransform RebaseRootBone(const QsTransform& acBone, const NiTransform& acFrom, const NiTransform& acTo) noexcept
+{
+    const glm::mat3 from = ToMat3(acFrom.rotate), to = ToMat3(acTo.rotate);
+    const glm::vec3 fromT{acFrom.translate.x, acFrom.translate.y, acFrom.translate.z};
+    const glm::vec3 toT{acTo.translate.x, acTo.translate.y, acTo.translate.z};
+    const glm::vec3 local{acBone.translation[0], acBone.translation[1], acBone.translation[2]};
+    const glm::vec3 world = from * (local * acFrom.scale) + fromT;
+    const float toScale = acTo.scale > 0.0001f ? acTo.scale : 1.f;
+    const glm::vec3 rebased = glm::transpose(to) * (world - toT) / toScale;
+    const glm::quat q{acBone.rotation[3], acBone.rotation[0], acBone.rotation[1], acBone.rotation[2]};
+    const glm::quat r = glm::normalize(glm::quat_cast(glm::transpose(to) * from * glm::mat3_cast(q)));
+    QsTransform out = acBone;
+    out.translation[0] = rebased.x; out.translation[1] = rebased.y; out.translation[2] = rebased.z;
+    out.rotation[0] = r.x; out.rotation[1] = r.y; out.rotation[2] = r.z; out.rotation[3] = r.w;
+    return out;
+}
 
 struct ActorPose
 {
@@ -76,6 +125,8 @@ struct ActorPose
     bool PendingLiving{};
     std::array<QsTransform, kMaxBones> Captured{};
     uint32_t CapturedCount{};
+    bool PendingHasParent{}, CapturedHasParent{};
+    NiTransform PendingParent{}, CapturedParent{};
     uint64_t CapturedAtMs{};
     uint64_t CapturedTick{};
     // Other PCs: legacy hysteresis for physics transitions; living samples blend back from
@@ -355,6 +406,8 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
             {
                 std::copy_n(pose.Pending.begin(), pose.PendingCount, pose.Captured.begin());
                 pose.CapturedCount = pose.PendingCount;
+                pose.CapturedHasParent = pose.PendingHasParent;
+                pose.CapturedParent = pose.PendingParent;
                 pose.CapturedTick = pose.PendingTick;
                 pose.CapturedAtMs = living ? pose.PendingAtMs : NowMs();
                 // Merge partial passes within a living frame only. Otherwise a root-only
@@ -368,6 +421,8 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
             // Physics-owned skeletons also retain unwritten bones across frames.
             std::copy_n(apPose, count, pose.Pending.begin());
             pose.PendingCount = (std::max)(pose.PendingCount, count);
+            // Every sample: the copy holds the owner's last living pose through the death transition.
+            pose.PendingHasParent = RootBoneFrame(apBoneNodes, pose.PendingParent);
             pose.PendingFrame = frame;
             pose.PendingTick = s_currentTick.load(std::memory_order_relaxed);
             pose.PendingAtMs = NowMs();
@@ -410,6 +465,14 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                 const float t = b.Tick > a.Tick ? static_cast<float>((time - static_cast<double>(a.Tick)) /
                     static_cast<double>(b.Tick - a.Tick)) : 1.f;
                 Interpolate(a.Bones.data(), b.Bones.data(), t, driven, t_override.data());
+                // A dying owner's samples carry its bone-0 frame: blend bone 0 in this copy's frame instead.
+                NiTransform frame{};
+                if (!livingFallback && driven && a.HasParent && b.HasParent && RootBoneFrame(apBoneNodes, frame))
+                {
+                    const auto ra = RebaseRootBone(a.Bones[0], a.Parent, frame);
+                    const auto rb = RebaseRootBone(b.Bones[0], b.Parent, frame);
+                    Interpolate(&ra, &rb, t, 1, t_override.data());
+                }
                 useOverride = true;
             }
             // Briefly hold the newest sample beyond the buffered timeline.
@@ -425,6 +488,9 @@ void HookCopyPoseToNodes(const QsTransform* apPose, const void* apBoneNodes, uin
                     if (driven < count)
                         FillUndriven(pose, apPose, driven, count, livingFallback);
                     std::copy_n(newest.Bones.begin(), driven, t_override.begin());
+                    NiTransform frame{};
+                    if (!livingFallback && driven && newest.HasParent && RootBoneFrame(apBoneNodes, frame))
+                        t_override[0] = RebaseRootBone(newest.Bones[0], newest.Parent, frame);
                     useOverride = true;
                 }
             }
@@ -590,7 +656,7 @@ uint32_t DrawnGraphIndex(Actor* apActor, BSAnimationGraphManager* apManager, con
 }
 
 // Seated-pose probe (Helgen chopping block: the other player's copy drew its pelvis 85-90 u off the owner's with the
-// owner pose "overriding"; Muse diag-blockpose). For a seated player, every registry refresh (250 ms, main thread):
+// owner pose "overriding"; diag-blockpose). For a seated player, every registry refresh (250 ms, main thread):
 // the pelvis/COM local translation from the pose this PC sends (owner) or the newest owner sample it applies (copy),
 // against the drawn node's local translation. Owner sent != drawn: the capture misses a later writer. Copy
 // sample != drawn: a local writer re-poses the copy after our override.
@@ -684,6 +750,10 @@ void RefreshRegistry(World& aWorld) noexcept
     {
         auto* pActor = Cast<Actor>(TESForm::GetById(aFormId));
         if (!pActor || !pActor->GetNiNode())
+            return;
+        // Seated at the lobby's fire: posed by its own graph (the mark's idle), never by its owner's pose, which stands
+        // on the owner's own mark (owner 2026-10-02: the copy kept switching between sitting and standing).
+        if (aKind == Role::Apply && LobbyService::HoldsRemote(aFormId))
             return;
         BSAnimationGraphManager* pManager{};
         if (!pActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
@@ -875,6 +945,67 @@ std::string DescribeOverride(const uint32_t aFormId) noexcept
         newest.Count);
 }
 
+std::string DescribeBoneSlots(Actor* apActor, const std::string& acNeedle) noexcept
+{
+    // Main thread. For each animation graph of the actor: its boneNodes length, whether this authority registered
+    // it, and for every node whose name contains acNeedle, its index and the pose this PC captured (owner) or
+    // received newest (copy) at that index. A tail that never moves on a copy shows here whether the owner sends
+    // it (Helgen Keep, 2026-09-29).
+    if (!apActor)
+        return "\"graphs\":[]";
+    BSAnimationGraphManager* pManager{};
+    if (!apActor->animationGraphHolder.GetBSAnimationGraph(&pManager) || !pManager)
+        return "\"graphs\":[]";
+    std::string result = "\"graphs\":[";
+    {
+        BSScopedLock<BSRecursiveLock> managerLock(pManager->lock);
+        std::lock_guard guard(s_lock);
+        const auto pose = s_poses.find(apActor->formID);
+        for (uint32_t g = 0; g < pManager->animationGraphs.size && g < 32; ++g)
+        {
+            auto* pGraph = reinterpret_cast<const uint8_t*>(pManager->animationGraphs.Get(g));
+            if (!pGraph)
+                continue;
+            const auto& nodes = reinterpret_cast<const AnimationGraph*>(pGraph)->boneNodes;
+            const auto registered = s_registry.find(&nodes);
+            std::string slots;
+            for (uint32_t i = 0; nodes.data && i < nodes.length && i < kMaxBones; ++i)
+            {
+                const auto* pNode = static_cast<const uint8_t*>(ResolveBoneNode(nodes.data[i]));
+                const char* pName = pNode ? *reinterpret_cast<const char* const*>(pNode + 0x10) : nullptr;
+                if (!pName || !std::strstr(pName, acNeedle.c_str()))
+                    continue;
+                std::string value = "null";
+                if (pose != s_poses.end())
+                {
+                    const auto& p = pose->second;
+                    const QsTransform* pBone = nullptr;
+                    uint32_t count = 0;
+                    if (registered != s_registry.end() && registered->second.Kind == Role::Capture)
+                    {
+                        count = p.CapturedCount;
+                        pBone = i < count ? &p.Captured[i] : nullptr;
+                    }
+                    else if (p.RingCount)
+                    {
+                        const auto& newest = p.Ring[(p.RingNext + kRingSize - 1) % kRingSize];
+                        count = newest.Count;
+                        pBone = i < count ? &newest.Bones[i] : nullptr;
+                    }
+                    value = pBone ? fmt::format("[{:.3f},{:.3f},{:.3f},{:.3f}]", pBone->rotation[0], pBone->rotation[1],
+                        pBone->rotation[2], pBone->rotation[3]) : fmt::format("\"beyond count {}\"", count);
+                }
+                slots += fmt::format("{}{{\"index\":{},\"name\":\"{}\",\"pose\":{}}}", slots.empty() ? "" : ",", i, pName, value);
+            }
+            result += fmt::format("{}{{\"graph\":{},\"length\":{},\"registered\":\"{}\",\"slots\":[{}]}}", g ? "," : "", g,
+                nodes.length, registered == s_registry.end() ? "no" : registered->second.Kind == Role::Capture ? "capture" : "apply",
+                slots);
+        }
+    }
+    pManager->Release();
+    return result + "]";
+}
+
 bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noexcept
 {
     std::lock_guard guard(s_lock);
@@ -900,6 +1031,16 @@ bool GetCapturedPose(const uint32_t aFormId, EvaluatedPoseSnapshot& arPose) noex
         std::copy_n(source.translation, 3, target.Translation.begin());
         std::copy_n(source.rotation, 4, target.Rotation.begin());
         std::copy_n(source.scale, 3, target.Scale.begin());
+    }
+    arPose.HasParent = pending ? pose.PendingHasParent : pose.CapturedHasParent;
+    if (arPose.HasParent)
+    {
+        const auto& parent = pending ? pose.PendingParent : pose.CapturedParent;
+        arPose.ParentTranslation = {parent.translate.x, parent.translate.y, parent.translate.z};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                arPose.ParentRotation[r * 3 + c] = parent.rotate.entry[r][c];
+        arPose.ParentScale = parent.scale;
     }
     return arPose.IsValid();
 }
@@ -974,6 +1115,17 @@ void PushOwnerSample(const uint32_t aFormId, const EvaluatedPoseSnapshot& acPose
         std::copy(source.Rotation.begin(), source.Rotation.end(), target.rotation);
         std::copy(source.Scale.begin(), source.Scale.end(), target.scale);
         target.scale[3] = 0.f;
+    }
+    sample.HasParent = acPose.HasParent;
+    if (sample.HasParent)
+    {
+        sample.Parent.translate.x = acPose.ParentTranslation[0];
+        sample.Parent.translate.y = acPose.ParentTranslation[1];
+        sample.Parent.translate.z = acPose.ParentTranslation[2];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sample.Parent.rotate.entry[r][c] = acPose.ParentRotation[r * 3 + c];
+        sample.Parent.scale = acPose.ParentScale;
     }
     std::copy_n(sample.Bones.begin(), sample.Count, pose.Held.begin());
     pose.HeldCount = (std::max)(pose.HeldCount, sample.Count);

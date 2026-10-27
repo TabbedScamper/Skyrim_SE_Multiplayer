@@ -47,11 +47,15 @@ struct OverlayService
     void Create(RenderSystemD3D11* apRenderSystem) noexcept;
 
     void Render() noexcept;
+    void RenderDrawOnly() noexcept;
     void Reset() const noexcept;
     void Reload() noexcept;
 
     void Initialize() noexcept;
     void PushDialogueListen(const DialogueListenState* aState, uint32_t aSpeaker);
+    // Revive prompt and meter (ReviveService): mode 0 hidden, 1 prompt, 2 reviving, 3 down.
+    void PushRevive(int aMode, const std::string& acName, const std::string& acKey, double aProgress, const std::string& acHint,
+        const std::string& acNote, const std::string& acButton, const std::string& acModel, bool aGamepad, float aBleed);
 
     void SetActive(bool aActive) noexcept;
     [[nodiscard]] bool GetActive() const noexcept;
@@ -68,6 +72,14 @@ struct OverlayService
     void SendSystemMessage(const std::string& acMessage);
     // Character creation together: the banner over the creator (whose character is shown, ready or not).
     void SetCreatorView(bool aVisible, int aPlayer, int aPlayerCount, bool aReady, bool aLocalReady = false, bool aGamepad = false);
+    // Live lobby (LobbyService): the loading screen with its progress (0-1), and the lobby menu once the scene is set.
+    void SetLobbyState(bool aLoading, float aProgress, bool aMenu);
+    // The lobby soundtrack's playing track (official title; empty when none).
+    void SetLobbyMusic(const std::string& acTitle);
+    // The lobby soundtrack's titles and which are on (Options > Audio > Lobby music).
+    void SendLobbyPlaylist();
+    // Test diagnostics: overlay draws so far, its state flags and render size (JSON object).
+    [[nodiscard]] std::string RenderStats() const noexcept;
     void ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly = false);
     bool InjectTestControllerButton(const std::string& acButton) noexcept;
 

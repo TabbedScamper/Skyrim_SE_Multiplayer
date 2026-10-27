@@ -20,6 +20,10 @@ struct PartyStartRequest;
 struct PartySessionSettingsRequest;
 struct PartyGameplaySettingsRequest;
 struct CheckpointSaveRequest;
+struct RequestCheckpointRoster;
+struct RequestHandoffAck;
+struct RequestHandoffSeed;
+struct RequestCheckpointAvailability;
 
 /**
  * @brief Manages every party in the server.
@@ -34,6 +38,7 @@ struct PartyService
         Vector<uint32_t> LoadedPlayerIds;
         Vector<uint32_t> GameplayReadyPlayerIds;
         GameId CachedWeather{};
+        GameId CachedWeatherWorldSpace{};
         // Host sky state (weather blend and wind), replayed to members who join or reload.
         bool CachedHasSky{};
         GameId CachedLastWeather{};
@@ -43,9 +48,25 @@ struct PartyService
         uint8_t CampaignMode{};
         uint8_t SessionState{};
         uint64_t StartEpoch{};
+        uint32_t LeaderGeneration{};
         String CheckpointId{};
+        // The newest checkpoint the leader announced in this session (a wipe reloads it).
+        String LatestCheckpointId{};
+        uint64_t HandoffTargetSteamId{};
+        uint64_t HandoffStartedTick{};
+        String HandoffCheckpointId{};
+        Vector<uint32_t> HandoffAckPlayerIds;
+        bool HandoffReady{};
+        Vector<uint64_t> HandoffOrder;
+        // Set only after a complete campaign ledger snapshot has been imported.
+        bool HandoffLedgerReady{};
+        uint64_t HandoffJoinDeadlineTick{};
+        Map<uint32_t, Vector<String>> AvailableCheckpoints;
+        // A wipe reload in progress: characters are replayed to every member at its gameplay barrier.
+        bool ReplayOnGameplay{};
         bool LobbyOpen{};
         bool PasswordProtected{};
+        String Password{};
         ServerSettings GameplaySettings{};
         bool GameplayOverridden{};
     };
@@ -56,10 +77,16 @@ struct PartyService
     TP_NOCOPYMOVE(PartyService);
 
     const Party* GetById(uint32_t aId) const noexcept;
+    // After a party wipe (owner choice: full checkpoint reset, the vanilla death reload): the session restarts in
+    // game from the leader's latest checkpoint (new epoch, both barriers); the leader loads first, followers after.
+    // False when the session has no checkpoint.
+    bool RestartFromCheckpoint(uint32_t aPartyId) noexcept;
     bool IsPlayerInParty(Player* const apPlayer) const noexcept;
     bool IsPlayerLeader(const Player* const apPlayer) const noexcept;
     Party* GetPlayerParty(Player* const apPlayer) noexcept;
     ServerSettings GetSettingsForPlayer(const Player* apPlayer) const noexcept;
+    // Every player's list of names again (a player renamed its character).
+    void RefreshPlayerNames() const noexcept { BroadcastPlayerList(); }
 
 protected:
     void OnUpdate(const UpdateEvent& acEvent) noexcept;
@@ -77,7 +104,11 @@ protected:
     void OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept;
     void OnPartyGameplaySettings(const PacketEvent<PartyGameplaySettingsRequest>& acPacket) noexcept;
     void OnCheckpointSave(const PacketEvent<CheckpointSaveRequest>& acPacket) noexcept;
-    void RemovePlayerFromParty(Player* apPlayer) noexcept;
+    void OnCheckpointRoster(const PacketEvent<RequestCheckpointRoster>& acPacket) noexcept;
+    void OnHandoffAck(const PacketEvent<RequestHandoffAck>& acPacket) noexcept;
+    void OnHandoffSeed(const PacketEvent<RequestHandoffSeed>& acPacket) noexcept;
+    void OnCheckpointAvailability(const PacketEvent<RequestCheckpointAvailability>& acPacket) noexcept;
+    void RemovePlayerFromParty(Player* apPlayer, bool aForced = false) noexcept;
 
     void BroadcastPlayerList(Player* apPlayer = nullptr) const noexcept;
     void BroadcastPartyInfo(uint32_t aPartyId) const noexcept;
@@ -104,6 +135,10 @@ private:
     entt::scoped_connection m_partySessionSettingsConnection;
     entt::scoped_connection m_partyGameplaySettingsConnection;
     entt::scoped_connection m_checkpointSaveConnection;
+    entt::scoped_connection m_checkpointRosterConnection;
+    entt::scoped_connection m_handoffAckConnection;
+    entt::scoped_connection m_handoffSeedConnection;
+    entt::scoped_connection m_checkpointAvailabilityConnection;
 
     uint64_t m_nextStartEpoch{1};
 

@@ -12,6 +12,8 @@ void RequestEquipmentChanges::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
     Serialization::WriteBool(aWriter, IsSpell);
     Serialization::WriteBool(aWriter, IsShout);
     Serialization::WriteBool(aWriter, IsAmmo);
+    Serialization::WriteBool(aWriter, HasStack);
+    if (HasStack) Stack.Serialize(aWriter);
     CurrentInventory.Serialize(aWriter);
 }
 
@@ -28,5 +30,7 @@ void RequestEquipmentChanges::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
     IsSpell = Serialization::ReadBool(aReader);
     IsShout = Serialization::ReadBool(aReader);
     IsAmmo = Serialization::ReadBool(aReader);
+    HasStack = Serialization::ReadBool(aReader);
+    if (HasStack) Stack.Deserialize(aReader);
     CurrentInventory.Deserialize(aReader);
 }

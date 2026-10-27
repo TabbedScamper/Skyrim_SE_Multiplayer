@@ -29,4 +29,7 @@ struct Movement
     // high 16 bits [-pi/2, pi/2]. NPC updates carry only the presence bit.
     bool HasLookDirection{};
     uint32_t LookDirection{};
+    uint8_t LifeState{};
+    bool Essential{};
+    bool Fleeing{};
 };

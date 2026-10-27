@@ -7,8 +7,15 @@
 #include <Messages/NotifyPlayerControlState.h>
 #include <Services/PlayerCollision.h>
 #include <Services/PartyService.h>
+#include <Services/LobbyService.h>
+#include <Services/ReviveService.h>
+#include <Games/References.h>
+#include <Services/CharacterService.h>
+#include <Services/CharacterSnapshots.h>
 #include <Services/DoorVoteService.h>
+#include <Services/DropInService.h>
 #include <Forms/TESObjectCELL.h>
+#include <Forms/TESWorldSpace.h>
 
 #include <Services/TransportService.h>
 #include <Services/SteamLobbyService.h>
@@ -36,7 +43,11 @@
 #include <Messages/PartyGameplaySettingsRequest.h>
 #include <Messages/CheckpointSaveRequest.h>
 #include <Messages/NotifyCheckpointSave.h>
+#include <Messages/CheckpointRoster.h>
+#include <Messages/HostHandoff.h>
+#include <HandoffPolicy.h>
 #include <Services/CheckpointSaves.h>
+#include <Utils/MainThread.h>
 #include <Forms/TESIdleForm.h>
 
 #include <OverlayApp.hpp>
@@ -48,6 +59,7 @@
 #include <Games/Skyrim/AI/Movement/PlayerControls.h>
 #include <Games/Skyrim/PlayerCharacter.h>
 #include <Forms/TESQuest.h>
+#include <Forms/TESNPC.h>
 #include <AI/AIProcess.h>
 
 namespace
@@ -240,8 +252,12 @@ struct PlayerControlSync
             return;
         uint32_t live{}, stored{};
         ReadControlState(pMap, live, stored);
+        // A local engine state owns a saved mask; do not overwrite its recovery. Known gap (2026-10-01): after loading a
+        // save made mid-execution, the follower keeps a saved mask from its own cart scene that only the host's scene
+        // clears, and stays locked. A blanket "take the host's mask after 3 s" fix was refuted in review (it would override
+        // mounts and legitimate script locks, persistently); a fix must be load-scoped. See FINDINGS 2026-10-01.
         if (stored != 0x80000000u)
-            return; // A local engine state owns a saved mask; do not overwrite its recovery.
+            return;
         const auto before = live & PlayerControlState::kChannels;
         const uint32_t enable = State.Controls & ~before;
         const uint32_t disable = before & ~State.Controls;
@@ -305,6 +321,7 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher, Transpo
     m_playerListConnection = aDispatcher.sink<NotifyPlayerList>().connect<&PartyService::OnPlayerList>(this);
     m_partyInfoConnection = aDispatcher.sink<NotifyPartyInfo>().connect<&PartyService::OnPartyInfo>(this);
     m_checkpointSaveConnection = aDispatcher.sink<NotifyCheckpointSave>().connect<&PartyService::OnCheckpointSave>(this);
+    m_checkpointRosterConnection = aDispatcher.sink<NotifyCheckpointRoster>().connect<&PartyService::OnCheckpointRoster>(this);
     m_partyInviteConnection = aDispatcher.sink<NotifyPartyInvite>().connect<&PartyService::OnPartyInvite>(this);
     m_partyJoinedConnection = aDispatcher.sink<NotifyPartyJoined>().connect<&PartyService::OnPartyJoined>(this);
     m_partyLeftConnection = aDispatcher.sink<NotifyPartyLeft>().connect<&PartyService::OnPartyLeft>(this);
@@ -317,10 +334,21 @@ void PartyService::CreateParty() const noexcept
     m_transport.Send(request);
 }
 
-void PartyService::LeaveParty() const noexcept
+void PartyService::LeaveParty() noexcept
 {
+    if (m_isLeader && m_sessionState >= 2 && m_partyMembers.size() > 1)
+    {
+        BeginHostDeparture(false);
+        return;
+    }
+    m_world.GetSteamLobbyService().ForgetParty();
+    const bool wasInGame = m_inParty && m_sessionState >= 2;
+    if (wasInGame)
+        CheckpointSaves::WriteCarryHome();
     PartyLeaveRequest request;
     m_transport.Send(request);
+    if (wasInGame)
+        LobbyService::RequestReturnToLobby("party_left");
 }
 
 void PartyService::CreateInvite(const uint32_t aPlayerId) const noexcept
@@ -347,11 +375,79 @@ void PartyService::KickPartyMember(const uint32_t aPlayerId) const noexcept
     m_transport.Send(kickMessage);
 }
 
+void PartyService::EndParty() noexcept
+{
+    if (!m_inParty || !m_isLeader || m_partyMembers.size() < 2)
+        return;
+    if (m_sessionState >= 2)
+    {
+        BeginHostDeparture(false);
+        return;
+    }
+    m_world.GetSteamLobbyService().ForgetParty();
+    // The server sends a forced leave to every member before it removes the host.
+    PartyKickRequest endMessage;
+    endMessage.PartyMemberPlayerId = 0;
+    m_transport.Send(endMessage);
+}
+
+void PartyService::DrainForcedLeave() noexcept
+{
+    const int pending = m_forcedLeavePending.exchange(0);
+    if (!pending)
+        return;
+    // The server's notification can arrive on a VM worker. Capture on the main loop before Steam/transport cleanup.
+    if (pending == 2)
+        CheckpointSaves::WriteCarryHome();
+    m_world.GetSteamLobbyService().QueueLeaveSession(true);
+}
+
 void PartyService::ChangePartyLeader(const uint32_t aPlayerId) const noexcept
 {
     PartyChangeLeaderRequest changeMessage;
     changeMessage.PartyMemberPlayerId = aPlayerId;
     m_transport.Send(changeMessage);
+}
+
+bool PartyService::BeginHostDeparture(bool aQuitToMenu) noexcept
+{
+    if (!m_inParty || !m_isLeader || m_sessionState < 2 || m_partyMembers.size() < 2)
+        return false;
+    if (m_handoffDeparted)
+        return false;
+    m_handoffQuitRequested |= aQuitToMenu;
+    if (m_handoffTargetSteamId)
+        return true;
+    for (const auto id : m_partyMembers)
+        if (id != m_leaderPlayerId)
+        {
+            ChangePartyLeader(id);
+            spdlog::info("Handoff: leader departure requested successor player {}", id);
+            return true;
+        }
+    return false;
+}
+
+std::string PartyService::HandoffStatus() const noexcept
+{
+    return fmt::format(R"({{"targetSteamId":"{}","checkpoint":"{}","ready":{},"ackSent":{},"departed":{},"seeded":{},"members":{},"lastFailure":"{}"}})",
+        m_handoffTargetSteamId, m_handoffCheckpointId.c_str(), m_handoffReady, m_handoffAckSent,
+        m_handoffDeparted, m_handoffCampaign, m_handoffOrder.size(), m_lastHandoffFailure.c_str());
+}
+
+void PartyService::CancelHandoff() noexcept
+{
+    m_lastHandoffFailure = m_handoffSeedCheckpoint;
+    m_handoffDeparted = false;
+    m_handoffCampaign = false;
+    m_handoffOrder.clear();
+    m_handoffTargetSteamId = 0;
+    m_handoffCheckpointId.clear();
+    m_handoffSeedCheckpoint.clear();
+    m_handoffAvailabilitySent = false;
+    m_handoffSaveRequested = false;
+    m_handoffAckSent = false;
+    m_handoffReady = false;
 }
 
 bool PartyService::IsFollowerCinematicInputGated() const noexcept
@@ -373,7 +469,8 @@ void PartyService::SelectCampaign(const uint8_t aMode, const String& acCheckpoin
     PartyStartRequest request;
     request.Mode = aMode;
     // Continue loads the leader's newest matched checkpoint on every PC unless one was named.
-    request.CheckpointId = aMode == PartyStartRequest::kContinue && acCheckpointId.empty() ? CheckpointSaves::Latest() : acCheckpointId;
+    request.CheckpointId = aMode == PartyStartRequest::kContinue && acCheckpointId.empty() ?
+        (m_handoffCampaign ? m_currentCheckpoint : CheckpointSaves::Latest()) : acCheckpointId;
     m_transport.Send(request);
 }
 
@@ -382,17 +479,19 @@ void PartyService::StartTogether(const uint8_t aMode, const String& acCheckpoint
     PartyStartRequest request;
     request.Mode = aMode;
     request.Launch = true;
-    request.CheckpointId = aMode == PartyStartRequest::kContinue && acCheckpointId.empty() ? CheckpointSaves::Latest() : acCheckpointId;
+    request.CheckpointId = aMode == PartyStartRequest::kContinue && acCheckpointId.empty() ?
+        (m_handoffCampaign ? m_currentCheckpoint : CheckpointSaves::Latest()) : acCheckpointId;
     m_transport.Send(request);
 }
 
-void PartyService::SetSessionSettings(const bool aOpen, const String& acPassword) const noexcept
+void PartyService::SetSessionSettings(const bool aOpen, const String& acPassword, bool aKeepPassword) const noexcept
 {
     if (!m_isLeader)
         return;
     PartySessionSettingsRequest request;
     request.Open = aOpen;
     request.Password = acPassword;
+    request.KeepPassword = aKeepPassword;
     m_transport.Send(request);
 }
 
@@ -406,10 +505,27 @@ void PartyService::SetGameplaySettings(const uint32_t aDifficulty, const bool aP
     m_transport.Send(request);
 }
 
+void PartyService::NoteGameLoaded() noexcept
+{
+    m_reloadPending = false;
+    // A load clears the fade; stay black until everyone is in.
+    if (m_wipeFade)
+        FadeOutGame(true, true, 0.f, true, 0.f);
+}
+
 void PartyService::ReachWorldReadyBarrier() noexcept
 {
-    if (!m_waitingForWorldReady || m_sessionState != 1 || m_worldGateHeld)
+    // During an in-game reload the world is the old one until the load event (the in-world fallback below reported
+    // the barrier the instant the reload began, and a waiting follower never reloaded).
+    if (!m_waitingForWorldReady || m_sessionState != 1 || m_worldGateHeld || m_reloadPending)
         return;
+
+    // Owner (2026-09-28): no frozen world while the others load; this PC waits on black and everyone fades in together
+    // at the gameplay barrier.
+    FadeOutGame(true, true, 0.f, true, 0.f);
+    if (!m_wipeFade)
+        m_wipeFadeSince = GetTickCount64();
+    m_wipeFade = true;
 
     if (auto* pUI = UI::Get())
     {
@@ -431,7 +547,113 @@ void PartyService::OnCheckpointSave(const NotifyCheckpointSave& acMessage) noexc
         m_startEpoch, m_sessionState);
     if (!m_inParty || acMessage.AuthorityEpoch != m_startEpoch)
         return;
+    m_currentCheckpoint = acMessage.CheckpointId;
     m_pendingCheckpoint = acMessage.CheckpointId;
+    if (m_isLeader)
+    {
+        if (m_saveRoster && m_saveRosterId == acMessage.CheckpointId)
+            SendRosterPosition(acMessage.CheckpointId, *m_saveRoster);
+        else if (auto position = CaptureRosterPosition())
+            SendRosterPosition(acMessage.CheckpointId, *position);
+        m_saveRoster.reset();
+    }
+}
+
+std::optional<RosterPosition> PartyService::CaptureRosterPosition() noexcept
+{
+    auto* player = PlayerCharacter::Get();
+    auto* cell = player ? player->parentCell : nullptr;
+    auto* npc = player ? Cast<TESNPC>(player->baseForm) : nullptr;
+    if (!cell || !npc) return std::nullopt;
+    RosterPosition position;
+    position.SteamId = m_world.GetSteamLobbyService().LocalSteamId();
+    position.CharacterName = npc->fullName.value.AsAscii();
+    const auto key = CheckpointSaves::CurrentCharacterKey();
+    position.CharacterKey = (key.empty() ? "name:" + std::string(position.CharacterName.c_str()) : key).c_str();
+    if (cell->worldspace && !m_world.GetModSystem().GetServerModId(cell->worldspace->formID, position.WorldSpaceId))
+        return std::nullopt;
+    if (!m_world.GetModSystem().GetServerModId(cell->formID, position.CellId))
+        return std::nullopt;
+    position.X = player->position.x;
+    position.Y = player->position.y;
+    position.Z = player->position.z;
+    position.Heading = player->rotation.z;
+    position.Downed = player->actorState.IsDeadState() || player->actorState.IsBleedingOut();
+    if (!position.SteamId || !position.Valid())
+    {
+        spdlog::warn("Checkpoint roster skipped: Steam identity or local position is unavailable");
+        return std::nullopt;
+    }
+    return position;
+}
+
+void PartyService::SendRosterPosition(const String& acId, const RosterPosition& acPosition) noexcept
+{
+    m_world.GetDropInService().SetCheckpointPosition(acPosition);
+    RequestCheckpointRoster request;
+    request.CheckpointId = acId;
+    request.Position = acPosition;
+    m_transport.Send(request);
+}
+
+void PartyService::SendHandoffSeed(const String& acCheckpointId) noexcept
+{
+    if (acCheckpointId.empty())
+    {
+        spdlog::error("Handoff: no checkpoint from the lost party to establish campaign lineage");
+        return;
+    }
+    String checkpoint = acCheckpointId;
+    if (checkpoint.empty() || !CheckpointSaves::Has(checkpoint) || !m_checkpointRosters.contains(checkpoint))
+    {
+        for (const auto& candidate : CheckpointSaves::Available(32))
+            if (m_checkpointRosters.contains(candidate) &&
+                (acCheckpointId.empty() || HandoffPolicy::SameFamily(candidate.c_str(), acCheckpointId.c_str())))
+            { checkpoint = candidate; break; }
+    }
+    const auto it = m_checkpointRosters.find(checkpoint);
+    if (it == m_checkpointRosters.end() || !CheckpointSaves::Has(checkpoint))
+    {
+        spdlog::error("Handoff: no complete local checkpoint roster to seed the new host");
+        return;
+    }
+    RequestHandoffSeed seed;
+    seed.CheckpointId = checkpoint;
+    seed.SteamIds = m_handoffOrder;
+    for (const auto steamId : seed.SteamIds)
+    {
+        const auto found = std::find_if(it->second.begin(), it->second.end(), [steamId](const RosterPosition& entry)
+            { return entry.SteamId == steamId; });
+        if (found == it->second.end())
+        {
+            spdlog::error("Handoff: checkpoint {} has no roster position for Steam {}", checkpoint, steamId);
+            return;
+        }
+        seed.Entries.push_back(*found);
+    }
+    m_transport.Send(seed);
+    m_handoffSeedCheckpoint = checkpoint;
+    spdlog::info("Handoff: seeded checkpoint {} for {} ordered members", checkpoint, seed.SteamIds.size());
+}
+
+void PartyService::OnCheckpointRoster(const NotifyCheckpointRoster& acMessage) noexcept
+{
+    if (!m_inParty || acMessage.Entries.size() != m_partyMembers.size())
+        return;
+    if (CheckpointSaves::WriteRoster(acMessage.CheckpointId, acMessage.Entries))
+    {
+        if (!m_checkpointRosters.contains(acMessage.CheckpointId))
+            m_rosterOrder.push_back(acMessage.CheckpointId);
+        m_checkpointRosters[acMessage.CheckpointId] = acMessage.Entries;
+        if (m_rosterOrder.size() > 32)
+        {
+            m_checkpointRosters.erase(m_rosterOrder.front());
+            m_rosterOrder.erase(m_rosterOrder.begin());
+        }
+        spdlog::info("Checkpoint {} roster sidecar written ({} players)", acMessage.CheckpointId, acMessage.Entries.size());
+    }
+    else
+        spdlog::error("Checkpoint {} roster sidecar could not be written", acMessage.CheckpointId);
 }
 
 namespace
@@ -457,8 +679,116 @@ void SuppressSurvivalPrompt() noexcept
 }
 } // namespace
 
+void PartyService::LaunchCheckpoint(const String& acCheckpointId) noexcept
+{
+    if (!MT::CutEnabled(6))
+    {
+        LaunchCheckpointNow(acCheckpointId, m_campaignMode);
+        return;
+    }
+    std::lock_guard lock(m_launchLock);
+    m_queuedLaunchCheckpoint = acCheckpointId;
+    m_queuedLaunchMode = m_campaignMode;
+    m_queuedLaunchConnection = MT::ConnectionSerial.load(std::memory_order_acquire);
+    m_queuedLaunch = true;
+}
+
+bool PartyService::HasPendingCheckpointLaunch() noexcept
+{
+    std::lock_guard lock(m_launchLock);
+    return m_queuedLaunch;
+}
+
+bool PartyService::DrainPendingCheckpointLaunch() noexcept
+{
+    String checkpoint;
+    uint8_t mode{};
+    uint32_t connection{};
+    {
+        std::lock_guard lock(m_launchLock);
+        if (!m_queuedLaunch)
+            return false;
+        checkpoint = std::move(m_queuedLaunchCheckpoint);
+        mode = m_queuedLaunchMode;
+        connection = m_queuedLaunchConnection;
+        m_queuedLaunch = false;
+    }
+    if (connection != MT::ConnectionSerial.load(std::memory_order_acquire))
+    {
+        spdlog::warn("mtd_terminal_drop checkpoint launch from an old connection");
+        return false;
+    }
+    LaunchCheckpointNow(checkpoint, mode);
+    return true;
+}
+
+void PartyService::DrainRestartFadeOnMainFrame() noexcept
+{
+    if (MT::CutEnabled(6) && MT::CurrentSlot() != MT::Slot::S3_3)
+    {
+        MT::M6WrongSlot.fetch_add(1, std::memory_order_relaxed);
+        MT::Report();
+    }
+    if (m_restartFadePending.exchange(false, std::memory_order_acq_rel))
+        FadeOutGame(true, true, 0.5f, true, 0.f);
+}
+
+void PartyService::LaunchCheckpointNow(const String& acCheckpointId, uint8_t aMode) noexcept
+{
+    if (MT::CutEnabled(6) && MT::CurrentSlot() != MT::Slot::S7)
+    {
+        MT::M6WrongSlot.fetch_add(1, std::memory_order_relaxed);
+        MT::Report();
+    }
+    if (m_handoffCampaign && (acCheckpointId.empty() || !CheckpointSaves::Has(acCheckpointId)))
+    {
+        spdlog::error("Handoff: Continue refused because common checkpoint '{}' is absent locally", acCheckpointId);
+        return;
+    }
+    // Continue with a named checkpoint loads that save on every PC; without one (or if
+    // this PC does not have it) fall back to the game's own Continue.
+    if (aMode != PartyStartRequest::kContinue || acCheckpointId.empty() || !CheckpointSaves::Load(acCheckpointId))
+    {
+        if (aMode == PartyStartRequest::kContinue)
+            spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acCheckpointId);
+        LaunchSharedCampaignFromMainMenu(aMode);
+    }
+}
+
 void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
+    // The black screen of a load never outlives the reason for it: lifted when the party or connection is gone, or
+    // when the gameplay barrier has not released everyone within 3 minutes (a stuck peer must not leave this player
+    // blind; review 2026-09-29).
+    if (m_wipeFade && (!m_transport.IsConnected() || !m_inParty || m_sessionState == 0 ||
+        GetTickCount64() - m_wipeFadeSince > 180000))
+    {
+        spdlog::warn("Load fade lifted without the gameplay barrier (connected {}, in party {}, state {}, {} ms)",
+            m_transport.IsConnected(), m_inParty, m_sessionState, GetTickCount64() - m_wipeFadeSince);
+        FadeOutGame(false, true, 1.f, true, 0.f);
+        m_wipeFade = false;
+        // The world-ready gate went up with the fade: never leave the player paused and input-blocked behind it.
+        if (m_worldGateHeld)
+        {
+            if (auto* pUI = UI::Get(); pUI && pUI->numPausesGame > 0)
+                --pUI->numPausesGame;
+            PlayerControls::QueueInputRelease();
+            m_worldGateHeld = false;
+            if (auto* pControls = PlayerControls::GetInstance())
+                pControls->SetBlockPlayerInput(false);
+        }
+    }
+    // A follower waiting for the leader's load: never forever (a leader that cannot load must not strand the party).
+    if (m_deferredLaunch && (m_sessionState != 1 || !m_inParty))
+        m_deferredLaunch = false;
+    if (m_reloadPending && (m_sessionState != 1 || !m_inParty))
+        m_reloadPending = false;
+    else if (m_deferredLaunch && GetTickCount64() - m_deferredSince > 120000)
+    {
+        spdlog::warn("Continue: the leader did not load within 120 s, loading anyway");
+        m_deferredLaunch = false;
+        LaunchCheckpoint(m_deferredCheckpoint);
+    }
     {
         static uint64_t s_nextSurvivalCheck{};
         if (const auto nowMs = GetTickCount64(); nowMs >= s_nextSurvivalCheck)
@@ -484,22 +814,69 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     const bool localSaveMade = CheckpointSaves::TakeLocalSaveMade();
     if (localSaveMade && m_isLeader && m_sessionState >= 2)
     {
+        CheckpointSaves::WriteCarryHome(); // only a promoted follower has a home source
         CheckpointSaveRequest request{};
         request.CheckpointId = CheckpointSaves::NewCheckpointId(m_startEpoch);
+        m_saveRoster = CaptureRosterPosition();
+        m_saveRosterId = request.CheckpointId;
         m_transport.Send(request);
         spdlog::info("Leader saved: announcing checkpoint {}", request.CheckpointId);
     }
     // A checkpoint the leader announced: start it once this PC is in the world (the engine
     // defers a queued save until saving is allowed), then copy the save when it is on disk.
+    // Only once the player has been in one cell for 5 s with no load screen: the leader's autosave at a load door
+    // announces the checkpoint as it goes through, and saving as soon as the new cell had 3D recorded escorts the
+    // engine had not yet brought through (Ralof outside Helgen Keep, 2026-09-30: missing after loading it).
+    if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell)
+    {
+        // Outdoors the grid cell changes as the player walks: key on the worldspace there, on the cell indoors.
+        const auto* pWorld = pPlayer->parentCell->worldspace;
+        const uint32_t place = pWorld ? reinterpret_cast<const TESForm*>(pWorld)->formID : pPlayer->parentCell->formID;
+        if (place != m_checkpointCellId)
+        {
+            m_checkpointCellId = place;
+            m_checkpointCellSinceMs = GetTickCount64();
+        }
+    }
+    else
+        m_checkpointCellId = 0;
     if (!m_pendingCheckpoint.empty() && m_sessionState >= 2)
     {
-        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell && pPlayer->GetNiNode())
+        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && pPlayer->parentCell && pPlayer->GetNiNode() &&
+            m_checkpointCellId && GetTickCount64() - m_checkpointCellSinceMs >= 5000 &&
+            (!pUI || !pUI->GetMenuOpen(BSFixedString("Loading Menu"))))
         {
-            CheckpointSaves::Begin(m_pendingCheckpoint);
+            CheckpointSaves::WriteCarryHome();
+            if (!m_isLeader)
+                if (auto position = CaptureRosterPosition())
+                    SendRosterPosition(m_pendingCheckpoint, *position);
+            CheckpointSaves::Begin(m_pendingCheckpoint, m_isLeader);
             m_pendingCheckpoint.clear();
         }
     }
     CheckpointSaves::Poll();
+    if (m_handoffTargetSteamId && m_isLeader && m_handoffCheckpointId.empty() &&
+        (!m_handoffSaveRequested || GetTickCount64() - m_handoffSaveRequestedAtMs > 30000) &&
+        GetTickCount64() >= m_handoffNextSaveAttemptMs)
+    {
+        m_handoffNextSaveAttemptMs = GetTickCount64() + 1000;
+        m_handoffSaveRequested = CheckpointSaves::RequestNativeSave();
+        if (m_handoffSaveRequested) m_handoffSaveRequestedAtMs = GetTickCount64();
+    }
+    if (m_handoffTargetSteamId && !m_handoffReady &&
+        !m_handoffCheckpointId.empty() && GetTickCount64() >= m_handoffNextAckAttemptMs)
+    {
+        m_handoffNextAckAttemptMs = GetTickCount64() + 1000;
+        if (m_checkpointRosters.contains(m_handoffCheckpointId) && CheckpointSaves::Has(m_handoffCheckpointId) &&
+            (m_isLeader || CheckpointSaves::CarryHomeReady()))
+        {
+            RequestHandoffAck ack;
+            ack.CheckpointId = m_handoffCheckpointId;
+            m_transport.Send(ack);
+            m_handoffAckSent = true;
+            spdlog::info("Handoff: durable checkpoint {} acknowledged", ack.CheckpointId);
+        }
+    }
 
     // A save can carry a follower's first-person graph still in the scripted walking camera
     // (the stage-160 checkpoint did), and the load restores the bob. Leave it once per load by
@@ -573,7 +950,9 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
         // host used to count only when the intro had moved on with control back, so it simply
         // carried on while the followers were still editing.
         if (m_campaignMode == 1 && loaded)
-            ready = m_creatorSeen;
+            ready = m_creatorSeen && (!CreatorTogether::SkipRequested() || CreatorTogether::SkipReady());
+        if (CreatorTogether::SkipRequested() && !CreatorTogether::SkipReady())
+            ready = false;
         if (ready)
         {
             PartyReadyRequest request;
@@ -630,7 +1009,15 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
     if (m_inParty && m_isLeader && m_sessionState >= 2)
     {
         PlayerControlState state;
-        const bool free = m_sessionState >= 3 && CapturePlayerControlState(state) && state.Free;
+        // Down, fallen or dead is not a cutscene: bleedout takes the leader's controls, and reporting that as "not
+        // free" put every follower into cutscene follow, whose player then took the downed leader's pose and camera
+        // (2026-09-30: the follower's character mangled, third person, glued to the fallen host). ReviveService owns
+        // downed players.
+        auto* pLocal = PlayerCharacter::Get();
+        const uint32_t life = pLocal ? (pLocal->actorState.flags1 >> 21) & 0xF : 0;
+        const bool down = pLocal && (pLocal->actorState.IsBleedingOut() || life == 1 || life == 2 || life == 7 || life == 8 ||
+            m_world.GetReviveService().IsFallen(m_world.GetTransport().GetLocalPlayerId()));
+        const bool free = m_sessionState >= 3 && (down || (CapturePlayerControlState(state) && state.Free));
         const auto nowMs = GetTickCount64();
         if (static_cast<int>(free) != m_leaderFreeSent || nowMs >= m_nextLeaderFreeSendMs)
         {
@@ -669,11 +1056,66 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 
     // New Game does not consistently emit TESLoadGameEvent. Treat the first
     // live player cell after the title menu closes as the equivalent boundary.
+    if (m_inParty && m_sessionState >= 1 && m_homeApplyState == 1)
+    {
+        auto* pPlayer = PlayerCharacter::Get();
+        if (!pPlayer || !pPlayer->parentCell || !pPlayer->GetNiNode() || !pUI ||
+            pUI->GetMenuOpen(BSFixedString("Loading Menu")) ||
+            pUI->GetMenuOpen(BSFixedString("Main Menu")) || LobbyService::InLobbyWorld())
+            m_homeWorldSince = 0;
+        else if (!m_homeWorldSince)
+            m_homeWorldSince = GetTickCount64();
+        else if (GetTickCount64() - m_homeWorldSince >= 3000)
+        {
+            auto* pIntro = Cast<TESQuest>(TESForm::GetById(0x3372B));
+            if (m_campaignMode == PartyStartRequest::kContinue && pIntro && !pIntro->IsStageDone(80))
+            {
+                // CreatorTogether owns appearance at stage 75 and state at Keep unbinding.
+                // A continued pre-creator checkpoint must reach world-ready without this
+                // competing full apply copying level and gear into the prisoner phase.
+                m_homeApplyState = 0;
+                spdlog::info("Follower: pre-creator checkpoint defers lobby character to creator skip and Keep unbinding");
+            }
+            else
+            {
+                CharacterSnapshot home;
+                if (CharacterSnapshots::ReadFile(m_homeSourceSnap, home))
+                {
+                    CharacterSnapshots::QueueApply(std::move(home));
+                    m_homeApplyState = 2;
+                    spdlog::info("Follower: applying lobby character from {} before joining the shared world",
+                        m_homeSourceSnap.filename().string());
+                }
+                else
+                {
+                    spdlog::error("Follower: lobby character {} could not be read; carry-home disabled", m_homeSourceSnap.string());
+                    m_homeApplyState = 0;
+                }
+            }
+        }
+    }
+    else if (m_inParty && m_sessionState >= 1 && m_homeApplyState == 2)
+    {
+        const auto status = CharacterSnapshots::ApplyStatus();
+        if (status.rfind("done", 0) == 0)
+        {
+            CheckpointSaves::SetCarryHomeSource(m_homeSourceKey);
+            m_homeApplyState = 3;
+            spdlog::info("Follower: lobby character applied; carry-home enabled for {}", m_homeSourceKey);
+        }
+        else if (status.rfind("failed", 0) == 0)
+        {
+            spdlog::error("Follower: lobby character apply failed; carry-home disabled: {}", status);
+            m_homeApplyState = 0;
+        }
+    }
     if (m_waitingForWorldReady && !m_worldGateHeld)
     {
         auto* pPlayer = PlayerCharacter::Get();
         auto* pUI = UI::Get();
-        if (pPlayer && pPlayer->parentCell && pUI && !pUI->GetMenuOpen(BSFixedString("Main Menu")))
+        // The live lobby's throwaway world is in a cell with no Main Menu open too: it is not the shared world.
+        if (m_homeApplyState != 1 && m_homeApplyState != 2 && pPlayer && pPlayer->parentCell && pUI &&
+            !pUI->GetMenuOpen(BSFixedString("Main Menu")) && !LobbyService::InLobbyWorld())
             ReachWorldReadyBarrier();
     }
 
@@ -696,6 +1138,29 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
 
 void PartyService::OnDisconnected(const DisconnectedEvent& acEvent) noexcept
 {
+    if (m_inParty && m_partySteamIds.size() > 1 && !m_handoffDeparted && !m_handoffTargetSteamId)
+    {
+        const auto oldLeader = std::find(m_partyMembers.begin(), m_partyMembers.end(), m_leaderPlayerId);
+        if (oldLeader != m_partyMembers.end())
+        {
+            const size_t oldIndex = static_cast<size_t>(oldLeader - m_partyMembers.begin());
+            const uint64_t successor = HandoffPolicy::Successor(m_partySteamIds, m_partySteamIds[oldIndex]);
+            m_handoffOrder.clear();
+            m_handoffOrder.push_back(successor);
+            for (const auto id : m_partySteamIds)
+                if (id != successor) m_handoffOrder.push_back(id);
+            m_handoffSeedCheckpoint = m_currentCheckpoint;
+            m_handoffDeparted = true;
+            m_handoffAvailabilitySent = false;
+            m_world.GetSteamLobbyService().BeginHandoff(successor, m_handoffOrder, true);
+            spdlog::info("Handoff: server lost; successor Steam {} elected", successor);
+        }
+    }
+    if (m_inParty && m_sessionState >= 2)
+    {
+        CheckpointSaves::WriteCarryHome();
+        LobbyService::RequestReturnToLobby("disconnected");
+    }
     DestroyParty();
 }
 
@@ -712,11 +1177,67 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
         m_isLeader = acPartyInfo.IsLeader;
         m_leaderPlayerId = acPartyInfo.LeaderPlayerId;
         m_partyMembers = acPartyInfo.PlayerIds;
+        m_partySteamIds = acPartyInfo.SteamIds;
+        if (m_partySteamIds.size() == m_partyMembers.size())
+        {
+            const auto leader = std::find(m_partyMembers.begin(), m_partyMembers.end(), m_leaderPlayerId);
+            const auto index = leader == m_partyMembers.end() ? 0 : static_cast<size_t>(leader - m_partyMembers.begin());
+            m_world.GetSteamLobbyService().RememberParty(m_partySteamIds, m_partySteamIds[index]);
+        }
+        if (acPartyInfo.HandoffTargetSteamId && !m_handoffTargetSteamId)
+        {
+            m_handoffTargetSteamId = acPartyInfo.HandoffTargetSteamId;
+            m_handoffOrder.clear();
+            m_handoffOrder.push_back(m_handoffTargetSteamId);
+            for (const auto id : m_partySteamIds)
+                if (id != m_handoffTargetSteamId) m_handoffOrder.push_back(id);
+            if (m_isLeader && !m_handoffSaveRequested)
+            {
+                m_handoffSaveRequested = CheckpointSaves::RequestNativeSave();
+                if (m_handoffSaveRequested) m_handoffSaveRequestedAtMs = GetTickCount64();
+                spdlog::info("Handoff: leader checkpoint save queued={}", m_handoffSaveRequested);
+            }
+        }
+        if (!acPartyInfo.HandoffTargetSteamId && m_handoffTargetSteamId && !m_handoffDeparted)
+        {
+            m_handoffTargetSteamId = 0;
+            m_handoffCheckpointId.clear();
+            m_handoffOrder.clear();
+            m_handoffSaveRequested = false;
+            m_handoffAckSent = false;
+            spdlog::warn("Handoff: successor left before the checkpoint barrier; request again to retry");
+        }
+        if (!acPartyInfo.HandoffCheckpointId.empty() && m_handoffCheckpointId != acPartyInfo.HandoffCheckpointId)
+        {
+            m_handoffCheckpointId = acPartyInfo.HandoffCheckpointId;
+            m_handoffAckSent = false;
+        }
+        m_handoffReady = acPartyInfo.HandoffReady;
         m_readyPlayers = acPartyInfo.ReadyPlayerIds;
         m_campaignMode = acPartyInfo.CampaignMode;
+        if (!acPartyInfo.CheckpointId.empty() && m_campaignMode == PartyStartRequest::kContinue)
+            m_currentCheckpoint = acPartyInfo.CheckpointId;
+        if (acPartyInfo.HandoffSeeded)
+        {
+            m_handoffCampaign = true;
+            m_handoffTargetSteamId = 0;
+            if (!acPartyInfo.CheckpointId.empty()) m_currentCheckpoint = acPartyInfo.CheckpointId;
+        }
         const auto previousSessionState = m_sessionState;
         m_sessionState = acPartyInfo.SessionState;
         m_startEpoch = acPartyInfo.StartEpoch;
+        m_leaderGeneration = acPartyInfo.LeaderGeneration;
+        if (previousSessionState == 0 && m_sessionState == 1 && !m_isLeader)
+        {
+            CheckpointSaves::SetCarryHomeSource({});
+            m_homeSourceKey = LobbyService::ChosenOwnPlaythroughKey();
+            m_homeSourceSnap = LobbyService::ChosenOwnSnapshotPath();
+            // New Game's vanilla intro strips inventory. The chosen character is restored by
+            // CreatorTogether at the creator and Keep unbinding, never at world load.
+            m_homeApplyState = m_campaignMode == PartyStartRequest::kContinue &&
+                !m_homeSourceKey.empty() && !m_homeSourceSnap.empty() ? 1 : 0;
+            m_homeWorldSince = 0;
+        }
         RefreshFollowerIntroProtection();
 
         // TODO: this can be done a bit prettier
@@ -744,11 +1265,59 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
         pArguments->SetString(6, acPartyInfo.CheckpointId.c_str());
         pArguments->SetBool(7, acPartyInfo.LobbyOpen);
         pArguments->SetBool(8, acPartyInfo.PasswordProtected);
+        // This player's id on the server it is connected to now. The overlay learned it once, at the first connect: a
+        // player who joined a friend's session kept the id of their own one-player session, so after a promotion their
+        // CO-OP screen never saw them as the host and offered no "Make host" (owner 2026-10-02).
+        pArguments->SetInt(9, static_cast<int>(m_transport.GetLocalPlayerId()));
 
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("partyInfo", pArguments);
         m_world.GetOverlayService().GetOverlayApp()->ExecuteAsync("coopLobbyState", pArguments);
         m_world.GetSteamLobbyService().ApplyPartySettings(acPartyInfo.LobbyOpen, acPartyInfo.PasswordProtected);
-        if (previousSessionState == 0 && m_sessionState == 1)
+        if (m_handoffDeparted && m_isLeader && m_sessionState == 0 &&
+            !acPartyInfo.CheckpointId.empty() && acPartyInfo.CheckpointId != m_handoffSeedCheckpoint)
+            SendHandoffSeed(acPartyInfo.CheckpointId);
+        if (m_handoffDeparted && acPartyInfo.HandoffSeeded && !m_handoffAvailabilitySent)
+        {
+            RequestCheckpointAvailability available;
+            available.Checkpoints = CheckpointSaves::Available(32);
+            m_transport.Send(available);
+            m_handoffAvailabilitySent = true;
+        }
+        if (m_handoffDeparted && acPartyInfo.HandoffSeeded && m_sessionState >= 2)
+        {
+            m_handoffDeparted = false;
+            m_handoffOrder.clear();
+            m_handoffAckSent = false;
+            m_handoffSaveRequested = false;
+            m_handoffCheckpointId.clear();
+        }
+        if (m_handoffReady && !m_handoffDeparted && !m_handoffOrder.empty())
+        {
+            m_handoffSeedCheckpoint = m_handoffCheckpointId;
+            m_handoffDeparted = true;
+            m_handoffAvailabilitySent = false;
+            LobbyService::RequestReturnToLobby("party_left");
+            m_world.GetSteamLobbyService().BeginHandoff(m_handoffTargetSteamId, m_handoffOrder);
+        }
+        // A wiped party reloads its checkpoint in game, as vanilla reloads the last save on death: forget every tracked
+        // actor without releasing ownership (the leader keeps its NPCs), then load; the leader first, followers once
+        // the leader's world is in.
+        const bool restart = previousSessionState >= 2 && m_sessionState == 1 && m_world.GetReviveService().IsWiped();
+        if (restart)
+        {
+            // Owner (2026-09-28): straight to black, no standing around while the leader loads; black holds through
+            // the load (reapplied after it) until the gameplay barrier releases everyone together.
+            if (MT::CutEnabled(6))
+                m_restartFadePending.store(true, std::memory_order_release);
+            else
+                FadeOutGame(true, true, 0.5f, true, 0.f);
+            m_wipeFade = true;
+            m_wipeFadeSince = GetTickCount64();
+            m_reloadPending = true;
+            m_world.GetCharacterService().ReleaseForReload();
+            spdlog::info("Party wipe: reloading checkpoint '{}' in game", acPartyInfo.CheckpointId);
+        }
+        if ((previousSessionState == 0 || restart) && m_sessionState == 1)
         {
             m_creatorSeen = false;
             m_gameplayReadySent = false;
@@ -757,15 +1326,27 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             // active hides that state transition and keeps its input hook.
             m_world.GetOverlayService().SetActive(false);
             m_waitingForWorldReady = true;
-            // Continue with a named checkpoint loads that save on every PC; without one (or if
-            // this PC does not have it) fall back to the game's own Continue.
-            if (m_campaignMode != PartyStartRequest::kContinue || acPartyInfo.CheckpointId.empty() ||
-                !CheckpointSaves::Load(acPartyInfo.CheckpointId))
+            // A follower's Continue waits for the leader's world to load first (the leader registers its actors
+            // before anyone else's copies arrive).
+            const bool leaderLoaded = std::find(acPartyInfo.ReadyPlayerIds.begin(), acPartyInfo.ReadyPlayerIds.end(),
+                m_leaderPlayerId) != acPartyInfo.ReadyPlayerIds.end();
+            if (m_campaignMode == PartyStartRequest::kContinue && !m_isLeader && !leaderLoaded)
             {
-                if (m_campaignMode == PartyStartRequest::kContinue)
-                    spdlog::warn("Continue without a matched checkpoint ('{}'): loading this PC's last save", acPartyInfo.CheckpointId);
-                LaunchSharedCampaignFromMainMenu(m_campaignMode);
+                m_deferredCheckpoint = acPartyInfo.CheckpointId;
+                m_deferredLaunch = true;
+                m_deferredSince = GetTickCount64();
+                spdlog::info("Continue: waiting for the leader to load first");
             }
+            else
+                LaunchCheckpoint(acPartyInfo.CheckpointId);
+        }
+        else if (m_deferredLaunch && m_sessionState == 1 &&
+            std::find(acPartyInfo.ReadyPlayerIds.begin(), acPartyInfo.ReadyPlayerIds.end(), m_leaderPlayerId) !=
+                acPartyInfo.ReadyPlayerIds.end())
+        {
+            spdlog::info("Continue: the leader has loaded after {} ms, loading now", GetTickCount64() - m_deferredSince);
+            m_deferredLaunch = false;
+            LaunchCheckpoint(m_deferredCheckpoint);
         }
         else if (previousSessionState == 1 && m_sessionState == 2)
         {
@@ -773,6 +1354,7 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             {
                 if (auto* pUI = UI::Get(); pUI && pUI->numPausesGame > 0)
                     --pUI->numPausesGame;
+                PlayerControls::QueueInputRelease();
                 m_worldGateHeld = false;
             }
             m_waitingForWorldReady = false;
@@ -783,6 +1365,14 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             if (auto* pControls = PlayerControls::GetInstance())
                 pControls->SetBlockPlayerInput(false);
             spdlog::info("Shared-campaign world-ready barrier released for epoch {}", m_startEpoch);
+            // Everyone has loaded: fade in together here. The gameplay barrier can be minutes away (a fresh intro
+            // reaches it only after the character creator): waiting for it kept both screens black through the whole
+            // cart ride until the 3-minute lift (session 2026-09-29 22:14-22:17).
+            if (m_wipeFade)
+            {
+                FadeOutGame(false, true, 2.5f, true, 0.f);
+                m_wipeFade = false;
+            }
         }
         else if (previousSessionState == 2 && m_sessionState == 3)
         {
@@ -791,6 +1381,12 @@ void PartyService::OnPartyInfo(const NotifyPartyInfo& acPartyInfo) noexcept
             m_creatorInputReleased = false;
             RefreshFollowerIntroProtection();
             spdlog::info("Shared-campaign gameplay barrier released for epoch {}", m_startEpoch);
+            if (m_wipeFade)
+            {
+                // Everyone is in and synced: fade in together, slowly, like the game's opening.
+                FadeOutGame(false, true, 2.5f, true, 0.f);
+                m_wipeFade = false;
+            }
         }
     }
 }
@@ -814,6 +1410,24 @@ void PartyService::OnPartyJoined(const NotifyPartyJoined& acPartyJoined) noexcep
     m_isLeader = acPartyJoined.IsLeader;
     m_leaderPlayerId = acPartyJoined.LeaderPlayerId;
     m_partyMembers = acPartyJoined.PlayerIds;
+    if (m_handoffDeparted)
+    {
+        m_handoffTargetSteamId = 0;
+        m_handoffCheckpointId.clear();
+        m_handoffReady = false;
+        m_handoffAckSent = false;
+        m_handoffSaveRequested = false;
+        const auto localSteam = m_world.GetSteamLobbyService().LocalSteamId();
+        if (!m_handoffOrder.empty() && m_handoffOrder.front() == localSteam)
+        {
+            SendHandoffSeed(m_handoffSeedCheckpoint);
+            RequestCheckpointAvailability available;
+            available.Checkpoints = CheckpointSaves::Available(32);
+            m_transport.Send(available);
+            m_handoffAvailabilitySent = true;
+        }
+    }
+    m_world.GetSteamLobbyService().FinishHandoff();
 
     m_world.GetDispatcher().trigger(PartyJoinedEvent(m_isLeader));
 }
@@ -821,18 +1435,47 @@ void PartyService::OnPartyJoined(const NotifyPartyJoined& acPartyJoined) noexcep
 void PartyService::OnPartyLeft(const NotifyPartyLeft& acPartyLeft) noexcept
 {
     spdlog::debug("[PartyService]: Left party");
+    m_world.GetSteamLobbyService().ForgetParty();
 
+    if (!acPartyLeft.Forced && m_inParty && m_sessionState >= 2)
+    {
+        CheckpointSaves::WriteCarryHome();
+        LobbyService::RequestReturnToLobby("party_left"); // a forced leave quits to the menu, which returns there too
+    }
+
+    const bool forced = acPartyLeft.Forced;
+    const bool needsCarry = forced && m_inParty && m_sessionState >= 2;
     DestroyParty();
 
+    if (forced)
+        m_forcedLeavePending.store(needsCarry ? 2 : 1);
     m_world.GetDispatcher().trigger(PartyLeftEvent());
 }
 
 void PartyService::DestroyParty() noexcept
 {
+    if (!m_handoffDeparted)
+    {
+        m_handoffCampaign = false;
+        m_handoffOrder.clear();
+        m_checkpointRosters.clear();
+        m_rosterOrder.clear();
+        m_handoffSeedCheckpoint.clear();
+        m_handoffTargetSteamId = 0;
+        m_handoffCheckpointId.clear();
+        m_handoffSaveRequested = false;
+        m_handoffAckSent = false;
+        m_handoffReady = false;
+    }
+    m_homeApplyState = 0;
+    m_homeSourceKey.clear();
+    m_homeSourceSnap.clear();
+    m_homeWorldSince = 0;
     if (m_worldGateHeld)
     {
         if (auto* pUI = UI::Get(); pUI && pUI->numPausesGame > 0)
             --pUI->numPausesGame;
+        PlayerControls::QueueInputRelease();
         m_worldGateHeld = false;
     }
     if (m_waitingForWorldReady || m_creatorInputReleased ||
@@ -850,10 +1493,13 @@ void PartyService::DestroyParty() noexcept
     m_isLeader = false;
     m_leaderPlayerId = -1;
     m_partyMembers.clear();
+    m_partySteamIds.clear();
     m_readyPlayers.clear();
     m_campaignMode = 0;
+    m_currentCheckpoint.clear();
     m_sessionState = 0;
     m_startEpoch = 0;
+    m_leaderGeneration = 0;
 }
 
 void PartyService::RefreshFollowerIntroProtection() noexcept
@@ -917,7 +1563,8 @@ void PartyService::OnNotifyLeaderControl(const NotifyLeaderControl& acMessage) n
 {
     m_leaderFree = acMessage.FreeControl;
     PlayerCollision::SetLeaderFreeControl(acMessage.FreeControl);
-    if (!acMessage.FreeControl || m_gatheredAroundLeader || m_isLeader)
+    if (!acMessage.FreeControl || m_gatheredAroundLeader || m_isLeader ||
+        m_campaignMode == PartyStartRequest::kContinue || m_world.GetDropInService().PreserveReturnPosition())
         return;
     auto* pPlayer = PlayerCharacter::Get();
     if (!pPlayer)

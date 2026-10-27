@@ -5,6 +5,9 @@
 
 #include <Services/GameTestService.h>
 #include <Services/CheckpointSaves.h>
+#include <Services/CharacterSnapshots.h>
+#include <Services/DropInService.h>
+#include <fstream>
 #include <Systems/InterpolationSystem.h>
 #include <Camera/PlayerCamera.h>
 #include <Systems/AnimationSystem.h>
@@ -14,23 +17,32 @@
 #include <Services/CameraService.h>
 #include <Services/CharacterService.h>
 #include <Services/PlayerService.h>
+#include <Systems/FaceGenSystem.h>
 #include <Services/PapyrusService.h>
+#include <EquipManager.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/Generic/HeadTrackService.h>
 #include <World.h>
 #include <GameLoopDiagnostic.h>
 #include <DInputHook.hpp>
 #include <Games/Skyrim/BSInput/InputPollDiagnostic.h>
+#include <Utils/MainThread.h>
+#include <MainQueue.h>
 
 #include <Games/Skyrim/BSGraphics/BSGraphicsRenderer.h>
 #include <Games/ActorExtension.h>
 #include <Games/Misc/MenuTopicManager.h>
 #include <Games/Skyrim/Interface/UI.h>
+#include <Sky/Sky.h>
+#include <Forms/TESGlobal.h>
 #include <Games/Skyrim/Interface/LoadingScreenProbe.h>
 #include <Games/Skyrim/PlayerCharacter.h>
 #include <Games/Skyrim/SaveLoad.h>
 #include <Games/Skyrim/Forms/ActorValueInfo.h>
 #include <Games/Skyrim/Forms/TESQuest.h>
 #include <Games/Skyrim/Forms/TESNPC.h>
+#include <Games/Skyrim/Forms/BGSHeadPart.h>
+#include <Games/Skyrim/Forms/TESRace.h>
 #include <Games/Skyrim/Forms/BGSOutfit.h>
 #include <Games/Skyrim/Forms/TESObjectCELL.h>
 #include <Games/Skyrim/Forms/TESWorldSpace.h>
@@ -43,8 +55,14 @@
 #include <Games/Skyrim/ArmorAttachmentTrace.h>
 #include <Forms/TESIdleForm.h>
 #include <Games/Skyrim/Havok/PoseCopyAuthority.h>
+#include <Services/DoorVoteService.h>
 #include <Combat/CombatController.h>
 #include <Games/Skyrim/NetImmerse/NiNode.h>
+#include <Games/Skyrim/NetImmerse/NiTriBasedGeom.h>
+#include <Games/Skyrim/NetImmerse/NiRenderedTexture.h>
+#include <Games/Skyrim/NetImmerse/BSShaderProperty.h>
+#include <Games/Skyrim/NetImmerse/BSMaskedShaderMaterial.h>
+#include <Games/Skyrim/Misc/TintMask.h>
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Games/Skyrim/Havok/ActorPoseDiagnosticViews.h>
 #include <Games/Skyrim/Havok/AnimationGraphUpdateTrace.h>
@@ -55,6 +73,8 @@
 #include <Services/PartyService.h>
 #include <Services/TransportService.h>
 #include <Services/ObjectService.h>
+#include <Combat/PlayerCombat.h>
+#include <Services/ReviveService.h>
 #include <Services/QuestService.h>
 #include <Messages/PartyStartRequest.h>
 #include <Components.h>
@@ -63,7 +83,13 @@
 #include <OverlayRenderHandler.hpp>
 #include <Games/Memory.h>
 #include <Services/CreatorTogether.h>
+#include <Services/FurnitureGraphLink.h>
+#include <Services/LobbyService.h>
+#include <Games/Skyrim/Interface/MainMenuIntegration.h>
+#include <Games/Skyrim/Interface/IMenu.h>
 #include <MinHook.h>
+
+extern std::atomic<bool> g_copyNativeTracking; // AnimationSystem.cpp
 
 // Research handoff: perf2-r1-check/reference-research.patch records the native
 // call paths and prior art. This task cannot edit the shared research document.
@@ -197,6 +223,17 @@ namespace
 std::mutex s_mainFrameDropLock;
 std::pair<uint32_t, int32_t> s_mainFrameDrop{};
 std::pair<uint32_t, bool> s_mainFrameDisable{}; // set_disabled request (reference, disabled), same lock
+float s_mainFrameDamage{};                      // damage_player request, same lock
+std::pair<uint32_t, uint32_t> s_mainFrameCombat{}; // start_combat request (attacker, target), same lock
+// creator_slide call, same lock. Runs from the frame update, not a runner task: a creator rebuild fires animation
+// events that queue runner tasks, and queuing from inside the runner drain aborted the game (2026-09-29 09:12).
+std::function<void()> s_mainFrameCreator;
+std::atomic<uint32_t> s_pauseMenuOpenStage{}; // window request, then main-frame show and System tab selection
+void QueueCreatorCall(std::function<void()> aCall)
+{
+    std::lock_guard lock(s_mainFrameDropLock);
+    s_mainFrameCreator = std::move(aCall);
+}
 
 // Read-only timing at the caller of the existing automatic-door hook. 40201 /
 // 140738120 is NiTimeController slot 0x27, void(this, NiUpdateData*), and calls +0x58
@@ -505,19 +542,31 @@ int32_t RunPath(PlayerCharacter* player, TESObjectREFR* target)
     return registerPath.Get()(*manager.Get(), request.value);
 }
 
-bool CanJump(PlayerCharacter* player)
+// nullptr when the player can jump now, else the first failed check (named in the driver's refusal).
+const char* JumpBlocker(PlayerCharacter* player)
 {
     using InJump = bool(Actor*);
     POINTER_SKYRIMSE(InJump, inJump, 37949);
     const auto actorFlags = player->actorState.flags1;
-    if ((actorFlags & ((1 << 8) | (1 << 10) | (0xF << 14) | (7 << 18) | (0xF << 21) | (7 << 25))) ||
-        (player->actorState.flags2 & (1 << 13)) || inJump.Get()(player)) return false;
+    if (actorFlags & ((1 << 8) | (1 << 10))) return "actor state bit 8/10";
+    if (actorFlags & (0xF << 14)) return "sitting or sleeping";
+    if (actorFlags & (7 << 18)) return "flying state";
+    if (actorFlags & (0xF << 21)) return "life state not alive";
+    if (actorFlags & (7 << 25)) return "knock state";
+    if (player->actorState.flags2 & (1 << 13)) return "actor state2 bit 13";
+    if (inJump.Get()(player)) return "already jumping";
     using GetController = void*(Actor*);
     POINTER_SKYRIMSE(GetController, getController, 37258);
     auto* controller = static_cast<uint8_t*>(getController.Get()(player));
+    if (!controller) return "no character controller";
     uint32_t flags{};
-    if (controller) std::memcpy(&flags, controller + 0x218, sizeof(flags));
-    return (flags & (1 << 10)) != 0;
+    std::memcpy(&flags, controller + 0x218, sizeof(flags));
+    return (flags & (1 << 10)) ? nullptr : "controller not supported (airborne or standing on something that is not ground)";
+}
+
+bool CanJump(PlayerCharacter* player)
+{
+    return JumpBlocker(player) == nullptr;
 }
 
 bool ReadJumpState(PlayerCharacter* player)
@@ -687,10 +736,24 @@ void Tick()
             auto* target = form.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
             if (nudge && form.empty() && player && cell && !loading && !creatorOpen)
                 target = CoordinateTarget(player, cell, request);
-            if (!player || !cell || !player->GetNiNode() || loading || creatorOpen || !target || !SameSpace(player, target) ||
-                Driven(player) || !(controls & 1) || !(controls & (1 << 10)) || !ControlsDriven(Controller(player)) ||
-                (!nudge && player->IsInCombat()) || player->actorState.IsDeadState() || player->GetNativeMountFormId() || !CanJump(player))
-                Finish(player, "failed", "jump requires an eligible free player and a local target");
+            // Harness travel may jump during the dragon attack (the player is in combat then), like walk_to.
+            const bool combatAllowed = nudge || (GetJsonString(request, "allow_combat") == "true" &&
+                HarnessService::IsEnabled() && HarnessService::OwnsDriver());
+            const char* refusal = !player || !cell || !player->GetNiNode() ? "player not loaded" :
+                loading || creatorOpen ? "loading or creator open" :
+                !target || !SameSpace(player, target) ? "target missing or in another space" :
+                Driven(player) || !ControlsDriven(Controller(player)) ? "player AI driven by another system" :
+                !(controls & 1) || !(controls & (1 << 10)) ? "movement or jumping controls disabled" :
+                !combatAllowed && player->IsInCombat() ? "player in combat" :
+                player->actorState.IsDeadState() ? "player dead" :
+                player->GetNativeMountFormId() ? "player mounted" :
+                !CanJump(player) ? "player cannot jump now (airborne or settling)" : nullptr;
+            const std::string blocker = refusal && player && !CanJump(player) ? std::string(" [") + JumpBlocker(player) + "]" : std::string();
+            if (refusal)
+            {
+                const auto message = fmt::format("jump requires an eligible free player and a local target: {}{}", refusal, blocker);
+                Finish(player, "failed", message.c_str());
+            }
             else if (reinterpret_cast<uint8_t*>(Controller(player))[0x1C6])
                 Finish(player, "failed", "native direct movement already owned");
             else if (Distance(player->position, target->position) > 1200.f)
@@ -928,12 +991,44 @@ void Tick()
                         progressPoint = player->position;
                         lastProgress = now;
                     }
+                    // Look where a person walking there would: eye level toward the target, tilted only
+                    // for height difference (stairs, ramps), eased so the view never snaps. Path steering
+                    // turns heading only and would otherwise keep any earlier look-up/down pitch.
+                    // Measured 2026-09-30 13:11:46: starting the native path pulls the player's pitch from -3 to 84
+                    // degrees within 120 ms (not our code). Hold our own pitch from level and write it every tick.
+                    static bool s_pitchHeld{};
+                    static float s_heldPitch{};
+                    static uint64_t s_lastPitchMs{};
+                    if (active && ownsAI)
+                    {
+                        if (!s_pitchHeld) { s_pitchHeld = true; s_heldPitch = 0.f; s_lastPitchMs = now; }
+                        // About 90 degrees per second, by elapsed time (the driver tick rate varies).
+                        const float maxStep = std::clamp((now - s_lastPitchMs) * 0.0016f, 0.f, 0.1f);
+                        s_lastPitchMs = now;
+                        const float horizontal = std::hypot(target->position.x - player->position.x, target->position.y - player->position.y);
+                        const float wanted = std::clamp(std::atan2(player->position.z - target->position.z, std::max(horizontal, 64.f)), -0.5f, 0.5f);
+                        if (std::isfinite(wanted))
+                            s_heldPitch += std::clamp(wanted - s_heldPitch, -maxStep, maxStep);
+                        if (std::abs(player->rotation.x - s_heldPitch) > 0.001f)
+                            player->SetRotation(s_heldPitch, player->rotation.y, player->rotation.z);
+                    }
+                    else s_pitchHeld = false;
                     if (active && now - lastProgress > 20000) Finish(player, "failed", "no path progress for 20 seconds");
                 }
             }
         }
     }
     catch (const std::exception& e) { Finish(player, "failed", e.what()); }
+    // Owner saw test players' views snap straight up or down: log any big pitch jump with the driver state.
+    if (player)
+    {
+        static float s_lastPitch{};
+        const float pitch = player->rotation.x;
+        if (std::isfinite(pitch) && std::abs(pitch - s_lastPitch) > 0.35f)
+            spdlog::info("Intro driver: pitch jump {:.0f} -> {:.0f} deg state={} active={} ownsAI={} aiDriven={} target={:X}",
+                s_lastPitch * 57.2958f, pitch * 57.2958f, state, active, ownsAI, Driven(player), targetId);
+        s_lastPitch = pitch;
+    }
     const auto json = fmt::format("\"state\":\"{}\",\"reason\":\"{}\",\"active\":{},\"ownsAI\":{},\"aiDriven\":{},\"creator\":\"{}\",\"creatorOpen\":{},\"creatorDone\":{},\"movementEnabled\":{},\"cellId\":{},\"targetId\":{},\"questId\":{},\"objectiveId\":{},\"distance\":{},\"radius\":{},\"pathId\":{},\"elapsedMs\":{},\"sampleMs\":{}",
         state, EscapeJson(reason), JsonBool(active), JsonBool(ownsAI), JsonBool(Driven(player)), EscapeJson(creator), JsonBool(creatorOpen), JsonBool(CreatorTogether::IsDone()), JsonBool((controls & 1) != 0), cell ? cell->formID : 0, targetId, questId, objectiveId, distance, radius, pathId, active ? now - started : 0, now);
     {
@@ -2274,6 +2369,105 @@ void GameTestService::OnWindowThread() noexcept
 
 void GameTestService::OnGameThread() noexcept
 {
+    const auto pauseStage = s_pauseMenuOpenStage.load(std::memory_order_acquire);
+    if (pauseStage == 1)
+    {
+        // JournalMenu::ProcessMessage (53315) initializes only when its show message has data.
+        using TCreateData = void*(void*, const BSFixedString*);
+        using TAddMessage = void(void*, const BSFixedString*, uint32_t, void*);
+        POINTER_SKYRIMSE(TCreateData, createData, 82169);
+        POINTER_SKYRIMSE(TAddMessage, addMessage, 13631);
+        static VersionDbPtr<void*> s_queue(400445);
+        auto* pQueue = s_queue.Get() ? *s_queue.Get() : nullptr;
+        if (pQueue)
+        {
+            auto* pUI = UI::Get();
+            if (!pUI || !pUI->GetMenuOpen(BSFixedString("Journal Menu")))
+            {
+                BSFixedString kind("BSUIMessageData");
+                BSFixedString name("Journal Menu");
+                auto* pData = createData.Get()(pQueue, &kind);
+                // No data from the factory here (2026-10-03): show it without, as journal hotkey mods do.
+                addMessage.Get()(pQueue, &name, 1 /* kShow */, pData);
+                if (!pData)
+                    spdlog::info("Test pause_menu_open: Journal shown without UI message data");
+                s_pauseMenuOpenStage.store(2, std::memory_order_release);
+            }
+            else
+                s_pauseMenuOpenStage.store(2, std::memory_order_release);
+        }
+        else
+            s_pauseMenuOpenStage.store(0, std::memory_order_release);
+    }
+    else if (pauseStage == 2)
+    {
+        auto* pUI = UI::Get();
+        auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("Journal Menu")) ?
+            pUI->FindMenuByName(BSFixedString("Journal Menu")) : nullptr;
+        if (pMenu && pMenu->uiMovie)
+        {
+            struct Value
+            {
+                void* ObjectInterface{};
+                uint32_t Type{};
+                uint32_t Pad{};
+                double Number{};
+            } tabs;
+            using TGetVariable = bool(void*, Value*, const char*);
+            auto* pVtable = *reinterpret_cast<uintptr_t**>(pMenu->uiMovie);
+            if (reinterpret_cast<TGetVariable*>(pVtable[0x11])(pMenu->uiMovie, &tabs,
+                    "_root.QuestJournalFader.Menu_mc.TabButtonGroup.length") && (tabs.Type & 0x0F) == 3 && tabs.Number >= 3)
+            {
+                using TInvoke = bool(void*, const char*, const char*, ...);
+                static VersionDbPtr<void> s_invoke(82664);
+                const bool ok = reinterpret_cast<TInvoke*>(s_invoke.GetPtr())(pMenu->uiMovie,
+                    "_root.QuestJournalFader.Menu_mc.SkyrimSeamlessShowSystem", nullptr);
+                if (!ok)
+                    spdlog::warn("Test pause_menu_open: could not select System tab");
+                s_pauseMenuOpenStage.store(0, std::memory_order_release);
+            }
+        }
+    }
+    {
+        float damage{};
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            damage = std::exchange(s_mainFrameDamage, 0.f);
+        }
+        if (auto* pPlayer = PlayerCharacter::Get(); pPlayer && damage > 0.f)
+        {
+            PlayerCombat::ApplyDamage(pPlayer, nullptr, damage, false);
+            spdlog::info("Test damage_player: {} -> health {} bleeding out {}", damage,
+                pPlayer->GetActorValue(ActorValueInfo::kHealth), pPlayer->actorState.IsBleedingOut());
+        }
+    }
+    {
+        std::function<void()> creatorCall;
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            creatorCall = std::exchange(s_mainFrameCreator, nullptr);
+        }
+        if (creatorCall)
+            creatorCall();
+    }
+    {
+        std::pair<uint32_t, uint32_t> combat{};
+        {
+            std::lock_guard lock(s_mainFrameDropLock);
+            combat = std::exchange(s_mainFrameCombat, {});
+        }
+        auto* pAttacker = combat.first ? Cast<Actor>(TESForm::GetById(combat.first)) : nullptr;
+        auto* pTarget = combat.second ? Cast<Actor>(TESForm::GetById(combat.second)) : nullptr;
+        auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr;
+        if (pAttacker && pTarget && pVM)
+        {
+            // Papyrus Actor.StartCombat (54768 / 140A03090): (VM, stack id, self, target).
+            using TStartCombat = void(void*, uint32_t, Actor*, Actor*);
+            POINTER_SKYRIMSE(TStartCombat, startCombat, 54768);
+            startCombat.Get()(pVM, 0, pAttacker, pTarget);
+            spdlog::info("Test start_combat: {:X} -> {:X}", pAttacker->formID, pTarget->formID);
+        }
+    }
     {
         std::pair<uint32_t, bool> request{};
         {
@@ -2316,7 +2510,7 @@ void GameTestService::OnGameThread() noexcept
             PAPYRUS_FUNCTION(void, ObjectReference, AddItem, TESForm*, int32_t, bool);
             auto* pAdd = Cast<TESBoundObject>(TESForm::GetById(s_adding.first));
             if (s_pAddItem && pAdd && s_adding.second > 0)
-                s_pAddItem(pPlayer, pAdd, s_adding.second, true);
+                s_pAddItem.CallWithStackId(UINT32_MAX, pPlayer, pAdd, s_adding.second, true);
             s_dropAt = GetTickCount64() + 500;
         }
         else if (s_adding.first && s_dropAt && GetTickCount64() >= s_dropAt)
@@ -3483,23 +3677,23 @@ void GameTestService::OnGameThread() noexcept
         const auto& loading = LoadingScreenProbe::Get().Sample();
         snapshot += fmt::format(
             ",\"loadingPresentation\":{{\"epoch\":{},\"loadingMenuPresent\":{},"
-            "\"candidateListReadable\":{},\"mistMenuPresent\":{},\"mistStateReadable\":{},"
+            "\"remainingTipsReadable\":{},\"mistMenuPresent\":{},\"mistStateReadable\":{},"
             "\"showMist\":{},\"showLoadScreen\":{},\"modelPresent\":{},"
             "\"modelHasUserData\":{},\"cameraPathPresent\":{},\"cameraFov\":{},"
             "\"angleZ\":{},\"selectedIdentityResolved\":{},\"selectedFormId\":{},"
-            "\"eligibleFormIds\":[",
+            "\"remainingTipFormIds\":[",
             loading.Epoch, JsonBool(loading.LoadingMenuPresent),
-            JsonBool(loading.CandidateListReadable), JsonBool(loading.MistMenuPresent),
+            JsonBool(loading.RemainingTipsReadable), JsonBool(loading.MistMenuPresent),
             JsonBool(loading.MistStateReadable), JsonBool(loading.ShowMist),
             JsonBool(loading.ShowLoadScreen), JsonBool(loading.LoadScreenModelPresent),
             JsonBool(loading.LoadScreenModelHasUserData), JsonBool(loading.CameraPathPresent),
             loading.CameraFov, loading.AngleZ, JsonBool(loading.SelectedIdentityResolved),
             loading.SelectedFormId);
-        for (size_t i = 0; i < loading.EligibleFormIds.size(); ++i)
+        for (size_t i = 0; i < loading.RemainingTipFormIds.size(); ++i)
         {
             if (i != 0)
                 snapshot += ',';
-            snapshot += std::to_string(loading.EligibleFormIds[i]);
+            snapshot += std::to_string(loading.RemainingTipFormIds[i]);
         }
         snapshot += "]}";
 
@@ -3523,6 +3717,25 @@ void GameTestService::OnGameThread() noexcept
                 "\"interiorCellId\":{}}}",
                 pTes->centerGridX, pTes->centerGridY, pTes->currentGridX, pTes->currentGridY,
                 pTes->interiorCell ? pTes->interiorCell->formID : 0);
+        }
+        // Weather and time (two PCs disagreeing on fog and light, 2026-10-01): the Sky's current (+0x48), last (+0x50),
+        // default (+0x58, SetWeather without override) and override (+0x60) weathers, the blend (+0x1B8) and flags
+        // (+0x1DC), from SkyrimAtlas weather-and-sky (Sky::SetWeather 26241, ForceWeather 26243); GameHour (0x38) and
+        // GameDaysPassed (0x39) globals.
+        if (auto* pSky = Sky::Get())
+        {
+            auto* pBytes = reinterpret_cast<const uint8_t*>(pSky);
+            const auto weatherId = [&](size_t aOffset) {
+                auto* pWeather = *reinterpret_cast<TESForm* const*>(pBytes + aOffset);
+                return pWeather ? pWeather->formID : 0u;
+            };
+            auto* pHour = Cast<TESGlobal>(TESForm::GetById(0x38));
+            auto* pDays = Cast<TESGlobal>(TESForm::GetById(0x39));
+            snapshot += fmt::format(
+                ",\"sky\":{{\"current\":{},\"last\":{},\"default\":{},\"override\":{},\"pct\":{:.3f},\"flags\":{}}},"
+                "\"time\":{{\"gameHour\":{:.3f},\"daysPassed\":{:.4f}}}",
+                weatherId(0x48), weatherId(0x50), weatherId(0x58), weatherId(0x60), pSky->currentWeatherPct, pSky->flags,
+                pHour ? pHour->f : -1.f, pDays ? pDays->f : -1.f);
         }
         if (auto* pProcesses = ProcessLists::Get())
         {
@@ -4820,6 +5033,41 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         if (command == "ping")
             return Result(id, fmt::format("\"pid\":{},\"protocol\":2", GetCurrentProcessId()));
 
+        if (command == "mt_status")
+        {
+            auto status = fmt::format("\"mainId\":{},\"x00Count\":{},\"lastSlot\":{},"
+                "\"mainIdMismatch\":{},\"checkerReports\":{},\"appLaneNested\":{},\"loadPhase\":{},"
+                "\"loadSerial\":{},\"loadGeneration\":{},\"connectionSerial\":{},\"inFrameLoads\":{},"
+                "\"loadNoops\":{},\"loadGenOrphans\":{},\"binkDepth\":{},"
+                "\"mainStalls\":{},\"frameSkipped\":{},\"m1WrongSlot\":{},\"m3aWrongSlot\":{},\"m6WrongSlot\":{},\"cutMask\":{},\"slots\":[",
+                MT::MainId.load(), MT::X00Count.load(), MT::LastSlot.load(),
+                MT::MainIdMismatch.load(), MT::CheckerReports.load(), MT::AppLaneNested.load(),
+                static_cast<uint8_t>(MT::CurrentLoadPhase.load()), MT::LoadSerial.load(),
+                MT::LoadGeneration.load(), MT::ConnectionSerial.load(), MT::InFrameLoads.load(), MT::LoadNoops.load(),
+                MT::LoadGenOrphans.load(), MT::BinkDepth.load(), MT::MainStalls.load(), MT::FrameSkipped.load(),
+                MT::M1WrongSlot.load(), MT::M3aWrongSlot.load(), MT::M6WrongSlot.load(), MT::CutMask.load());
+            for (size_t slot = 1; slot < MT::SlotCount; ++slot)
+            {
+                const auto& timing = MT::SlotTiming[slot];
+                const auto count = timing.Count.load(std::memory_order_acquire);
+                std::array<uint32_t, 64> samples{};
+                const auto sampleCount = static_cast<size_t>((std::min)(uint64_t{64}, count));
+                for (size_t i = 0; i < sampleCount; ++i)
+                    samples[i] = timing.RecentUs[i].load(std::memory_order_relaxed);
+                std::sort(samples.begin(), samples.begin() + sampleCount);
+                const auto p95 = sampleCount ? samples[((sampleCount - 1) * 95) / 100] : 0;
+                if (slot > 1) status += ',';
+                status += fmt::format("{{\"id\":{},\"count\":{},\"p95Us\":{},\"maxUs\":{}}}",
+                    slot, count, p95, timing.MaxUs.load(std::memory_order_relaxed));
+            }
+            const auto& lanes = MainQueue::Get();
+            status += fmt::format("],\"queue\":{{\"window\":{},\"ui\":{},\"world\":{},"
+                "\"script\":{},\"terminal\":{}}}",
+                lanes.Window.Outstanding(), lanes.Ui.Outstanding(), lanes.World.Outstanding(),
+                lanes.Script.Outstanding(), lanes.Terminal.Outstanding());
+            return Result(id, status);
+        }
+
         if (command == "farm_connect" || command == "farm_create_party" || command == "farm_state")
         {
             if (!FarmMode::Enabled() || !HarnessService::IsEnabled())
@@ -4899,10 +5147,10 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         }
 
         if (command == "capabilities")
-            return Result(id, "\"protocol\":2,\"commands\":[\"ping\",\"capabilities\",\"snapshot\","
+            return Result(id, "\"protocol\":2,\"commands\":[\"ping\",\"capabilities\",\"mt_status\",\"snapshot\","
                 "\"game_snapshot\",\"hitch_snapshot\",\"request_game_snapshot\",\"cancel_game_snapshot\",\"game_snapshot_at\",\"game_pose_snapshot\",\"watch_quest\",\"set_pose_probe\",\"set_pose_probe_actor\",\"test_displace_remote_corpse\",\"capture_bundle\",\"screenshot\",\"open_options\","
                 "\"set_visual_pose_apply\",\"set_visual_root_diagnostic\",\"set_native_vehicle_trial\",\"set_remote_process_trial\",\"set_presentation_delay\",\"profile_host_frames\",\"set_camera_position_probe\",\"set_skip_next_post_respawn_knock\","
-                "\"open_coop\",\"party_state\",\"set_session_open\",\"join_friend\",\"set_ready\",\"start_new_campaign\",\"start_continue_campaign\",\"create_test_checkpoint\",\"test_checkpoint_status\","
+                "\"open_coop\",\"party_state\",\"set_session_open\",\"join_friend\",\"set_ready\",\"start_new_campaign\",\"start_continue_campaign\",\"create_test_checkpoint\",\"test_checkpoint_status\",\"carryhome_status\",\"carryhome_write_now\",\"roster_status\",\"roster_place_now\","
                 "\"close_options\",\"controller\",\"race_menu_key\",\"gameplay_key\",\"race_menu_state\",\"confirm_character_native\",\"confirm_character_native_status\","
                 "\"creator_finish\",\"walk_to\",\"follow_objective\",\"walk_cancel\",\"jump_toward\",\"intro_status\","
                 "\"toggle_window\",\"confirm_display\",\"setting\",\"world_reference_state\"]");
@@ -5356,6 +5604,21 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             m_world.GetSteamLobbyService().QueueRefreshLobbyState();
             return Result(id, "\"action\":\"open_coop\"");
         }
+        if (command == "party_promote_other")
+        {
+            // The leader hands the party to the first other member (the CO-OP overlay's Promote).
+            auto& party = m_world.GetPartyService();
+            if (!party.IsLeader())
+                return Error(id, "only the leader can promote");
+            const auto self = m_world.GetTransport().GetLocalPlayerId();
+            for (const auto member : party.GetPartyMembers())
+                if (member != self)
+                {
+                    party.ChangePartyLeader(member);
+                    return Result(id, fmt::format("\"promoted\":{}", member));
+                }
+            return Error(id, "nobody else in the party");
+        }
         if (command == "party_state")
         {
             const auto& party = m_world.GetPartyService();
@@ -5392,11 +5655,16 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 missing += "Quest.Stop ";
             else if (pIntro && !keepQuest)
                 s_pStop(pIntro);
-            PAPYRUS_FUNCTION(void, Game, SetInChargen, bool, bool, bool);
-            if (!s_pSetInChargen)
-                missing += "Game.SetInChargen ";
-            else
-                s_pSetInChargen(nullptr, false, false, false);
+            // Game.SetInChargen is a static native with no address in the registration hook (papyrus_natives.tsv):
+            // call its implementation 55576 (VM, stack id, static tag, disableSaving, disableWaiting, showMessage).
+            {
+                using TSetInChargen = void(void*, uint32_t, void*, bool, bool, bool);
+                POINTER_SKYRIMSE(TSetInChargen, setInChargen, 55576);
+                if (auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr)
+                    setInChargen.Get()(pVM, 0, nullptr, false, false, false);
+                else
+                    missing += "Game.SetInChargen ";
+            }
             // Game's static natives register without a direct address (papyrus_natives.tsv); call their
             // implementations (VM, stack id, static tag, arguments): EnablePlayerControls 55455
             // (0x140A23FC0), SetPlayerAIDriven 55577 (0x140A2AE50).
@@ -5432,6 +5700,21 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const auto offsetText = GetJsonString(acLine, "offset");
             auto* pWorldSpace = worldText.empty() ? nullptr : Cast<TESWorldSpace>(TESForm::GetById(std::stoul(worldText, nullptr, 16)));
             auto* pPlayer = PlayerCharacter::Get();
+            // No worldspace: a move inside the player's current cell (interiors included; never another cell).
+            if (worldText.empty() && pPlayer && pPlayer->parentCell && !GetJsonString(acLine, "x").empty())
+            {
+                NiPoint3 target{};
+                target.x = std::stof(GetJsonString(acLine, "x"));
+                target.y = std::stof(GetJsonString(acLine, "y"));
+                target.z = std::stof(GetJsonString(acLine, "z"));
+                auto* pCell = pPlayer->parentCell;
+                QueueCreatorCall([pCell, target]() {
+                    if (auto* pLocal = PlayerCharacter::Get(); pLocal && pLocal->parentCell == pCell)
+                        pLocal->MoveTo(pCell, target);
+                });
+                return Result(id, fmt::format("\"cell\":\"{:X}\",\"x\":{:.0f},\"y\":{:.0f},\"z\":{:.0f},\"sameCell\":true",
+                    pCell->formID, target.x, target.y, target.z));
+            }
             if (!pWorldSpace || !pPlayer || GetJsonString(acLine, "x").empty())
                 return Error(id, "worldspace, position or player missing");
             NiPoint3 target{};
@@ -5488,6 +5771,1137 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             s_mainFrameDisable = {static_cast<uint32_t>(std::stoul(formText, nullptr, 16)), GetJsonString(acLine, "disabled") != "false"};
             return Result(id, "\"queued\":true");
         }
+        // Revive tests: face a point (heading toward x,y), hold Activate, damage this PC's player (game thread).
+        // Cheap per-frame-safe camera sample: camera root and player root world positions, the camera's view
+        // direction and one quest's stage. For probes that run inside a scene (a full game snapshot costs ~0.2 s).
+        if (command == "main_frame_placement")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                InterpolationSystem::SetMainFramePlacement(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", InterpolationSystem::IsMainFramePlacement()));
+        }
+        if (command == "skip_mounted_placement")
+        {
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                InterpolationSystem::SetSkipMountedPlacement(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", InterpolationSystem::IsSkipMountedPlacement()));
+        }
+        if (command == "smooth_stamp")
+        {
+            extern std::atomic<bool> g_smoothSnapshotStamp;
+            if (const auto enabled = GetJsonString(acLine, "enabled"); !enabled.empty())
+                g_smoothSnapshotStamp = enabled != "false";
+            return Result(id, fmt::format("\"enabled\":{}", g_smoothSnapshotStamp.load()));
+        }
+        if (command == "character_capture")
+        {
+            // Guest character phase 1: read this PC's character (read only), write it to
+            // Data\SkyrimTogetherReborn\snapshots\<name>.snap, read the file back and compare, report a summary.
+            auto name = GetJsonString(acLine, "name");
+            if (name.empty())
+                name = "latest";
+            if (name.size() > 48 || !std::all_of(name.begin(), name.end(), [](char c) {
+                    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                }))
+                return Error(id, "name must be 1-48 letters, digits or underscores");
+            CharacterSnapshot snapshot;
+            std::string error;
+            if (!CharacterSnapshots::Capture(snapshot, error))
+                return Error(id, error);
+            Buffer buffer(1 << 22);
+            Buffer::Writer writer(&buffer);
+            snapshot.Serialize(writer);
+            const auto folder = TiltedPhoques::GetPath() / "snapshots";
+            std::error_code fsError;
+            std::filesystem::create_directories(folder, fsError);
+            const auto path = folder / (name + ".snap");
+            {
+                std::ofstream file(path, std::ios::binary | std::ios::trunc);
+                file.write(reinterpret_cast<const char*>(buffer.GetWriteData()), static_cast<std::streamsize>(writer.Size()));
+                if (!file)
+                    return Error(id, "could not write the snapshot file");
+            }
+            std::ifstream file(path, std::ios::binary);
+            std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            Buffer readBuffer(bytes.size() + 16);
+            std::memcpy(readBuffer.GetWriteData(), bytes.data(), bytes.size());
+            Buffer::Reader reader(&readBuffer);
+            CharacterSnapshot roundtrip;
+            const bool readBack = roundtrip.Deserialize(reader) && roundtrip == snapshot;
+            // "items":"true" lists every stack (plugin:form x count, worn, enchanted) to diff two snapshots.
+            std::string items;
+            if (GetJsonString(acLine, "items") == "true")
+            {
+                items = ",\"itemList\":[";
+                for (size_t i = 0; i < snapshot.Items.Entries.size(); ++i)
+                {
+                    const auto& entry = snapshot.Items.Entries[i];
+                    items += fmt::format("{}\"{:X}:{:X} x{}{}{}\"", i ? "," : "", entry.BaseId.ModId, entry.BaseId.BaseId,
+                        entry.Count, entry.ExtraWorn || entry.ExtraWornLeft ? " worn" : "",
+                        entry.EnchantData.IsWeapon || !entry.EnchantData.Effects.empty() ? " ench" : "");
+                }
+                items += "]";
+            }
+            return Result(id, fmt::format("\"path\":\"{}\",\"bytes\":{},\"roundtrip\":{},{},{}{}",
+                path.generic_string(), writer.Size(), JsonBool(readBack), CharacterSnapshots::Describe(snapshot),
+                CharacterSnapshots::DescribeLiveLook(), items));
+        }
+        if (command == "dropin_join")
+        {
+            // Join the running session as the character in "path" (a .snap file), as the lobby's Join button does.
+            const auto path = GetJsonString(acLine, "path");
+            if (path.empty())
+                return Error(id, "path to a .snap file required");
+            const auto error = m_world.GetDropInService().StartJoin(path);
+            if (!error.empty())
+                return Error(id, error);
+            return Result(id, "\"started\":true");
+        }
+        if (command == "dropin_status")
+            return Result(id, fmt::format("\"status\":\"{}\"", m_world.GetDropInService().Status()));
+        if (command == "roster_status")
+        {
+            const auto& checkpoint = m_world.GetPartyService().GetCurrentCheckpointId();
+            return Result(id, fmt::format("\"checkpoint\":\"{}\",\"roster\":{},\"placeStatus\":\"{}\"",
+                EscapeJson(checkpoint.c_str()), CheckpointSaves::RosterJson(checkpoint),
+                EscapeJson(m_world.GetDropInService().RosterPlaceStatus())));
+        }
+        if (command == "roster_place_now")
+        {
+            m_world.GetDropInService().QueueRosterPlaceNow();
+            return Result(id, "\"queued\":true,\"statusCommand\":\"roster_status\"");
+        }
+        if (command == "request_save")
+            return Result(id, fmt::format("\"queued\":{}", JsonBool(CheckpointSaves::RequestNativeSave())));
+        if (command == "carryhome_status")
+            return Result(id, CheckpointSaves::CarryHomeStatus());
+        if (command == "carryhome_write_now")
+        {
+            if (!m_world.GetPartyService().IsInParty() || m_world.GetPartyService().IsLeader() ||
+                m_world.GetPartyService().GetSessionState() < 2)
+                return Error(id, "requires a follower in a running party");
+            const bool written = CheckpointSaves::WriteCarryHome();
+            return Result(id, fmt::format("\"writtenOrQueued\":{},{}", JsonBool(written), CheckpointSaves::CarryHomeStatus()));
+        }
+        if (command == "load_save_solo")
+        {
+            // Test bench: load the checkpoint SSC_<id> on this PC alone (as Continue does), never inside a party.
+            const auto checkpoint = GetJsonString(acLine, "id");
+            if (checkpoint.empty())
+                return Error(id, "id required (the part after SSC_)");
+            if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().GetPartyMembers().size() > 1)
+                return Error(id, "refused while another player is in the party");
+            if (!CheckpointSaves::Has(checkpoint.c_str()))
+                return Error(id, "no such checkpoint on this PC");
+            // On the next main loop frame: the app update (runner, game-thread queue) does not run at the main menu.
+            CheckpointSaves::QueueLoad(checkpoint.c_str());
+            return Result(id, fmt::format("\"loading\":\"SSC_{}\"", checkpoint));
+        }
+        if (command == "load_save_file" || command == "save_look_write")
+        {
+            // Character files for saves made before the mod wrote one (owner 2026-10-02: the lobby showed an Argonian
+            // and a Khajiit as the default Nord): load_save_file loads the save alone, then save_look_write writes the
+            // loaded character as <save>.snap beside it, as every save made with the mod now gets.
+            const auto file = GetJsonString(acLine, "file");
+            if (file.empty() || file.size() > 120 || !std::all_of(file.begin(), file.end(), [](char c) {
+                    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                }))
+                return Error(id, "file: the save's file name without .ess (letters, digits, underscores)");
+            const auto save = CheckpointSaves::SavesFolder() / (file + ".ess");
+            if (!std::filesystem::exists(save))
+                return Error(id, "no such save on this PC");
+            if (command == "load_save_file")
+            {
+                if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().GetPartyMembers().size() > 1)
+                    return Error(id, "refused while another player is in the party");
+                CheckpointSaves::QueueLoad(String(("file:" + file).c_str()));
+                return Result(id, "\"queued\":true");
+            }
+            if (LobbyService::InLobbyWorld())
+                return Error(id, "still in the lobby: load the save first");
+            CharacterSnapshot snapshot;
+            std::string error;
+            if (!CharacterSnapshots::Capture(snapshot, error))
+                return Error(id, error);
+            Buffer buffer(1 << 22);
+            Buffer::Writer writer(&buffer);
+            snapshot.Serialize(writer);
+            const auto path = std::filesystem::path(save).replace_extension(".snap");
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(buffer.GetWriteData()), static_cast<std::streamsize>(writer.Size()));
+            if (!out)
+                return Error(id, "could not write the character file");
+            spdlog::info("Character file written for {}: {} level {}", file, snapshot.Name.c_str(), snapshot.Level);
+            return Result(id, fmt::format("\"written\":\"{}\",{}", EscapeJson(path.filename().string()),
+                CharacterSnapshots::Describe(snapshot)));
+        }
+        if (command == "character_apply")
+        {
+            // Guest character phase 1: make this PC's player the character in snapshots\<name>.snap (not its
+            // appearance yet). Changes the character, so only with "confirm":"yes" and never inside a co-op party:
+            // test on a throwaway save, then save to a NEW slot and reload it to check.
+            const auto name = GetJsonString(acLine, "name");
+            if (name.empty() || name.size() > 48 || !std::all_of(name.begin(), name.end(), [](char c) {
+                    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+                }))
+                return Error(id, "name must be 1-48 letters, digits or underscores");
+            if (GetJsonString(acLine, "confirm") != "yes")
+                return Error(id, "this changes the character; pass \"confirm\":\"yes\" on a throwaway save");
+            if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().GetPartyMembers().size() > 1)
+                return Error(id, "refused while another player is in the party");
+            const auto path = TiltedPhoques::GetPath() / "snapshots" / (name + ".snap");
+            std::ifstream file(path, std::ios::binary);
+            if (!file)
+                return Error(id, "no such snapshot");
+            std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            Buffer readBuffer(bytes.size() + 16);
+            std::memcpy(readBuffer.GetWriteData(), bytes.data(), bytes.size());
+            Buffer::Reader reader(&readBuffer);
+            CharacterSnapshot snapshot;
+            if (!snapshot.Deserialize(reader))
+                return Error(id, "snapshot unreadable (version or corrupt)");
+            // On the main game frame, appearance included; poll character_apply_status.
+            CharacterSnapshots::QueueApply(std::move(snapshot));
+            spdlog::info("Character snapshot {} queued for apply", name);
+            return Result(id, "\"queued\":true");
+        }
+        if (command == "title_seq")
+        {
+            const auto sequence = GetJsonString(acLine, "seq");
+            if (sequence != "hide" && sequence != "stop" && sequence != "play" && (sequence.size() != 9 || sequence.rfind("Sequence", 0) != 0))
+                return Error(id, "seq must be Sequence1..Sequence4 or hide");
+            LobbyService::RequestTitleSequence(sequence);
+            return Result(id, "\"queued\":true");
+        }
+        if (command == "lobby_lore")
+        {
+            // The lore entries the lobby's news panel chooses from, written next to the logs (lobby_lore.txt).
+            const auto entries = LobbyService::LoreDump();
+            return Result(id, fmt::format("\"count\":{}", entries));
+        }
+        if (command == "lobby_menu_call")
+        {
+            // Calls one of the patched Main Menu's own SkyrimSeamless* functions (test bench for the CHARACTERS
+            // screen), as the player's input would. Game thread: the movie is the UI's.
+            const auto function = GetJsonString(acLine, "fn");
+            // Also the menu's own Back (onCancelPress), to close a confirmation without answering Yes.
+            if ((function.rfind("SkyrimSeamless", 0) != 0 && function != "onCancelPress") || function.find_first_not_of(
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") != std::string::npos)
+                return Error(id, "fn must be a SkyrimSeamless* function name or onCancelPress");
+            auto* pUI = UI::Get();
+            auto* pMenu = pUI ? pUI->FindMenuByName("Main Menu") : nullptr;
+            if (!pMenu || !pMenu->uiMovie)
+                return Error(id, "Main Menu is not open");
+            using TInvoke = bool(void*, const char*, const char*, ...);
+            static VersionDbPtr<void> s_invoke(82664);
+            const auto path = "_root.MenuHolder.Menu_mc." + function;
+            const bool ok = reinterpret_cast<TInvoke*>(s_invoke.GetPtr())(pMenu->uiMovie, path.c_str(), nullptr);
+            return Result(id, fmt::format("\"invoked\":{}", ok));
+        }
+        if (command == "lobby_menu_set")
+        {
+            // Sets one number in the Main Menu movie (test bench: _root.SkyrimSeamlessCharacterStep, as the arrows do).
+            const auto path = GetJsonString(acLine, "path");
+            if (path.rfind("_root.", 0) != 0 || path.find_first_not_of("_.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != std::string::npos)
+                return Error(id, "path must be a _root. path");
+            auto* pUI = UI::Get();
+            auto* pMenu = pUI ? pUI->FindMenuByName("Main Menu") : nullptr;
+            if (!pMenu || !pMenu->uiMovie)
+                return Error(id, "Main Menu is not open");
+            struct Value
+            {
+                void* ObjectInterface{};
+                uint32_t Type{3};
+                uint32_t Pad{};
+                double Number{};
+            } value;
+            value.Number = std::stod(GetJsonString(acLine, "value"));
+            using TSetVariable = bool(void*, const char*, const Value&, uint32_t);
+            const bool ok = reinterpret_cast<TSetVariable*>((*reinterpret_cast<uintptr_t**>(pMenu->uiMovie))[0x10])(pMenu->uiMovie, path.c_str(), value, 0);
+            return Result(id, fmt::format("\"set\":{}", ok));
+        }
+        if (command == "pause_menu_open")
+        {
+            s_pauseMenuOpenStage.store(1, std::memory_order_release);
+            return Result(id, "\"queued\":true");
+        }
+        if (command == "pause_menu_state")
+            return Result(id, LobbyService::PauseMenuStateJson());
+        if (command == "pause_menu_request")
+        {
+            const auto text = GetJsonString(acLine, "action");
+            if (text.empty() || !LobbyService::PostPauseMenuRequest(std::atoi(text.c_str())))
+                return Error(id, "Journal Menu is closed or action is not 1..9");
+            return Result(id, fmt::format("\"posted\":{}", text));
+        }
+        if (command == "pause_menu_action")
+        {
+            auto action = GetJsonString(acLine, "name");
+            if (action.empty())
+                action = GetJsonString(acLine, "action");
+            if (!LobbyService::PauseMenuAction(action))
+                return Error(id, "System tab is closed or action is unknown");
+            return Result(id, fmt::format("\"action\":\"{}\"", EscapeJson(action)));
+        }
+        if (command == "lobby_menu_get")
+        {
+            // Reads numbers from the Main Menu movie (test bench for layout): "paths" separated by '|'.
+            auto* pUI = UI::Get();
+            auto* pMenu = pUI ? pUI->FindMenuByName("Main Menu") : nullptr;
+            if (!pMenu || !pMenu->uiMovie)
+                return Error(id, "Main Menu is not open");
+            struct Value
+            {
+                void* ObjectInterface{};
+                uint32_t Type{};
+                uint32_t Pad{};
+                double Number{};
+            };
+            using TGetVariable = bool(void*, Value*, const char*);
+            auto* pVtable = *reinterpret_cast<uintptr_t**>(pMenu->uiMovie);
+            std::string out;
+            std::string paths = GetJsonString(acLine, "paths");
+            size_t start = 0;
+            while (start <= paths.size())
+            {
+                const auto end = paths.find('|', start);
+                const auto path = paths.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                Value value{};
+                const bool ok = reinterpret_cast<TGetVariable*>(pVtable[0x11])(pMenu->uiMovie, &value, path.c_str());
+                std::string shown = "null";
+                if (ok && (value.Type & 0x0F) == 3)
+                    shown = fmt::format("{:.1f}", value.Number);
+                else if (ok && (value.Type & 0x0F) == 2)
+                    shown = (*reinterpret_cast<const uint8_t*>(&value.Number) & 1) ? "true" : "false";
+                else if (ok && (value.Type & 0x0F) == 4)
+                {
+                    const char* pText = *reinterpret_cast<const char* const*>(&value.Number);
+                    if (pText && (value.Type & 0x40))
+                        pText = *reinterpret_cast<const char* const*>(pText);
+                    std::string text = pText ? pText : "";
+                    for (auto& c : text)
+                        if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20)
+                            c = ' ';
+                    shown = "\"" + text.substr(0, 120) + "\"";
+                }
+                else if (ok)
+                    shown = fmt::format("\"type {}\"", value.Type & 0x0F);
+                out += fmt::format("{}\"{}\":{}", out.empty() ? "" : ",", path, shown);
+                if (end == std::string::npos)
+                    break;
+                start = end + 1;
+            }
+            return Result(id, "\"values\":{" + out + "}");
+        }
+        if (command == "lobby_motd_probe")
+        {
+            // Which news-panel paths exist in the open Main Menu movie (game thread: the movie is the UI's).
+            std::string probe = "{}";
+            auto* pUI = UI::Get();
+            auto* pMenu = pUI ? pUI->FindMenuByName("Main Menu") : nullptr;
+            if (!pMenu || !pMenu->uiMovie)
+                return Error(id, "Main Menu is not open");
+            probe = ProbeMainMenuMotd(pMenu->uiMovie);
+            return Result(id, "\"motd\":" + probe);
+        }
+        if (command == "lobby_return_status")
+            return Result(id, fmt::format("\"return\":{}", LobbyService::ReturnStatus()));
+        if (command == "lobby_preview" || command == "lobby_status" || command == "lobby_end" ||
+            command == "lobby_edit" || command == "lobby_edit_close" || command == "lobby_idle" || command == "lobby_save")
+        {
+            if (command == "lobby_idle")
+            {
+                int slot{};
+                try { slot = std::stoi(GetJsonString(acLine, "slot")); }
+                catch (...) { return Error(id, "slot must be 0-4"); }
+                if (!LobbyService::SetSlotIdle(slot, GetJsonString(acLine, "idle")))
+                    return Error(id, "unknown slot or idle");
+            }
+            if (command == "lobby_save")
+                LobbyService::RequestSave();
+            if (command == "lobby_edit" || command == "lobby_edit_close")
+                LobbyService::SetEditorOpen(command == "lobby_edit");
+            // The live main-menu lobby (LobbyService); preview starts it from the title screen.
+            if (command == "lobby_preview" && !LobbyService::Begin())
+                return Error(id, "the lobby is already running");
+            if (command == "lobby_end")
+                LobbyService::End();
+            return Result(id, "\"lobby\":" + LobbyService::Status());
+        }
+        if (command == "activate_ref")
+        {
+            // Test: the local player activates a reference (hex form id), as a player pressing E would, on the game
+            // thread. Used to check door replication between PCs.
+            const auto refText = GetJsonString(acLine, "ref");
+            uint32_t formId{};
+            try { formId = static_cast<uint32_t>(std::stoul(refText, nullptr, 16)); }
+            catch (...) { return Error(id, "ref must be a hex form id"); }
+            World::Get().GetRunner().Queue([formId]() {
+                auto* pRef = Cast<TESObjectREFR>(TESForm::GetById(formId));
+                auto* pPlayer = PlayerCharacter::Get();
+                if (!pRef || !pPlayer)
+                    return;
+                const auto before = pRef->GetOpenState();
+                pRef->Activate(pPlayer, 0, nullptr, 1, 1);
+                spdlog::info("Test activate {:X}: open state {} -> {}", formId, static_cast<int>(before),
+                    static_cast<int>(pRef->GetOpenState()));
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\"", formId));
+        }
+        if (command == "furniture_links_repair")
+        {
+            // Test only: {"enabled":"true"} turns the experimental furniture relink on for this PC until the game restarts.
+            const bool enabled = GetJsonString(acLine, "enabled") != "false";
+            m_world.ctx().at<FurnitureGraphLink>().SetRepairEnabled(enabled);
+            return Result(id, fmt::format("\"repairEnabled\":{}", enabled));
+        }
+        if (command == "furniture_links")
+            // Tower wall probe: actors using animated furniture and whether their graph is linked to it.
+            return Result(id, "\"links\":" + m_world.ctx().at<FurnitureGraphLink>().Describe());
+        if (command == "character_apply_status")
+        {
+            const auto status = CharacterSnapshots::ApplyStatus();
+            if (status.rfind("done: ", 0) == 0)
+                return Result(id, fmt::format("\"status\":\"done\",\"report\":{}", status.substr(6)));
+            return Result(id, fmt::format("\"status\":\"{}\"", status));
+        }
+        if (command == "skipcreator_status")
+            return Result(id, CreatorTogether::SkipStatus());
+        if (command == "camera_sample")
+        {
+            auto* player = PlayerCharacter::Get();
+            auto* camera = PlayerCamera::Get();
+            if (!player || !player->GetNiNode() || !camera || !camera->cameraNode)
+                return Error(id, "player or camera not loaded");
+            const auto& c = camera->cameraNode->world;
+            const auto& p = player->GetNiNode()->world.translate;
+            const auto questText = GetJsonString(acLine, "quest");
+            auto* quest = questText.empty() ? nullptr : Cast<TESQuest>(TESForm::GetById(std::stoul(questText, nullptr, 16)));
+            return Result(id, fmt::format("\"camera\":[{},{},{}],\"view\":[{},{},{}],\"body\":[{},{},{}],\"stage\":{}",
+                c.translate.x, c.translate.y, c.translate.z, c.rotate.entry[0][1], c.rotate.entry[1][1], c.rotate.entry[2][1],
+                p.x, p.y, p.z, quest ? quest->currentStage : -1));
+        }
+        if (command == "face_point")
+        {
+            auto* player = PlayerCharacter::Get();
+            if (!player || GetJsonString(acLine, "x").empty())
+                return Error(id, "player or point missing");
+            const float dx = std::stof(GetJsonString(acLine, "x")) - player->position.x;
+            const float dy = std::stof(GetJsonString(acLine, "y")) - player->position.y;
+            const float z = std::atan2(dx, dy);
+            // Look at the point like a player would: at its height when "z" is given (eyes about
+            // 120 u up), otherwise straight ahead, never keeping an earlier look up or down.
+            const auto pointZ = GetJsonString(acLine, "z");
+            const float x = pointZ.empty() ? 0.f :
+                std::clamp(std::atan2(player->position.z + 120.f - std::stof(pointZ), std::max(std::hypot(dx, dy), 1.f)), -1.2f, 1.2f);
+            player->SetRotation(x, player->rotation.y, z);
+            return Result(id, fmt::format("\"yaw\":{},\"pitch\":{}", z, x));
+        }
+        if (command == "revive_hold")
+        {
+            ReviveService::SetTestHold(GetJsonString(acLine, "enabled") != "false");
+            return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
+        }
+        if (command == "appearance_state")
+        {
+            // Character creation slider spill check: this player's and every remote player copy's NPC base, its
+            // face morph storage (pointer + value hash), weight, head data and head parts. Shared pointers between two
+            // characters mean one player's slider writes land on the other.
+            const auto describe = [](Actor* apActor) -> std::string
+            {
+                auto* pNpc = apActor ? Cast<TESNPC>(apActor->baseForm) : nullptr;
+                if (!pNpc)
+                    return "null";
+                uint64_t hash = 1469598103934665603ull;
+                if (pNpc->faceMorphs)
+                {
+                    const auto* bytes = reinterpret_cast<const uint8_t*>(pNpc->faceMorphs);
+                    for (size_t i = 0; i < sizeof(TESNPC::FaceMorphs); ++i)
+                        hash = (hash ^ bytes[i]) * 1099511628211ull;
+                }
+                std::string parts = "[";
+                for (uint8_t i = 0; pNpc->headparts && i < pNpc->headpartsCount; ++i)
+                    parts += fmt::format("{}\"{:X}\"", i ? "," : "", pNpc->headparts[i] ? pNpc->headparts[i]->formID : 0);
+                parts += "]";
+                return fmt::format("{{\"actor\":\"{:X}\",\"npc\":\"{:X}\",\"npcPtr\":\"{}\",\"faceMorphs\":\"{}\",\"morphHash\":\"{:X}\","
+                    "\"morph0\":{:.3f},\"weight\":{:.2f},\"headData\":\"{}\",\"headpartsPtr\":\"{}\",\"headparts\":{},\"faceNPC\":\"{:X}\","
+                    "\"race\":\"{:X}\",\"name\":\"{}\"}}",
+                    apActor->formID, pNpc->formID, fmt::ptr(pNpc), fmt::ptr(pNpc->faceMorphs), hash,
+                    pNpc->faceMorphs ? pNpc->faceMorphs->option[0] : -1.f, pNpc->weight, fmt::ptr(pNpc->headData),
+                    fmt::ptr(pNpc->headparts), parts, pNpc->faceNPC ? pNpc->faceNPC->formID : 0,
+                    pNpc->raceForm.race ? pNpc->raceForm.race->formID : 0,
+                    EscapeJson(pNpc->fullName.value.data ? pNpc->fullName.value.AsAscii() : ""));
+            };
+            // Every lighting material on a character's 3D (feature 4 face tint, 5 skin tint): shared materials between
+            // characters carry one player's creator tint writes onto the other.
+            const auto materials = [](Actor* apActor, std::map<void*, int>& aFeatures)
+            {
+                std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth)
+                {
+                    if (!apNode || aDepth > 24)
+                        return;
+                    if (auto* pGeom = apNode->CastToNiTriBasedGeom())
+                    {
+                        auto* pProperty = reinterpret_cast<BSShaderProperty*>(pGeom->effect.object);
+                        if (pProperty && pProperty->material)
+                        {
+                            const auto getFeature = reinterpret_cast<uint32_t (*)(void*)>((*reinterpret_cast<void***>(pProperty->material))[6]);
+                            aFeatures[pProperty->material] = static_cast<int>(getFeature(pProperty->material));
+                        }
+                    }
+                    if (auto* pNode = apNode->AsNode())
+                        for (uint16_t i = 0; i < pNode->children.length; ++i)
+                            walk(pNode->children.data[i], aDepth + 1);
+                };
+                if (apActor)
+                    walk(apActor->GetNiNode(), 0);
+            };
+            std::map<void*, int> selfMaterials;
+            materials(PlayerCharacter::Get(), selfMaterials);
+            const auto skinColors = [](const std::map<void*, int>& aMaterials)
+            {
+                std::string list;
+                for (const auto& [material, feature] : aMaterials)
+                    if (feature == 5)
+                    {
+                        const auto* color = reinterpret_cast<const float*>(static_cast<const uint8_t*>(material) + 0xA0);
+                        list += fmt::format("{}\"{:.3f},{:.3f},{:.3f}\"", list.empty() ? "" : ",", color[0], color[1], color[2]);
+                    }
+                return "[" + list + "]";
+            };
+            std::string otherSkin = "[]";
+            uint64_t tintHash = 1469598103934665603ull;
+            uint32_t firstTint = 0;
+            if (auto* pSelf = PlayerCharacter::Get())
+            {
+                const auto& tints = pSelf->GetTints();
+                for (uint32_t i = 0; i < tints.length; ++i)
+                    if (tints[i])
+                    {
+                        const uint64_t values[] = {tints[i]->color, static_cast<uint64_t>(tints[i]->alpha * 1000.f), tints[i]->type};
+                        for (const auto value : values)
+                            tintHash = (tintHash ^ value) * 1099511628211ull;
+                        if (i == 0)
+                            firstTint = tints[i]->color;
+                    }
+            }
+            // Face tint texture and its pixel buffer (NiRenderedTexture::buffer): the local player's face renders into
+            // the global render target 0xF (52396 / 14096BE70); a copy whose texture reads that buffer shows this
+            // player's creator tints.
+            const auto faceTexturesOf = [](const std::map<void*, int>& aMaterials)
+            {
+                std::string list;
+                for (const auto& [material, feature] : aMaterials)
+                    if (feature == 4)
+                    {
+                        auto* pTexture = static_cast<NiRenderedTexture*>(static_cast<BSMaskedShaderMaterial*>(material)->renderedTexture.object);
+                        // texture/buffer/pixel hash (the pixels, read back from the GPU: what is actually drawn).
+                        list += fmt::format("{}\"{}/{}/{:X}\"", list.empty() ? "" : ",", fmt::ptr(pTexture),
+                            fmt::ptr(pTexture ? static_cast<void*>(pTexture->buffer) : nullptr),
+                            FaceGenSystem::HashTintTexture(material));
+                    }
+                return list;
+            };
+            const std::string faceTextures = faceTexturesOf(selfMaterials);
+            std::string otherFace;
+            std::string others = "[";
+            int count = 0;
+            uint32_t shared = 0;
+            std::string sharedList;
+            auto view = m_world.view<FormIdComponent, PlayerComponent>();
+            for (auto entity : view)
+            {
+                auto* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                if (!pActor || pActor == PlayerCharacter::Get())
+                    continue;
+                others += (count++ ? "," : "") + describe(pActor);
+                std::map<void*, int> theirs;
+                materials(pActor, theirs);
+                otherSkin = skinColors(theirs);
+                otherFace = faceTexturesOf(theirs);
+                for (const auto& [material, feature] : theirs)
+                    if (selfMaterials.count(material))
+                    {
+                        ++shared;
+                        sharedList += fmt::format("{}\"{}:{}\"", sharedList.empty() ? "" : ",", fmt::ptr(material), feature);
+                    }
+            }
+            std::string selfList;
+            for (const auto& [material, feature] : selfMaterials)
+                if (feature == 4 || feature == 5)
+                    selfList += fmt::format("{}\"{}:{}\"", selfList.empty() ? "" : ",", fmt::ptr(material), feature);
+            return Result(id, fmt::format("\"self\":{},\"others\":{}],\"selfTintHash\":\"{:X}\",\"selfFirstTint\":\"{:06X}\",\"selfFaceTexture\":[{}],\"otherFaceTexture\":[{}],\"selfSkin\":{},\"otherSkin\":{},\"selfTintMaterials\":[{}],\"sharedMaterials\":{},\"shared\":[{}],\"creatorLeaks\":{},\"appliedLooks\":{},\"partyNames\":[{}]",
+                describe(PlayerCharacter::Get()), others, tintHash, firstTint, faceTextures, otherFace, skinColors(selfMaterials), otherSkin,
+                selfList, shared, sharedList, CreatorTogether::LeakedFrames(), CreatorTogether::AppliedLooks(),
+                [this]() {
+                    std::string names;
+                    for (const auto& [playerId, name] : m_world.GetPartyService().GetPlayers())
+                        names += fmt::format("{}\"{}:{}\"", names.empty() ? "" : ",", playerId, EscapeJson(name.c_str()));
+                    return names;
+                }()));
+        }
+        if (command == "checkpoint_now")
+        {
+            // A named test checkpoint on this PC: queues the engine save Papyrus Game.RequestSave uses (the
+            // checkpoint service's own path) and copies it to SSC_<name>.ess once written. Run on every PC at the same
+            // moment for a matched set. Saving must be allowed (see set_in_chargen).
+            const auto name = GetJsonString(acLine, "name");
+            if (name.empty() || name.size() > 48 ||
+                !std::all_of(name.begin(), name.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }))
+                return Error(id, "name must be 1-48 letters, digits or underscores");
+            World::Get().GetRunner().Queue([name]() { CheckpointSaves::Begin(String(name.c_str()), false); });
+            return Result(id, fmt::format("\"queued\":\"{}\"", name));
+        }
+        if (command == "set_in_chargen")
+        {
+            // Game.SetInChargen (55576): the intro disables saving and waiting until the creator is done. Test
+            // checkpoints inside the intro clear it for one save, then restore it. Runs on the game thread.
+            const bool disableSaving = GetJsonString(acLine, "saving") == "false";
+            const bool disableWaiting = GetJsonString(acLine, "waiting") == "false";
+            World::Get().GetRunner().Queue([disableSaving, disableWaiting]() {
+                using TSetInChargen = void(void*, uint32_t, void*, bool, bool, bool);
+                POINTER_SKYRIMSE(TSetInChargen, setInChargen, 55576);
+                if (auto* pVM = GameVM::Get() ? GameVM::Get()->virtualMachine : nullptr)
+                {
+                    setInChargen.Get()(pVM, 0, nullptr, disableSaving, disableWaiting, false);
+                    spdlog::info("Test set_in_chargen: saving disabled {}, waiting disabled {}", disableSaving, disableWaiting);
+                }
+            });
+            return Result(id, fmt::format("\"disableSaving\":{},\"disableWaiting\":{}", JsonBool(disableSaving),
+                JsonBool(disableWaiting)));
+        }
+        if (command == "creator_poke")
+        {
+            // Write to this player's own face morph storage and weight, as a creator slider does, to see which
+            // characters change with it (shared storage = slider spill).
+            auto* pPlayer = PlayerCharacter::Get();
+            auto* pNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+            if (!pNpc)
+                return Error(id, "no player base");
+            // Every slider-backed value (owner: "mess with every slider"): all face morphs and presets, the weight,
+            // and every tint layer's color and strength (skin tone, warpaint, dirt...). "only" limits it to one group:
+            // morphs, presets, weight, tints.
+            const auto only = GetJsonString(acLine, "only");
+            if (pNpc->faceMorphs && (only.empty() || only == "morphs"))
+                for (auto& option : pNpc->faceMorphs->option)
+                    option = option > 0.f ? -0.8f : 0.8f;
+            if (pNpc->faceMorphs && (only.empty() || only == "presets"))
+                for (auto& preset : pNpc->faceMorphs->presets)
+                    preset = (preset + 1) % 4;
+            if (only.empty() || only == "weight")
+                pNpc->weight = pNpc->weight >= 50.f ? 10.f : 90.f;
+            if (only.empty() || only == "tints")
+            {
+                // Only the layers already shown, as the creator's sliders do (switching every layer on overflowed the
+                // native 16-layer tint pass).
+                const auto& tints = pPlayer->GetTints();
+                for (uint32_t i = 0; i < tints.length; ++i)
+                    if (tints[i] && tints[i]->alpha > 0.f)
+                    {
+                        tints[i]->color = tints[i]->color == 0x0000FF ? 0x00FF00 : 0x0000FF;
+                        tints[i]->alpha = tints[i]->alpha > 0.5f ? 0.3f : 0.9f;
+                    }
+            }
+            return Result(id, fmt::format("\"faceMorphs\":\"{}\",\"morph0\":{:.3f},\"weight\":{:.1f}", fmt::ptr(pNpc->faceMorphs),
+                pNpc->faceMorphs ? pNpc->faceMorphs->option[0] : -1.f, pNpc->weight));
+        }
+        if (command == "creator_slide")
+        {
+            // Drives the RaceSex menu's own slider callbacks (registered in 140968C50), exactly as moving a slider
+            // does, so the native apply code runs (skin tone, face tint texture, weight rebuild). Without "index" it
+            // lists the sliders: slider array = menu+0x140[menu+0x198] entry (0x28) at menu+0x188, data +8, size +0x18;
+            // each slider is 0x138: min +0, max +4, callback name +0x20, tint type +0x124, value +0x130. With "index"
+            // it queues that slider's callback on the game thread with a new value (or "value").
+            auto* pUI = UI::Get();
+            auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))
+                ? reinterpret_cast<uint8_t*>(pUI->FindMenuByName(BSFixedString("RaceSex Menu"))) : nullptr;
+            if (!pMenu)
+                return Error(id, "RaceSex Menu is not open");
+            const auto sliderArray = [](uint8_t* apMenu) -> std::pair<uint8_t*, uint32_t> {
+                auto* pLists = *reinterpret_cast<uint8_t**>(apMenu + 0x140 + *reinterpret_cast<uint32_t*>(apMenu + 0x198) * 0x18);
+                if (!pLists)
+                    return {nullptr, 0};
+                auto* pEntry = pLists + *reinterpret_cast<uint32_t*>(apMenu + 0x188) * 0x28;
+                return {*reinterpret_cast<uint8_t**>(pEntry + 8), *reinterpret_cast<uint32_t*>(pEntry + 0x18)};
+            };
+            // "callback" with "a0"/"a1": call ChangeRace (52351, a0 = race index), ChangeSex (52352, a0 = 0/1) or
+            // ChangeHeadPreset (52359, a0 value, a1 slider) directly; these rebuild the whole character.
+            const auto callbackText = GetJsonString(acLine, "callback");
+            if (!callbackText.empty())
+            {
+                static const std::unordered_map<std::string, uint32_t> s_direct{
+                    {"ChangeRace", 52351}, {"ChangeSex", 52352}, {"ChangeHeadPreset", 52359}};
+                const auto direct = s_direct.find(callbackText);
+                if (direct == s_direct.end())
+                    return Error(id, "callback must be ChangeRace, ChangeSex or ChangeHeadPreset");
+                const auto a0Text = GetJsonString(acLine, "a0");
+                const auto a1Text = GetJsonString(acLine, "a1");
+                const double a0 = a0Text.empty() ? 0.0 : std::stod(a0Text);
+                const double a1 = a1Text.empty() ? 0.0 : std::stod(a1Text);
+                const uint32_t handlerId = direct->second;
+                QueueCreatorCall([handlerId, a0, a1, callbackText]() {
+                    auto* pUI = UI::Get();
+                    auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))
+                        ? pUI->FindMenuByName(BSFixedString("RaceSex Menu")) : nullptr;
+                    if (!pMenu)
+                        return;
+                    struct FakeValue { uint64_t objectInterface; uint32_t type; uint32_t pad; double number; };
+                    struct FakeArgs { uint8_t responseId[0x18]; void* pHandler; void* pMovie; FakeValue* pArgs; uint32_t count; };
+                    FakeValue values[2]{{0, 5, 0, a0}, {0, 5, 0, a1}};
+                    FakeArgs args{};
+                    args.pHandler = pMenu;
+                    args.pArgs = values;
+                    args.count = 2;
+                    using THandler = void (*)(FakeArgs*);
+                    VersionDbPtr<void> pHandler(handlerId);
+                    spdlog::info("Test creator_slide: {}({}, {})", callbackText, a0, a1);
+                    reinterpret_cast<THandler>(pHandler.GetPtr())(&args);
+                });
+                return Result(id, fmt::format("\"queued\":\"{}\"", callbackText));
+            }
+            const auto [pSliders, count] = sliderArray(pMenu);
+            if (!pSliders)
+                return Error(id, "no slider array");
+            const auto indexText = GetJsonString(acLine, "index");
+            if (indexText.empty())
+            {
+                std::string list = "[";
+                for (uint32_t i = 0; i < count && i < 128; ++i)
+                {
+                    auto* pSlider = pSliders + i * 0x138;
+                    char name[64]{};
+                    strncpy_s(name, reinterpret_cast<const char*>(pSlider + 0x20), _TRUNCATE);
+                    list += fmt::format("{}{{\"i\":{},\"cb\":\"{}\",\"min\":{:.2f},\"max\":{:.2f},\"tint\":{},\"value\":{:.2f}}}",
+                        i ? "," : "", i, name, *reinterpret_cast<float*>(pSlider), *reinterpret_cast<float*>(pSlider + 4),
+                        *reinterpret_cast<int32_t*>(pSlider + 0x124), *reinterpret_cast<float*>(pSlider + 0x130));
+                }
+                return Result(id, fmt::format("\"count\":{},\"sliders\":{}]", count, list));
+            }
+            const uint32_t index = std::stoul(indexText);
+            if (index >= count)
+                return Error(id, "index out of range");
+            const auto valueText = GetJsonString(acLine, "value");
+            QueueCreatorCall([index, valueText]() {
+                auto* pUI = UI::Get();
+                auto* pMenu = pUI && pUI->GetMenuOpen(BSFixedString("RaceSex Menu"))
+                    ? reinterpret_cast<uint8_t*>(pUI->FindMenuByName(BSFixedString("RaceSex Menu"))) : nullptr;
+                if (!pMenu)
+                    return;
+                auto* pLists = *reinterpret_cast<uint8_t**>(pMenu + 0x140 + *reinterpret_cast<uint32_t*>(pMenu + 0x198) * 0x18);
+                auto* pEntry = pLists + *reinterpret_cast<uint32_t*>(pMenu + 0x188) * 0x28;
+                if (index >= *reinterpret_cast<uint32_t*>(pEntry + 0x18))
+                    return;
+                auto* pSlider = *reinterpret_cast<uint8_t**>(pEntry + 8) + index * 0x138;
+                const std::string callback(reinterpret_cast<const char*>(pSlider + 0x20));
+                static const std::unordered_map<std::string, uint32_t> s_handlers{
+                    {"ChangeWeight", 52353}, {"ChangeFaceDetails", 52354}, {"ChangeMorph", 52355}, {"ChangeDoubleMorph", 52356},
+                    {"ChangeHeadPart", 52357}, {"ChangePreset", 52358}, {"ChangeHeadPreset", 52359},
+                    {"ChangeHairColorPreset", 52360}, {"ChangeTintingMask", 52361}, {"ChangeMask", 52362}, {"ChangeMaskColor", 52363}};
+                const auto handler = s_handlers.find(callback);
+                if (handler == s_handlers.end())
+                {
+                    spdlog::info("Test creator_slide: slider {} callback '{}' not driven", index, callback);
+                    return;
+                }
+                const float minimum = *reinterpret_cast<float*>(pSlider);
+                const float maximum = *reinterpret_cast<float*>(pSlider + 4);
+                const float current = *reinterpret_cast<float*>(pSlider + 0x130);
+                float value = valueText.empty() ? 0.f : std::stof(valueText);
+                if (valueText.empty())
+                {
+                    // Whole steps for index sliders (presets, tint colors, masks), a far point for continuous ones.
+                    value = current + 1.f <= maximum ? std::floor(current) + 1.f : minimum;
+                    if (callback == "ChangeWeight" || callback == "ChangeMorph" || callback == "ChangeDoubleMorph")
+                        value = current > (minimum + maximum) / 2.f ? minimum : maximum;
+                }
+                // Scaleform FxDelegateArgs: handler +0x18, GFxValue args +0x28 (0x18 each, number at +0x10), count +0x30.
+                struct FakeValue { uint64_t objectInterface; uint32_t type; uint32_t pad; double number; };
+                struct FakeArgs { uint8_t responseId[0x18]; void* pHandler; void* pMovie; FakeValue* pArgs; uint32_t count; };
+                FakeValue values[2]{{0, 5, 0, value}, {0, 5, 0, static_cast<double>(index)}};
+                FakeArgs args{};
+                args.pHandler = pMenu;
+                args.pArgs = values;
+                args.count = 2;
+                using THandler = void(FakeArgs*);
+                VersionDbPtr<THandler> pHandler(handler->second);
+                spdlog::info("Test creator_slide: slider {} {} tint {} {:.2f} -> {:.2f}", index, callback,
+                    *reinterpret_cast<int32_t*>(pSlider + 0x124), current, value);
+                pHandler.Get()(&args);
+            });
+            return Result(id, fmt::format("\"queued\":{}", index));
+        }
+        if (command == "facegen_restore")
+        {
+            // Control runs only: "false" stops redrawing the local player's tints after a copy's tint job.
+            FaceGenSystem::RestoreLocalTints.store(GetJsonString(acLine, "enabled") != "false");
+            return Result(id, fmt::format("\"restore\":{}", JsonBool(FaceGenSystem::RestoreLocalTints.load())));
+        }
+        if (command == "papyrus_has")
+        {
+            // names: "Type.Function,..." -> which are missing from PapyrusService's runtime table (a name-bound call to
+            // a missing one returns a default).
+            const auto names = GetJsonString(acLine, "names");
+            const auto& service = World::Get().ctx().at<PapyrusService>();
+            std::string missing;
+            size_t start = 0;
+            while (start < names.size())
+            {
+                auto end = names.find(',', start);
+                if (end == std::string::npos)
+                    end = names.size();
+                const auto entry = names.substr(start, end - start);
+                const auto dot = entry.find('.');
+                if (dot != std::string::npos &&
+                    !service.Get(String(entry.substr(0, dot).c_str()), String(entry.substr(dot + 1).c_str())))
+                    missing += fmt::format("{}\"{}\"", missing.empty() ? "" : ",", entry);
+                start = end + 1;
+            }
+            return Result(id, fmt::format("\"registered\":{},\"missing\":[{}]", service.RegisteredCount(), missing));
+        }
+        if (command == "remote_entities")
+        {
+            // Every remote character entity: server id, cached form, whether that form exists and is flagged a
+            // remote player, waiting for 3D, the interpolated position, and player id if any.
+            std::string list = "[";
+            int count = 0;
+            auto view = m_world.view<RemoteComponent>();
+            for (auto entity : view)
+            {
+                const auto& remote = view.get<RemoteComponent>(entity);
+                auto* pActor = Cast<Actor>(TESForm::GetById(remote.CachedRefId));
+                const auto* pInterp = m_world.try_get<InterpolationComponent>(entity);
+                const auto* pPlayer = m_world.try_get<PlayerComponent>(entity);
+                list += fmt::format("{}{{\"server\":\"{:X}\",\"form\":\"{:X}\",\"exists\":{},\"remotePlayer\":{},\"formComponent\":{},"
+                    "\"waiting3D\":{},\"player\":{},\"pos\":[{:.0f},{:.0f},{:.0f}]}}",
+                    count++ ? "," : "", remote.Id, remote.CachedRefId, JsonBool(pActor != nullptr),
+                    JsonBool(pActor && pActor->GetExtension() && pActor->GetExtension()->IsRemotePlayer()),
+                    JsonBool(m_world.all_of<FormIdComponent>(entity)), JsonBool(m_world.all_of<WaitingFor3D>(entity)),
+                    pPlayer ? static_cast<int64_t>(pPlayer->Id) : -1,
+                    pInterp ? pInterp->Position.x : 0.f, pInterp ? pInterp->Position.y : 0.f, pInterp ? pInterp->Position.z : 0.f);
+            }
+            return Result(id, fmt::format("\"count\":{},\"entities\":{}]", count, list));
+        }
+        if (command == "ritual_hold")
+        {
+            ReviveService::SetTestShout(GetJsonString(acLine, "enabled") != "false");
+            return Result(id, fmt::format("\"held\":{}", JsonBool(GetJsonString(acLine, "enabled") != "false")));
+        }
+        if (command == "revive_state")
+            return Result(id, fmt::format("\"revive\":{},\"unresolvedPapyrus\":{},\"papyrusRegistered\":{}", ReviveService::DescribeTest(), g_unresolvedPapyrusNatives.load(), World::Get().ctx().at<PapyrusService>().RegisteredCount()));
+        if (command == "revive_bleed")
+        {
+            const auto valueText = GetJsonString(acLine, "value");
+            const float value = valueText.empty() ? 0.5f : std::stof(valueText);
+            ReviveService::SetTestBleed(value);
+            return Result(id, fmt::format("\"bleed\":{}", value));
+        }
+        if (command == "death_drop_now")
+        {
+            // The death path's weapon drop (0x140677C90 / 37320, through our hook) on an actor, as a death would call it.
+            const auto formText = GetJsonString(acLine, "form_id");
+            const uint32_t formId = formText.empty() ? 0 : std::stoul(formText, nullptr, 16);
+            QueueCreatorCall([formId]() {
+                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                if (!pActor)
+                    return;
+                using TDeathDrop = void(Actor*);
+                POINTER_SKYRIMSE(TDeathDrop, deathDrop, 37320);
+                deathDrop.Get()(pActor);
+                spdlog::info("Test death_drop_now: {:X}", formId);
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\"", formId));
+        }
+        if (command == "death_drop_chance")
+        {
+            // iDeathDropWeaponChance (GameSetting 374997, int value 374998): percent chance a dying NPC drops its weapon.
+            POINTER_SKYRIMSE(int32_t, chance, 374998);
+            const auto valueText = GetJsonString(acLine, "value");
+            if (!valueText.empty())
+                *chance.Get() = std::stoi(valueText);
+            return Result(id, fmt::format("\"chance\":{}", *chance.Get()));
+        }
+        if (command == "give_weapon")
+        {
+            // Arm an actor (form_id) with a weapon (base, default Iron Sword 12EB7) and equip it, on the game thread.
+            const auto formText = GetJsonString(acLine, "form_id");
+            const auto baseText = GetJsonString(acLine, "base");
+            const uint32_t formId = formText.empty() ? 0 : std::stoul(formText, nullptr, 16);
+            const uint32_t baseId = baseText.empty() ? 0x12EB7 : std::stoul(baseText, nullptr, 16);
+            QueueCreatorCall([formId, baseId]() {
+                auto* pActor = Cast<Actor>(TESForm::GetById(formId));
+                auto* pWeapon = TESForm::GetById(baseId);
+                if (!pActor || !pWeapon)
+                    return;
+                using ObjectReference = TESObjectREFR;
+                PAPYRUS_FUNCTION(void, ObjectReference, AddItem, TESForm*, int32_t, bool);
+                s_pAddItem.CallWithStackId(UINT32_MAX, pActor, pWeapon, 1, true);
+                EquipManager::Get()->Equip(pActor, pWeapon, nullptr, 1, nullptr, false, true, false, true);
+                spdlog::info("Test give_weapon: {:X} armed with {:X}", formId, baseId);
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\"", formId));
+        }
+        if (command == "inventory")
+        {
+            // Every item a reference (form_id) holds with its count and worn flags: the corpse test compares a body's
+            // contents across PCs (session 2026-09-29: a corpse's armor showed twice on the follower).
+            const auto formText = GetJsonString(acLine, "form_id");
+            auto* pReference = formText.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(formText, nullptr, 16)));
+            if (!pReference)
+                return Result(id, "\"found\":false");
+            auto& mods = World::Get().GetModSystem();
+            std::string items;
+            for (const auto& entry : pReference->GetInventory().Entries)
+            {
+                if (entry.Count == 0)
+                    continue;
+                items += fmt::format("{}{{\"base\":\"{:X}\",\"count\":{},\"worn\":{},\"wornLeft\":{}}}", items.empty() ? "" : ",",
+                    mods.GetGameId(entry.BaseId), entry.Count, JsonBool(entry.ExtraWorn), JsonBool(entry.ExtraWornLeft));
+            }
+            return Result(id, fmt::format("\"found\":true,\"items\":[{}]", items));
+        }
+        if (command == "crosshair")
+        {
+            // What the crosshair is on (CrosshairPickData, 401585: target handle at +4), as the activate prompt and
+            // the hold-to-grab see it.
+            POINTER_SKYRIMSE(uint8_t*, pickData, 401585);
+            auto* pData = *pickData.Get();
+            const uint32_t handle = pData ? *reinterpret_cast<uint32_t*>(pData + 4) : 0;
+            auto* pTarget = handle ? TESObjectREFR::GetByHandle(handle) : nullptr;
+            auto* pActor = Cast<Actor>(pTarget);
+            return Result(id, fmt::format("\"target\":\"{:X}\",\"base\":\"{:X}\",\"actor\":{},\"dead\":{},\"lifeState\":{}",
+                pTarget ? pTarget->formID : 0, pTarget && pTarget->baseForm ? pTarget->baseForm->formID : 0,
+                JsonBool(pActor != nullptr), JsonBool(pActor && pActor->IsDead()),
+                pActor ? static_cast<int>((pActor->actorState.flags1 >> 21) & 0xF) : -1));
+        }
+        if (command == "ref_pose")
+        {
+            // A loose object's reference position, its drawn 3D position, and whether the host's physics stream drives
+            // it here (followers apply the host's poses; the host has none).
+            const auto form = GetJsonString(acLine, "form_id");
+            auto* pRef = form.empty() ? nullptr : Cast<TESObjectREFR>(TESForm::GetById(std::stoul(form, nullptr, 16)));
+            if (!pRef)
+                return Error(id, "reference not found");
+            NiAVObject* pRoot = pRef->GetNiNode();
+            // A body: its pelvis bone (the ragdoll moves the bones, not the reference).
+            static BSFixedString s_pelvis("NPC Pelvis [Pelv]");
+            if (pRoot && Cast<Actor>(pRef))
+                if (auto* pBone = static_cast<NiNode*>(pRoot)->GetByName(s_pelvis))
+                    pRoot = pBone;
+            ObjectService::RemotePhysicsDiagnostic authority{};
+            const bool driven = m_world.ctx().at<ObjectService>().GetRemotePhysicsDiagnostic(pRef->formID, authority);
+            return Result(id, fmt::format("\"position\":[{:.1f},{:.1f},{:.1f}],\"node\":[{:.1f},{:.1f},{:.1f}],"
+                "\"hostDriven\":{},\"hostPosition\":[{:.1f},{:.1f},{:.1f}],\"hostAgeMs\":{},\"bodyDriven\":{},\"lease\":{}",
+                pRef->position.x, pRef->position.y, pRef->position.z, pRoot ? pRoot->world.translate.x : 0.f,
+                pRoot ? pRoot->world.translate.y : 0.f, pRoot ? pRoot->world.translate.z : 0.f, JsonBool(driven),
+                authority.Position.x, authority.Position.y, authority.Position.z, authority.AgeMs,
+                JsonBool(authority.BodyDriven), ObjectService::LeaseHolder(pRef->formID)));
+        }
+        if (command == "party_load_cell")
+        {
+            // Leader only: move the whole party into a cell (e.g. 32AE7 QASmoke, B1783 CTest) through the door barrier:
+            // Go at a shared tick, each PC loads it (CenterOnCell on the main thread), the world gate holds until all
+            // have. Never a per-player teleport into another cell.
+            const auto cellText = GetJsonString(acLine, "cell");
+            if (cellText.empty())
+                return Error(id, "cell missing");
+            // "name": the cell's editor id (QASmoke, CTest, HelgenExterior07); each PC loads it as the console's coc does.
+            const auto nameText = GetJsonString(acLine, "name");
+            const char* error = m_world.GetDoorVoteService().RequestTestCell(std::stoul(cellText, nullptr, 16), nameText.c_str());
+            if (*error)
+                return Error(id, error);
+            return Result(id, fmt::format("\"requested\":\"{}\"", EscapeJson(cellText)));
+        }
+        if (command == "copy_native_tracking")
+        {
+            const auto enabled = GetJsonString(acLine, "enabled");
+            if (!enabled.empty())
+                g_copyNativeTracking.store(enabled != "false");
+            return Result(id, fmt::format("\"enabled\":{}", JsonBool(g_copyNativeTracking.load())));
+        }
+        if (command == "actor_bones")
+        {
+            // Local rotations of named bones (default: head and beast tail) and the head-tracking inputs of an actor
+            // (form_id). Session 2026-09-29: in Helgen Keep a player copy's tail stayed straight out and its head
+            // stopped tracking; sampling twice shows whether the graph still moves those bones.
+            const auto formText = GetJsonString(acLine, "form_id");
+            auto* pActor = formText.empty() ? nullptr : Cast<Actor>(TESForm::GetById(std::stoul(formText, nullptr, 16)));
+            if (!pActor)
+                return Error(id, "actor not found");
+            // The drawn third-person skeleton (19735); GetNiNode gives the first-person one in first person.
+            using TGet3D = NiAVObject*(TESObjectREFR*);
+            POINTER_SKYRIMSE(TGet3D, get3D, 19735);
+            auto* pRoot = static_cast<NiNode*>(get3D.Get()(pActor));
+            std::vector<std::string> names;
+            if (const auto list = GetJsonString(acLine, "nodes"); !list.empty())
+            {
+                std::stringstream stream(list);
+                for (std::string name; std::getline(stream, name, '|');)
+                    names.push_back(name);
+            }
+            else
+                names = {"NPC Head [Head]", "NPC Neck [Neck]", "TailBone0", "TailBone1", "TailBone2", "TailBone3", "TailBone4"};
+            std::string bones;
+            if (const auto match = GetJsonString(acLine, "match"); !match.empty() && pRoot)
+            {
+                // Every node whose name contains "match" (case-insensitive); NiObjectNET::name is the BSFixedString at +0x10.
+                std::string needle = match;
+                std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                int visited = 0;
+                auto walk = [&](auto& self, NiAVObject* apNode, int aDepth) -> void {
+                    if (!apNode || aDepth > 64 || ++visited > 2048)
+                        return;
+                    const char* pName = *reinterpret_cast<const char* const*>(reinterpret_cast<const uint8_t*>(apNode) + 0x10);
+                    std::string lower = pName ? pName : "";
+                    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                    if (!lower.empty() && lower.find(needle) != std::string::npos)
+                        names.push_back(pName);
+                    if (auto* pNode = apNode->AsNode(); pNode && pNode->children.data)
+                        for (uint16_t i = 0; i < pNode->children.length; ++i)
+                            self(self, pNode->children.data[i], aDepth + 1);
+                };
+                names.clear();
+                walk(walk, pRoot, 0);
+            }
+            for (const auto& name : names)
+            {
+                BSFixedString fixed(name.c_str());
+                auto* pNode = pRoot ? pRoot->GetByName(fixed) : nullptr;
+                if (!pNode)
+                    continue;
+                const auto& r = pNode->local.rotate.entry;
+                // NiObjectNET::controller (+0x18) and the parent: a tail is not in the behavior graph's bones, so
+                // whatever animates it hangs off the node or its parent. Vtable RVAs map through graph/vtables.tsv.
+                const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                const auto rva = [base](const void* apObject) -> uintptr_t {
+                    const auto vtable = apObject ? *static_cast<const uintptr_t*>(apObject) : 0;
+                    return vtable > base ? vtable - base : 0;
+                };
+                const auto* pController = *reinterpret_cast<void* const*>(reinterpret_cast<const uint8_t*>(pNode) + 0x18);
+                bones += fmt::format("{}{{\"name\":\"{}\",\"local\":[{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f}],"
+                    "\"node\":\"{:X}\",\"controller\":\"{:X}\",\"parent\":\"{:X}\",\"flags\":\"{:X}\",\"address\":\"{:X}\"}}",
+                    bones.empty() ? "" : ",", name, r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2],
+                    rva(pNode), rva(pController), rva(pNode->parent), pNode->flags, reinterpret_cast<uintptr_t>(pNode));
+            }
+            bool isNpc{}, spine{}, headTracking{};
+            BSFixedString npcName("IsNPC"), spineName("bHeadTrackSpine"), trackingName("bHeadTracking");
+            const bool haveNpc = pActor->animationGraphHolder.GetVariableBool(&npcName, &isNpc);
+            const bool haveSpine = pActor->animationGraphHolder.GetVariableBool(&spineName, &spine);
+            const bool haveTracking = pActor->animationGraphHolder.GetVariableBool(&trackingName, &headTracking);
+            using TTargetType = uint32_t(AIProcess*);
+            POINTER_SKYRIMSE(TTargetType, targetType, 39486);
+            const auto type = pActor->currentProcess ? targetType.Get()(pActor->currentProcess) : UINT32_MAX;
+            const auto* pExtension = pActor->GetExtension();
+            // Biped slot 10 (the beast tail addon) carries its own animation graph: 15674 / 0x14021E080 stores a
+            // TailAnimationGraphManagerHolder at biped + 0x70 + slot * 0x78 when the addon's model has a behavior.
+            std::string slotGraphs;
+            if (const auto* pBiped = static_cast<const uint8_t*>(pActor->actorWeightData))
+            {
+                const auto moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                for (uint32_t slot = 0; slot < 32; ++slot)
+                {
+                    const void* pHolder{};
+                    uintptr_t vtable{};
+                    SIZE_T read{};
+                    if (!ReadProcessMemory(GetCurrentProcess(), pBiped + 0x70 + slot * 0x78, &pHolder, sizeof(pHolder), &read) || !pHolder)
+                        continue;
+                    ReadProcessMemory(GetCurrentProcess(), pHolder, &vtable, sizeof(vtable), &read);
+                    slotGraphs += fmt::format("{}{{\"slot\":{},\"holderVtable\":\"{:X}\"}}", slotGraphs.empty() ? "" : ",", slot,
+                        vtable > moduleBase ? vtable - moduleBase : 0);
+                }
+            }
+            // Native tracking gate (37361 / 37363): process + 0x137 clear, then *(middleHigh + 0x250) + 0x29c in
+            // [0, threshold] (0x14209FF08, or 0x14209FF50 when +0x1F8's +0x128 is 3).
+            std::string trackGate = "\"trackGate\":null";
+            if (const auto* process = reinterpret_cast<const uint8_t*>(pActor->currentProcess))
+            {
+                const auto moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                const uint8_t* middle{};
+                const uint8_t* data{};
+                float value = -1.f;
+                SIZE_T got{};
+                ReadProcessMemory(GetCurrentProcess(), process + 8, &middle, sizeof(middle), &got);
+                if (middle)
+                    ReadProcessMemory(GetCurrentProcess(), middle + 0x250, &data, sizeof(data), &got);
+                if (data)
+                    ReadProcessMemory(GetCurrentProcess(), data + 0x29C, &value, sizeof(value), &got);
+                const float threshold = *reinterpret_cast<const float*>(moduleBase + 0x209FF08);
+                const float thresholdAlt = *reinterpret_cast<const float*>(moduleBase + 0x209FF50);
+                trackGate = fmt::format("\"trackGate\":{{\"culled137\":{},\"middle\":{},\"data250\":{},\"value29C\":{:.1f},\"threshold\":{:.1f},\"thresholdAlt\":{:.1f}}}",
+                    process[0x137], JsonBool(middle != nullptr), JsonBool(data != nullptr), value, threshold, thresholdAlt);
+            }
+            return Result(id, fmt::format("{},\"race\":\"{:X}\",\"remotePlayer\":{},\"slotGraphs\":[{}],\"bones\":[{}],\"isNPC\":{},\"headTrackSpine\":{},"
+                "\"bHeadTracking\":{},\"graphRead\":[{},{},{}],\"flags2HeadTrack\":{},\"nativeTargetType\":{},\"flags1\":\"{:X}\",\"flags2\":\"{:X}\","
+                "\"weaponDrawn\":{},{}",
+                trackGate, pActor->race ? pActor->race->formID : 0, JsonBool(pExtension && pExtension->IsRemotePlayer()), slotGraphs, bones,
+                JsonBool(isNpc), JsonBool(spine), JsonBool(headTracking), JsonBool(haveNpc), JsonBool(haveSpine),
+                JsonBool(haveTracking), JsonBool((pActor->actorState.flags2 & (1u << 3)) != 0), type,
+                pActor->actorState.flags1, pActor->actorState.flags2, JsonBool(pActor->actorState.IsWeaponDrawn()),
+                PoseCopyAuthority::DescribeBoneSlots(pActor, GetJsonString(acLine, "slots").empty() ? "TailBone01" : GetJsonString(acLine, "slots"))));
+        }
+        if (command == "grab_object")
+        {
+            // The hold-Activate grab without a crosshair: StartGrabObject (40552) checks the crosshair reference's
+            // mass and then calls 40555 (player, reference, 1, 1000.0, 0), which attaches the grab spring.
+            // "release" ends it (PlayerCharacter::DestroyMouseSprings, 40557).
+            const auto formText = GetJsonString(acLine, "form_id");
+            const bool release = GetJsonString(acLine, "release") == "true";
+            const uint32_t formId = formText.empty() ? 0 : std::stoul(formText, nullptr, 16);
+            QueueCreatorCall([formId, release]() {
+                auto* pPlayer = PlayerCharacter::Get();
+                if (!pPlayer)
+                    return;
+                if (release)
+                {
+                    using TRelease = void(PlayerCharacter*);
+                    POINTER_SKYRIMSE(TRelease, destroySprings, 40557);
+                    destroySprings.Get()(pPlayer);
+                    spdlog::info("Test grab_object: released");
+                    return;
+                }
+                auto* pReference = Cast<TESObjectREFR>(TESForm::GetById(formId));
+                if (!pReference)
+                    return;
+                using TGrab = void*(PlayerCharacter*, TESObjectREFR*, uint32_t, float, bool);
+                POINTER_SKYRIMSE(TGrab, grab, 40555);
+                const auto* pResult = grab.Get()(pPlayer, pReference, 1, 1000.f, false);
+                spdlog::info("Test grab_object: {:X} grab spring {}", formId, fmt::ptr(pResult));
+            });
+            return Result(id, fmt::format("\"queued\":\"{:X}\",\"release\":{}", formId, JsonBool(release)));
+        }
+        if (command == "start_combat")
+        {
+            // attacker: a form id (hex); target: a form id or "remote_player" (the other player's copy here).
+            const auto attackerText = GetJsonString(acLine, "attacker");
+            const auto targetText = GetJsonString(acLine, "target");
+            uint32_t target = 0;
+            if (targetText == "remote_player")
+            {
+                auto view = m_world.view<FormIdComponent>();
+                for (auto entity : view)
+                {
+                    auto* pCandidate = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+                    if (pCandidate && pCandidate->GetExtension() && pCandidate->GetExtension()->IsRemotePlayer())
+                    {
+                        target = pCandidate->formID;
+                        break;
+                    }
+                }
+            }
+            else if (!targetText.empty())
+                target = std::stoul(targetText, nullptr, 16);
+            if (attackerText.empty() || !target)
+                return Error(id, "attacker or target missing");
+            std::lock_guard lock(s_mainFrameDropLock);
+            s_mainFrameCombat = {static_cast<uint32_t>(std::stoul(attackerText, nullptr, 16)), target};
+            return Result(id, fmt::format("\"queued\":true,\"target\":\"{:X}\"", target));
+        }
+        if (command == "damage_player")
+        {
+            const auto amountText = GetJsonString(acLine, "amount");
+            std::lock_guard lock(s_mainFrameDropLock);
+            s_mainFrameDamage = amountText.empty() ? 1000.f : std::stof(amountText);
+            return Result(id, "\"queued\":true");
+        }
         if (command == "drop_item")
         {
             const auto baseText = GetJsonString(acLine, "base");
@@ -5507,7 +6921,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             auto* pPlayer = PlayerCharacter::Get();
             if (baseText.empty() || !pPlayer || !pPlayer->parentCell)
                 return Error(id, "base or player missing");
-            const uint32_t base = std::stoul(baseText, nullptr, 16);
+            // "weapons": every weapon lying loose (a dead NPC's dropped weapon is a new temporary reference).
+            const bool anyWeapon = baseText == "weapons";
+            const uint32_t base = anyWeapon ? 0 : std::stoul(baseText, nullptr, 16);
             const float radius = radiusText.empty() ? 1000.f : std::stof(radiusText);
             NiPoint3 center = pPlayer->position;
             if (!GetJsonString(acLine, "x").empty())
@@ -5525,7 +6941,8 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                 for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
                 {
                     auto* pRef = pCell->refData.refArray[i].Get();
-                    if (!pRef || !pRef->baseForm || pRef->baseForm->formID != base || pRef->IsDeleted())
+                    if (!pRef || !pRef->baseForm || pRef->IsDeleted() ||
+                        (anyWeapon ? pRef->baseForm->formType != FormType::Weapon : pRef->baseForm->formID != base))
                         continue;
                     const auto d = pRef->position - center;
                     if (d.x * d.x + d.y * d.y + d.z * d.z > radius * radius)
@@ -5557,7 +6974,9 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (!pActor || !pPlayer || !pActor->currentProcess)
                 return Error(id, "actor not found");
             const float push = pushText.empty() ? 20.f : std::stof(pushText);
-            pActor->currentProcess->KnockExplosion(pActor, &pPlayer->position, push);
+            // push < 0: no knock first (a knock sheathes the weapon, and the death weapon drop needs it drawn).
+            if (push >= 0.f)
+                pActor->currentProcess->KnockExplosion(pActor, &pPlayer->position, push);
             pActor->Kill();
             return Result(id, fmt::format("\"push\":{}", push));
         }
@@ -5627,13 +7046,89 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             const auto* pRoot = pActor->GetNiNode();
             return Result(id, fmt::format("\"form_id\":\"{:X}\",\"dead\":{},\"lifeState\":{},\"knockState\":{},\"position\":[{:.1f},{:.1f},{:.1f}],"
                 "\"has3D\":{},\"bodies\":{},\"worn\":{},\"visual\":{},\"health\":{:.1f},\"inCombat\":{},\"combatTarget\":\"{:X}\","
-                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
+                "\"remote\":{},\"items\":{},\"graphCalls\":{},\"graphLastMs\":{},\"nowMs\":{},\"hidden\":{},\"magicka\":{:.1f},\"weaponState\":{},\"rightHand\":\"{:X}\",\"look\":{}", pActor->formID, JsonBool(pActor->IsDead()), (flags1 >> 21) & 0xF, (flags1 >> 25) & 0x7,
                 pActor->position.x, pActor->position.y, pActor->position.z, JsonBool(pRoot != nullptr),
                 CorpseRagdollService::DescribeRagdollBodies(pActor), worn, DescribeActorVisuals(pActor),
                 pActor->GetActorValue(ActorValueInfo::kHealth), JsonBool(pActor->IsInCombat()),
                 pActor->GetCombatTarget() ? pActor->GetCombatTarget()->formID : 0,
                 JsonBool(pActor->GetExtension() && pActor->GetExtension()->IsRemote()), items, graph.Calls, graph.LastPostCallMs,
-                GetTickCount64()));
+                GetTickCount64(), JsonBool(pRoot && (pRoot->flags & 1u) != 0),
+                pActor->GetActorValue(ActorValueInfo::kMagicka), (pActor->actorState.flags2 >> 5) & 7,
+                pActor->GetEquippedWeapon(1) ? pActor->GetEquippedWeapon(1)->formID : 0, HeadTrackService::DescribeLook(pActor)));
+        }
+        if (command == "world_snapshot")
+        {
+            // Every non-actor reference within "radius" (default 2500) of a point ("x","y","z"; default the player) in
+            // the 3x3 loaded exterior cells, or the player's interior cell: [form, disabled, 3D loaded, collision bodies
+            // in the physics world]. Diffed step by step on both PCs while a quest plays (Helgen inn, 2026-09-30).
+            auto* pPlayer = PlayerCharacter::Get();
+            if (!pPlayer || !pPlayer->parentCell)
+                return Error(id, "player missing");
+            const auto radiusText = GetJsonString(acLine, "radius");
+            const float radius = radiusText.empty() ? 2500.f : std::stof(radiusText);
+            NiPoint3 center = pPlayer->position;
+            if (!GetJsonString(acLine, "x").empty())
+            {
+                center.x = std::stof(GetJsonString(acLine, "x"));
+                center.y = std::stof(GetJsonString(acLine, "y"));
+                center.z = std::stof(GetJsonString(acLine, "z"));
+            }
+            const auto bodiesInWorld = [](NiAVObject* apRoot) {
+                int inWorld = 0, visited = 0;
+                std::function<void(NiAVObject*, int)> walk = [&](NiAVObject* apNode, int aDepth) {
+                    if (!apNode || aDepth > 8 || ++visited > 256)
+                        return;
+                    if (apNode->collisionObject)
+                    {
+                        void* pWrapper{};
+                        void* pBody{};
+                        void* pPhysicsWorld{};
+                        if (ReadNative(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
+                            ReadNative(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody &&
+                            ReadNative(static_cast<const uint8_t*>(pBody) + 0x10, pPhysicsWorld) && pPhysicsWorld)
+                            ++inWorld;
+                    }
+                    if (auto* pAsNode = apNode->AsNode())
+                        for (uint16_t i = 0; i < pAsNode->children.length; ++i)
+                            walk(pAsNode->children.data[i], aDepth + 1);
+                };
+                walk(apRoot, 0);
+                return inWorld;
+            };
+            std::string refs = "[";
+            int count = 0;
+            auto visit = [&](TESObjectCELL* pCell) {
+                if (!pCell || !pCell->refData.refArray || pCell->refData.capacity > 50000)
+                    return;
+                for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
+                {
+                    auto* pRef = pCell->refData.refArray[i].Get();
+                    if (!pRef || !pRef->baseForm || pRef->IsDeleted() || pRef->formType == Actor::Type)
+                        continue;
+                    const auto d = pRef->position - center;
+                    if (d.x * d.x + d.y * d.y + d.z * d.z > radius * radius)
+                        continue;
+                    auto* pRoot = pRef->GetNiNode();
+                    refs += fmt::format("{}[\"{:X}\",{},{},{}]", count++ ? "," : "", pRef->formID, pRef->IsDisabled() ? 1 : 0,
+                        pRoot ? 1 : 0, pRoot ? bodiesInWorld(pRoot) : 0);
+                }
+            };
+            if (auto* pSpace = pPlayer->GetWorldSpace())
+            {
+                const int32_t cx = static_cast<int32_t>(std::floor(center.x / 4096.f));
+                const int32_t cy = static_cast<int32_t>(std::floor(center.y / 4096.f));
+                for (int32_t dx = -1; dx <= 1; ++dx)
+                    for (int32_t dy = -1; dy <= 1; ++dy)
+                        visit(ModManager::Get()->GetCellFromCoordinates(cx + dx, cy + dy, pSpace, false));
+                // Persistent references (quest properties, enable-parent children such as the Helgen inn models)
+                // live in the worldspace's persistent cell (TESWorldSpace +0x88), not in the grid cells.
+                void* pPersistent{};
+                if (ReadNative(reinterpret_cast<const uint8_t*>(pSpace) + 0x88, pPersistent))
+                    visit(Cast<TESObjectCELL>(static_cast<TESForm*>(pPersistent)));
+            }
+            else
+                visit(pPlayer->parentCell);
+            return Result(id, fmt::format("\"count\":{},\"refs\":{}]", count, refs));
         }
         if (command == "ref_bodies")
         {
@@ -5655,11 +7150,20 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
                     ActorPoseDiagnosticViews::RigidBody state{};
                     const bool readable = ReadNative(reinterpret_cast<const uint8_t*>(apNode->collisionObject) + 0x20, pWrapper) && pWrapper &&
                         ReadNative(reinterpret_cast<const uint8_t*>(pWrapper) + 0x10, pBody) && pBody && ReadNative(pBody, state);
+                    // hkpWorldObject: world +0x10, collidable broadphase collisionFilterInfo +0x4C (layer = low 7 bits).
+                    uint32_t filterInfo{};
+                    void* pPhysicsWorld{};
+                    if (readable)
+                    {
+                        ReadNative(static_cast<const uint8_t*>(pBody) + 0x4C, filterInfo);
+                        ReadNative(static_cast<const uint8_t*>(pBody) + 0x10, pPhysicsWorld);
+                    }
                     const auto& lr = apNode->local.rotate.entry;
                     const auto& wr = apNode->world.rotate.entry;
-                    bodies += fmt::format("{}{{\"name\":\"{}\",\"depth\":{},\"readable\":{},\"motionType\":{},\"body\":[{},{},{}],\"node\":[{},{},{}],"
+                    bodies += fmt::format("{}{{\"name\":\"{}\",\"layer\":{},\"filter\":\"{:X}\",\"inWorld\":{},\"depth\":{},\"readable\":{},\"motionType\":{},\"body\":[{},{},{}],\"node\":[{},{},{}],"
                         "\"localRot\":[{:.4f},{:.4f},{:.4f},{:.4f}],\"worldRot\":[{:.4f},{:.4f},{:.4f},{:.4f}],\"bodyRot\":[{:.4f},{:.4f},{:.4f},{:.4f}]}}",
-                        emitted++ ? "," : "", EscapeJson(pName ? pName : ""), aDepth, JsonBool(readable), readable ? state.motionType : -1,
+                        emitted++ ? "," : "", EscapeJson(pName ? pName : ""), filterInfo & 0x7F, filterInfo, JsonBool(pPhysicsWorld != nullptr),
+                        aDepth, JsonBool(readable), readable ? state.motionType : -1,
                         state.transform[12] * 70.f, state.transform[13] * 70.f, state.transform[14] * 70.f, apNode->world.translate.x,
                         apNode->world.translate.y, apNode->world.translate.z, lr[0][0], lr[0][1], lr[1][0], lr[2][2], wr[0][0], wr[0][1],
                         wr[1][0], wr[2][2], state.transform[0], state.transform[1], state.transform[4], state.transform[10]);
@@ -5817,8 +7321,12 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
             if (!player)
                 return Error(id, "no player");
             const float z = player->rotation.z + static_cast<float>(degrees * 3.14159265358979 / 180.0);
-            player->SetRotation(player->rotation.x, player->rotation.y, z);
-            return Result(id, fmt::format("\"yaw\":{}", z));
+            // Optional absolute look pitch in degrees, positive = down (head tracking up/down scenario).
+            const auto pitchText = GetJsonString(acLine, "pitch");
+            const float x = pitchText.empty() ? player->rotation.x :
+                static_cast<float>(std::strtod(pitchText.c_str(), nullptr) * 3.14159265358979 / 180.0);
+            player->SetRotation(x, player->rotation.y, z);
+            return Result(id, fmt::format("\"yaw\":{},\"pitch\":{}", z, x));
         }
         if (command == "offscreen_simulate")
         {
@@ -5947,6 +7455,43 @@ std::string GameTestService::Execute(const std::string& acLine) noexcept
         // Steam session tests: the lobby as the UI sees it, direct invites, answering invites.
         if (command == "steam_state")
             return Result(id, fmt::format("\"steam\":{}", m_world.GetSteamLobbyService().TestStateJson()));
+        if (command == "handoff_status")
+            return Result(id, fmt::format("\"party\":{},\"steam\":{}",
+                m_world.GetPartyService().HandoffStatus(), m_world.GetSteamLobbyService().HandoffStatus()));
+        if (command == "ledger_status")
+        {
+            const auto& party = m_world.GetPartyService();
+            const String checkpoint = !party.GetCurrentCheckpointId().empty() ?
+                party.GetCurrentCheckpointId() : CheckpointSaves::Latest();
+            auto path = CheckpointSaves::PathOf(checkpoint);
+            path.replace_extension(".ledger");
+            std::error_code error;
+            const bool present = !checkpoint.empty() && std::filesystem::is_regular_file(path, error);
+            const auto bytes = present ? std::filesystem::file_size(path, error) : 0;
+            return Result(id, fmt::format("\"checkpoint\":\"{}\",\"localExtractPresent\":{},\"localExtractBytes\":{},\"successorSeeded\":{}",
+                checkpoint.c_str(), present && !error, error ? 0 : bytes, party.IsHandoffCampaign()));
+        }
+        if (command == "handoff_make_host")
+        {
+            auto& party = m_world.GetPartyService();
+            if (!party.IsInParty() || !party.IsLeader() || party.GetSessionState() < 2)
+                return Error(id, "a running party leader is required");
+            auto member = GetJsonString(acLine, "member");
+            if (member.empty()) member = GetJsonString(acLine, "playerId");
+            uint32_t target{};
+            for (const auto playerId : party.GetPartyMembers())
+            {
+                if (std::to_string(playerId) == member)
+                    target = playerId;
+                const auto it = party.GetPlayers().find(playerId);
+                if (it != party.GetPlayers().end() && it->second.c_str() == member)
+                    target = playerId;
+            }
+            if (!target || target == m_world.GetTransport().GetLocalPlayerId())
+                return Error(id, "member is not another player in this party");
+            party.ChangePartyLeader(target);
+            return Result(id, fmt::format("\"requestedPlayerId\":{}", target));
+        }
         if (command == "steam_host" || command == "steam_leave")
         {
             if (command == "steam_host") m_world.GetSteamLobbyService().QueueHostSession();

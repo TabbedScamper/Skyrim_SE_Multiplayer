@@ -12,7 +12,8 @@ bool WorldState::Valid() const noexcept
     switch (Kind)
     {
     case WorldStateKind::Disabled:
-    case WorldStateKind::Destroyed: return Value <= 1 && Scalar == 0 && Animation.empty();
+    case WorldStateKind::Destroyed:
+    case WorldStateKind::BlockActivation: return Value <= 1 && Scalar == 0 && Animation.empty();
     case WorldStateKind::Open: return Value <= 1 && (Scalar == 0 || Scalar == 1 || Scalar == 2 || Scalar == 3) && Animation.empty();
     case WorldStateKind::Lock: return Value <= 0x1FF && Scalar == 0 && Animation.empty();
     case WorldStateKind::DestructionHealth: return (Scalar == -1 || Scalar >= 0) &&

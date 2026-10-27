@@ -24,7 +24,7 @@ struct NotifyProjectileLaunch final : ServerMessage
                Area == acRhs.Area && Power == acRhs.Power && Scale == acRhs.Scale && AlwaysHit == acRhs.AlwaysHit &&
                NoDamageOutsideCombat == acRhs.NoDamageOutsideCombat && AutoAim == acRhs.AutoAim &&
                DeferInitialization == acRhs.DeferInitialization && ForceConeOfFire == acRhs.ForceConeOfFire &&
-               UnkBool1 == acRhs.UnkBool1 && UnkBool2 == acRhs.UnkBool2;
+               UnkBool1 == acRhs.UnkBool1 && UnkBool2 == acRhs.UnkBool2 && IsDualCasting == acRhs.IsDualCasting;
     }
 
     uint32_t ShooterID{};
@@ -50,4 +50,5 @@ struct NotifyProjectileLaunch final : ServerMessage
     bool ForceConeOfFire{};
     bool UnkBool1{};
     bool UnkBool2{};
+    bool IsDualCasting{};
 };

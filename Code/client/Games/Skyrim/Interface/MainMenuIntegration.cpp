@@ -569,11 +569,191 @@ void PollMainMenuOptions(IMenu* apMainMenu) noexcept
             default: return fmt::format("type{}", value.Type & 0x0F);
             }
         };
-        spdlog::info("Launch watch: state={} inputs={} pending={} queued={} selected={} menuVisible={} overlay={}",
+        spdlog::info("Launch watch: state={} inputs={} pending={} queued={} selected={} menuVisible={} overlay={} "
+                     "listVisible={} listAlpha={} listHolderVisible={} menuAlpha={} logoVisible={} entries={}",
             read("_root.MenuHolder.Menu_mc.strCurrentState"), read("_root.MenuHolder.Menu_mc.ShouldProcessInputs"),
             read("_root.MenuHolder.Menu_mc.SkyrimSeamlessPendingLaunchMode"), read("_root.SkyrimSeamlessLaunchMode"),
-            read("_root.MenuHolder.Menu_mc.MainList.selectedIndex"), read("_root.MenuHolder._visible"), s_mainMenuOverlayActive);
+            read("_root.MenuHolder.Menu_mc.MainList.selectedIndex"), read("_root.MenuHolder._visible"), s_mainMenuOverlayActive,
+            read("_root.MenuHolder.Menu_mc.MainList._visible"), read("_root.MenuHolder.Menu_mc.MainList._alpha"),
+            read("_root.MenuHolder.Menu_mc.MainListHolder._visible"), read("_root.MenuHolder.Menu_mc._alpha"),
+            read("_root.MenuHolder.Menu_mc.Logo_mc._visible"), read("_root.MenuHolder.Menu_mc.MainList.entryList.length"));
     }
+}
+
+void AddMainMenuVignette(void* apMovie) noexcept
+{
+    if (!apMovie)
+        return;
+    using TInvoke = bool(void*, const char*, const char*, ...);
+    static VersionDbPtr<void> s_invoke(82664);
+    auto* pInvoke = reinterpret_cast<TInvoke*>(s_invoke.GetPtr());
+    if (!pInvoke)
+        return;
+    // The lowest depth AS2 allows: authored timeline objects (MenuHolder) live from -16383 up, so anything above put
+    // the vignette over the menu text (2026-10-01 screenshot).
+    pInvoke(apMovie, "_root.createEmptyMovieClip", "%s, %d", "SSMVignette", -16384);
+    // One stretched texture (Tools/Lobby/make-vignette.py), smooth where 64 drawn bands showed steps (owner
+    // 2026-10-01: "the banding is still pretty bad"). Paths are relative to Data\Interface, as SkyUI's MCM loads its
+    // custom .dds content.
+    pInvoke(apMovie, "_root.SSMVignette.loadMovie", "%s", "SkyrimSEMultiplayer/lobby_vignette.dds");
+    spdlog::info("Main menu vignette: loading SkyrimSEMultiplayer/lobby_vignette.dds");
+}
+
+bool SizeMainMenuVignette(void* apMovie) noexcept
+{
+    if (!apMovie)
+        return false;
+    auto* pVtable = *reinterpret_cast<uintptr_t**>(apMovie);
+    const auto getVariable = reinterpret_cast<TGetVariable*>(pVtable[0x11]);
+    const auto setVariable = reinterpret_cast<TSetVariable*>(pVtable[0x10]);
+    const auto number = [&](const char* acPath, double aDefault) {
+        ScaleformValue value{};
+        return getVariable(apMovie, &value, acPath) && (value.Type & 0x0F) == 3 ? value.Value.Number : aDefault;
+    };
+    // Loaded once the clip has a size of its own.
+    if (number("_root.SSMVignette._width", 0.0) <= 0.0)
+        return false;
+    // The visible part of the 1280x720 stage, from the window's real size (Stage.visibleRect lagged a resize):
+    // the movie shows all of the stage, so a wider window shows more stage left and right, a taller one more above
+    // and below. At 1664x1056 this gives 1280x812 at (0,-46), as Stage.visibleRect reported.
+    double windowWidth = 1280.0, windowHeight = 720.0;
+    if (auto* pWindow = BSGraphics::GetMainWindow(); pWindow && pWindow->pSwapChain)
+    {
+        DXGI_SWAP_CHAIN_DESC swapDesc{};
+        if (SUCCEEDED(pWindow->pSwapChain->GetDesc(&swapDesc)) && swapDesc.BufferDesc.Width && swapDesc.BufferDesc.Height)
+        {
+            windowWidth = swapDesc.BufferDesc.Width;
+            windowHeight = swapDesc.BufferDesc.Height;
+        }
+    }
+    const double aspect = windowWidth / windowHeight;
+    const double visibleWidth = aspect > 1280.0 / 720.0 ? 720.0 * aspect : 1280.0;
+    const double visibleHeight = aspect > 1280.0 / 720.0 ? 720.0 : 1280.0 / aspect;
+    const double fields[4]{(1280.0 - visibleWidth) * 0.5, (720.0 - visibleHeight) * 0.5, visibleWidth, visibleHeight};
+    // Re-fitted while the lobby holds (the window can be resized or switched to fullscreen); log changes only.
+    // Per movie: a return to the lobby builds a new Main Menu with a fresh, unsized vignette at the same window size
+    // (owner 2026-10-03: back in the lobby the vignette sat small in the top left corner).
+    static double s_last[4]{-1, -1, -1, -1};
+    static void* s_lastMovie{};
+    if (apMovie == s_lastMovie && std::equal(std::begin(fields), std::end(fields), std::begin(s_last)))
+        return true;
+    std::copy(std::begin(fields), std::end(fields), std::begin(s_last));
+    s_lastMovie = apMovie;
+    const char* paths[4]{"_root.SSMVignette._x", "_root.SSMVignette._y", "_root.SSMVignette._width", "_root.SSMVignette._height"};
+    for (int k = 0; k < 4; ++k)
+    {
+        ScaleformValue value{};
+        value.Value.Number = fields[k];
+        setVariable(apMovie, paths[k], value, 0);
+    }
+    spdlog::info("Main menu vignette: sized to {}x{} at {},{}", fields[2], fields[3], fields[0], fields[1]);
+    return true;
+}
+
+std::string SetMainMenuMotd(void* apMovie, const char* apHeader, const char* apBody) noexcept
+{
+    if (!apMovie)
+        return {};
+    auto* pVtable = *reinterpret_cast<uintptr_t**>(apMovie);
+    const auto getVariable = reinterpret_cast<TGetVariable*>(pVtable[0x11]);
+    const auto setVariable = reinterpret_cast<TSetVariable*>(pVtable[0x10]);
+    using TInvoke = bool(void*, const char*, const char*, ...);
+    static VersionDbPtr<void> s_invoke(82664);
+    auto* pInvoke = reinterpret_cast<TInvoke*>(s_invoke.GetPtr());
+    if (pInvoke && apBody)
+        pInvoke(apMovie, "_root.MenuHolder.Menu_mc.SetMotd", "%s", apBody);
+    if (apHeader)
+    {
+        ScaleformValue header{};
+        header.Type = 4; // string (unmanaged: the movie copies it)
+        header.Value.Pointer = const_cast<char*>(apHeader);
+        setVariable(apMovie, "_root.MenuHolder.Menu_mc.MessageOfTheDay_mc.Header_tf.text", header, 0);
+    }
+    ScaleformValue read{};
+    if (!getVariable(apMovie, &read, "_root.MenuHolder.Menu_mc.MessageOfTheDay_mc.Header_tf.text") || (read.Type & 0x0F) != 4)
+        return {};
+    const char* pText = static_cast<const char*>(read.Value.Pointer);
+    if (pText && (read.Type & 0x40))
+        pText = *reinterpret_cast<const char* const*>(read.Value.Pointer);
+    return pText ? pText : "";
+}
+
+std::string ProbeTitleMovie(void* apMovie) noexcept
+{
+    if (!apMovie)
+        return "{}";
+    auto* pVtable = *reinterpret_cast<uintptr_t**>(apMovie);
+    const auto getVariable = reinterpret_cast<TGetVariable*>(pVtable[0x11]);
+    std::string out;
+    for (const char* path : {"_root.sequence4._currentframe", "_root.sequence4._totalframes", "_root._currentframe", "_root._totalframes", "_root.Titles_mc._currentframe", "_root.Title_mc._currentframe",
+             "_root.TitleText_mc._currentframe", "_root.Sequence4._currentframe", "_root.Sequence4_mc._currentframe",
+             "_root.TitleSequence_mc._currentframe", "_root.Menu_mc._currentframe", "_root.Skyrim_mc._currentframe", "_root.Logo_mc._currentframe"})
+    {
+        ScaleformValue value{};
+        if (getVariable(apMovie, &value, path) && (value.Type & 0x0F) == 3)
+            out += fmt::format("{}={} ", path, value.Value.Number);
+    }
+    return out;
+}
+
+std::string ProbeMainMenuMotd(void* apMovie) noexcept
+{
+    if (!apMovie)
+        return "{}";
+    auto* pVtable = *reinterpret_cast<uintptr_t**>(apMovie);
+    const auto getVariable = reinterpret_cast<TGetVariable*>(pVtable[0x11]);
+    using TIsAvailable = bool(void*, const char*);
+    const auto isAvailable = reinterpret_cast<TIsAvailable*>(pVtable[0x0A]);
+    const auto describe = [&](const std::string& acPath) -> std::string {
+        ScaleformValue value{};
+        if (!getVariable(apMovie, &value, acPath.c_str()))
+            return {};
+        switch (value.Type & 0x0F)
+        {
+        case 0: return "undefined";
+        case 1: return "null";
+        case 2: return (reinterpret_cast<const uint8_t&>(value.Value) & 1) ? "true" : "false";
+        case 3: return fmt::format("{}", value.Value.Number);
+        case 4:
+        {
+            const char* pText = static_cast<const char*>(value.Value.Pointer);
+            if (pText && (value.Type & 0x40))
+                pText = *reinterpret_cast<const char* const*>(value.Value.Pointer);
+            std::string text = pText ? pText : "";
+            for (auto& c : text)
+                if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20)
+                    c = ' ';
+            return "\"" + text.substr(0, 120) + "\"";
+        }
+        default: return fmt::format("type{}", value.Type & 0x0F);
+        }
+    };
+    const char* holders[] = {"_root.MenuHolder.Menu_mc.MessageOfTheDay_mc", "_root.MenuHolder.Menu_mc"};
+    const char* fields[] = {"", ".SetMotd", ".Title_tf.text", ".TitleText.text", ".Title.text", ".title.text", ".Header_tf.text",
+        ".HeaderText.text", ".Body_tf.text", ".BodyText.text", ".Text_tf.text", ".MessageText.text", ".Message_tf.text",
+        ".Description.text", ".textField.text", ".MOTD_tf.text", ".MotdText.text", ".Title_mc.textField.text",
+        ".Body_mc.textField.text", "._visible", "._x", "._y"};
+    std::string json = "{";
+    for (const char* holder : holders)
+        for (const char* field : fields)
+        {
+            const std::string path = std::string(holder) + field;
+            const auto value = describe(path);
+            const bool callable = isAvailable(apMovie, path.c_str());
+            if (value.empty() && !callable)
+                continue;
+            json += fmt::format("{}\"{}\":\"{}{}\"", json.size() > 1 ? "," : "", path, callable ? "available " : "",
+                value.empty() ? "" : value.substr(0, 1) == "\"" ? "text" : value);
+            if (!value.empty() && value[0] == '"')
+                json += fmt::format(",\"{}#text\":{}", path, value);
+        }
+    return json + "}";
+}
+
+void WatchMainMenuState(int aSeconds) noexcept
+{
+    s_launchWatchUntil = std::chrono::steady_clock::now() + std::chrono::seconds(aSeconds);
+    s_launchWatchNext = {};
 }
 
 void SetMainMenuOverlayActive(bool aActive) noexcept
@@ -582,8 +762,16 @@ void SetMainMenuOverlayActive(bool aActive) noexcept
     ApplyMainMenuVisibility();
 }
 
+std::chrono::steady_clock::time_point s_sharedLaunchUntil{};
+
+bool IsSharedCampaignLaunching() noexcept
+{
+    return std::chrono::steady_clock::now() < s_sharedLaunchUntil;
+}
+
 void LaunchSharedCampaignFromMainMenu(const uint8_t aCampaignMode) noexcept
 {
+    s_sharedLaunchUntil = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     // The focused input poll may never have run in an unattended session.
     // Resolve the live movie for this launch instead of depending on that poll.
     s_pMainMenuMovie = nullptr;

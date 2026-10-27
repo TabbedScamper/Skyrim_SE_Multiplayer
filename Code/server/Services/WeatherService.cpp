@@ -20,6 +20,7 @@ void WeatherService::OnWeatherChange(const PacketEvent<RequestWeatherChange>& ac
     NotifyWeatherChange notify{};
     notify.Id = acMessage.Packet.Id;
     notify.HasSky = acMessage.Packet.HasSky;
+    notify.WorldSpaceId = acMessage.Packet.WorldSpaceId;
     notify.LastId = acMessage.Packet.LastId;
     notify.Percent = acMessage.Packet.Percent;
     notify.WindSpeed = acMessage.Packet.WindSpeed;
@@ -33,6 +34,7 @@ void WeatherService::OnWeatherChange(const PacketEvent<RequestWeatherChange>& ac
     if (notify.HasSky)
     {
         pParty->CachedHasSky = true;
+        pParty->CachedWeatherWorldSpace = notify.WorldSpaceId;
         pParty->CachedLastWeather = notify.LastId;
         pParty->CachedWeatherPercent = notify.Percent;
         pParty->CachedWindSpeed = notify.WindSpeed;
@@ -56,6 +58,7 @@ void WeatherService::OnRequestCurrentWeather(const PacketEvent<RequestCurrentWea
     NotifyWeatherChange notify{};
     notify.Id = pParty->CachedWeather;
     notify.HasSky = pParty->CachedHasSky;
+    notify.WorldSpaceId = pParty->CachedWeatherWorldSpace;
     notify.LastId = pParty->CachedLastWeather;
     notify.Percent = pParty->CachedWeatherPercent;
     notify.WindSpeed = pParty->CachedWindSpeed;

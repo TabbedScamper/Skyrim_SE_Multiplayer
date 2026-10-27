@@ -20,10 +20,15 @@ struct ImguiService
     void Create(RenderSystemD3D11* apRenderSystem, HWND aHwnd);
 
     void Render() const;
+    void DrawLastFrame() const;
     void Reset() const;
 
     LRESULT WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     void RawInputHandler(RAWINPUT& aRawinput);
+    // The overlay's pointer as a fraction of the screen (InputService), used as ImGui's mouse position while the
+    // overlay is active; cleared when it is not.
+    static void SetPointer(float aU, float aV) noexcept;
+    static void ClearPointer() noexcept;
 
     entt::sink<entt::sigh<TCallback>> OnDraw;
 

@@ -347,7 +347,8 @@ std::unordered_map<uint32_t, Actor*> forms;
 struct TESObjectREFR { uint32_t formID{}; virtual ~TESObjectREFR()=default; static TESObjectREFR* GetByHandle(uint32_t h); virtual void* GetNiNode()=0; };
 struct Actor : TESObjectREFR { ActorExtension ext; Cell cell; bool root{true}, deleted{}, suppressed{};
     void* GetNiNode() override { return root ? this : nullptr; } bool IsDeleted() const { return deleted; }
-    bool IsDead() const { return false; } ActorExtension* GetExtension() { return &ext; } Cell* GetParentCellEx() { return &cell; } };
+    bool IsDead() const { return false; } bool IsDisabled() const { return false; }
+    ActorExtension* GetExtension() { return &ext; } Cell* GetParentCellEx() { return &cell; } };
 TESObjectREFR* TESObjectREFR::GetByHandle(uint32_t h) { return forms.contains(h) ? forms.at(h) : nullptr; }
 struct TESForm { static TESObjectREFR* GetById(uint32_t id) { return TESObjectREFR::GetByHandle(id); } };
 template<class T> T* Cast(TESObjectREFR* p) { return dynamic_cast<T*>(p); }

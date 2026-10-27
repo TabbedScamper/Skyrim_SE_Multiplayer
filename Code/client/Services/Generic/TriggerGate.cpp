@@ -1,4 +1,6 @@
 #include <Services/TriggerGate.h>
+#include <Services/ReviveService.h>
+#include <Services/HarnessService.h>
 
 #include <World.h>
 #include <Components.h>
@@ -20,10 +22,14 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <list>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+
+// Games/Skyrim/TESObjectREFR.cpp: a door open/close through the hooked native, so it replicates.
+void WorldStateSetDoorOpen(TESObjectREFR* apRef, bool aOpen) noexcept;
 
 namespace
 {
@@ -209,8 +215,11 @@ BSTEventResult HookTrigger(void* apSink, const TESTriggerEnterEvent* apEvent, co
         auto* pSink = kind == Kind ? apSink : reinterpret_cast<uint8_t*>(GameVM::Get()) + kSinkOffsets[kind];
         const auto result = s_original[kind](pSink, &event, kind == Kind ? apSource : nullptr);
         if (kind == kEnter && event.pActionRef != apEvent->pActionRef)
+        {
             spdlog::info("Trigger: {:X} tripped by remote player {:X} (delivered)",
                 event.pTrigger->formID, apEvent->pActionRef->formID);
+            HarnessService::OnPartyTriggerDelivered(event.pTrigger->formID, apEvent->pActionRef->formID);
+        }
         return result;
     }
     return s_original[Kind](apSink, apEvent, apSource);
@@ -403,6 +412,12 @@ bool InWorld()
 
 struct TriggerGate::State
 {
+    struct ClassificationRequest
+    {
+        uint32_t Handle{}, FormId{};
+        uint64_t Order{};
+    };
+    using ClassificationWork = std::list<ClassificationRequest>;
     struct Held
     {
         uint32_t Handle{};
@@ -414,6 +429,7 @@ struct TriggerGate::State
         std::unordered_set<uint32_t> Members;
         uint64_t Since{};
         uint32_t RemoteFormId{};
+        std::optional<ClassificationWork::iterator> ClassificationTicket;
     };
     std::mutex Mutex;
     std::mutex MoveMutex;
@@ -426,8 +442,31 @@ struct TriggerGate::State
     uint32_t PlayerHandle{};
     uint64_t SampleTime{};
     std::unordered_map<uint32_t, Location> Players;
+    // Fallen players (spectating, body hidden near whoever they watch): never waited on, and their contacts never
+    // fire triggers.
+    std::unordered_set<uint32_t> FallenHandles;
     std::unordered_map<uint32_t, Held> Pending;
+    struct Classification
+    {
+        uint32_t FormId{};
+        TriggerCapabilities::Bucket Bucket{};
+    };
+    std::unordered_map<uint32_t, Classification> Classifications;
+    ClassificationWork ClassificationQueue;
+    // A quest/scene trigger fired for the first player in (vanilla: the player is whoever gets there). For a few
+    // seconds its stage may not put a barrier near it; barriers it tries are deferred until all players are in.
+    struct Guard
+    {
+        uint32_t FormId{};
+        Location Where{};
+        uint64_t WatchUntil{};
+        std::vector<std::pair<uint32_t, bool>> Deferred; // reference form id, door close (else enable)
+    };
+    std::vector<Guard> Guards;
     std::unordered_map<uint32_t, TriggerPartyContact::Occupancy> Inside;
+    // Native contacts for entrants outside the party. Only a delivered enter permits a leave.
+    std::unordered_map<uint32_t, std::unordered_set<uint32_t>> NativeContacts;
+    size_t NativeContactCount{};
     uint64_t NextNotice{};
     uint64_t NextUnstuck{};
     uint64_t Sequence{};
@@ -445,19 +484,24 @@ struct TriggerGate::State
             return false;
         const auto inside = Inside.find(aTrigger.Handle);
         const auto leader = Players.find(LeaderId);
+        // Distance fallbacks bridge native contact, which a remote player's copy often never records here: requiring
+        // contact (5e5f7493) held 22 story triggers forever in a fresh intro (Alduin never landed, Ralof never went to
+        // the keep; owner, 2026-09-30). Kept from that change only: the leader never passes the near-the-leader test
+        // against itself, and a player counts as near the leader only within 150 u of height, so one still on the
+        // Helgen tower (~200 u above the inn floor) is not "in" when the other lands (the inn barrier waits for all).
         for (const auto& [id, player] : Players)
         {
             if (!SameSpace(player, aTrigger) || !player.Handle)
                 return false;
+            if (inside != Inside.end() && inside->second.Members.contains(player.Handle))
+                continue;
             const auto delta = player.Position - aTrigger.Position;
             if (glm::dot(delta, delta) <= 400.f * 400.f)
                 continue;
-            // Retain the nearby-party fallback while native contact state catches
-            // up after cell attachment or controller recreation.
-            if (leader != Players.end() && SameSpace(player, leader->second))
+            if (id != LeaderId && leader != Players.end() && SameSpace(player, leader->second))
             {
                 const auto toLeader = player.Position - leader->second.Position;
-                if (glm::dot(toLeader, toLeader) <= 600.f * 600.f)
+                if (toLeader.x * toLeader.x + toLeader.y * toLeader.y <= 600.f * 600.f && std::abs(toLeader.z) <= 150.f)
                     continue;
             }
             if (inside == Inside.end() || !inside->second.Members.contains(player.Handle))
@@ -493,12 +537,50 @@ BSTEventResult TriggerGate::OnEvent(const TESLoadGameEvent*, const EventDispatch
     if (!m_state->Pending.empty())
         spdlog::warn("Trigger gate: canceled {} held triggers after loading a save", m_state->Pending.size());
     m_state->Pending.clear();
+    m_state->Classifications.clear();
+    m_state->ClassificationQueue.clear();
+    // The loaded save holds its own barrier states.
+    m_state->Guards.clear();
     m_state->Inside.clear();
+    m_state->NativeContacts.clear();
+    m_state->NativeContactCount = 0;
     m_state->Players.clear();
     m_state->Leader = false;
     std::lock_guard moveLock(m_state->MoveMutex);
     m_state->Move.reset();
     return BSTEventResult::kOk;
+}
+
+bool TriggerGate::DeferBarrier(TESObjectREFR* apRef, bool aDoorClose) noexcept
+{
+    auto* pGate = s_gate.load(std::memory_order_acquire);
+    if (!pGate || !apRef || !apRef->baseForm)
+        return false;
+    // Blocking kinds only: activator 24, talking activator 25, door 29, static 34 (also collision and enable-parent
+    // markers), movable static 36, tree 38, furniture 40. Actors, lights, sounds and items keep their native enable.
+    const auto type = static_cast<uint8_t>(apRef->baseForm->formType);
+    if (aDoorClose ? type != static_cast<uint8_t>(FormType::Door) :
+        !(type == 24 || type == 25 || type == 29 || type == 34 || type == 36 || type == 38 || type == 40))
+        return false;
+    const auto where = GetLocation(apRef);
+    auto& state = *pGate->m_state;
+    std::lock_guard lock(state.Mutex);
+    if (!state.Leader || state.Guards.empty())
+        return false;
+    const auto now = GetTickCount64();
+    for (auto& guard : state.Guards)
+    {
+        if (now > guard.WatchUntil || !SameSpace(where, guard.Where))
+            continue;
+        const auto delta = where.Position - guard.Where.Position;
+        if (glm::dot(delta, delta) > 3000.f * 3000.f)
+            continue;
+        guard.Deferred.emplace_back(apRef->formID, aDoorClose);
+        spdlog::info("Trigger gate: deferred {} of {:X} (barrier near {:X}) until all players are in",
+            aDoorClose ? "closing" : "enabling", apRef->formID, guard.FormId);
+        return true;
+    }
+    return false;
 }
 
 bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*& apActor) noexcept
@@ -514,16 +596,50 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
     if (!state.Leader)
         return true;
     const auto actorHandle = apActor->GetHandle().handle.iBits;
+    if (actorHandle && state.FallenHandles.contains(actorHandle))
+        return true;
     const bool partyActor = std::any_of(state.Players.begin(), state.Players.end(),
         [actorHandle](const auto& entry) { return actorHandle && entry.second.Handle == actorHandle; });
-    if (!partyActor)
-        return false;
     const auto trigger = GetLocation(apTrigger);
     if (!trigger.Handle)
         return false;
+    if (!partyActor)
+    {
+        if (!actorHandle)
+            return true;
+        auto found = state.NativeContacts.find(trigger.Handle);
+        const bool entered = found != state.NativeContacts.end() && found->second.contains(actorHandle);
+        if (aKind == kLeave)
+        {
+            if (!entered)
+                return true;
+            found->second.erase(actorHandle);
+            --state.NativeContactCount;
+            if (found->second.empty())
+                state.NativeContacts.erase(found);
+        }
+        else if (aKind == kEnter || (aKind == kTrigger && !entered))
+        {
+            if (aKind == kTrigger)
+                aKind = kEnter;
+            if (!entered)
+            {
+                if (state.NativeContactCount >= 4096)
+                {
+                    state.NativeContacts.clear();
+                    state.NativeContactCount = 0;
+                    spdlog::warn("Trigger gate: native contact ledger reached 4096 pairs; recovering on later contacts");
+                }
+                state.NativeContactCount += state.NativeContacts[trigger.Handle].insert(actorHandle).second;
+            }
+        }
+        return false;
+    }
     // A remote copy may already overlap when it joins the authoritative
     // snapshot. Recover its enter from the first native repeating contact.
-    if (aKind == kTrigger && apActor != PlayerCharacter::Get() && !state.Inside.contains(trigger.Handle))
+    const auto insideContact = state.Inside.find(trigger.Handle);
+    if (aKind == kTrigger && (insideContact == state.Inside.end() ||
+        !insideContact->second.Members.contains(actorHandle)))
         aKind = kEnter;
     if (aKind == kLeave)
     {
@@ -531,7 +647,8 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
         {
             if (!inside->second.Observe(aKind, actorHandle, state.SampleTime))
                 return true;
-            state.Inside.erase(inside);
+            if (inside->second.Members.empty())
+                state.Inside.erase(inside);
         }
         else
             return true;
@@ -553,16 +670,11 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
         // 26038 emits repeating OnTrigger only for contacts already recorded.
         if (aKind != kEnter)
             return false;
-        // Never acquire VM/alias locks while holding our snapshot mutex.
-        const auto epoch = state.Epoch;
-        const auto leaderId = state.LeaderId;
-        const auto generation = state.Generation;
-        lock.unlock();
-        const auto bucket = ClassifyTrigger(apTrigger);
-        lock.lock();
-        if (!state.Leader || !state.InParty || epoch != state.Epoch ||
-            leaderId != state.LeaderId || generation != state.Generation)
-            return true;
+        // Physics callbacks must not take the VM attached-script or alias locks.
+        // An uncached trigger waits conservatively until the main-frame classifier runs.
+        const auto cached = state.Classifications.find(trigger.Handle);
+        const auto bucket = cached != state.Classifications.end() && cached->second.FormId == apTrigger->formID ?
+            cached->second.Bucket : TriggerCapabilities::Bucket::DoorOrMovement;
         if (!TriggerCapabilities::Hold(bucket))
         {
             spdlog::info("Trigger gate: {:X} not held ({})", apTrigger->formID, TriggerCapabilities::Name(bucket));
@@ -570,12 +682,26 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
         }
         if (state.AllPresent(trigger))
             return false;
+        // Only door/movement triggers wait for the whole party. Holding every quest/scene trigger stalled MQ101:
+        // the follower alone tripped the lockpick trigger (BA032, stage 400), it was held for three minutes and a
+        // later trigger set 460 first (owner, 2026-09-30 18:49). The barrier a stage puts up (the Helgen inn's
+        // CollisionBMarker, the tower door and TowerCollision) is deferred by the guard instead.
+        if (bucket != TriggerCapabilities::Bucket::DoorOrMovement)
+        {
+            state.Guards.push_back({apTrigger->formID, trigger, GetTickCount64() + 8000, {}});
+            spdlog::info("Trigger gate: {:X} fired for the first player ({}); barrier guard on until all players are in",
+                apTrigger->formID, TriggerCapabilities::Name(bucket));
+            return false;
+        }
         State::Held item{trigger.Handle, apTrigger->formID, ++state.NextHold};
         item.Since = GetTickCount64();
         item.RemoteFormId = remoteFormId;
         for (const auto& [id, location] : state.Players)
             item.Members.insert(id);
         held = state.Pending.emplace(trigger.Handle, std::move(item)).first;
+        if (cached == state.Classifications.end() || cached->second.FormId != apTrigger->formID)
+            held->second.ClassificationTicket = state.ClassificationQueue.emplace(state.ClassificationQueue.end(),
+                State::ClassificationRequest{trigger.Handle, apTrigger->formID, held->second.Order});
         spdlog::info("Trigger gate: holding {:X} for {} players", apTrigger->formID, state.Players.size());
     }
     if (aKind == kEnter)
@@ -588,6 +714,42 @@ bool TriggerGate::Hold(uint8_t& aKind, TESObjectREFR* apTrigger, TESObjectREFR*&
     else
         held->second.Left = true;
     return true;
+}
+
+void TriggerGate::OnMainFrame() noexcept
+{
+    auto* gate = s_gate.load(std::memory_order_acquire);
+    if (!gate)
+        return;
+    auto& state = *gate->m_state;
+    std::array<State::ClassificationRequest, 4> missing{};
+    size_t count{};
+    uint64_t generation{};
+    {
+        std::lock_guard lock(state.Mutex);
+        generation = state.Generation;
+        while (count < missing.size() && !state.ClassificationQueue.empty())
+        {
+            const auto request = state.ClassificationQueue.front();
+            missing[count++] = request;
+            if (auto held = state.Pending.find(request.Handle); held != state.Pending.end())
+                held->second.ClassificationTicket.reset();
+            state.ClassificationQueue.pop_front();
+        }
+    }
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto [handle, formId, order] = missing[i];
+        auto trigger = Resolve(handle);
+        if (!trigger || trigger->formID != formId)
+            continue;
+        const auto bucket = ClassifyTrigger(trigger);
+        std::lock_guard lock(state.Mutex);
+        const auto held = state.Pending.find(handle);
+        if (generation == state.Generation && held != state.Pending.end() &&
+            held->second.FormId == formId && held->second.Order == order)
+            state.Classifications[handle] = {formId, bucket};
+    }
 }
 
 void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
@@ -606,21 +768,35 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
     state.KeyDown = keyDown;
     state.Focused = focused;
 
-    std::unordered_map<uint32_t, Location> players;
+    // Reused every frame (swapped into the state below, the state's previous ones come back): no per-frame allocation.
+    static std::unordered_map<uint32_t, Location> players;
+    static std::unordered_set<uint32_t> fallenHandles;
+    players.clear();
+    fallenHandles.clear();
     if (leader && active)
     {
+        const auto& revive = m_world.GetReviveService();
         for (const auto id : party.GetPartyMembers())
-            players.emplace(id, Location{});
-        players[m_transport.GetLocalPlayerId()] = GetLocation(PlayerCharacter::Get());
+            if (!revive.IsFallen(id))
+                players.emplace(id, Location{});
+        if (revive.IsFallen(m_transport.GetLocalPlayerId()))
+            fallenHandles.insert(PlayerCharacter::Get() ? PlayerCharacter::Get()->GetHandle().handle.iBits : 0);
+        else
+            players[m_transport.GetLocalPlayerId()] = GetLocation(PlayerCharacter::Get());
         auto view = m_world.view<PlayerComponent, RemoteComponent, FormIdComponent>();
         for (const auto entity : view)
         {
             const auto id = view.get<PlayerComponent>(entity).Id;
+            auto* actor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
             if (players.contains(id))
-                players[id] = GetLocation(Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id)));
+                players[id] = GetLocation(actor);
+            else if (actor && revive.IsFallen(id))
+                fallenHandles.insert(actor->GetHandle().handle.iBits);
         }
+        fallenHandles.erase(0);
     }
     std::vector<State::Held> release;
+    std::vector<std::pair<uint32_t, bool>> barriers;
     std::vector<uint32_t> staleLeaves;
     uint64_t deliveryGeneration{};
     uint32_t deliveryPlayer{};
@@ -635,22 +811,36 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
             if (!state.Pending.empty())
                 spdlog::warn("Trigger gate: canceled {} held triggers after authority changed", state.Pending.size());
             state.Pending.clear();
+            state.Classifications.clear();
+            state.ClassificationQueue.clear();
             state.Inside.clear();
+            state.NativeContacts.clear();
+            state.NativeContactCount = 0;
         }
         if (!inParty || changedAuthority)
         {
             state.Inside.clear();
+            state.NativeContacts.clear();
+            state.NativeContactCount = 0;
             std::lock_guard moveLock(state.MoveMutex);
             state.Move.reset();
             state.ReceivedSequence = 0;
             state.ReceivedLeader = 0;
+        }
+        if (inParty && !active)
+        {
+            // Native leaves are swallowed while world scripts are suspended. Recover the next contact as an enter.
+            state.Inside.clear();
+            state.NativeContacts.clear();
+            state.NativeContactCount = 0;
         }
         state.Leader = leader && active;
         state.InParty = inParty;
         state.Epoch = party.GetStartEpoch();
         state.LeaderId = party.GetLeaderPlayerId();
         state.PlayerHandle = PlayerCharacter::Get() ? PlayerCharacter::Get()->GetHandle().handle.iBits : 0;
-        state.Players = std::move(players);
+        state.Players.swap(players);
+        state.FallenHandles.swap(fallenHandles);
         state.SampleTime = now;
         TriggerPhantom::SetAuthority(state.Leader);
         // A despawn/cell change has no guaranteed native leave. Close the last
@@ -683,17 +873,56 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
             if (!pTrigger || pTrigger->IsDeleted() || pTrigger->IsDisabled())
             {
                 spdlog::warn("Trigger gate: canceled {:X}, trigger unavailable or disabled", it->second.FormId);
+                if (it->second.ClassificationTicket)
+                    state.ClassificationQueue.erase(*it->second.ClassificationTicket);
                 it = state.Pending.erase(it);
                 continue;
             }
             const bool left = !inParty || std::any_of(it->second.Members.begin(), it->second.Members.end(),
                 [&state](uint32_t id) { return !state.Players.contains(id); });
-            if (!inParty || state.AllPresent(GetLocation(pTrigger)))
+            const auto classified = state.Classifications.find(it->first);
+            const bool releaseAfterClassification = classified != state.Classifications.end() &&
+                classified->second.FormId == it->second.FormId &&
+                classified->second.Bucket != TriggerCapabilities::Bucket::DoorOrMovement;
+            if (!inParty || releaseAfterClassification || state.AllPresent(GetLocation(pTrigger)))
             {
+                if (releaseAfterClassification && TriggerCapabilities::Hold(classified->second.Bucket))
+                    state.Guards.push_back({it->second.FormId, GetLocation(pTrigger), now + 8000, {}});
                 spdlog::info("Trigger gate: {:X} released ({})", it->second.FormId,
-                    left ? "player left the party" : "all players in");
+                    left ? "player left the party" : releaseAfterClassification ? "classified as non-door" : "all players in");
+                if (it->second.ClassificationTicket)
+                {
+                    state.ClassificationQueue.erase(*it->second.ClassificationTicket);
+                    it->second.ClassificationTicket.reset();
+                }
                 release.push_back(it->second);
                 it = state.Pending.erase(it);
+            }
+            else
+                ++it;
+        }
+        // Barrier guards: apply what a stage deferred once every player is in (or the party/authority is gone), and
+        // drop a guard whose watch ended with nothing deferred.
+        for (auto it = state.Guards.begin(); it != state.Guards.end();)
+        {
+            // Also once the party has left the area (nobody within 2000 u of the trigger, or all in another space),
+            // and at the latest 90 s after the trigger: players who passed a trigger at different moments were never
+            // all in at once, and the Helgen street's debris stayed off for good (2026-09-30 19:24, B817D, DB8EC).
+            const bool left = active && !state.Players.empty() &&
+                std::none_of(state.Players.begin(), state.Players.end(), [&it](const auto& aPlayer) {
+                    const auto delta = aPlayer.second.Position - it->Where.Position;
+                    return SameSpace(aPlayer.second, it->Where) && glm::dot(delta, delta) <= 2000.f * 2000.f;
+                });
+            const bool done = !inParty || !leader || changedAuthority || left || now > it->WatchUntil + 82000 ||
+                (active && state.AllPresent(it->Where));
+            if (done || (now > it->WatchUntil && it->Deferred.empty()))
+            {
+                if (!it->Deferred.empty())
+                    spdlog::info("Trigger gate: barrier near {:X} applied ({} change(s), {})", it->FormId,
+                        it->Deferred.size(), !inParty || !leader || changedAuthority ? "party changed" :
+                        left ? "party left the area" : now > it->WatchUntil + 82000 ? "90 s passed" : "all players in");
+                barriers.insert(barriers.end(), it->Deferred.begin(), it->Deferred.end());
+                it = state.Guards.erase(it);
             }
             else
                 ++it;
@@ -706,6 +935,17 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
             state.NextNotice = now + 10000;
         deliveryGeneration = state.Generation;
         deliveryPlayer = state.PlayerHandle;
+    }
+    // The guard is erased, so these native calls pass the barrier hooks; outside the snapshot lock (they re-enter it).
+    for (const auto& [formId, doorClose] : barriers)
+    {
+        auto* pRef = Cast<TESObjectREFR>(TESForm::GetById(formId));
+        if (!pRef || pRef->IsDeleted())
+            continue;
+        if (doorClose)
+            WorldStateSetDoorOpen(pRef, false);
+        else if (pRef->IsDisabled())
+            pRef->EnableImpl();
     }
     // Native sends can acquire VM locks and must run outside the snapshot lock.
     const auto mayDeliver = [&]() {
@@ -743,8 +983,11 @@ void TriggerGate::OnUpdate(const UpdateEvent&) noexcept
                 s_original[kind](reinterpret_cast<uint8_t*>(GameVM::Get()) + kSinkOffsets[kind], &event, nullptr);
         }
         if (held.Enter && held.RemoteFormId && mayDeliver())
+        {
             spdlog::info("Trigger: {:X} tripped by remote player {:X} (delivered)",
                 held.FormId, held.RemoteFormId);
+            HarnessService::OnPartyTriggerDelivered(held.FormId, held.RemoteFormId);
+        }
     }
     if (notice)
     {

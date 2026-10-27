@@ -45,10 +45,18 @@ void RenderSystemD3D11::OnDeviceCreation(IDXGISwapChain* apSwapChain, ID3D11Devi
     DebugService::ArrangeGameWindows(GetWindow());
 }
 
-void RenderSystemD3D11::OnRender()
+void RenderSystemD3D11::OnRender(bool aDrawOnly)
 {
-    m_imguiService.Render();
-    m_overlay.Render();
+    if (aDrawOnly)
+    {
+        m_imguiService.DrawLastFrame();
+        m_overlay.RenderDrawOnly();
+    }
+    else
+    {
+        m_imguiService.Render();
+        m_overlay.Render();
+    }
 }
 
 void RenderSystemD3D11::OnReset(IDXGISwapChain* apSwapChain)

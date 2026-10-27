@@ -2,6 +2,7 @@
 
 #include <Services/ActorValueService.h>
 #include <Services/CorpseRagdollService.h>
+#include <Services/CheckpointSaves.h>
 #include <World.h>
 #include <Forms/ActorValueInfo.h>
 #include <Games/References.h>
@@ -23,6 +24,8 @@
 #include <Messages/RequestDeathStateChange.h>
 
 #include <misc/ActorValueOwner.h>
+#include <mutex>
+#include <unordered_set>
 
 ActorValueService::ActorValueService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -48,6 +51,16 @@ struct PendingDeath
     uint64_t DueMs{};
 };
 std::vector<PendingDeath> s_pendingDeaths;
+struct PendingMurder
+{
+    uint32_t VictimId{};
+    uint32_t OwnershipEpoch{};
+    uint32_t KillerId{};
+};
+std::mutex s_murderMutex;
+std::vector<PendingMurder> s_pendingMurders;
+std::unordered_set<uint64_t> s_chargedMurders;
+std::atomic<uint32_t> s_droppedMurders{0};
 
 void QueueDeath(const uint32_t aFormId, const uint64_t aDueMs) noexcept
 {
@@ -93,6 +106,14 @@ void ActorValueService::OnDisconnected(const DisconnectedEvent& acEvent) noexcep
 {
     // TODO: this crashes sometimes, no clue why
     m_world.clear<ActorValuesComponent>();
+    {
+        std::lock_guard killerLock(m_pendingKillerMutex);
+        m_pendingKillerIds.clear();
+    }
+    std::lock_guard lock(s_murderMutex);
+    s_pendingMurders.clear();
+    s_chargedMurders.clear();
+    s_droppedMurders.store(0, std::memory_order_relaxed);
 }
 
 void ActorValueService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
@@ -247,6 +268,11 @@ void ActorValueService::OnHealthChange(const HealthChangeEvent& acEvent) noexcep
     RequestHealthChangeBroadcast requestHealthChange;
     requestHealthChange.Id = serverId;
     requestHealthChange.DeltaHealth = acEvent.DeltaHealth;
+    if (acEvent.AttackerId == 0x14 && acEvent.HitteeId != 0x14 && acEvent.DeltaHealth < 0.f)
+    {
+        if (const auto token = Utils::GetLocalOwnershipToken(acEvent.AttackerId))
+            requestHealthChange.KillerId = token->ServerId;
+    }
 
     m_transport.Send(requestHealthChange);
 
@@ -312,6 +338,19 @@ void ActorValueService::RunDeathStateUpdates() noexcept
             requestChange.Id = localComponent.Id;
             requestChange.OwnershipEpoch = localComponent.OwnershipEpoch;
             requestChange.IsDead = isDead;
+            if (isDead)
+            {
+                std::lock_guard killerLock(m_pendingKillerMutex);
+                const auto killer = m_pendingKillerIds.find(pActor->formID);
+                if (killer != m_pendingKillerIds.end())
+                    requestChange.KillerId = killer->second;
+                m_pendingKillerIds.erase(pActor->formID);
+            }
+            else
+            {
+                std::lock_guard killerLock(m_pendingKillerMutex);
+                m_pendingKillerIds.erase(pActor->formID);
+            }
 
             m_transport.Send(requestChange);
         }
@@ -332,7 +371,7 @@ void ActorValueService::RunActorValuesUpdates() noexcept
     BroadcastActorValues();
 }
 
-void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcast& acMessage) const noexcept
+void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcast& acMessage) noexcept
 {
     Actor* pActor = Utils::GetByServerId<Actor>(acMessage.Id);
     if (!pActor)
@@ -343,6 +382,9 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
 
     const float newHealth = pActor->GetActorValue(ActorValueInfo::kHealth) + acMessage.DeltaHealth;
     pActor->ForceActorValue(ActorValueOwner::ForceMode::DAMAGE, ActorValueInfo::kHealth, newHealth);
+
+    if (pActor->GetExtension() && !pActor->GetExtension()->IsRemotePlayer())
+        CheckpointSaves::QueueSaveChange(pActor->formID, 0x2);
 
     const float health = pActor->GetActorValue(ActorValueInfo::kHealth);
     if (!pActor->IsDead() && health <= 0.f)
@@ -361,7 +403,19 @@ void ActorValueService::OnHealthChangeBroadcast(const NotifyHealthChangeBroadcas
                 QueueDeath(pActor->formID, GetTickCount64() + delay);
             }
             else
+            {
+                if (acMessage.KillerId && (pActor->flags1 & 4))
+                {
+                    std::lock_guard killerLock(m_pendingKillerMutex);
+                    m_pendingKillerIds[pActor->formID] = acMessage.KillerId;
+                }
                 pActor->Kill();
+                if (!pActor->IsDead())
+                {
+                    std::lock_guard killerLock(m_pendingKillerMutex);
+                    m_pendingKillerIds.erase(pActor->formID);
+                }
+            }
         }
     }
 
@@ -391,6 +445,7 @@ void ActorValueService::OnActorValueChanges(const NotifyActorValueChanges& acMes
     if (!pActor)
         return;
 
+    bool changed = false;
     for (const auto& [key, value] : acMessage.Values)
     {
         // Syncing dragon souls triggers "Dragon soul collected" event
@@ -402,10 +457,14 @@ void ActorValueService::OnActorValueChanges(const NotifyActorValueChanges& acMes
         if (key == ActorValueInfo::kStamina || key == ActorValueInfo::kMagicka || key == ActorValueInfo::kHealth)
         {
             pActor->ForceActorValue(ActorValueOwner::ForceMode::DAMAGE, key, value);
+            changed = true;
             continue;
         }
         pActor->SetActorValue(key, value);
+        changed = true;
     }
+    if (changed && pActor->GetExtension() && !pActor->GetExtension()->IsRemotePlayer())
+        CheckpointSaves::QueueSaveChange(pActor->formID, 0x2);
 }
 
 void ActorValueService::OnActorMaxValueChanges(const NotifyActorMaxValueChanges& acMessage) const noexcept
@@ -427,6 +486,7 @@ void ActorValueService::OnActorMaxValueChanges(const NotifyActorMaxValueChanges&
     if (!pActor)
         return;
 
+    bool changed = false;
     for (const auto& [key, value] : acMessage.Values)
     {
         if (key == ActorValueInfo::kDragonSouls)
@@ -435,7 +495,10 @@ void ActorValueService::OnActorMaxValueChanges(const NotifyActorMaxValueChanges&
         spdlog::debug("Actor max value update, server ID: {:X}, key: {}, value: {}", acMessage.Id, key, value);
 
         pActor->ForceActorValue(ActorValueOwner::ForceMode::PERMANENT, key, value);
+        changed = true;
     }
+    if (changed && pActor->GetExtension() && !pActor->GetExtension()->IsRemotePlayer())
+        CheckpointSaves::QueueSaveChange(pActor->formID, 0x2);
 }
 
 void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessage) const noexcept
@@ -462,6 +525,24 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
     if (pExtension->IsPlayer())
         return;
 
+    const uint64_t murderKey = (uint64_t{acMessage.OwnershipEpoch} << 32) | acMessage.Id;
+    if (!acMessage.IsDead)
+    {
+        std::lock_guard lock(s_murderMutex);
+        s_chargedMurders.erase(murderKey);
+    }
+    else if (acMessage.KillerId && (pActor->flags1 & 4))
+    {
+        std::lock_guard lock(s_murderMutex);
+        if (!s_chargedMurders.contains(murderKey) && s_pendingMurders.size() < 64)
+        {
+            s_chargedMurders.insert(murderKey);
+            s_pendingMurders.push_back({acMessage.Id, acMessage.OwnershipEpoch, acMessage.KillerId});
+        }
+        else if (!s_chargedMurders.contains(murderKey))
+            s_droppedMurders.fetch_add(1, std::memory_order_relaxed);
+    }
+
     if (pActor->IsDead() != acMessage.IsDead)
     {
         // A death is shown on the presentation timeline, like the owner's fall: applied on arrival,
@@ -485,4 +566,33 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
 bool ActorValueService::IsDeathPending(const uint32_t aFormId) noexcept
 {
     return std::any_of(s_pendingDeaths.begin(), s_pendingDeaths.end(), [aFormId](const PendingDeath& acPending) { return acPending.FormId == aFormId; });
+}
+
+void ActorValueService::DrainQueuedMurders() noexcept
+{
+    if (const auto dropped = s_droppedMurders.exchange(0, std::memory_order_acq_rel))
+        spdlog::warn("Dropped {} murder charge notifications from the bounded queue", dropped);
+    std::vector<PendingMurder> pending;
+    {
+        std::lock_guard lock(s_murderMutex);
+        const auto count = (std::min)(size_t{8}, s_pendingMurders.size());
+        pending.assign(s_pendingMurders.begin(), s_pendingMurders.begin() + count);
+        s_pendingMurders.erase(s_pendingMurders.begin(), s_pendingMurders.begin() + count);
+    }
+    if (!World::Exists() || !World::Get().GetTransport().IsConnected())
+        return;
+    const auto own = Utils::GetLocalOwnershipToken(0x14);
+    for (const auto& murder : pending)
+    {
+        if (!own || own->ServerId != murder.KillerId)
+            continue;
+        auto* victim = Utils::GetByServerId<Actor>(murder.VictimId);
+        const auto token = victim ? Utils::GetRemoteOwnershipToken(victim->formID) : std::nullopt;
+        if (!victim || !token || token->OwnershipEpoch != murder.OwnershipEpoch ||
+            !victim->GetExtension()->IsRemote() || !(victim->flags1 & 4))
+            continue;
+        using TChargeMurder = void(Actor*, Actor*);
+        POINTER_SKYRIMSE(TChargeMurder, chargeMurder, 37426);
+        chargeMurder.Get()(victim, PlayerCharacter::Get());
+    }
 }

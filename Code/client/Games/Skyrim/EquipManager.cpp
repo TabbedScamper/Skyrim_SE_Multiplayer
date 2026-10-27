@@ -62,6 +62,8 @@ void QueueEquipmentChange(Actor* apActor, EquipmentChangeEvent aEvent)
 
 TP_THIS_FUNCTION(TEquip, void*, EquipManager, Actor* apActor, TESForm* apItem, EquipData* apData);
 TP_THIS_FUNCTION(TUnEquip, void*, EquipManager, Actor* apActor, TESForm* apItem, EquipData* apData);
+TP_THIS_FUNCTION(TApplyEquip, void, Actor, TESForm* apItem, EquipData* apData);
+TP_THIS_FUNCTION(TApplyUnEquip, uint64_t, Actor, TESForm* apItem, EquipData* apData);
 TP_THIS_FUNCTION(TEquipSpell, void*, EquipManager, Actor* apActor, TESForm* apSpell, MagicEquipData* apData);
 TP_THIS_FUNCTION(TUnEquipSpell, void*, EquipManager, Actor* apActor, TESForm* apSpell, MagicEquipData* apData);
 TP_THIS_FUNCTION(TEquipShout, void*, EquipManager, Actor* apActor, TESForm* apShout, ShoutEquipData* apData);
@@ -69,6 +71,8 @@ TP_THIS_FUNCTION(TUnEquipShout, void*, EquipManager, Actor* apActor, TESForm* ap
 
 TUnEquip* RealUnEquip = nullptr;
 TEquip* RealEquip = nullptr;
+TApplyEquip* RealApplyEquip = nullptr;
+TApplyUnEquip* RealApplyUnEquip = nullptr;
 TEquipSpell* RealEquipSpell = nullptr;
 TUnEquipSpell* RealUnEquipSpell = nullptr;
 TEquipShout* RealEquipShout = nullptr;
@@ -161,7 +165,8 @@ void* TP_MAKE_THISCALL(EquipHook, EquipManager, Actor* apActor, TESForm* apItem,
         return nullptr;
 
     const auto pExtension = apActor->GetExtension();
-    if (pExtension->IsRemote())
+    const bool isRemote = pExtension && pExtension->IsRemote();
+    if (isRemote)
     {
         spdlog::debug("Actor[{:X}]::Equip(), item form id: {:X}", apActor->formID, apItem->formID);
         if (!ScopedEquipOverride::IsOverriden())
@@ -171,18 +176,6 @@ void* TP_MAKE_THISCALL(EquipHook, EquipManager, Actor* apActor, TESForm* apItem,
     // Consumables are "equipped" as well. We don't want this to sync, for several reasons.
     // The right hand item on the server would be overridden by the consumable.
     // Furthermore, the equip action on the other clients would doubly subtract the consumables.
-    if (pExtension->IsLocal() && !apItem->IsConsumable() && !apData->bQueueEquip)
-    {
-        EquipmentChangeEvent evt{};
-        evt.ActorId = apActor->formID;
-        evt.Count = apData->count;
-        evt.ItemId = apItem->formID;
-        evt.EquipSlotId = apData->pSlot ? apData->pSlot->formID : 0;
-        evt.IsAmmo = apItem->formType == FormType::Ammo;
-
-        QueueEquipmentChange(apActor, std::move(evt));
-    }
-
     ScopedUnequipOverride _;
 
     return TiltedPhoques::ThisCall(RealEquip, apThis, apActor, apItem, apData);
@@ -194,7 +187,8 @@ void* TP_MAKE_THISCALL(UnEquipHook, EquipManager, Actor* apActor, TESForm* apIte
         return nullptr;
 
     const auto pExtension = apActor->GetExtension();
-    if (pExtension->IsRemote())
+    const bool isRemote = pExtension && pExtension->IsRemote();
+    if (isRemote)
     {
         spdlog::debug("Actor[{:X}]::Unequip(), item form id: {:X}, IsOverridden, equip: {}, inventory: {}", apActor->formID, apItem->formID, ScopedEquipOverride::IsOverriden(), ScopedInventoryOverride::IsOverriden());
         // The ScopedInventoryOverride check is here to allow the item to be unequipped if it is removed
@@ -230,22 +224,51 @@ void* TP_MAKE_THISCALL(UnEquipHook, EquipManager, Actor* apActor, TESForm* apIte
         }
     }
 
-    if (pExtension->IsLocal() && !ScopedUnequipOverride::IsOverriden() && !apData->bQueueEquip)
-    {
-        EquipmentChangeEvent evt{};
-        evt.ActorId = apActor->formID;
-        evt.Count = apData->count;
-        evt.ItemId = apItem->formID;
-        evt.EquipSlotId = apData->pSlot ? apData->pSlot->formID : 0;
-        evt.Unequip = true;
-        evt.IsAmmo = apItem->formType == FormType::Ammo;
-
-        QueueEquipmentChange(apActor, std::move(evt));
-    }
-
     spdlog::debug("UnEquipHook, actor: {:X}", apActor->formID);
 
     return TiltedPhoques::ThisCall(RealUnEquip, apThis, apActor, apItem, apData);
+}
+
+void TP_MAKE_THISCALL(ApplyEquipHook, Actor, TESForm* apItem, EquipData* apData)
+{
+    // The apply path also runs directly when a queued equip is consumed.
+    // Suppress its conflict unequips while the native operation runs.
+    {
+        ScopedUnequipOverride _;
+        TiltedPhoques::ThisCall(RealApplyEquip, apThis, apItem, apData);
+    }
+
+    const auto* extension = apThis ? apThis->GetExtension() : nullptr;
+    if (!extension || extension->IsRemote() || !apItem || !apData || apItem->IsConsumable() || ScopedEquipOverride::IsOverriden())
+        return;
+
+    EquipmentChangeEvent event{};
+    event.ActorId = apThis->formID;
+    event.ItemId = apItem->formID;
+    event.Count = apData->count;
+    event.EquipSlotId = apData->pSlot ? apData->pSlot->formID : 0;
+    event.IsAmmo = apItem->formType == FormType::Ammo;
+    QueueEquipmentChange(apThis, std::move(event));
+}
+
+uint64_t TP_MAKE_THISCALL(ApplyUnEquipHook, Actor, TESForm* apItem, EquipData* apData)
+{
+    const bool conflict = ScopedUnequipOverride::IsOverriden();
+    const auto result = TiltedPhoques::ThisCall(RealApplyUnEquip, apThis, apItem, apData);
+    const auto* extension = apThis ? apThis->GetExtension() : nullptr;
+    if (conflict || !result || !extension || extension->IsRemote() || !apItem || !apData ||
+        ScopedEquipOverride::IsOverriden())
+        return result;
+
+    EquipmentChangeEvent event{};
+    event.ActorId = apThis->formID;
+    event.ItemId = apItem->formID;
+    event.Count = apData->count;
+    event.EquipSlotId = apData->pSlot ? apData->pSlot->formID : 0;
+    event.Unequip = true;
+    event.IsAmmo = apItem->formType == FormType::Ammo;
+    QueueEquipmentChange(apThis, std::move(event));
+    return result;
 }
 
 void* TP_MAKE_THISCALL(EquipSpellHook, EquipManager, Actor* apActor, TESForm* apSpell, MagicEquipData* apData)
@@ -254,10 +277,11 @@ void* TP_MAKE_THISCALL(EquipSpellHook, EquipManager, Actor* apActor, TESForm* ap
         return nullptr;
 
     const auto pExtension = apActor->GetExtension();
-    if (pExtension->IsRemote() && !ScopedEquipOverride::IsOverriden())
+    const bool isRemote = pExtension && pExtension->IsRemote();
+    if (isRemote && !ScopedEquipOverride::IsOverriden())
         return nullptr;
 
-    if (pExtension->IsLocal() && !apData->bQueueEquip)
+    if (pExtension && !isRemote && !apData->bQueueEquip)
     {
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
@@ -279,10 +303,11 @@ void* TP_MAKE_THISCALL(UnEquipSpellHook, EquipManager, Actor* apActor, TESForm* 
         return nullptr;
 
     const auto pExtension = apActor->GetExtension();
-    if (pExtension->IsRemote() && !ScopedEquipOverride::IsOverriden())
+    const bool isRemote = pExtension && pExtension->IsRemote();
+    if (isRemote && !ScopedEquipOverride::IsOverriden())
         return nullptr;
 
-    if (pExtension->IsLocal() && !ScopedUnequipOverride::IsOverriden() && !apData->bQueueEquip)
+    if (pExtension && !isRemote && !ScopedUnequipOverride::IsOverriden() && !apData->bQueueEquip)
     {
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
@@ -303,11 +328,12 @@ void* TP_MAKE_THISCALL(EquipShoutHook, EquipManager, Actor* apActor, TESForm* ap
         return nullptr;
 
     const auto pExtension = apActor->GetExtension();
-    if (pExtension->IsRemote() && !ScopedEquipOverride::IsOverriden())
+    const bool isRemote = pExtension && pExtension->IsRemote();
+    if (isRemote && !ScopedEquipOverride::IsOverriden())
         return nullptr;
 
     // TODO: queue check?
-    if (pExtension->IsLocal())
+    if (pExtension && !isRemote)
     {
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
@@ -328,11 +354,12 @@ void* TP_MAKE_THISCALL(UnEquipShoutHook, EquipManager, Actor* apActor, TESForm* 
         return nullptr;
 
     const auto pExtension = apActor->GetExtension();
-    if (pExtension->IsRemote() && !ScopedEquipOverride::IsOverriden())
+    const bool isRemote = pExtension && pExtension->IsRemote();
+    if (isRemote && !ScopedEquipOverride::IsOverriden())
         return nullptr;
 
     // TODO: queue check?
-    if (pExtension->IsLocal() && !ScopedUnequipOverride::IsOverriden())
+    if (pExtension && !isRemote && !ScopedUnequipOverride::IsOverriden())
     {
         EquipmentChangeEvent evt{};
         evt.ActorId = apActor->formID;
@@ -351,6 +378,8 @@ static TiltedPhoques::Initializer s_equipmentHooks(
     {
         POINTER_SKYRIMSE(TEquip, s_equipFunc, 38929);
         POINTER_SKYRIMSE(TUnEquip, s_unequipFunc, 38934);
+        POINTER_SKYRIMSE(TApplyEquip, s_applyEquip, 38001);
+        POINTER_SKYRIMSE(TApplyUnEquip, s_applyUnEquip, 38002);
         POINTER_SKYRIMSE(TEquipSpell, s_equipSpellFunc, 38928);
         POINTER_SKYRIMSE(TUnEquipSpell, s_unequipSpellFunc, 38933);
         POINTER_SKYRIMSE(TEquipShout, s_equipShoutFunc, 38930);
@@ -358,6 +387,8 @@ static TiltedPhoques::Initializer s_equipmentHooks(
 
         RealEquip = s_equipFunc.Get();
         RealUnEquip = s_unequipFunc.Get();
+        RealApplyEquip = s_applyEquip.Get();
+        RealApplyUnEquip = s_applyUnEquip.Get();
         RealEquipSpell = s_equipSpellFunc.Get();
         RealUnEquipSpell = s_unequipSpellFunc.Get();
         RealEquipShout = s_equipShoutFunc.Get();
@@ -365,6 +396,8 @@ static TiltedPhoques::Initializer s_equipmentHooks(
 
         TP_HOOK(&RealEquip, EquipHook);
         TP_HOOK(&RealUnEquip, UnEquipHook);
+        TP_HOOK(&RealApplyEquip, ApplyEquipHook);
+        TP_HOOK(&RealApplyUnEquip, ApplyUnEquipHook);
         TP_HOOK(&RealEquipSpell, EquipSpellHook);
         TP_HOOK(&RealUnEquipSpell, UnEquipSpellHook);
         TP_HOOK(&RealEquipShout, EquipShoutHook);

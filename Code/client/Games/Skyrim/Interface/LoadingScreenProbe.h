@@ -7,8 +7,8 @@ struct LoadingScreenProbeSnapshot
 {
     uint64_t Epoch{};
     bool LoadingMenuPresent{};
-    bool CandidateListReadable{};
-    std::vector<uint32_t> EligibleFormIds{};
+    bool RemainingTipsReadable{};
+    std::vector<uint32_t> RemainingTipFormIds{};
 
     bool MistMenuPresent{};
     bool MistStateReadable{};
@@ -20,9 +20,6 @@ struct LoadingScreenProbeSnapshot
     float CameraFov{};
     float AngleZ{};
 
-    // CommonLib exposes the eligible LSCR array and the instantiated NIF, but
-    // not the chosen TESLoadScreen pointer. This remains false until a
-    // pre-instantiation selection seam is identified and validated on 1.7.104.
     bool SelectedIdentityResolved{};
     uint32_t SelectedFormId{};
 };

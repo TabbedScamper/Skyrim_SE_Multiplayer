@@ -114,6 +114,46 @@ $-faint: rgba(255, 255, 255, 0.35);
   }
 }
 
+.credits {
+  margin-top: 1rem;
+  line-height: 1.5;
+  font-size: max(13px, 0.9em);
+  opacity: 0.85;
+}
+
+// ---- updates ----
+.update-status {
+  margin: 1rem 0 0.5rem;
+  letter-spacing: 0.04em;
+}
+
+.update-actions {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.patch-notes {
+  font-size: max(13px, 0.9em);
+  line-height: 1.45;
+
+  p {
+    margin: 0.2rem 0;
+    color: $-dim;
+  }
+
+  p.heading {
+    margin-top: 0.9rem;
+    color: #fff;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  p.bullet::before {
+    content: '- ';
+  }
+}
+
 .warning {
   color: mod($-color-background, 1) !important;
 

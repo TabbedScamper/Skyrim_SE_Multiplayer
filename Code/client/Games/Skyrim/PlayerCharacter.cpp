@@ -1,4 +1,6 @@
 #include <PlayerCharacter.h>
+#include <cmath>
+#include <atomic>
 #include <Games/ActorExtension.h>
 
 #include <Structs/Skyrim/AnimationGraphDescriptor_Master_Behavior.h>
@@ -26,6 +28,7 @@
 #include <ModCompat/BehaviorVar.h>
 
 int32_t PlayerCharacter::LastUsedCombatSkill = -1;
+static std::atomic<bool> s_payCrimeGoldQueued{false};
 
 TP_THIS_FUNCTION(TPickUpObject, char, PlayerCharacter, TESObjectREFR* apObject, int32_t aCount, bool aUnk1, bool aUnk2);
 TP_THIS_FUNCTION(TSetBeastForm, void, void, void* apUnk1, void* apUnk2, bool aEntering);
@@ -155,6 +158,16 @@ void PlayerCharacter::RespawnPlayerAt(TESObjectCELL* apCell, const NiPoint3& aPo
 
 void PlayerCharacter::PayCrimeGoldToAllFactions() noexcept
 {
+    s_payCrimeGoldQueued.store(true, std::memory_order_release);
+}
+
+void PlayerCharacter::DrainQueuedCrimePayments() noexcept
+{
+    if (!s_payCrimeGoldQueued.exchange(false, std::memory_order_acq_rel))
+        return;
+    auto* player = Get();
+    if (!player)
+        return;
     // Yes, yes, this isn't great, but there's no "pay fines everywhere" function
     const uint32_t crimeFactionIds[]{0x28170, 0x267E3, 0x29DB0, 0x2816D, 0x2816e, 0x2816C, 0x2816B, 0x267EA, 0x2816F, 0x4018279};
 
@@ -167,7 +180,8 @@ void PlayerCharacter::PayCrimeGoldToAllFactions() noexcept
             continue;
         }
 
-        PayFine(pCrimeFaction, false, false);
+        if (player->GetCrimeGoldValue(pCrimeFaction) != 0)
+            player->PayFine(pCrimeFaction, false, false);
     }
 }
 
@@ -229,22 +243,22 @@ void TP_MAKE_THISCALL(HookAddSkillExperience, PlayerCharacter, int32_t aSkill, f
     // TODO: armor skills? sneak?
     static const Set<int32_t> combatSkills{ActorValueInfo::kAlteration, ActorValueInfo::kConjuration, ActorValueInfo::kDestruction, ActorValueInfo::kIllusion, ActorValueInfo::kRestoration, ActorValueInfo::kOneHanded, ActorValueInfo::kTwoHanded, ActorValueInfo::kMarksman, ActorValueInfo::kBlock};
 
-    Skills::Skill skill = Skills::GetSkillFromActorValue(aSkill);
-    float oldExperience = apThis->GetSkillExperience(skill);
+    float useMult = 1.f;
+    float useOffset = 0.f;
+    float improveMult = 1.f;
+    float improveOffset = 0.f;
+    using TGetExperienceFactors = bool(int32_t, float*, float*, float*, float*);
+    POINTER_SKYRIMSE(TGetExperienceFactors, s_getExperienceFactors, 27244);
+    s_getExperienceFactors.Get()(aSkill, &useMult, &useOffset, &improveMult, &improveOffset);
+    const float prePerkExperience = aExperience * useMult + useOffset;
 
     TiltedPhoques::ThisCall(RealAddSkillExperience, apThis, aSkill, aExperience);
 
-    float newExperience = apThis->GetSkillExperience(skill);
-    float deltaExperience = newExperience - oldExperience;
-
-    spdlog::debug("Skill (AVI): {}, experience: {}", aSkill, deltaExperience);
-
     if (combatSkills.contains(aSkill))
     {
-        spdlog::debug("Set new last used combat skill to {}.", aSkill);
         PlayerCharacter::LastUsedCombatSkill = aSkill;
-
-        World::Get().GetRunner().Trigger(AddExperienceEvent(deltaExperience));
+        if (aExperience > 0.f && std::isfinite(prePerkExperience) && prePerkExperience > 0.f)
+            World::Get().GetRunner().Trigger(AddExperienceEvent(aSkill, prePerkExperience));
     }
 }
 

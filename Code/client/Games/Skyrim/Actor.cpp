@@ -1,6 +1,11 @@
 #include <Games/References.h>
+#include <Services/CharacterService.h>
+#include <Services/ReviveService.h>
 #include <Games/Skyrim/EquipManager.h>
 #include <atomic>
+#include <deque>
+#include <mutex>
+#include <unordered_set>
 #include <AI/AIProcess.h>
 #include <Misc/MiddleProcess.h>
 #include <Misc/GameVM.h>
@@ -15,6 +20,7 @@
 #include <Combat/PlayerCombat.h>
 
 #include <Events/HealthChangeEvent.h>
+#include <Events/ChargedCrimeEvent.h>
 #include <Events/InventoryChangeEvent.h>
 #include <Events/MountEvent.h>
 #include <Events/DialogueEvent.h>
@@ -29,6 +35,7 @@
 #include <Services/PartyService.h>
 #include <Services/ObjectService.h>
 #include <Systems/AnimationSystem.h>
+#include <Systems/InterpolationSystem.h>
 #include <Services/CorpseRagdollService.h>
 #include <Services/TransportService.h>
 #include <Services/Generic/NpcLootService.h>
@@ -62,11 +69,20 @@
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Havok/hkbStateMachine.h>
 #include <Havok/hkbBehaviorGraph.h>
+#include <Havok/bhkCharacterController.h>
 
 #include <ModCompat/BehaviorVar.h>
 
 namespace
 {
+std::atomic<bool> s_conditionCacheDirty{};
+
+void ResetConditionCache()
+{
+    POINTER_SKYRIMSE(void(), s_resetConditionCache, 21788);
+    s_resetConditionCache.Get()();
+}
+
 void QueueActorInventoryChange(Actor* apActor, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference = nullptr)
 {
     auto ownershipToken = Utils::GetLocalOwnershipToken(apActor->formID);
@@ -205,8 +221,20 @@ void Actor::ForcePosition(const NiPoint3& acPosition) noexcept
 {
     ScopedReferencesOverride recursionGuard;
 
-    // It just works TM
-    SetPosition(acPosition, true);
+    bool updateController = true;
+    if (GetExtension()->IsRemote() && currentProcess)
+    {
+        if (auto* pController = currentProcess->GetCharController())
+        {
+            // A newly created controller may be positioned before ActorProcess.
+            // Both SetPositionImpl and the following velocity reset need a step
+            updateController = pController->UpdateStepTiming();
+        }
+    }
+
+    // With no usable step yet, update the reference/3D now; interpolation will
+    // catch the controller up once physics timing becomes available
+    SetPosition(acPosition, updateController);
 }
 
 void Actor::QueueUpdate() noexcept
@@ -223,10 +251,10 @@ void Actor::QueueUpdate() noexcept
     pSetting->data = originalValue;
 }
 
-GamePtr<Actor> Actor::Create(TESNPC* apBaseForm) noexcept
+GamePtr<Actor> Actor::Create(TESNPC* apBaseForm, bool aRemotePlayer) noexcept
 {
     auto pActor = New();
-    // Prevent saving
+    // Keep the existing skip field; player proxies also need the change-map exclusion below.
     pActor->SetSkipSaveFlag(true);
     pActor->GetExtension()->SetRemote(true);
 
@@ -254,6 +282,13 @@ GamePtr<Actor> Actor::Create(TESNPC* apBaseForm) noexcept
     pActor->GetMagicCaster(MagicSystem::CastingSource::OTHER);
 
     pActor->flags &= 0xFFDFFFFF;
+
+    // FRAME-07 (remote player proxies kept out of saves) is withdrawn for now: the temporary flag (0x4000) it set makes
+    // the engine delete the proxy on a world reset or cell unload while the mod still holds it, and both PCs crashed in a
+    // two-PC test at a party start from the lobby (2026-10-02 02:09: Cast on freed proxies in
+    // PoseCopyAuthority::ProbeSeatedPlayers and OrphanTrace::ObserveFrameEnd). It needs the proxy's deletion handled
+    // first. aRemotePlayer is kept for that.
+    (void)aRemotePlayer;
 
     return pActor;
 }
@@ -367,25 +402,17 @@ void Actor::DispelAllSpells(bool aNow) noexcept
 
 bool Actor::IsInCombat() const noexcept
 {
-    PAPYRUS_FUNCTION(bool, Actor, IsInCombat);
-    return s_pIsInCombat(this);
+    // Papyrus Actor.IsInCombat (140A0D6D0) is only this virtual call (Actor vtable +0x718). Calling it directly never
+    // depends on the native being registered: an unresolved binding returned false, which read as "out of combat"
+    // (review 2026-09-29: revives would take the out-of-combat time mid-fight).
+    using TIsInCombat = bool (*)(const Actor*);
+    return reinterpret_cast<TIsInCombat>((*reinterpret_cast<void* const* const*>(this))[0x718 / 8])(this);
 }
 
 Actor* Actor::GetCombatTarget() const noexcept
 {
     PAPYRUS_FUNCTION(Actor*, Actor, GetCombatTarget);
     return s_pGetCombatTarget(this);
-}
-
-// TODO: this is a really hacky solution.
-// The internal targeting system should be disabled instead.
-void Actor::StartCombatEx(Actor* apTarget) noexcept
-{
-    if (GetCombatTarget() != apTarget)
-    {
-        StopCombat();
-        StartCombat(apTarget);
-    }
 }
 
 void Actor::SetCombatTargetEx(Actor* apTarget) noexcept
@@ -398,6 +425,58 @@ void Actor::StartCombat(Actor* apTarget) noexcept
 {
     PAPYRUS_FUNCTION(void, Actor, StartCombat, Actor*);
     s_pStartCombat(this, apTarget);
+}
+
+namespace
+{
+std::mutex s_nativeCombatLock;
+std::deque<uint64_t> s_nativeCombatQueue;
+std::unordered_set<uint64_t> s_nativeCombatPending;
+}
+
+void Actor::QueueStartCombatNative(uint32_t aActorId, uint32_t aTargetId) noexcept
+{
+    if (!aActorId || !aTargetId) return;
+    const uint64_t key = (uint64_t{aActorId} << 32) | aTargetId;
+    std::lock_guard lock(s_nativeCombatLock);
+    if (!s_nativeCombatPending.insert(key).second) return;
+    s_nativeCombatQueue.push_back(key);
+}
+
+void Actor::DrainStartCombatNative() noexcept
+{
+    const auto& party = World::Get().GetPartyService();
+    if (!World::Get().GetTransport().IsConnected() || !party.IsInParty() || !party.IsLeader() ||
+        !party.GetStartEpoch() || party.GetSessionState() < 2)
+    {
+        std::lock_guard lock(s_nativeCombatLock);
+        s_nativeCombatQueue.clear();
+        s_nativeCombatPending.clear();
+        return;
+    }
+    using IsCombatTarget = bool(Actor*, Actor*);
+    POINTER_SKYRIMSE(IsCombatTarget, isCombatTarget, 38571);
+    for (uint32_t i = 0; i < 32; ++i)
+    {
+        uint64_t key{};
+        {
+            std::lock_guard lock(s_nativeCombatLock);
+            if (s_nativeCombatQueue.empty()) break;
+            key = s_nativeCombatQueue.front();
+            s_nativeCombatQueue.pop_front();
+            s_nativeCombatPending.erase(key);
+        }
+        auto* actor = Cast<Actor>(TESForm::GetById(static_cast<uint32_t>(key >> 32)));
+        auto* target = Cast<Actor>(TESForm::GetById(static_cast<uint32_t>(key)));
+        if (actor && target && !actor->IsDead() && !target->IsDead() && actor->currentProcess &&
+            !actor->GetExtension()->IsRemote() && !actor->GetExtension()->IsPlayer() &&
+            target->GetExtension()->IsRemotePlayer() &&
+            !isCombatTarget.Get()(actor, target))
+            // Through Papyrus Actor.StartCombat (54768), as before batch b4: the engine's own StartCombat (38561) called
+            // directly crashed the host in the cart ride on a null combat group (2026-10-02 16:32, and the CombatGroup
+            // AddTarget crashes at 09:45 and 11:35 have the same shape). The Papyrus path keeps the engine's checks.
+            actor->StartCombat(target);
+    }
 }
 
 void Actor::StopCombat() noexcept
@@ -590,6 +669,9 @@ Factions Actor::GetFactions() const noexcept
     auto* pChanges = Cast<ExtraFactionChanges>(extraData.GetByType(ExtraDataType::Faction));
     if (pChanges)
     {
+        if (pChanges->crimeFaction)
+            modSystem.GetServerModId(pChanges->crimeFaction->formID, result.CrimeFaction);
+        result.RemoveCrimeFaction = pChanges->removeCrimeFaction;
         for (auto i = 0u; i < pChanges->entries.length; ++i)
         {
             Faction faction;
@@ -759,6 +841,8 @@ void Actor::QueueReset3D(const uint32_t aDelayMs) noexcept
 void Actor::FlushPendingReset3D() noexcept
 {
     NpcLootService::MarkMainThread();
+    if (s_conditionCacheDirty.exchange(false, std::memory_order_acq_rel))
+        ResetConditionCache();
     World::Get().GetNpcLootService().OnMainFrame();
     World::Get().GetNakedNpcGuard().UpdateNative();
     const auto now = std::chrono::steady_clock::now();
@@ -832,29 +916,79 @@ void Actor::SetActorValues(const ActorValues& acActorValues) noexcept
 
 void Actor::SetFactions(const Factions& acFactions) noexcept
 {
-    RemoveFromAllFactions();
-
+    const auto current = GetFactions();
     auto& modSystem = World::Get().GetModSystem();
-
-    for (auto& entry : acFactions.NpcFactions)
+    const auto findRank = [](const Factions& aFactions, const GameId& aId) -> int32_t
     {
-        auto pForm = GetById(modSystem.GetGameId(entry.Id));
-        auto pFaction = Cast<TESFaction>(pForm);
-        if (pFaction)
+        for (const auto& entry : aFactions.ExtraFactions)
+            if (entry.Id == aId)
+                return entry.Rank;
+        for (const auto& entry : aFactions.NpcFactions)
+            if (entry.Id == aId)
+                return entry.Rank;
+        return -1;
+    };
+    bool changed = false;
+    const auto apply = [&](const Faction& aEntry)
+    {
+        const auto wanted = findRank(acFactions, aEntry.Id);
+        if (wanted == findRank(current, aEntry.Id))
+            return;
+        auto* faction = Cast<TESFaction>(GetById(modSystem.GetGameId(aEntry.Id)));
+        if (!faction)
+            return;
+        if (wanted < 0)
         {
-            SetFactionRank(pFaction, entry.Rank);
+            using TRemoveFromFaction = void(Actor*, TESFaction*);
+            POINTER_SKYRIMSE(TRemoveFromFaction, removeFromFaction, 37688);
+            removeFromFaction.Get()(this, faction);
+        }
+        else
+            SetFactionRank(faction, static_cast<int8_t>(wanted));
+        changed = true;
+    };
+    for (const auto& entry : acFactions.ExtraFactions)
+        apply(entry);
+    for (const auto& entry : acFactions.NpcFactions)
+        if (std::none_of(acFactions.ExtraFactions.begin(), acFactions.ExtraFactions.end(),
+                [&](const Faction& extra) { return extra.Id == entry.Id; }))
+            apply(entry);
+    for (const auto& entry : current.ExtraFactions)
+        if (std::none_of(acFactions.ExtraFactions.begin(), acFactions.ExtraFactions.end(),
+                [&](const Faction& extra) { return extra.Id == entry.Id; }) &&
+            std::none_of(acFactions.NpcFactions.begin(), acFactions.NpcFactions.end(),
+                [&](const Faction& npc) { return npc.Id == entry.Id; }))
+            apply(entry);
+    for (const auto& entry : current.NpcFactions)
+        if (std::none_of(current.ExtraFactions.begin(), current.ExtraFactions.end(),
+                [&](const Faction& extra) { return extra.Id == entry.Id; }) &&
+            std::none_of(acFactions.ExtraFactions.begin(), acFactions.ExtraFactions.end(),
+                [&](const Faction& extra) { return extra.Id == entry.Id; }) &&
+            std::none_of(acFactions.NpcFactions.begin(), acFactions.NpcFactions.end(),
+                [&](const Faction& npc) { return npc.Id == entry.Id; }))
+            apply(entry);
+
+    if ((acFactions.CrimeFaction || acFactions.RemoveCrimeFaction) &&
+        (current.CrimeFaction != acFactions.CrimeFaction ||
+            current.RemoveCrimeFaction != acFactions.RemoveCrimeFaction))
+    {
+        auto* crimeFaction = acFactions.CrimeFaction ?
+            Cast<TESFaction>(GetById(modSystem.GetGameId(acFactions.CrimeFaction))) : nullptr;
+        if (crimeFaction || !acFactions.CrimeFaction)
+        {
+            using TSetCrimeFaction = void(Actor*, TESFaction*);
+            POINTER_SKYRIMSE(TSetCrimeFaction, setCrimeFaction, 37381);
+            setCrimeFaction.Get()(this, crimeFaction);
+            changed = true;
         }
     }
 
-    for (auto& entry : acFactions.ExtraFactions)
-    {
-        auto pForm = GetById(modSystem.GetGameId(entry.Id));
-        auto pFaction = Cast<TESFaction>(pForm);
-        if (pFaction)
-        {
-            SetFactionRank(pFaction, entry.Rank);
-        }
-    }
+    if (!changed)
+        return;
+    if (NpcLootService::IsMainThread())
+        ResetConditionCache();
+    else
+        s_conditionCacheDirty.store(true, std::memory_order_release);
 }
 
 void Actor::SetFactionRank(const TESFaction* apFaction, int8_t aRank) noexcept
@@ -1039,6 +1173,8 @@ void Actor::Kill() noexcept
     t_syncKill = true;
     KillImpl(nullptr, 100.f, true, !(pExtension && pExtension->IsRemote()));
     t_syncKill = false;
+    if (pExtension && pExtension->IsRemote())
+        CharacterService::NoteRemoteDeath(formID);
 
     // Papyrus kill will not go through if it is queued by a kill move
     /*
@@ -1054,15 +1190,17 @@ void Actor::KillIntoRagdoll() noexcept
     t_syncKill = true;
     KillImpl(nullptr, 100.f, true, true);
     t_syncKill = false;
+    if (GetExtension()->IsRemote())
+        CharacterService::NoteRemoteDeath(formID);
 }
 
 void Actor::Reset() noexcept
 {
     using ObjectReference = TESObjectREFR;
 
-    PAPYRUS_FUNCTION(void, ObjectReference, Reset, int, TESObjectREFR*);
+    PAPYRUS_FUNCTION(void, ObjectReference, Reset, TESObjectREFR*);
 
-    s_pReset(this, 0, nullptr);
+    s_pReset.CallWithStackId(UINT32_MAX, this, nullptr);
 }
 
 bool Actor::PlayIdle(TESIdleForm* apIdle) noexcept
@@ -1133,6 +1271,29 @@ char TP_MAKE_THISCALL(HookSetPosition, Actor, NiPoint3& aPosition)
         ObjectService::RecordNativeSetPosition(apThis,
             caller >= base ? caller - base : 0, &aPosition,
             bIsRemote, scopedOverride);
+        // Session 2026-09-29: picking up a dropped lockpick in Helgen Keep sent the follower back to the Keep's
+        // entrance with nothing in the log. Name whoever moves the local player a long way at once.
+        if (apThis == PlayerCharacter::Get())
+        {
+            const float dx = aPosition.x - apThis->position.x, dy = aPosition.y - apThis->position.y,
+                dz = aPosition.z - apThis->position.z;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance > 600.f && std::isfinite(distance))
+            {
+                void* frames[8]{};
+                const auto count = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
+                std::string stack;
+                for (USHORT i = 0; i < count; ++i)
+                {
+                    const auto address = reinterpret_cast<uintptr_t>(frames[i]);
+                    stack += address >= base && address - base < 0x4000000 ? fmt::format(" SkyrimSE.exe+{:X}", address - base) :
+                        fmt::format(" {:X}", address);
+                }
+                spdlog::warn("Local player moved {:.0f} u at once: ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}) cell {:X}; stack{}",
+                    distance, apThis->position.x, apThis->position.y, apThis->position.z, aPosition.x, aPosition.y, aPosition.z,
+                    apThis->parentCell ? apThis->parentCell->formID : 0, stack);
+            }
+        }
     }
 
     if (bIsRemote && !scopedOverride)
@@ -1198,6 +1359,113 @@ bool TP_MAKE_THISCALL(HookSpawnActorInWorld, Actor)
 
 TP_THIS_FUNCTION(TDamageActor, bool, Actor, float aDamage, Actor* apHitter, bool aKillMove);
 static TDamageActor* RealDamageActor = nullptr;
+using THitReaction = void(Actor*, Actor*, void*, uint32_t);
+static THitReaction* RealHitReaction = nullptr;
+
+static void HookHitReaction(Actor* apVictim, Actor* apAttacker, void* apHitContext, uint32_t aFlags)
+{
+    const auto* extension = apAttacker ? apAttacker->GetExtension() : nullptr;
+    if (apVictim && extension && extension->IsPlayer() && World::Exists() &&
+        World::Get().GetTransport().IsConnected())
+    {
+        static std::atomic<uint64_t> nextFriendlyHitLog{};
+        const auto now = GetTickCount64();
+        auto next = nextFriendlyHitLog.load(std::memory_order_relaxed);
+        if (now >= next && nextFriendlyHitLog.compare_exchange_strong(next, now + 250, std::memory_order_relaxed))
+            spdlog::info("Friendly hit gate: victim={:X} attacker={:X} playerSingleton={} remotePuppet={} victimIgnoreFriendlyHits={}",
+                apVictim->formID, apAttacker->formID, apAttacker == PlayerCharacter::Get(),
+                extension->IsRemotePlayer(), apVictim->GetIgnoreFriendlyHit());
+    }
+    RealHitReaction(apVictim, apAttacker, apHitContext, aFlags);
+}
+TP_THIS_FUNCTION(TStealAlarm, void, Actor, TESObjectREFR*, TESForm*, int32_t, int32_t, TESForm*, bool);
+TP_THIS_FUNCTION(TTrespassAlarm, void, Actor, TESObjectREFR*, TESForm*, int32_t);
+static TStealAlarm* RealStealAlarm = nullptr;
+static TTrespassAlarm* RealTrespassAlarm = nullptr;
+TP_THIS_FUNCTION(TChargeCrime, void, TESObjectREFR, void*);
+static TChargeCrime* RealChargeCrime = nullptr;
+static std::atomic<bool> s_crimeReportingEnabled{false};
+static std::atomic<uint32_t> s_droppedCrimeReports{0};
+static std::mutex s_chargedCrimeMutex;
+static std::deque<ChargedCrimeEvent> s_chargedCrimes;
+
+void TP_MAKE_THISCALL(HookChargeCrime, TESObjectREFR, void* apCrime)
+{
+    TiltedPhoques::ThisCall(RealChargeCrime, apThis, apCrime);
+    if (!apCrime || !s_crimeReportingEnabled.load(std::memory_order_acquire))
+        return;
+    const auto* bytes = static_cast<const uint8_t*>(apCrime);
+    auto* faction = *reinterpret_cast<TESFaction* const*>(bytes + 0x60);
+    if (!faction)
+        return;
+    ChargedCrimeEvent event;
+    event.Id = *reinterpret_cast<const uint32_t*>(bytes + 0x48);
+    event.Type = *reinterpret_cast<const uint32_t*>(bytes + 0x04);
+    event.Gold = *reinterpret_cast<const uint32_t*>(bytes + 0x58);
+    event.CriminalHandle = *reinterpret_cast<const uint32_t*>(bytes + 0x0C);
+    event.FactionFormId = faction->formID;
+    auto* witnessLock = reinterpret_cast<BSReadWriteLock*>(const_cast<uint8_t*>(bytes) + 0x6C);
+    using TReadLock = void(BSReadWriteLock*);
+    POINTER_SKYRIMSE(TReadLock, readLock, 68233);
+    POINTER_SKYRIMSE(TReadLock, readUnlock, 68239);
+    readLock.Get()(witnessLock);
+    const auto* witnesses = reinterpret_cast<const GameArray<uint32_t>*>(bytes + 0x28);
+    if (witnesses->data)
+        event.WitnessHandles.assign(witnesses->data, witnesses->data + (std::min)(witnesses->length, uint32_t{512}));
+    readUnlock.Get()(witnessLock);
+    if (event.WitnessHandles.empty())
+        return;
+    std::lock_guard lock(s_chargedCrimeMutex);
+    if (s_chargedCrimes.size() < 64)
+        s_chargedCrimes.push_back(std::move(event));
+    else
+        s_droppedCrimeReports.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Actor::DrainChargedCrimes() noexcept
+{
+    const auto& party = World::Get().GetPartyService();
+    const bool enabled = World::Get().GetTransport().IsConnected() && party.IsInParty() &&
+        !party.IsLeader() && party.GetStartEpoch() && party.GetSessionState() >= 2;
+    s_crimeReportingEnabled.store(enabled, std::memory_order_release);
+    if (const auto dropped = s_droppedCrimeReports.exchange(0, std::memory_order_acq_rel))
+        spdlog::warn("Dropped {} charged crime reports from the bounded native queue", dropped);
+    std::vector<ChargedCrimeEvent> pending;
+    {
+        std::lock_guard lock(s_chargedCrimeMutex);
+        if (!enabled)
+            s_chargedCrimes.clear();
+        for (size_t i = 0; i < 8 && !s_chargedCrimes.empty(); ++i)
+        {
+            pending.push_back(std::move(s_chargedCrimes.front()));
+            s_chargedCrimes.pop_front();
+        }
+    }
+    for (auto& event : pending)
+    {
+        event.Epoch = party.GetStartEpoch();
+        World::Get().GetRunner().Trigger(event);
+    }
+}
+
+void TP_MAKE_THISCALL(HookStealAlarm, Actor, TESObjectREFR* apReference, TESForm* apObject,
+    int32_t aCount, int32_t aTotal, TESForm* apOwner, bool aAllowWarning)
+{
+    if (World::Exists() && World::Get().GetTransport().IsConnected() &&
+        World::Get().GetPartyService().IsLeader() &&
+        apThis->GetExtension()->IsRemotePlayer())
+        return;
+    TiltedPhoques::ThisCall(RealStealAlarm, apThis, apReference, apObject, aCount, aTotal, apOwner, aAllowWarning);
+}
+
+void TP_MAKE_THISCALL(HookTrespassAlarm, Actor, TESObjectREFR* apReference, TESForm* apOwnership, int32_t aCrime)
+{
+    if (World::Exists() && World::Get().GetTransport().IsConnected() &&
+        World::Get().GetPartyService().IsLeader() &&
+        apThis->GetExtension()->IsRemotePlayer())
+        return;
+    TiltedPhoques::ThisCall(RealTrespassAlarm, apThis, apReference, apOwnership, aCrime);
+}
 
 // Actor::KillImpl (vtable 0x10E, ID 37896). On a PC that does not own an NPC, a local kill (a
 // scene or quest script, a local projectile) killed and ragdolled its copy on its own: the intro
@@ -1252,6 +1520,8 @@ void TP_MAKE_THISCALL(HookKillImpl, Actor, Actor* apAttacker, float aDamage, boo
     }
     TiltedPhoques::ThisCall(RealKillImpl, apThis, apAttacker, aDamage, aSendEvent, aRagdollInstant);
     CorpseRagdollService::QueueActor(apThis);
+    if (pExtension && pExtension->IsRemote() && !pExtension->IsPlayer())
+        CharacterService::NoteRemoteDeath(apThis->formID);
 }
 
 // TODO: this is flawed, since it does not account for invulnerable actors
@@ -1275,6 +1545,18 @@ bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bo
         }
 
         World::Get().GetRunner().Trigger(HealthChangeEvent(apThis->formID, -realDamage));
+        // Hit measurement (fling/overkill rule): every hit of 10%+ of max health on the local player.
+        if (const float maximum = currentHealth - apThis->healthModifiers.damageModifier; realDamage >= 0.1f * maximum)
+            spdlog::info("Player hit: {:.1f} damage (raw {:.1f}) by {:X}, health {:.1f}/{:.1f}, knock {}, life {}, killmove {}",
+                realDamage, aDamage, apHitter ? apHitter->formID : 0, currentHealth, maximum,
+                (apThis->actorState.flags1 >> 25) & 0x7, (apThis->actorState.flags1 >> 21) & 0xF, aKillMove);
+        // Lethal hits: a knock-down fling or an overkill (one blow of at least 75% of max health, whatever health
+        // was left, owner rule 2026-09-28) kills outright instead of bleeding out (ReviveService).
+        if (wouldKill)
+        {
+            const float maximum = currentHealth - apThis->healthModifiers.damageModifier;
+            ReviveService::NoteLethalHit(maximum > 0.f ? realDamage / maximum : 0.f, apHitter ? apHitter->formID : 0);
+        }
         return TiltedPhoques::ThisCall(RealDamageActor, apThis, aDamage, apHitter, aKillMove);
     }
     else if (pExHittee->IsRemotePlayer())
@@ -1287,7 +1569,7 @@ bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bo
         const auto* pExHitter = apHitter->GetExtension();
         if (pExHitter->IsLocalPlayer())
         {
-            World::Get().GetRunner().Trigger(HealthChangeEvent(apThis->formID, -realDamage));
+            World::Get().GetRunner().Trigger(HealthChangeEvent(apThis->formID, -realDamage, apHitter->formID));
             return TiltedPhoques::ThisCall(RealDamageActor, apThis, aDamage, apHitter, aKillMove);
         }
         if (pExHitter->IsRemotePlayer())
@@ -1337,6 +1619,11 @@ void PlayerCombat::ApplyDamage(Actor* apVictim, Actor* apAttacker, float aDamage
     // Observe the native result so difficulty, killmove scaling, invulnerability and
     // essential/bleedout clamps are applied once, by the player's own engine.
     const float before = apVictim->GetActorValue(ActorValueInfo::kHealth);
+    if (before - aDamage <= 0.f)
+    {
+        const float maximum = before - apVictim->healthModifiers.damageModifier;
+        ReviveService::NoteLethalHit(maximum > 0.f ? aDamage / maximum : 0.f, apAttacker ? apAttacker->formID : 0);
+    }
     TiltedPhoques::ThisCall(RealDamageActor, apVictim, aDamage, apAttacker, aKillMove);
     const float delta = apVictim->GetActorValue(ActorValueInfo::kHealth) - before;
     if (delta != 0.f)
@@ -1594,6 +1881,35 @@ static TiltedPhoques::Initializer s_addWornOutfitHook([]() {
     TP_HOOK(&RealAddWornOutfit, HookAddWornOutfit);
 });
 
+using TResetWornInventory = void(void*, Actor*, uint64_t, bool, uint64_t, bool);
+using TRefreshWornParts = uint64_t(Actor*);
+static TResetWornInventory* RealResetWornInventory{};
+static TRefreshWornParts* RealRefreshWornParts{};
+
+static void HookResetWornInventory(void* apInventory, Actor* apActor, uint64_t a3, bool a4, uint64_t a5, bool a6)
+{
+    RealResetWornInventory(apInventory, apActor, a3, a4, a5, a6);
+    if (apActor && apActor->GetExtension()->IsRemote() && !apActor->GetExtension()->IsPlayer())
+        World::Get().GetNakedNpcGuard().MarkDirty(apActor->formID);
+}
+
+static uint64_t HookRefreshWornParts(Actor* apActor)
+{
+    const auto result = RealRefreshWornParts(apActor);
+    if (apActor && apActor->GetExtension()->IsRemote() && !apActor->GetExtension()->IsPlayer())
+        World::Get().GetNakedNpcGuard().MarkDirty(apActor->formID);
+    return result;
+}
+
+static TiltedPhoques::Initializer s_wornResetHooks([]() {
+    POINTER_SKYRIMSE(TResetWornInventory, resetWornInventory, 418622);
+    POINTER_SKYRIMSE(TRefreshWornParts, refreshWornParts, 19743);
+    RealResetWornInventory = resetWornInventory.Get();
+    RealRefreshWornParts = refreshWornParts.Get();
+    TP_HOOK(&RealResetWornInventory, HookResetWornInventory);
+    TP_HOOK(&RealRefreshWornParts, HookRefreshWornParts);
+});
+
 void TP_MAKE_THISCALL(HookUnequipObject, Actor, void* apUnk1, TESBoundObject* apObject, int32_t aUnk2, void* apUnk3)
 {
     TiltedPhoques::ThisCall(RealUnequipObject, apThis, apUnk1, apObject, aUnk2, apUnk3);
@@ -1673,14 +1989,22 @@ void Actor::SpeakSound(const char* pFile)
     TiltedPhoques::ThisCall(RealSpeakSoundFunction, this, pFile, handle, 0, 0x32, 0, 0, 0, 0, 0, 0, 0, 1, 1);
 }
 
-char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
+char TP_MAKE_THISCALL(HookActorProcess, Actor, float aDeltaTime)
 {
-    // Remote AI cannot be allowed to execute independently of the owner.
+    // This hook suppresses remote locomotion only; the replica AI tick runs separately.
     // This opt-in two-actor trial tests whether continued native processing
     // is required for a mount interaction to remain alive. It is not a
     // production authority policy and never applies while disconnected.
     if (apThis->GetExtension()->IsRemote())
     {
+        // Suppressed movement still needs a valid controller step (upstream #901): interpolated
+        // position updates reset velocity through it, and a zero step divides by zero and spreads
+        // nonfinite values into nearby contacts (objects and NPCs gliding).
+        if (apThis->currentProcess)
+        {
+            if (auto* pController = apThis->currentProcess->GetCharController())
+                pController->UpdateStepTiming(aDeltaTime);
+        }
         const auto formId = apThis->formID;
         if (!World::Get().GetTransport().IsConnected() ||
             (formId != s_remoteProcessTrialRiderFormId.load(std::memory_order_acquire) &&
@@ -1697,7 +2021,7 @@ char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
         ObjectService::QueueActorSceneUpdate(apThis->formID);
     }
 
-    return TiltedPhoques::ThisCall(RealActorProcess, apThis, a2);
+    return TiltedPhoques::ThisCall(RealActorProcess, apThis, aDeltaTime);
 }
 
 BSExtraData* TP_MAKE_THISCALL(HookNativeExtraDataAdd, ExtraDataList,
@@ -1801,8 +2125,35 @@ bool TP_MAKE_THISCALL(HookIsFleeing, Actor)
     // TODO: investigate why the flee flag is set at all on remote players sometimes.
     if (apThis->GetExtension()->IsPlayer())
         return false;
+    if (apThis->GetExtension()->IsRemote())
+    {
+        bool fleeing{};
+        if (InterpolationSystem::GetRemoteFleeState(apThis->formID, fleeing))
+            return fleeing;
+    }
     
     return TiltedPhoques::ThisCall(RealIsFleeing, apThis);
+}
+
+using TStartGetUp = void(Actor*, bool);
+static TStartGetUp* RealStartGetUp = nullptr;
+static void HookStartGetUp(Actor* actor, bool hasRagdoll)
+{
+    const auto* extension = actor ? actor->GetExtension() : nullptr;
+    if (extension && extension->IsRemote() && !extension->IsPlayer() &&
+        CorpseRagdollService::BlockNativeGetUp(actor->formID))
+        return;
+    RealStartGetUp(actor, hasRagdoll);
+}
+
+using TBleedoutEntry = bool(Actor*, Actor*, float);
+static TBleedoutEntry* RealBleedoutEntry = nullptr;
+static bool HookBleedoutEntry(Actor* actor, Actor* attacker, float damage)
+{
+    const auto* extension = actor ? actor->GetExtension() : nullptr;
+    if (extension && extension->IsRemote() && !extension->IsPlayer())
+        return false;
+    return RealBleedoutEntry(actor, attacker, damage);
 }
 
 static TiltedPhoques::Initializer s_actorHooks(
@@ -1819,6 +2170,10 @@ static TiltedPhoques::Initializer s_actorHooks(
         POINTER_SKYRIMSE(TForceState, s_ForceState, 37313);
         POINTER_SKYRIMSE(TSpawnActorInWorld, s_SpawnActorInWorld, 19742);
         POINTER_SKYRIMSE(TDamageActor, s_damageActor, 37335);
+        POINTER_SKYRIMSE(THitReaction, s_hitReaction, 38626);
+        POINTER_SKYRIMSE(TStealAlarm, s_stealAlarm, 37422);
+        POINTER_SKYRIMSE(TTrespassAlarm, s_trespassAlarm, 37427);
+        POINTER_SKYRIMSE(TChargeCrime, s_chargeCrime, 37679);
         POINTER_SKYRIMSE(TKillImpl, s_killImpl, 37896);
         RealKillImpl = s_killImpl.Get();
         POINTER_SKYRIMSE(TApplyActorEffect, s_applyActorEffect, 35086);
@@ -1835,9 +2190,12 @@ static TiltedPhoques::Initializer s_actorHooks(
         POINTER_SKYRIMSE(TDecapitate, decapitate, 37639);
         POINTER_SKYRIMSE(TCreateHead, createHead, 37640);
         POINTER_SKYRIMSE(TIsFleeing, isFleeing, 37577);
+        POINTER_SKYRIMSE(TStartGetUp, startGetUp, 40150);
+        POINTER_SKYRIMSE(TBleedoutEntry, bleedoutEntry, 38631);
         POINTER_SKYRIMSE(TNativeExtraDataAdd, s_nativeExtraDataAdd, 12315);
 
         RealActorProcess = s_actorProcess.Get();
+        RealBleedoutEntry = bleedoutEntry.Get();
         RealNativeExtraDataAdd = s_nativeExtraDataAdd.Get();
         // The installed 1.7.104 executable's ExtraInteraction setter. Its
         // prologue guard avoids hooking an unrelated address on another build.
@@ -1857,6 +2215,10 @@ static TiltedPhoques::Initializer s_actorHooks(
         RealForceState = s_ForceState.Get();
         RealSpawnActorInWorld = s_SpawnActorInWorld.Get();
         RealDamageActor = s_damageActor.Get();
+        RealHitReaction = s_hitReaction.Get();
+        RealStealAlarm = s_stealAlarm.Get();
+        RealTrespassAlarm = s_trespassAlarm.Get();
+        RealChargeCrime = s_chargeCrime.Get();
         RealApplyActorEffect = s_applyActorEffect.Get();
         RealRegenAttributes = s_regenAttributes.Get();
         RealAddInventoryItem = s_addInventoryItem.Get();
@@ -1871,8 +2233,10 @@ static TiltedPhoques::Initializer s_actorHooks(
         RealDecapitate = decapitate.Get();
         RealCreateHead = createHead.Get();
         RealIsFleeing = isFleeing.Get();
+        RealStartGetUp = startGetUp.Get();
 
         TP_HOOK(&RealActorProcess, HookActorProcess);
+        TP_HOOK(&RealBleedoutEntry, HookBleedoutEntry);
         TP_HOOK(&RealNativeExtraDataAdd, HookNativeExtraDataAdd);
         if (RealNativeSetInteraction)
             TP_HOOK(&RealNativeSetInteraction, HookNativeSetInteraction);
@@ -1885,6 +2249,10 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealForceState, HookForceState);
         TP_HOOK(&RealSpawnActorInWorld, HookSpawnActorInWorld);
         TP_HOOK(&RealDamageActor, HookAuthorityDamageActor);
+        TP_HOOK(&RealHitReaction, HookHitReaction);
+        TP_HOOK(&RealStealAlarm, HookStealAlarm);
+        TP_HOOK(&RealTrespassAlarm, HookTrespassAlarm);
+        TP_HOOK(&RealChargeCrime, HookChargeCrime);
         TP_HOOK(&RealApplyActorEffect, HookApplyActorEffect);
         TP_HOOK(&RealRegenAttributes, HookRegenAttributes);
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);
@@ -1899,4 +2267,5 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealDecapitate, HookDecapitate);
         TP_HOOK(&RealCreateHead, HookCreateHead);
         TP_HOOK(&RealIsFleeing, HookIsFleeing);
+        TP_HOOK(&RealStartGetUp, HookStartGetUp);
     });

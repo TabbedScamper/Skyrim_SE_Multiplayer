@@ -111,14 +111,18 @@ def validate_capture(root, stamp, accepted):
                 if kind == 'step_done' and scenario['steps'][sequence - 1].get('party_trigger') and not party_proof:
                     raise ValueError(f'{pc}: missing party trigger evidence')
                 phase += 1
-            elif kind in ('local_trigger_enter', 'party_trigger_proximity_arrived'):
+            elif kind in ('local_trigger_enter', 'party_trigger_enter', 'party_trigger_proximity_arrived'):
                 step = scenario['steps'][sequence - 1]
                 if step.get('party_trigger'):
                     if phase != 2 or row.get('sequence') != sequence or row.get('trigger') != int(step['until_trigger'], 16):
                         raise ValueError(f'{pc}: misplaced party trigger evidence')
                     if pc == 'Host':
-                        if kind != 'local_trigger_enter' or row.get('entrant') != 0x14 or row.get('generation', 0) <= 0:
-                            raise ValueError(f'{pc}: leader requires original local trigger entry')
+                        # The leader's own entry, or a partner's trip delivered to it (either advances the story).
+                        local_entry = kind == 'local_trigger_enter' and row.get('entrant') == 0x14
+                        party_entry = (kind == 'party_trigger_enter' and isinstance(row.get('entrant'), int) and
+                                       row['entrant'] not in (0, 0x14))
+                        if not (local_entry or party_entry) or row.get('generation', 0) <= 0:
+                            raise ValueError(f'{pc}: leader requires a native trigger entry')
                         if not isinstance(row.get('localId'), int) or row.get('leaderId') != row['localId']:
                             raise ValueError(f'{pc}: invalid leader identity')
                         leader_ids[sequence] = row['localId']
@@ -257,7 +261,7 @@ def analyze(folder):
                         stat["controllerUnknown"] += not row.get("filterReadable", False)
                 elif kind == "reference":
                     result["references"].append(row)
-                elif kind in ("driver", "path_stall_recovery", "trigger_walk_submission", "local_trigger_enter", "party_trigger_proximity_arrived"):
+                elif kind in ("driver", "path_stall_recovery", "trigger_walk_submission", "local_trigger_enter", "party_trigger_enter", "party_trigger_proximity_arrived"):
                     result["drivers"].append(row)
                 elif kind == "armor":
                     counts = armor[f'{row["id"]:08X}']

@@ -19,6 +19,11 @@ TESForm* TESForm::GetById(const uint32_t aId)
 
 void TESNPC::Serialize(String* apSaveBuffer) const noexcept
 {
+    Serialize(apSaveBuffer, GetChangeFlags());
+}
+
+void TESNPC::Serialize(String* apSaveBuffer, uint32_t aChangeFlags) const noexcept
+{
     ScopedSaveLoadOverride saveLoadOverride;
 
     char buffer[1 << 15];
@@ -26,7 +31,7 @@ void TESNPC::Serialize(String* apSaveBuffer) const noexcept
     BGSSaveFormBuffer saveBuffer;
     saveBuffer.buffer = buffer;
     saveBuffer.capacity = 1 << 15;
-    saveBuffer.changeFlags = GetChangeFlags();
+    saveBuffer.changeFlags = aChangeFlags;
 
     Save(&saveBuffer);
 
@@ -50,7 +55,7 @@ void TESNPC::Serialize(String* apSaveBuffer) const noexcept
     apSaveBuffer->append(reinterpret_cast<const char*>(&bodyHeight), sizeof(bodyHeight));
 }
 
-bool TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
+bool TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags, bool aLocalPlayerSnapshot) noexcept
 {
     // Unchanged static NPC bases have no appearance payload. In particular,
     // spawning an FF copy must not run LoadGame on its shared base for a no-op.
@@ -60,8 +65,9 @@ bool TESNPC::Deserialize(const String& acBuffer, uint32_t aChangeFlags) noexcept
 
     // Network appearance must never load into the local player or its face template.
     // Checking the actor's ref ID alone does not protect a replica using the same base.
+    // The one exception is deliberate: applying this player's own guest character (CharacterSnapshots::Apply).
     auto* pPlayer = PlayerCharacter::Get();
-    auto* pLocalNpc = pPlayer ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
+    auto* pLocalNpc = pPlayer && !aLocalPlayerSnapshot ? Cast<TESNPC>(pPlayer->baseForm) : nullptr;
     for (int depth = 0; pLocalNpc && depth < 16; ++depth)
     {
         if (this == pLocalNpc)

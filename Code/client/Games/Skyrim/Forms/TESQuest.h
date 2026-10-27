@@ -7,6 +7,7 @@
 
 struct TESQuest;
 struct Mod;
+bool QuestStageItemHookReady() noexcept;
 
 struct BGSBaseAlias
 {
@@ -153,7 +154,6 @@ struct TESQuest : BGSStoryManagerTreeForm
     bool IsStageDone(uint16_t stageIndex);
     void SetCompleted(bool force);
 
-    void CompleteAllObjectives(); // completes all objectives + stages
     void SetActive(bool toggle);  // < is the quest selected in journal and followed?
 
     inline void Disable() { flags &= ~Flags::Enabled; };
@@ -161,8 +161,7 @@ struct TESQuest : BGSStoryManagerTreeForm
     inline bool IsEnabled() const { return flags & Flags::Enabled; }
     inline bool IsActive() const { return flags & Flags::Active; }
     inline bool IsStopped() const { return (flags & (Flags::Enabled | Flags::StageWait)) == 0; } // & 0x81
-
-    bool Kill();
+
     State getState();
 
     bool EnsureQuestStarted(bool& succeded, bool force);

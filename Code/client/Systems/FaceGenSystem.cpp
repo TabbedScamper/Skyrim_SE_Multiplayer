@@ -21,6 +21,7 @@
 #include <Games/Skyrim/NetImmerse/BSMaskedShaderMaterial.h>
 #include <Games/Memory.h>
 #include <Renderer.h>
+#include <d3d11.h>
 
 __declspec(noinline) NiTriBasedGeom* GetHeadTriBasedGeom(Actor* apActor, uint32_t aPartType)
 {
@@ -58,6 +59,96 @@ TP_THIS_FUNCTION(TCreateResourceView, Ni2DBuffer*, TextureHolder, uint32_t, uint
 
 using TCreateTexture = NiRenderedTexture*(__fastcall)(BSFixedString& aName);
 using TCreateTints = void(__fastcall)(const GameArray<TintMask*>& acTints, NiRenderedTexture* apTexture);
+
+std::atomic<bool> FaceGenSystem::RestoreLocalTints{true};
+
+namespace
+{
+// Set by a copy's tint job this frame; FlushLocalRestore queues one local redraw after all of them (the job runner
+// 0x14043C9D0 draws its list in order, each job into render target 0xF, the target copy after).
+bool s_localRestorePending{};
+}
+
+void FaceGenSystem::FlushLocalRestore() noexcept
+{
+    if (!s_localRestorePending)
+        return;
+    s_localRestorePending = false;
+    auto* pLocalPlayer = PlayerCharacter::Get();
+    if (!pLocalPlayer || !RestoreLocalTints.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard appearanceLock(CreatorTogether::AppearanceMutex());
+    POINTER_SKYRIMSE(TCreateTints, CreateTints, 27040);
+    // Visible layers only, at most 16: the builder's pass has 16 slots and no bound check (see Update).
+    const auto& local = pLocalPlayer->GetTints();
+    std::vector<TintMask*> visible;
+    for (uint32_t i = 0; i < local.length && visible.size() < 16; ++i)
+        if (local[i] && local[i]->alpha > 0.f)
+            visible.push_back(local[i]);
+    GameArray<TintMask*> tints;
+    tints.capacity = tints.length = static_cast<uint32_t>(visible.size());
+    tints.data = tints.length ? static_cast<TintMask**>(Memory::Allocate(sizeof(TintMask*) * tints.length)) : nullptr;
+    for (uint32_t i = 0; i < tints.length; ++i)
+        tints[i] = visible[i];
+    // No target: the job redraws 0xF only, which the local face reads live (exactly the creator's call in 52396).
+    CreateTints(tints, nullptr);
+    if (tints.data)
+        Memory::Free(tints.data);
+    tints.data = nullptr;
+    tints.capacity = tints.length = 0;
+}
+
+uint64_t FaceGenSystem::HashTintTexture(void* apMaterial) noexcept
+{
+    // Ni2DBuffer +0x10 is the D3D11 shader resource view (0x14100DD60 / 0x14100EF50 create it and call its
+    // GetResource). Copy the texture to a cached staging texture and hash the rows.
+    auto* pMaterial = static_cast<BSMaskedShaderMaterial*>(apMaterial);
+    auto* pTexture = pMaterial ? static_cast<NiRenderedTexture*>(pMaterial->renderedTexture.object) : nullptr;
+    auto* pBuffer = pTexture ? reinterpret_cast<uint8_t*>(pTexture->buffer) : nullptr;
+    auto* pView = pBuffer ? *reinterpret_cast<ID3D11ShaderResourceView**>(pBuffer + 0x10) : nullptr;
+    auto* pRenderer = BGSRenderer::Get();
+    if (!pView || !pRenderer || !pRenderer->pD3dDevice || !pRenderer->pD3dContext)
+        return 0;
+    ID3D11Resource* pResource = nullptr;
+    pView->GetResource(&pResource);
+    ID3D11Texture2D* pSource = nullptr;
+    if (!pResource || FAILED(pResource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&pSource))))
+    {
+        if (pResource)
+            pResource->Release();
+        return 0;
+    }
+    pResource->Release();
+    D3D11_TEXTURE2D_DESC desc{};
+    pSource->GetDesc(&desc);
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.SampleDesc = {1, 0};
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ID3D11Texture2D* pStaging = nullptr;
+    uint64_t hash = 0;
+    if (SUCCEEDED(pRenderer->pD3dDevice->CreateTexture2D(&desc, nullptr, &pStaging)))
+    {
+        pRenderer->pD3dContext->CopySubresourceRegion(pStaging, 0, 0, 0, 0, pSource, 0, nullptr);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(pRenderer->pD3dContext->Map(pStaging, 0, D3D11_MAP_READ, 0, &mapped)))
+        {
+            hash = 1469598103934665603ull;
+            const auto* pRow = static_cast<const uint8_t*>(mapped.pData);
+            const uint32_t rowBytes = (std::min)(mapped.RowPitch, desc.Width * 16u);
+            for (uint32_t y = 0; y < desc.Height; ++y, pRow += mapped.RowPitch)
+                for (uint32_t x = 0; x < rowBytes; x += 4)
+                    hash = (hash ^ *reinterpret_cast<const uint32_t*>(pRow + x)) * 1099511628211ull;
+            pRenderer->pD3dContext->Unmap(pStaging, 0);
+        }
+        pStaging->Release();
+    }
+    pSource->Release();
+    return hash;
+}
 
 void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFaceGenComponent) noexcept
 {
@@ -149,30 +240,44 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
             return;
         }
 
-        auto& tintsEntries = aFaceGenComponent.FaceTints.Entries;
+        // The native builder (FaceGenSystem::CreateTints, 27040 / 14043C530) writes every layer with alpha > 0 into
+        // a 16-slot pass with no bound check; a 17th visible layer overwrote the pass and crashed the receiver in its
+        // pointer swap (141554FE0), 2026-09-29. Pass only visible layers, at most 16, as the vanilla creator does.
+        std::vector<const Tints::Entry*> visible;
+        for (const auto& entry : aFaceGenComponent.FaceTints.Entries)
+            if (entry.Alpha > 0.f && visible.size() < 16)
+                visible.push_back(&entry);
 
         GameArray<TintMask*> tints;
-        tints.capacity = tints.length = aFaceGenComponent.FaceTints.Entries.size() & 0xFFFFFFFF;
+        tints.capacity = tints.length = static_cast<uint32_t>(visible.size());
         tints.data = (TintMask**)Memory::Allocate(sizeof(TintMask*) * tints.length);
 
         for (auto i = 0u; i < tints.length; ++i)
         {
             tints[i] = Memory::New<TintMask>();
 
-            tints[i]->alpha = tintsEntries[i].Alpha;
-            tints[i]->color = tintsEntries[i].Color;
-            tints[i]->type = tintsEntries[i].Type;
+            tints[i]->alpha = visible[i]->Alpha;
+            tints[i]->color = visible[i]->Color;
+            tints[i]->type = visible[i]->Type;
 
             auto pNewTexture = Memory::New<TESTexture>();
             pNewTexture->Construct();
             pNewTexture->Init();
 
-            pNewTexture->name.Set(tintsEntries[i].Name.c_str());
+            pNewTexture->name.Set(visible[i]->Name.c_str());
 
             tints[i]->texture = pNewTexture;
         }
 
         CreateTints(tints, pTexture);
+
+        // Every tint job draws into render target 0xF (job runner 0x14043C9D0: image space effect 99 into 0xF, then a
+        // job with a target texture gets its own copy, 0x14100EF50). The local player's face tint texture is a LIVE
+        // view of 0xF (RaceSex 0x14096BE70 via 0x14100DD60), so this copy's job left the other player's face paint and
+        // skin tone on the local player's face (owner reports 2026-09-29: "her Nord's face paint and skin tone
+        // changed" whenever the host moved a slider). Queue the local player's own tints right after it, with no
+        // target, exactly as the creator does: jobs run in order, so 0xF ends each batch holding the local face.
+        s_localRestorePending = true;
 
         for (auto i = 0u; i < tints.length; ++i)
         {
@@ -207,6 +312,7 @@ void FaceGenSystem::Update(World& aWorld, Actor* apActor, FaceGenComponent& aFac
             spdlog::info("Player {:X}: detached FaceGen material shared with the local player", apActor->formID);
 
         aFaceGenComponent.Generated = true;
+        spdlog::info("Player {:X}: face tint generated, {} layers, texture {}", apActor->formID, tints.length, fmt::ptr(pTexture));
     }
 
     pShaderProperty->DecRef();

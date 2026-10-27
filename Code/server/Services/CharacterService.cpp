@@ -78,6 +78,15 @@ struct LeaderParkedActor
 // limbs have all settled may move (its streams are ended first): at a checkpoint load the first PC to register a
 // long-dead corpse otherwise kept it for good, outside the leader's authority (Lokir, 2026-09-28: the follower
 // owned and simulated him, local meteor blasts threw him around, the host never bound its own copy).
+// A corpse a player picked up (hold-to-grab): that player simulates it while carrying it; leader enforcement and other
+// claims leave it alone until it is let go and at rest, or 60 s pass without word.
+struct CarriedCorpse
+{
+    uint32_t Carrier{};
+    std::chrono::steady_clock::time_point Until{};
+    uint64_t Epoch{}; // the party's campaign epoch at pickup: a wipe reload ends the carry
+};
+
 struct RagdollRelayState
 {
     std::array<uint64_t, 2> Ticks{};
@@ -479,6 +488,8 @@ void CharacterService::ReconcileActorOwnership(Player* apPlayer, entt::entity en
 
 bool CharacterService::CanReplicateTo(Player* apPlayer, entt::entity aEntity) const noexcept
 {
+    if (!apPlayer->GetCellComponent())
+        return false;
     const auto& owner = m_world.get<OwnerComponent>(aEntity);
     const auto& actor = m_world.get<CharacterComponent>(aEntity);
     auto* simulator = owner.GetOwner();
@@ -515,6 +526,14 @@ void CharacterService::EnforceLeaderAuthority() const noexcept
             continue;
         }
         auto* leader = party ? m_world.GetPlayerManager().GetById(party->LeaderPlayerId) : nullptr;
+        if (const auto* carried = m_world.try_get<CarriedCorpse>(entity))
+        {
+            // A carried corpse stays with its carrier (until set down, 60 s without word, or a new campaign epoch).
+            if (now < carried->Until && m_world.GetPlayerManager().GetById(carried->Carrier) &&
+                (!party || carried->Epoch == party->StartEpoch))
+                continue;
+            m_world.remove<CarriedCorpse>(entity);
+        }
         if (leader)
             ReconcileActorOwnership(leader, entity, false);
     }
@@ -803,10 +822,27 @@ void CharacterService::OnOwnershipTransferRequest(const PacketEvent<RequestOwner
         return;
     }
 
-    if (message.Reason != OwnershipReleaseReason::Relinquish && message.Reason != OwnershipReleaseReason::DeclineGrant)
+    if (message.Reason != OwnershipReleaseReason::Relinquish && message.Reason != OwnershipReleaseReason::DeclineGrant &&
+        message.Reason != OwnershipReleaseReason::ScriptRemoved)
     {
         spdlog::warn("Ignored ownership release with invalid reason from player {:X} for actor {:X}", acMessage.pPlayer->GetId(), message.ServerId);
         return;
+    }
+    if (message.Reason == OwnershipReleaseReason::ScriptRemoved)
+    {
+        // Only the leader's world is the story's; a follower's local script removing its copy decides nothing.
+        const auto* pForm = m_world.try_get<FormIdComponent>(cEntity);
+        const bool temporary = !pForm || pForm->Id.ModId == UINT32_MAX || pForm->Id == GameId{};
+        // A death that reached the server after the leader's check keeps its corpse.
+        if (m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer) && temporary &&
+            !view.get<CharacterComponent>(*it).IsPlayer() && !view.get<CharacterComponent>(*it).IsDead())
+        {
+            spdlog::info("Leader's scripts removed temporary actor {:X}; removing it for every player", message.ServerId);
+            m_world.GetDispatcher().trigger(CharacterRemoveEvent(message.ServerId));
+            return;
+        }
+        spdlog::info("Script removal of actor {:X} by player {} not accepted; treated as a release", message.ServerId,
+            acMessage.pPlayer->GetId());
     }
 
     if (auto* state = m_world.try_get<RagdollRelayState>(cEntity); state && state->IsActive())
@@ -871,6 +907,74 @@ void CharacterService::OnOwnershipTransferEvent(const OwnershipTransferEvent& ac
     TransferToNextOwner(acEvent.Entity, OwnershipTransferReason::OwnerUnavailable);
 }
 
+void CharacterService::ReplayToPlayer(Player* apPlayer) const noexcept
+{
+    const auto& cell = apPlayer->GetCellComponent();
+    if (!cell)
+        return;
+    uint32_t sent = 0, outOfRange = 0, refused = 0, players = 0;
+    // The other party members' own characters, whatever their recorded range: a reload inside one worldspace only
+    // shifts the grid (which never sends the mover to others) and their recorded position is still the pre-wipe one
+    // until they move. Their movement stream places the copy.
+    std::vector<entt::entity> sentPlayers;
+    if (const auto* pParty = m_world.GetPartyService().GetPlayerParty(apPlayer))
+        for (auto* pMember : pParty->Members)
+            if (pMember != apPlayer && pMember->GetCharacter() && m_world.valid(*pMember->GetCharacter()))
+            {
+                CharacterSpawnRequest spawn;
+                Serialize(m_world, *pMember->GetCharacter(), &spawn);
+                apPlayer->Send(spawn);
+                sentPlayers.push_back(*pMember->GetCharacter());
+                ++players;
+            }
+    auto view = m_world.view<CellIdComponent, CharacterComponent, OwnerComponent>();
+    for (auto entity : view)
+    {
+        if (std::find(sentPlayers.begin(), sentPlayers.end(), entity) != sentPlayers.end())
+            continue;
+        if (!cell.IsInRange(view.get<CellIdComponent>(entity), view.get<CharacterComponent>(entity).IsDragon()))
+        {
+            ++outOfRange;
+            continue;
+        }
+        if (!CanReplicateTo(apPlayer, entity))
+        {
+            ++refused;
+            continue;
+        }
+        CharacterSpawnRequest spawn;
+        Serialize(m_world, entity, &spawn);
+        apPlayer->Send(spawn);
+        ++sent;
+    }
+    spdlog::info("Party restart: replayed {} players and {} characters to player {} (cell {:X}:{:X} world {:X}:{:X} center {},{}; {} out of range, {} not replicable)",
+        players, sent, apPlayer->GetId(), cell.Cell.ModId, cell.Cell.BaseId, cell.WorldSpaceId.ModId, cell.WorldSpaceId.BaseId,
+        cell.CenterCoords.X, cell.CenterCoords.Y, outOfRange, refused);
+}
+
+size_t CharacterService::DropPartyTemporaries(uint32_t aPartyId) const noexcept
+{
+    const auto* party = m_world.GetPartyService().GetById(aPartyId);
+    if (!party)
+        return 0;
+    std::vector<entt::entity> temporaries;
+    for (auto entity : m_world.view<TemporaryActorProvenance, CharacterComponent, OwnerComponent>())
+    {
+        const auto& character = m_world.get<CharacterComponent>(entity);
+        if (character.IsPlayer() || character.IsPlayerSummon())
+            continue;
+        const auto& owner = m_world.get<OwnerComponent>(entity);
+        const bool ours = owner.GetOwner() ?
+            std::find(party->Members.begin(), party->Members.end(), owner.GetOwner()) != party->Members.end() :
+            owner.PartyId && *owner.PartyId == aPartyId;
+        if (ours)
+            temporaries.push_back(entity);
+    }
+    for (auto entity : temporaries)
+        m_world.GetDispatcher().trigger(CharacterRemoveEvent(World::ToInteger(entity)));
+    return temporaries.size();
+}
+
 void CharacterService::OnCharacterRemoveEvent(const CharacterRemoveEvent& acEvent) const noexcept
 {
     EndRagdollStreams(m_world, static_cast<entt::entity>(acEvent.ServerId));
@@ -905,6 +1009,80 @@ void CharacterService::OnOwnershipClaimRequest(const PacketEvent<RequestOwnershi
 {
     const auto& message = acMessage.Packet;
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
+    if (message.Carry == 3)
+    {
+        // The leader's game has this actor loaded in the leader's own cell (the engine carried it through a load door
+        // with the player). The recorded cell is the previous owner's copy, left behind: record the leader's cell and
+        // let the leader claim it (Ralof lost leaving Helgen's cave, 2026-09-30 19:40:33).
+        if (!m_world.valid(cEntity) || !m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer))
+            return;
+        auto* cell = m_world.try_get<CellIdComponent>(cEntity);
+        const auto* character = m_world.try_get<CharacterComponent>(cEntity);
+        if (!cell || !character || character->IsPlayer() || character->IsDead())
+            return;
+        const auto previous = *cell;
+        *cell = acMessage.pPlayer->GetCellComponent();
+        if (!CanClaimOwnership(acMessage.pPlayer, cEntity, message.ExpectedOwnershipEpoch, OwnershipTransferReason::LeaderClaim))
+        {
+            *cell = previous;
+            return;
+        }
+        spdlog::info("Leader carry claim: {:X} moved to the leader's cell {:X}:{:X} with the leader", message.ServerId,
+            cell->Cell.ModId, cell->Cell.BaseId);
+        TransferOwnership(acMessage.pPlayer, cEntity, OwnershipTransferReason::LeaderClaim);
+        return;
+    }
+    if (message.Carry)
+    {
+        // Owner report (2026-09-29): followers could not pick up bodies; the leader simulates every corpse near it and
+        // the follower's grab only jiggled it. The carrier simulates a carried corpse; everyone else follows its ragdoll.
+        if (!m_world.valid(cEntity))
+            return;
+        if (message.Carry == 2)
+        {
+            if (const auto* carried = m_world.try_get<CarriedCorpse>(cEntity); carried && carried->Carrier == acMessage.pPlayer->GetId())
+            {
+                m_world.remove<CarriedCorpse>(cEntity);
+                spdlog::info("Corpse carry: {:X} set down by player {}", message.ServerId, acMessage.pPlayer->GetId());
+            }
+            return;
+        }
+        const auto* character = m_world.try_get<CharacterComponent>(cEntity);
+        const auto* cell = m_world.try_get<CellIdComponent>(cEntity);
+        const auto* owner = m_world.try_get<OwnerComponent>(cEntity);
+        const auto* carried = m_world.try_get<CarriedCorpse>(cEntity);
+        const bool carriedByOther = carried && carried->Carrier != acMessage.pPlayer->GetId() &&
+            std::chrono::steady_clock::now() < carried->Until;
+        if (!character || !cell || !owner || !character->IsDead() || character->IsPlayer() || character->IsMount() ||
+            carriedByOther || m_world.all_of<LeaderParkedActor>(cEntity) ||
+            !acMessage.pPlayer->GetCellComponent().IsInRange(*cell, character->IsDragon()) ||
+            !m_world.GetPartyService().GetPlayerParty(acMessage.pPlayer) ||
+            (owner->PartyId && owner->PartyId != acMessage.pPlayer->GetParty().JoinedPartyId))
+        {
+            spdlog::info("Corpse carry: {:X} refused for player {}", message.ServerId, acMessage.pPlayer->GetId());
+            return;
+        }
+        // A pickup names the ownership epoch it saw; a renewal comes from the owner itself.
+        if (owner->GetOwner() != acMessage.pPlayer &&
+            !OwnershipPolicy::AcceptOwnershipEpoch(message.ExpectedOwnershipEpoch, owner->OwnershipEpoch))
+        {
+            spdlog::info("Corpse carry: {:X} refused for player {} (stale ownership epoch)", message.ServerId, acMessage.pPlayer->GetId());
+            return;
+        }
+        const auto* pCarrierParty = m_world.GetPartyService().GetPlayerParty(acMessage.pPlayer);
+        m_world.emplace_or_replace<CarriedCorpse>(cEntity, CarriedCorpse{acMessage.pPlayer->GetId(),
+            std::chrono::steady_clock::now() + std::chrono::seconds(60), pCarrierParty ? pCarrierParty->StartEpoch : 0});
+        const bool owned = owner->GetOwner() == acMessage.pPlayer ||
+            TransferOwnership(acMessage.pPlayer, cEntity, OwnershipTransferReason::CorpseCarry);
+        spdlog::info("Corpse carry: {:X} picked up by player {} (simulating it: {})", message.ServerId,
+            acMessage.pPlayer->GetId(), owned);
+        if (!owned)
+            m_world.remove<CarriedCorpse>(cEntity);
+        return;
+    }
+    if (const auto* carried = m_world.try_get<CarriedCorpse>(cEntity);
+        carried && carried->Carrier != acMessage.pPlayer->GetId() && std::chrono::steady_clock::now() < carried->Until)
+        return;
     const auto reason = m_world.GetPartyService().IsPlayerLeader(acMessage.pPlayer)
         ? OwnershipTransferReason::LeaderClaim
         : OwnershipTransferReason::CellLease;
@@ -972,6 +1150,7 @@ void CharacterService::OnCorpseRagdoll(const PacketEvent<CorpseRagdollRequest>& 
     notify.Settled = acMessage.Packet.Settled;
     notify.Active = acMessage.Packet.Active;
     notify.Dying = acMessage.Packet.Dying;
+    notify.KnockState = acMessage.Packet.KnockState;
     std::copy(std::begin(acMessage.Packet.Origin), std::end(acMessage.Packet.Origin), std::begin(notify.Origin));
     notify.Heading = acMessage.Packet.Heading;
     notify.Bodies = bodies;
@@ -999,11 +1178,27 @@ void CharacterService::OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequ
     if (it == view.end() || view.get<OwnerComponent>(entity).GetOwner() != acMessage.pPlayer)
         return;
     auto& characterComponent = view.get<CharacterComponent>(entity);
-    if (!characterComponent.IsPlayer() || packet.AppearanceBuffer.empty() || packet.AppearanceBuffer.size() > 64 * 1024)
+    const bool renameOnly = packet.AppearanceBuffer.empty();
+    if (!characterComponent.IsPlayer() || (renameOnly && packet.Name.empty()) || packet.AppearanceBuffer.size() > 64 * 1024)
         return;
-    characterComponent.SaveBuffer = packet.AppearanceBuffer;
-    characterComponent.ChangeFlags = packet.ChangeFlags;
-    characterComponent.FaceTints = packet.FaceTints;
+    // The character's name is the player's name in the party (revive and door notices, the party list). The client
+    // connected with whatever its character was called at the main menu ("Prisoner" before the creator).
+    if (!packet.Name.empty())
+    {
+        const auto name = GameServer::Get()->SanitizePlayerName(packet.Name);
+        if (!name.empty() && name != acMessage.pPlayer->GetUsername())
+        {
+            spdlog::info("Player {} is now called {}", acMessage.pPlayer->GetId(), name);
+            acMessage.pPlayer->SetUsername(name);
+            m_world.GetPartyService().RefreshPlayerNames();
+        }
+    }
+    if (!renameOnly)
+    {
+        characterComponent.SaveBuffer = packet.AppearanceBuffer;
+        characterComponent.ChangeFlags = packet.ChangeFlags;
+        characterComponent.FaceTints = packet.FaceTints;
+    }
 
     NotifyPlayerAppearance notify{};
     notify.ServerId = packet.ServerId;
@@ -1011,6 +1206,7 @@ void CharacterService::OnPlayerAppearance(const PacketEvent<PlayerAppearanceRequ
     notify.AppearanceBuffer = packet.AppearanceBuffer;
     notify.FaceTints = packet.FaceTints;
     notify.InCreator = packet.InCreator;
+    notify.Name = packet.Name.empty() ? String{} : acMessage.pPlayer->GetUsername();
     for (auto* pPlayer : m_world.GetPlayerManager())
     {
         if (pPlayer != acMessage.pPlayer)
@@ -1042,7 +1238,7 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         auto& animationComponent = view.get<AnimationComponent>(*itor);
 
         // Snapshots without actions arrive unreliable and unordered: never roll state back to an older one (the
-        // actions it carries still apply). Muse refute-unreliable.
+        // actions it carries still apply). refute-unreliable.
         const bool staleMovement = movementComponent.Tick && message.Tick < movementComponent.Tick;
         if (!staleMovement)
             movementComponent.Tick = message.Tick;
@@ -1060,6 +1256,9 @@ void CharacterService::OnReferencesMoveRequest(const PacketEvent<ClientReference
         movementComponent.Direction = movement.Direction;
         movementComponent.HasLookDirection = movement.HasLookDirection;
         movementComponent.LookDirection = movement.LookDirection;
+        movementComponent.LifeState = movement.LifeState;
+        movementComponent.Essential = movement.Essential;
+        movementComponent.Fleeing = movement.Fleeing;
         const auto requestedTargetId = update.CombatTargetServerId;
         if (requestedTargetId == 0 || requestedTargetId == 0xFFFFFFFFu)
             movementComponent.CombatTargetServerId = requestedTargetId;
@@ -1264,7 +1463,14 @@ void CharacterService::OnSyncExperienceRequest(const PacketEvent<SyncExperienceR
     if (!bEnableXpSync)
         return;
 
+    const auto skill = acMessage.Packet.Skill;
+    if (skill != 6 && skill != 7 && skill != 8 && skill != 9 && skill != 18 && skill != 19 && skill != 20 && skill != 21 && skill != 22)
+        return;
+    if (!std::isfinite(acMessage.Packet.Experience) || acMessage.Packet.Experience <= 0.f)
+        return;
+
     NotifySyncExperience notify;
+    notify.Skill = skill;
     notify.Experience = acMessage.Packet.Experience;
 
     const auto& partyComponent = acMessage.pPlayer->GetParty();
@@ -1490,6 +1696,8 @@ const char* CharacterService::GetOwnershipTransferReasonName(const OwnershipTran
         return "owner relinquished control";
     case OwnershipTransferReason::OwnerUnavailable:
         return "owner became unavailable";
+    case OwnershipTransferReason::CorpseCarry:
+        return "corpse carry";
     }
 
     return "unknown reason";
@@ -1590,13 +1798,18 @@ bool CharacterService::TransferOwnership(Player* apPlayer, const entt::entity aE
     if (pOldOwner == apPlayer)
         return true;
 
-    if (HasMovingRagdoll(m_world, aEntity))
+    // A player holding the body decides where it goes, even while it still moves: the owner's copy that player sees
+    // follows the owner's stream closely, so its simulation continues from there. Session 2026-09-29: the follower's
+    // pickup waited 5 s for the stream to settle (she had let go by then), and the host's pickups of the body she then
+    // owned were refused outright while it kept moving; his grab fought her stream and the body slid.
+    const bool carry = aReason == OwnershipTransferReason::CorpseCarry;
+    if (!carry && HasMovingRagdoll(m_world, aEntity))
         return false;
     if (HasActiveRagdoll(m_world, aEntity))
     {
-        // Settled corpse: end the old owner's streams reliably before the new owner starts its own.
-        spdlog::info("Ragdoll server {:X}: settled streams ended for an ownership transfer to player {}",
-            World::ToInteger(aEntity), apPlayer->GetId());
+        // End the old owner's streams reliably before the new owner starts its own.
+        spdlog::info("Ragdoll server {:X}: {} streams ended for an ownership transfer to player {}",
+            World::ToInteger(aEntity), HasMovingRagdoll(m_world, aEntity) ? "moving" : "settled", apPlayer->GetId());
         EndRagdollStreams(m_world, aEntity);
     }
 
@@ -1865,8 +2078,14 @@ void CharacterService::ProcessMovementChanges() const noexcept
             movement.Direction = movementComponent.Direction;
             movement.HasLookDirection = movementComponent.HasLookDirection;
             movement.LookDirection = movementComponent.LookDirection;
+            movement.LifeState = movementComponent.LifeState;
+            movement.Essential = movementComponent.Essential;
+            movement.Fleeing = movementComponent.Fleeing;
             movement.Variables = movementComponent.Variables;
             update.CombatTargetServerId = movementComponent.CombatTargetServerId;
+            // The owner's own sample time, relative to this relay's stamp (owner clocks can run a few ms ahead: 0).
+            update.SampleAge = message.Tick > movementComponent.Tick && movementComponent.Tick
+                ? static_cast<uint32_t>((std::min)(message.Tick - movementComponent.Tick, uint64_t{1000})) : 0;
 
             update.ActionEvents = animationComponent.Actions;
             if (animationComponent.EvaluatedPosePending)

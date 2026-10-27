@@ -242,6 +242,51 @@ header {
   font-size: max(13px, 0.9em);
 }
 
+// The checkpoint picker: each shared save with its own screenshot.
+.checkpoints {
+  display: grid;
+  gap: 0.3rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+.checkpoint {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem;
+  text-align: left;
+  opacity: 0.75;
+
+  img {
+    width: 8rem;
+    flex: 0 0 auto;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+  }
+
+  &.selected {
+    opacity: 1;
+  }
+}
+
+.checkpoint-text {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+
+  strong {
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    font-size: max(13px, 1em);
+  }
+
+  small {
+    color: $-dim;
+    font-size: max(13px, 0.85em);
+  }
+}
+
 .chosen {
   margin: 0;
   text-align: center;

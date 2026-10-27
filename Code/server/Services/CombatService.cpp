@@ -19,7 +19,7 @@ struct PlayerCombatRelayClock
         uint32_t OwnerEpoch{};
         uint32_t Sender{};
     };
-    std::array<Clock, 4> Streams;
+    std::array<Clock, 5> Streams;
 };
 
 void RelayPlayerCombat(World& aWorld, const PacketEvent<RequestPlayerCombatState>& aPacket)
@@ -44,6 +44,7 @@ void RelayPlayerCombat(World& aWorld, const PacketEvent<RequestPlayerCombatState
     if (!owner || !character || owner->OwnershipEpoch != state.OwnershipEpoch)
         return;
     Player* recipient = nullptr;
+    TiltedPhoques::Vector<PlayerCombatState::Witness> validWitnesses;
     if (state.Type == PlayerCombatState::Stealth)
     {
         if (sender == leader || sender->GetCharacter() != actor || !owner->IsCurrentOwner(sender, state.OwnershipEpoch))
@@ -54,6 +55,29 @@ void RelayPlayerCombat(World& aWorld, const PacketEvent<RequestPlayerCombatState
     {
         recipient = owner->GetOwner();
         if (sender != leader || !recipient || recipient == leader || recipient->GetCharacter() != actor)
+            return;
+    }
+    else if (state.Type == PlayerCombatState::Crime)
+    {
+        if (sender == leader || sender->GetCharacter() != actor ||
+            !owner->IsCurrentOwner(sender, state.OwnershipEpoch) || !character->IsPlayer())
+            return;
+        recipient = leader;
+        const auto* cell = aWorld.try_get<CellIdComponent>(actor);
+        if (!cell)
+            return;
+        for (const auto& witness : state.Witnesses)
+        {
+            const auto witnessEntity = static_cast<entt::entity>(witness.Id);
+            const auto* witnessOwner = aWorld.try_get<OwnerComponent>(witnessEntity);
+            const auto* witnessCharacter = aWorld.try_get<CharacterComponent>(witnessEntity);
+            const auto* witnessCell = aWorld.try_get<CellIdComponent>(witnessEntity);
+            if (witnessOwner && witnessCharacter && !witnessCharacter->IsPlayer() &&
+                witnessOwner->IsCurrentOwner(leader, witness.OwnershipEpoch) &&
+                witnessCell && cell->IsInRange(*witnessCell, character->IsDragon()))
+                validWitnesses.push_back(witness);
+        }
+        if (validWitnesses.empty())
             return;
     }
     else
@@ -90,6 +114,8 @@ void RelayPlayerCombat(World& aWorld, const PacketEvent<RequestPlayerCombatState
     clock = {state.Epoch, state.Sequence, state.OwnershipEpoch, sender->GetId()};
     NotifyPlayerCombatState notify;
     notify.State = state;
+    if (state.Type == PlayerCombatState::Crime)
+        notify.State.Witnesses = std::move(validWitnesses);
     recipient->Send(notify);
 }
 }
@@ -139,6 +165,7 @@ void CombatService::OnProjectileLaunchRequest(const PacketEvent<ProjectileLaunch
 
     notify.UnkBool1 = packet.UnkBool1;
     notify.UnkBool2 = packet.UnkBool2;
+    notify.IsDualCasting = packet.IsDualCasting;
 
     // Shooter 0: a world caster (non-actor temporary reference) launched by the leader; relay around its character.
     const auto senderCharacter = acMessage.pPlayer ? acMessage.pPlayer->GetCharacter() : std::nullopt;

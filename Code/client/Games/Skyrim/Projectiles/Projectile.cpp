@@ -131,6 +131,10 @@ BSPointerHandle<Projectile>* TP_MAKE_THISCALL(HookLaunch, BSPointerHandle<Projec
     Event.UnkBool2 = arData.bUnkBool2;
     Event.DeferInitialization = arData.bDeferInitialization;
     Event.ForceConeOfFire = arData.bForceConeOfFire;
+    if (arData.pSpell)
+        if (auto* shooter = Cast<Actor>(arData.pShooter); shooter && shooter->currentProcess)
+            if (const auto high = *reinterpret_cast<uint8_t* const*>(reinterpret_cast<const uint8_t*>(shooter->currentProcess) + 0x10))
+                Event.IsDualCasting = high[0x45F] != 0;
 
     auto result = TiltedPhoques::ThisCall(RealLaunch, apThis, arData);
 

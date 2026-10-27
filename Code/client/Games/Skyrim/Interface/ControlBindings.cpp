@@ -309,3 +309,8 @@ void SetBindingsChangedCallback(BindingsChangedFn apCallback) noexcept
     s_onChanged = apCallback;
 }
 } // namespace ControlBindings
+
+std::string ControlBindings::ConnectedControllerModel() noexcept
+{
+    return ControllerModel();
+}

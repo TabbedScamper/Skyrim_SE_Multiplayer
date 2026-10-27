@@ -1,4 +1,6 @@
 #include <Services/PlayerCollision.h>
+#include <Services/TransportService.h>
+#include <Services/ReviveService.h>
 
 #include <World.h>
 #include <Components.h>
@@ -118,6 +120,10 @@ void Update(World& aWorld) noexcept
         separate = now - s_lastScripted < kSettleAfterScript;
     }
 
+    // A fallen player's hidden body sits near whoever it watches: it passes through the living (its copy here), and
+    // while this player is fallen every other player passes through it (owner: the host's hidden body was pushed).
+    const auto& revive = aWorld.GetReviveService();
+    const bool localFallen = revive.IsFallen(aWorld.GetTransport().GetLocalPlayerId());
     auto view = aWorld.view<FormIdComponent, RemoteComponent>();
     for (auto entity : view)
     {
@@ -128,15 +134,17 @@ void Update(World& aWorld) noexcept
         void* pController = GetController(pActor);
         if (!pController)
             continue;
+        const auto* pPlayer = aWorld.try_get<PlayerComponent>(entity);
+        const bool apart = separate || localFallen || (pPlayer && revive.IsFallen(pPlayer->Id));
         const uint32_t filter = GetFilter(pController);
         const auto it = s_changed.find(formId);
-        if (separate && !(filter & kNoCollision))
+        if (apart && !(filter & kNoCollision))
         {
             s_changed[formId] = filter;
             SetFilter(pController, filter | kNoCollision);
             spdlog::info("Players pass through each other: {:X} (filter {:08X})", formId, filter);
         }
-        else if (!separate && it != s_changed.end())
+        else if (!apart && it != s_changed.end())
         {
             SetFilter(pController, it->second & ~kNoCollision);
             s_changed.erase(it);

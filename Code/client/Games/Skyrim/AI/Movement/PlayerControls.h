@@ -25,8 +25,8 @@ struct PlayerControlsData
     bool fovSlideMode;     // 27
     bool povScriptMode;    // 28
     bool povBeastMode;     // 29
-    std::uint8_t unk2A;    // 2A
-    std::uint8_t unk2B;    // 2B
+    bool releaseHeldHandlers; // 2A: PlayerControls+0x4E
+    bool markHeldHandlers;    // 2B: PlayerControls+0x4F
     bool remapMode;        // 2C
     std::uint8_t unk2D;    // 2D
     std::uint16_t unk2E;   // 2E
@@ -41,6 +41,21 @@ struct PlayerControls
     void SetEnabled(bool abFlag);
 
     void SetCamSwitch(bool aSet) noexcept;
+    static void QueueInputRelease() noexcept;
+    static void DrainInputRelease() noexcept;
+
+    void MarkInputRelease() noexcept
+    {
+        Data.markHeldHandlers = true;
+        Data.releaseHeldHandlers = true;
+    }
+
+    void ClearHeldInput() noexcept
+    {
+        Data.MoveInputVec = {};
+        Data.LookInputVec = {};
+        MarkInputRelease();
+    }
 
 public:
     char pad0[0x24];
@@ -78,6 +93,8 @@ public:
 
 static_assert(offsetof(PlayerControls, PlayerControls::bBlockPlayerInput) == 0x1D9);
 static_assert(offsetof(PlayerControls, PlayerControls::Data) == 0x24);
+static_assert(offsetof(PlayerControls, Data) + offsetof(PlayerControlsData, releaseHeldHandlers) == 0x4E);
+static_assert(offsetof(PlayerControls, Data) + offsetof(PlayerControlsData, markHeldHandlers) == 0x4F);
 static_assert(offsetof(PlayerControls, PlayerControls::handlers) == 0x58);
 static_assert(sizeof(PlayerControls) == 0x1E0);
 

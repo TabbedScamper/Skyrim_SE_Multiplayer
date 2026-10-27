@@ -25,4 +25,6 @@ struct EnterExteriorCellRequest final : ClientMessage
     GameId WorldSpaceId{};
     GameId CellId{};
     GridCellCoords CurrentCoords{};
+    // A periodic re-report of the cell the player is in: the server acts only when its record differs.
+    bool Heartbeat{};
 };

@@ -6,7 +6,8 @@ using TiltedPhoques::Serialization;
 
 bool Factions::operator==(const Factions& acRhs) const noexcept
 {
-    return NpcFactions == acRhs.NpcFactions && ExtraFactions == acRhs.ExtraFactions;
+    return NpcFactions == acRhs.NpcFactions && ExtraFactions == acRhs.ExtraFactions &&
+        CrimeFaction == acRhs.CrimeFaction && RemoveCrimeFaction == acRhs.RemoveCrimeFaction;
 }
 
 bool Factions::operator!=(const Factions& acRhs) const noexcept
@@ -30,6 +31,8 @@ void Factions::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
     {
         entry.Serialize(aWriter);
     }
+    CrimeFaction.Serialize(aWriter);
+    aWriter.WriteBits(RemoveCrimeFaction ? 1 : 0, 1);
 }
 
 void Factions::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
@@ -53,4 +56,8 @@ void Factions::Deserialize(TiltedPhoques::Buffer::Reader& aReader)
     {
         entry.Deserialize(aReader);
     }
+    CrimeFaction.Deserialize(aReader);
+    uint64_t removed{};
+    aReader.ReadBits(removed, 1);
+    RemoveCrimeFaction = removed != 0;
 }

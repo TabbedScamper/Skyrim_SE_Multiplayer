@@ -1,6 +1,10 @@
 #pragma once
 #include <Combat/PlayerCombat.h>
+#include <Events/ChargedCrimeEvent.h>
+#include <deque>
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 struct World;
 struct TransportService;
@@ -19,6 +23,8 @@ private:
     void OnDisconnected(const DisconnectedEvent&);
     void OnNotify(const NotifyPlayerCombatState&);
     void OnImpact(const PlayerCombat::Impact&);
+    void OnChargedCrime(const ChargedCrimeEvent&);
+    void ProcessChargedCrime(const ChargedCrimeEvent&);
     void Reset();
     bool Active() const;
     void Send(PlayerCombatState aState);
@@ -42,6 +48,10 @@ private:
         uint64_t Sequence{};
     };
     std::unordered_map<uint64_t, Received> m_received;
+    std::unordered_set<uint32_t> m_reportedCrimes;
+    std::mutex m_crimeMutex;
+    std::deque<ChargedCrimeEvent> m_pendingCrimes;
+    uint32_t m_droppedCrimes{};
     uint64_t m_epoch{};
     uint32_t m_leader{};
     uint64_t m_sequence{};
@@ -50,4 +60,5 @@ private:
     entt::scoped_connection m_disconnect;
     entt::scoped_connection m_notify;
     entt::scoped_connection m_impact;
+    entt::scoped_connection m_crime;
 };

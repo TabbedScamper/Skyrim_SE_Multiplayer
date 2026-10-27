@@ -20,6 +20,8 @@ export class ServerListService {
   constructor(private readonly http: HttpClient) {}
 
   public getServerList(): Observable<Server[]> {
+    // No public server list until Skyrim SE Multiplayer runs its own (never the official Skyrim Together list).
+    if (!environment.url) return of([]);
     return this.http
       .get<Server[]>(`${environment.urlProtocol}://${environment.url}/list`)
       .pipe(

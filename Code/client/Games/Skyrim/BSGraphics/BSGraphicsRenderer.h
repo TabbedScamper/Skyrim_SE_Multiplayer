@@ -40,6 +40,7 @@ RendererWindow* GetMainWindow();
 RendererData* GetRendererData();
 struct Renderer;
 Renderer* GetRenderer();
+void DrainDeferredWindowWorkOnMainFrame() noexcept;
 
 struct DepthStencilTarget
 {

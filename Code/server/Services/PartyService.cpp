@@ -11,6 +11,7 @@
 
 #include <Events/PlayerJoinEvent.h>
 #include <Events/PlayerLeaveEvent.h>
+#include <Events/CharacterRemoveEvent.h>
 #include <Events/UpdateEvent.h>
 
 #include <Messages/NotifyPlayerList.h>
@@ -29,6 +30,10 @@
 #include <Messages/PartySessionSettingsRequest.h>
 #include <Messages/PartyGameplaySettingsRequest.h>
 #include <Messages/CheckpointSaveRequest.h>
+#include <Messages/CheckpointRoster.h>
+#include <Messages/HostHandoff.h>
+#include <HandoffPolicy.h>
+#include <CampaignLedger.h>
 #include <Messages/NotifyCheckpointSave.h>
 #include <Messages/NotifySettingsChange.h>
 #include <Messages/NotifyPlayerJoined.h>
@@ -195,6 +200,10 @@ PartyService::PartyService(World& aWorld, entt::dispatcher& aDispatcher) noexcep
     , m_partySessionSettingsConnection(aDispatcher.sink<PacketEvent<PartySessionSettingsRequest>>().connect<&PartyService::OnPartySessionSettings>(this))
     , m_partyGameplaySettingsConnection(aDispatcher.sink<PacketEvent<PartyGameplaySettingsRequest>>().connect<&PartyService::OnPartyGameplaySettings>(this))
     , m_checkpointSaveConnection(aDispatcher.sink<PacketEvent<CheckpointSaveRequest>>().connect<&PartyService::OnCheckpointSave>(this))
+    , m_checkpointRosterConnection(aDispatcher.sink<PacketEvent<RequestCheckpointRoster>>().connect<&PartyService::OnCheckpointRoster>(this))
+    , m_handoffAckConnection(aDispatcher.sink<PacketEvent<RequestHandoffAck>>().connect<&PartyService::OnHandoffAck>(this))
+    , m_handoffSeedConnection(aDispatcher.sink<PacketEvent<RequestHandoffSeed>>().connect<&PartyService::OnHandoffSeed>(this))
+    , m_checkpointAvailabilityConnection(aDispatcher.sink<PacketEvent<RequestCheckpointAvailability>>().connect<&PartyService::OnCheckpointAvailability>(this))
 {
     // Its own storage: emplacing into the world context from inside this constructor (while the
     // context is still constructing this service) killed the server on startup.
@@ -283,6 +292,21 @@ void PartyService::OnUpdate(const UpdateEvent& acEvent) noexcept
             }
         }
     }
+    for (const auto& entry : m_parties)
+    {
+        const auto id = entry.first;
+        auto& party = m_parties[id];
+        if (!party.HandoffTargetSteamId || cCurrentTick < party.HandoffStartedTick ||
+            cCurrentTick - party.HandoffStartedTick < 180000)
+            continue;
+        spdlog::warn("[PartyService]: Handoff for party {} timed out after 180 s", id);
+        party.HandoffTargetSteamId = 0;
+        party.HandoffStartedTick = 0;
+        party.HandoffCheckpointId.clear();
+        party.HandoffAckPlayerIds.clear();
+        party.HandoffReady = false;
+        BroadcastPartyInfo(id);
+    }
 }
 
 void PartyService::OnPartyCreate(const PacketEvent<PartyCreateRequest>& acPacket) noexcept
@@ -299,6 +323,7 @@ void PartyService::OnPartyCreate(const PacketEvent<PartyCreateRequest>& acPacket
         party.GameplaySettings = GetSettings();
         party.Members.push_back(player);
         party.LeaderPlayerId = player->GetId();
+        ++party.LeaderGeneration;
         inviterPartyComponent.JoinedPartyId = partyId;
 
         spdlog::debug("[PartyService]: Created party for {}", player->GetId());
@@ -346,7 +371,23 @@ void PartyService::OnPartyChangeLeader(const PacketEvent<PartyChangeLeaderReques
             {
                 if (pPlayer->GetId() == pNewLeader->GetId())
                 {
+                    if (party.LeaderPlayerId == pPlayer->GetId())
+                        break;
+                    if (party.SessionState >= 2)
+                    {
+                        if (party.HandoffTargetSteamId)
+                            break;
+                        party.HandoffTargetSteamId = pPlayer->GetSteamId();
+                        party.HandoffStartedTick = GameServer::Get()->GetTick();
+                        party.HandoffCheckpointId.clear();
+                        party.HandoffAckPlayerIds.clear();
+                        party.HandoffReady = false;
+                        spdlog::info("[PartyService]: Planned handoff to Steam {} waits for a new checkpoint", party.HandoffTargetSteamId);
+                        BroadcastPartyInfo(*inviterPartyComponent.JoinedPartyId);
+                        break;
+                    }
                     party.LeaderPlayerId = pPlayer->GetId();
+                    ++party.LeaderGeneration;
                     spdlog::debug("[PartyService]: Changed party leader to {}, updating party members.", party.LeaderPlayerId);
                     BroadcastPartyInfo(*inviterPartyComponent.JoinedPartyId);
                     break;
@@ -360,6 +401,20 @@ void PartyService::OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) no
 {
     auto& message = acPacket.Packet;
     Player* const player = acPacket.pPlayer;
+    auto* party = player ? GetPlayerParty(player) : nullptr;
+    if (!party || party->LeaderPlayerId != player->GetId())
+        return;
+    // Player ID zero is reserved for END PARTY. Copy members before each removal mutates the party.
+    if (message.PartyMemberPlayerId == 0)
+    {
+        const auto members = party->Members;
+        for (auto* member : members)
+            if (member != player)
+                RemovePlayerFromParty(member, true);
+        RemovePlayerFromParty(player, true);
+        GameServer::Get()->SetSessionPassword({});
+        return;
+    }
     Player* const pKick = m_world.GetPlayerManager().GetById(message.PartyMemberPlayerId);
 
     spdlog::debug("[PartyService]: Received request to change party leader to {}", message.PartyMemberPlayerId);
@@ -377,8 +432,11 @@ void PartyService::OnPartyKick(const PacketEvent<PartyKickRequest>& acPacket) no
         if (party.LeaderPlayerId == player->GetId())
         {
             spdlog::debug("[PartyService]: Kicking player {} from party", pKick->GetId());
-            RemovePlayerFromParty(pKick);
-            BroadcastPlayerList(pKick);
+            if (pKick != player && pKick->GetParty().JoinedPartyId == inviterPartyComponent.JoinedPartyId)
+            {
+                RemovePlayerFromParty(pKick, true);
+                BroadcastPlayerList(pKick);
+            }
         }
     }
 }
@@ -433,6 +491,12 @@ void PartyService::OnPartyReady(const PacketEvent<PartyReadyRequest>& acPacket) 
     {
         pParty->SessionState = 3;
         spdlog::info("[PartyService]: Every party member reached the gameplay barrier for epoch {}", pParty->StartEpoch);
+        if (pParty->ReplayOnGameplay)
+        {
+            pParty->ReplayOnGameplay = false;
+            for (auto* pMember : pParty->Members)
+                m_world.GetCharacterService().ReplayToPlayer(pMember);
+        }
     }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
 }
@@ -450,12 +514,175 @@ void PartyService::OnCheckpointSave(const PacketEvent<CheckpointSaveRequest>& ac
         return;
     }
 
+    pParty->LatestCheckpointId = id;
+    if (pParty->HandoffTargetSteamId && !pParty->HandoffReady && pParty->HandoffCheckpointId.empty())
+    {
+        pParty->HandoffCheckpointId = id;
+        pParty->HandoffAckPlayerIds.clear();
+        BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+    }
     NotifyCheckpointSave notify{};
     notify.CheckpointId = id;
     notify.AuthorityEpoch = pParty->StartEpoch;
     for (auto* pMember : pParty->Members)
         pMember->Send(notify);
     spdlog::info("[PartyService]: Checkpoint {} for party of {} (epoch {})", id, pParty->Members.size(), pParty->StartEpoch);
+}
+
+void PartyService::OnCheckpointRoster(const PacketEvent<RequestCheckpointRoster>& acPacket) noexcept
+{
+    auto* const player = acPacket.pPlayer;
+    auto* const party = GetPlayerParty(player);
+    const auto& request = acPacket.Packet;
+    if (!party || party->SessionState < 2 || request.CheckpointId != party->LatestCheckpointId ||
+        !request.IsValid() || !request.Position.Valid() || !request.Position.SteamId ||
+        request.Position.CharacterKey.empty() || request.Position.CharacterName.empty() ||
+        request.Position.SteamId != player->GetSteamId())
+        return;
+    try
+    {
+        Campaign::RosterEntry entry;
+        entry.CheckpointId = request.CheckpointId.c_str();
+        const auto& position = request.Position;
+        entry.SteamId = position.SteamId;
+        entry.CharacterKey = position.CharacterKey.c_str();
+        entry.CharacterName = position.CharacterName.c_str();
+        entry.WorldMod = position.WorldSpaceId.ModId;
+        entry.WorldBase = position.WorldSpaceId.BaseId;
+        entry.CellMod = position.CellId.ModId;
+        entry.CellBase = position.CellId.BaseId;
+        entry.X = position.X;
+        entry.Y = position.Y;
+        entry.Z = position.Z;
+        entry.Heading = position.Heading;
+        entry.Downed = position.Downed;
+        m_world.GetCampaignLedger().PutRosterEntry(entry);
+        NotifyCheckpointRoster notify;
+        notify.CheckpointId = request.CheckpointId;
+        for (const auto& saved : m_world.GetCampaignLedger().ReadRoster(entry.CheckpointId))
+        {
+            RosterPosition item;
+            item.SteamId = saved.SteamId;
+            item.CharacterKey = saved.CharacterKey.c_str();
+            item.CharacterName = saved.CharacterName.c_str();
+            item.WorldSpaceId = {saved.WorldMod, saved.WorldBase};
+            item.CellId = {saved.CellMod, saved.CellBase};
+            item.X = saved.X; item.Y = saved.Y; item.Z = saved.Z; item.Heading = saved.Heading;
+            item.Downed = saved.Downed;
+            if (notify.Entries.size() < 16) notify.Entries.push_back(std::move(item));
+        }
+        if (notify.Entries.size() == party->Members.size())
+            for (auto* member : party->Members)
+                member->Send(notify);
+        spdlog::info("[PartyService]: Checkpoint {} roster received from {} ({} records)",
+            request.CheckpointId, player->GetId(), notify.Entries.size());
+    }
+    catch (const std::exception& error)
+    {
+        spdlog::error("[PartyService]: Checkpoint roster write failed: {}", error.what());
+    }
+}
+
+void PartyService::OnHandoffAck(const PacketEvent<RequestHandoffAck>& acPacket) noexcept
+{
+    auto* player = acPacket.pPlayer;
+    auto* party = GetPlayerParty(player);
+    if (!party || !party->HandoffTargetSteamId || party->HandoffReady ||
+        party->HandoffCheckpointId.empty() || acPacket.Packet.CheckpointId != party->HandoffCheckpointId)
+        return;
+    try
+    {
+        const auto roster = m_world.GetCampaignLedger().ReadRoster(party->HandoffCheckpointId.c_str());
+        if (roster.size() != party->Members.size() ||
+            std::none_of(roster.begin(), roster.end(), [player](const Campaign::RosterEntry& entry)
+                { return entry.SteamId == player->GetSteamId(); }))
+            return;
+    }
+    catch (const std::exception& error)
+    {
+        spdlog::error("[PartyService]: Handoff roster check failed: {}", error.what());
+        return;
+    }
+    if (std::find(party->HandoffAckPlayerIds.begin(), party->HandoffAckPlayerIds.end(), player->GetId()) == party->HandoffAckPlayerIds.end())
+        party->HandoffAckPlayerIds.push_back(player->GetId());
+    if (party->HandoffAckPlayerIds.size() != party->Members.size())
+        return;
+    party->HandoffReady = true;
+    spdlog::info("[PartyService]: Handoff checkpoint {} durable on all {} members", party->HandoffCheckpointId, party->Members.size());
+    BroadcastPartyInfo(*player->GetParty().JoinedPartyId);
+}
+
+void PartyService::OnHandoffSeed(const PacketEvent<RequestHandoffSeed>& acPacket) noexcept
+{
+    auto* player = acPacket.pPlayer;
+    auto* party = GetPlayerParty(player);
+    const auto& seed = acPacket.Packet;
+    if (!party || party->LeaderPlayerId != player->GetId() || party->SessionState != 0 ||
+        (!party->HandoffOrder.empty() && party->HandoffOrder != seed.SteamIds) ||
+        seed.SteamIds.empty() || seed.SteamIds.front() != player->GetSteamId() ||
+        seed.SteamIds.size() > 16 || seed.Entries.size() != seed.SteamIds.size())
+        return;
+    for (size_t i = 0; i < seed.SteamIds.size(); ++i)
+    {
+        if (!seed.SteamIds[i] || std::count(seed.SteamIds.begin(), seed.SteamIds.end(), seed.SteamIds[i]) != 1 ||
+            seed.Entries[i].SteamId != seed.SteamIds[i] || !seed.Entries[i].Valid())
+            return;
+    }
+    // The successor retains this roster in its checkpoint sidecar until a full ledger snapshot can be imported.
+    // Writing rows into this PC's existing campaign database would mix two campaigns.
+    party->HandoffOrder = seed.SteamIds;
+    if (!party->HandoffJoinDeadlineTick)
+        party->HandoffJoinDeadlineTick = GameServer::Get()->GetTick() + 20000;
+    std::stable_sort(party->Members.begin(), party->Members.end(), [&](const Player* left, const Player* right)
+    {
+        const auto rank = [&](const Player* member)
+        {
+            auto it = std::find(party->HandoffOrder.begin(), party->HandoffOrder.end(), member->GetSteamId());
+            return static_cast<size_t>(it - party->HandoffOrder.begin());
+        };
+        return rank(left) < rank(right);
+    });
+    party->LatestCheckpointId = seed.CheckpointId;
+    spdlog::warn("[PartyService]: Handoff candidate {} has {} ordered seats; full ledger import is still required",
+        seed.CheckpointId, seed.SteamIds.size());
+    BroadcastPartyInfo(*player->GetParty().JoinedPartyId);
+}
+
+void PartyService::OnCheckpointAvailability(const PacketEvent<RequestCheckpointAvailability>& acPacket) noexcept
+{
+    auto* player = acPacket.pPlayer;
+    auto* party = GetPlayerParty(player);
+    if (!party || party->HandoffOrder.empty() || party->SessionState != 0)
+        return;
+    const auto& available = acPacket.Packet.Checkpoints;
+    if (available.size() > 32 || std::any_of(available.begin(), available.end(), [](const String& id)
+        { return id.empty() || id.size() > 64 || !std::all_of(id.begin(), id.end(), [](unsigned char c)
+            { return std::isalnum(c) || c == '_' || c == '-'; }); }))
+        return;
+    party->AvailableCheckpoints[player->GetId()] = available;
+    if (party->AvailableCheckpoints.size() < party->Members.size())
+        return;
+    String common;
+    for (const auto& candidate : party->AvailableCheckpoints[party->LeaderPlayerId])
+    {
+        if (!HandoffPolicy::SameFamily(candidate.c_str(), party->LatestCheckpointId.c_str()) ||
+            HandoffPolicy::Newer(candidate.c_str(), party->LatestCheckpointId.c_str()))
+            continue;
+        const bool heldByAll = std::all_of(party->Members.begin(), party->Members.end(), [&](const Player* member)
+        {
+            auto it = party->AvailableCheckpoints.find(member->GetId());
+            return it != party->AvailableCheckpoints.end() &&
+                std::find(it->second.begin(), it->second.end(), candidate) != it->second.end();
+        });
+        if (heldByAll && (common.empty() || HandoffPolicy::Newer(candidate.c_str(), common.c_str()))) common = candidate;
+    }
+    if (common != party->CheckpointId)
+    {
+        party->CheckpointId = common;
+        party->ReadyPlayerIds.clear();
+        BroadcastPartyInfo(*player->GetParty().JoinedPartyId);
+        spdlog::info("[PartyService]: Newest common handoff checkpoint is '{}' among {} members", common, party->Members.size());
+    }
 }
 
 void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) noexcept
@@ -468,12 +695,36 @@ void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) 
     const auto& request = acPacket.Packet;
     if (request.Mode != PartyStartRequest::kNew && request.Mode != PartyStartRequest::kContinue)
         return;
+    if (!pParty->HandoffOrder.empty() && (request.Mode != PartyStartRequest::kContinue ||
+        !pParty->HandoffLedgerReady ||
+        pParty->CheckpointId.empty() || request.CheckpointId != pParty->CheckpointId ||
+        pParty->AvailableCheckpoints.size() != pParty->Members.size() ||
+        (pParty->Members.size() < pParty->HandoffOrder.size() &&
+         GameServer::Get()->GetTick() < pParty->HandoffJoinDeadlineTick)))
+        return;
+    if (!pParty->HandoffOrder.empty())
+    {
+        try
+        {
+            const auto roster = m_world.GetCampaignLedger().ReadRoster(request.CheckpointId.c_str());
+            if (!std::all_of(pParty->Members.begin(), pParty->Members.end(), [&](const Player* member)
+                { return std::any_of(roster.begin(), roster.end(), [&](const Campaign::RosterEntry& entry)
+                    { return entry.SteamId == member->GetSteamId(); }); }))
+                return;
+        }
+        catch (const std::exception& error)
+        {
+            spdlog::error("[PartyService]: Handoff Continue roster check failed: {}", error.what());
+            return;
+        }
+    }
 
     pParty->CampaignMode = request.Mode;
     pParty->CheckpointId = request.Mode == PartyStartRequest::kContinue ? request.CheckpointId : String{};
     if (request.Launch)
     {
-        const bool allReady = pParty->Members.size() >= 2 && pParty->ReadyPlayerIds.size() == pParty->Members.size() &&
+        const bool allReady = (pParty->Members.size() >= 2 || !pParty->HandoffOrder.empty()) &&
+                              pParty->ReadyPlayerIds.size() == pParty->Members.size() &&
                               std::all_of(pParty->Members.begin(), pParty->Members.end(), [&](const Player* apMember) {
                                   return std::find(pParty->ReadyPlayerIds.begin(), pParty->ReadyPlayerIds.end(), apMember->GetId()) != pParty->ReadyPlayerIds.end();
                               });
@@ -485,6 +736,7 @@ void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) 
         }
         pParty->SessionState = 1;
         pParty->StartEpoch = m_nextStartEpoch++;
+        ++pParty->LeaderGeneration;
         // Observe the launch boundary without retiring live native identities.
         spdlog::info("Orphan session: party={} epoch={} retainedNativeIdentities=1",
             *pPlayer->GetParty().JoinedPartyId, pParty->StartEpoch);
@@ -493,6 +745,35 @@ void PartyService::OnPartyStart(const PacketEvent<PartyStartRequest>& acPacket) 
         pParty->ReadyPlayerIds.clear();
     }
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
+}
+
+bool PartyService::RestartFromCheckpoint(uint32_t aPartyId) noexcept
+{
+    auto it = m_parties.find(aPartyId);
+    if (it == m_parties.end() || it->second.SessionState < 2)
+        return false;
+    auto& party = it.value();
+    const String checkpoint = !party.LatestCheckpointId.empty() ? party.LatestCheckpointId : party.CheckpointId;
+    if (checkpoint.empty())
+        return false;
+    // Full reset (owner choice 2026-09-28) through the ordinary Continue: persistent actors keep their identity and
+    // their owner (the leader), so its reloaded natives rebind to them (dropping them let the follower's faster load
+    // claim the leader's NPCs and crashed the leader's load). Only temporaries, which cannot rebind, are removed.
+    const auto temporaries = m_world.GetCharacterService().DropPartyTemporaries(aPartyId);
+    spdlog::info("[PartyService]: party {} restart dropped {} temporary characters", aPartyId, temporaries);
+    party.CampaignMode = PartyStartRequest::kContinue;
+    party.CheckpointId = checkpoint;
+    party.ReplayOnGameplay = true;
+    party.SessionState = 1;
+    party.StartEpoch = m_nextStartEpoch++;
+    ++party.LeaderGeneration;
+    party.LoadedPlayerIds.clear();
+    party.GameplayReadyPlayerIds.clear();
+    party.ReadyPlayerIds.clear();
+    spdlog::info("[PartyService]: party {} wiped, reloading checkpoint {} in game (epoch {})", aPartyId, checkpoint,
+        party.StartEpoch);
+    BroadcastPartyInfo(aPartyId);
+    return true;
 }
 
 void PartyService::OnPartySessionSettings(const PacketEvent<PartySessionSettingsRequest>& acPacket) noexcept
@@ -506,9 +787,11 @@ void PartyService::OnPartySessionSettings(const PacketEvent<PartySessionSettings
     if (request.Password.size() > 64)
         return;
 
+    if (!request.KeepPassword)
+        pParty->Password = request.Password;
     pParty->LobbyOpen = request.Open;
-    pParty->PasswordProtected = request.Open && !request.Password.empty();
-    GameServer::Get()->SetSessionPassword(pParty->PasswordProtected ? request.Password : String{});
+    pParty->PasswordProtected = request.Open && !pParty->Password.empty();
+    GameServer::Get()->SetSessionPassword(pParty->PasswordProtected ? pParty->Password : String{});
     BroadcastPartyInfo(*pPlayer->GetParty().JoinedPartyId);
 }
 
@@ -550,7 +833,8 @@ void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
 
     GameServer::Get()->SendToPlayers(notify, acEvent.pPlayer);
 
-    if (m_parties.size() == 1 && GameServer::Get()->AllowsAutoPartyJoin())
+    if (m_parties.size() == 1 && (GameServer::Get()->AllowsAutoPartyJoin() ||
+        std::any_of(m_parties.begin(), m_parties.end(), [](const auto& item) { return !item.second.HandoffOrder.empty(); })))
     {
         for (Player* player : m_world.GetPlayerManager())
         {
@@ -558,12 +842,25 @@ void PartyService::OnPlayerJoin(const PlayerJoinEvent& acEvent) noexcept
             {
                 auto& playerPartyComponent = player->GetParty();
                 Party& party = m_parties[*playerPartyComponent.JoinedPartyId];
+                if (party.HandoffTargetSteamId || (!party.HandoffOrder.empty() &&
+                    std::find(party.HandoffOrder.begin(), party.HandoffOrder.end(), acEvent.pPlayer->GetSteamId()) == party.HandoffOrder.end()))
+                    break;
 
                 // A new member has not participated in this launch barrier.
                 if (party.SessionState == 1 || party.SessionState == 2)
                     break;
 
                 party.Members.push_back(acEvent.pPlayer);
+                if (!party.HandoffOrder.empty())
+                    std::stable_sort(party.Members.begin(), party.Members.end(), [&](const Player* left, const Player* right)
+                    {
+                        const auto rank = [&](const Player* member)
+                        {
+                            auto it = std::find(party.HandoffOrder.begin(), party.HandoffOrder.end(), member->GetSteamId());
+                            return static_cast<size_t>(it - party.HandoffOrder.begin());
+                        };
+                        return rank(left) < rank(right);
+                    });
                 if (party.SessionState == 0)
                     party.ReadyPlayerIds.clear();
                 acEvent.pPlayer->GetParty().JoinedPartyId = *playerPartyComponent.JoinedPartyId;
@@ -607,6 +904,8 @@ void PartyService::OnPartyInvite(const PacketEvent<PartyInviteRequest>& acPacket
         }
 
         auto& party = m_parties[*inviterPartyComponent.JoinedPartyId];
+        if (party.HandoffTargetSteamId)
+            return;
         if (party.LeaderPlayerId != pInviter->GetId())
         {
             spdlog::debug("[PartyService]: Inviter not party leader, cancelling invite.");
@@ -655,7 +954,7 @@ void PartyService::OnPartyAcceptInvite(const PacketEvent<PartyAcceptInviteReques
         auto partyId = *inviterPartyComponent.JoinedPartyId;
         Party& party = m_parties[partyId];
 
-        if (party.SessionState == 1 || party.SessionState == 2)
+        if (party.HandoffTargetSteamId || party.SessionState == 1 || party.SessionState == 2)
             return;
 
         if (party.LeaderPlayerId != pInviter->GetId())
@@ -693,7 +992,7 @@ void PartyService::OnPlayerLeave(const PlayerLeaveEvent& acEvent) noexcept
     BroadcastPlayerList(acEvent.pPlayer);
 }
 
-void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
+void PartyService::RemovePlayerFromParty(Player* apPlayer, bool aForced) noexcept
 {
     for (auto* player : m_world.GetPlayerManager())
         player->GetParty().Invitations.erase(apPlayer);
@@ -716,6 +1015,18 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
         eraseMember(party.ReadyPlayerIds);
         eraseMember(party.LoadedPlayerIds);
         eraseMember(party.GameplayReadyPlayerIds);
+        party.AvailableCheckpoints.erase(apPlayer->GetId());
+        if (party.HandoffTargetSteamId && !party.HandoffReady)
+        {
+            party.HandoffAckPlayerIds.clear();
+            if (party.HandoffTargetSteamId == apPlayer->GetSteamId())
+            {
+                party.HandoffTargetSteamId = 0;
+                party.HandoffStartedTick = 0;
+                party.HandoffCheckpointId.clear();
+                spdlog::warn("[PartyService]: Handoff cancelled because the successor disconnected");
+            }
+        }
         // A disconnect changes membership, not the running world or its epoch.
         // Re-evaluate an in-flight barrier against the surviving members.
         if (!members.empty())
@@ -742,6 +1053,7 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
             if (party.LeaderPlayerId == apPlayer->GetId())
             {
                 party.LeaderPlayerId = members.at(0)->GetId(); // Reassign party leader
+                ++party.LeaderGeneration;
                 spdlog::debug("[PartyService]: Leader left, reassigned party leader to {}", party.LeaderPlayerId);
             }
             spdlog::debug("[PartyService]: Updating other party players of removal.");
@@ -756,6 +1068,7 @@ void PartyService::RemovePlayerFromParty(Player* apPlayer) noexcept
 
         spdlog::debug("[PartyService]: Sending party left event to player.");
         NotifyPartyLeft leftMessage;
+        leftMessage.Forced = aForced;
         apPlayer->Send(leftMessage);
     }
 }
@@ -795,17 +1108,26 @@ void PartyService::BroadcastPartyInfo(uint32_t aPartyId) const noexcept
 
     NotifyPartyInfo message;
     message.LeaderPlayerId = party.LeaderPlayerId;
-    message.ReadyPlayerIds = party.ReadyPlayerIds;
+    // While the party loads (state 1) the ready list names who has loaded: followers start their Continue load
+    // only once the leader's world is in (owner rule 2026-09-28: a follower loading first registered its actors
+    // while the leader was still loading, and the leader crashed on their spawn requests).
+    message.ReadyPlayerIds = party.SessionState == 1 ? party.LoadedPlayerIds : party.ReadyPlayerIds;
     message.CampaignMode = party.CampaignMode;
     message.SessionState = party.SessionState;
     message.StartEpoch = party.StartEpoch;
+    message.LeaderGeneration = party.LeaderGeneration;
     message.CheckpointId = party.CheckpointId;
     message.LobbyOpen = party.LobbyOpen;
     message.PasswordProtected = party.PasswordProtected;
+    message.HandoffTargetSteamId = party.HandoffTargetSteamId;
+    message.HandoffCheckpointId = party.HandoffCheckpointId;
+    message.HandoffReady = party.HandoffReady;
+    message.HandoffSeeded = !party.HandoffOrder.empty() && party.HandoffLedgerReady;
 
     for (auto pPlayer : members)
     {
         message.PlayerIds.push_back(pPlayer->GetId());
+        message.SteamIds.push_back(pPlayer->GetSteamId());
     }
 
     for (auto pPlayer : members)

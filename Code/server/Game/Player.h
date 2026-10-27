@@ -20,6 +20,7 @@ struct Player
     [[nodiscard]] const String& GetUsername() const noexcept { return m_username; }
     [[nodiscard]] const String& GetEndPoint() const noexcept { return m_endpoint; }
     [[nodiscard]] const uint64_t GetDiscordId() const noexcept { return m_discordId; }
+    [[nodiscard]] uint64_t GetSteamId() const noexcept { return m_steamId; }
     [[nodiscard]] const uint32_t GetStringCacheId() const noexcept { return m_stringCacheId; }
     [[nodiscard]] const uint16_t GetLevel() const noexcept { return m_level; }
 
@@ -29,6 +30,7 @@ struct Player
     [[nodiscard]] const QuestLogComponent& GetQuestLogComponent() const noexcept;
 
     void SetDiscordId(uint64_t aDiscordId) noexcept;
+    void SetSteamId(uint64_t aSteamId) noexcept { m_steamId = aSteamId; }
     void SetEndpoint(String aEndpoint) noexcept;
     void SetUsername(String aUsername) noexcept;
     void SetMods(Vector<String> aMods) noexcept;
@@ -58,6 +60,7 @@ private:
     Vector<String> m_mods;
     Vector<uint16_t> m_modIds;
     uint64_t m_discordId{0};
+    uint64_t m_steamId{0};
     String m_endpoint;
     String m_username;
     PartyComponent m_party;

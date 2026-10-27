@@ -1,0 +1,32 @@
+﻿diff --git a/Code/client/Services/Generic/ObjectService.cpp b/Code/client/Services/Generic/ObjectService.cpp
+index 13aef830..12ce1be1 100644
+--- a/Code/client/Services/Generic/ObjectService.cpp
++++ b/Code/client/Services/Generic/ObjectService.cpp
+@@ -5927,6 +5927,9 @@ void ObjectService::OnActivate(const ActivateEvent& acEvent) noexcept
+     m_transport.Send(request);
+ }
+ 
++// Native door open/close (TESObjectREFR.cpp), the setter world state uses.
++void WorldStateSetDoorOpen(TESObjectREFR* apRef, bool aOpen) noexcept;
++
+ void ObjectService::OnActivateNotify(const NotifyActivate& acMessage) noexcept
+ {
+     Actor* pActor = Utils::GetByServerId<Actor>(acMessage.ActivatorId);
+@@ -5955,6 +5958,17 @@ void ObjectService::OnActivateNotify(const NotifyActivate& acMessage) noexcept
+             // it'll just continue to be unsynced (open remotely, closed locally and vice versa)
+             return;
+         }
++        // Mirror only the door's motion, never a second activation: Activate (N19796) posts OnActivate to the door's
++        // scripts before its default processing, so replaying it ran every door script once per PC, and a load door's
++        // travel begins after its opening completes (SkyrimAtlas activation A1/A3/A4, atlas audit finding 6). Load
++        // doors are the door vote's business; an ordinary door is driven through the native open/close setter that
++        // world state uses for script SetOpen (N14287 path, WorldStateSetDoorOpen).
++        if (pObject->extraData.Contains(ExtraDataType::Teleport))
++            return;
++        if (remotePreActivationState != TESObjectREFR::kOpen && remotePreActivationState != TESObjectREFR::kClosed)
++            return;
++        WorldStateSetDoorOpen(pObject, remotePreActivationState == TESObjectREFR::kClosed);
++        return;
+     }
+ 
+     // unsure if these flags are the best, but these are passed with the papyrus Activate fn

@@ -59,8 +59,9 @@ void Inventory::Entry::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexc
 
     ExtraEnchantId.Deserialize(aReader);
     ExtraEnchantCharge = Serialization::ReadVarInt(aReader) & 0xFFFF;
-    uint64_t effectCount = Serialization::ReadVarInt(aReader);
-    for (uint64_t i = 0; i < effectCount; i++)
+    // Counts come from the network or a .snap file: bounded, and reading stops when the data runs out.
+    uint64_t effectCount = (std::min<uint64_t>)(Serialization::ReadVarInt(aReader), 64);
+    for (uint64_t i = 0; i < effectCount && !aReader.Eof(); i++)
     {
         EffectItem effect;
         effect.Deserialize(aReader);
@@ -114,8 +115,9 @@ void Inventory::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 
 void Inventory::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
-    uint32_t count = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
-    for (uint32_t i = 0; i < count; i++)
+    // Bounded far above any real inventory; a hostile count would otherwise allocate until the game runs out of memory.
+    const uint32_t count = (std::min<uint32_t>)(Serialization::ReadVarInt(aReader) & 0xFFFFFFFF, 16384);
+    for (uint32_t i = 0; i < count && !aReader.Eof(); i++)
     {
         Entry entry;
         entry.Deserialize(aReader);

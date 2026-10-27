@@ -20,7 +20,7 @@ struct TargetConfig
 static constexpr TargetConfig CurrentTarget{ L"Skyrim Special Edition", 489830, 0x40000000 };
 #define TARGET_NAME L"SkyrimSE"
 #define TARGET_NAME_A "SkyrimSE"
-#define PRODUCT_NAME L"Skyrim Together"
+#define PRODUCT_NAME L"Skyrim SE Multiplayer"
 #define SHORT_NAME L"Skyrim Special Edition"
 
 // clang-format on

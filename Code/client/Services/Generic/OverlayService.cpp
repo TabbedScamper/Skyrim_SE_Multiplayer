@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/OverlayService.h>
+#include <Games/Skyrim/Audio/AudioPreview.h>
 #include <Messages/DialogueListenState.h>
 
 #include <OverlayApp.hpp>
@@ -334,8 +335,31 @@ void OverlayService::Create(RenderSystemD3D11* apRenderSystem) noexcept
     m_pOverlay->GetClient()->Create();
 }
 
+static std::atomic<uint64_t> s_overlayRenders{};
+
+std::string OverlayService::RenderStats() const noexcept
+{
+    uint32_t width = 0, height = 0;
+    bool visible = false;
+    if (m_pOverlay && m_pOverlay->GetClient())
+    {
+        if (auto pRenderer = m_pOverlay->GetClient()->GetOverlayRenderHandler())
+        {
+            std::tie(width, height) = pRenderer->GetRenderSize();
+            visible = pRenderer->IsVisible();
+        }
+    }
+    using Handler = TiltedPhoques::OverlayRenderHandler;
+    return fmt::format("{{\"renders\":{},\"visible\":{},\"inGame\":{},\"title\":{},\"active\":{},\"size\":[{},{}],"
+                       "\"paints\":{},\"paintMismatch\":{},\"lastPaint\":[{},{}],\"resizes\":{},\"drawn\":{},\"drawnEmpty\":{}}}",
+        s_overlayRenders.load(), visible, m_inGame, m_titleScreen, m_active, width, height, Handler::s_paints.load(),
+        Handler::s_paintSizeMismatch.load(), Handler::s_lastPaintWidth.load(), Handler::s_lastPaintHeight.load(),
+        Handler::s_resizes.load(), Handler::s_drawsWithTexture.load(), Handler::s_drawsWithout.load());
+}
+
 void OverlayService::Render() noexcept
 {
+    ++s_overlayRenders;
     static bool s_f9WasDown = false;
     static bool s_f10WasDown = false;
     static bool s_debugPromptOpen = false;
@@ -455,6 +479,12 @@ void OverlayService::Render() noexcept
         RenderNativeCursorOnTop();
 }
 
+void OverlayService::RenderDrawOnly() noexcept
+{
+    if (m_pOverlay && m_pOverlay->GetClient())
+        m_pOverlay->GetClient()->Render();
+}
+
 void OverlayService::Reset() const noexcept
 {
     m_pOverlay->GetClient()->Reset();
@@ -551,6 +581,45 @@ void OverlayService::SendSystemMessage(const std::string& acMessage)
     m_pOverlay->ExecuteAsync("message", pArguments);
 }
 
+void OverlayService::SetLobbyState(const bool aLoading, const float aProgress, const bool aMenu)
+{
+    if (!m_pOverlay)
+        return;
+    auto pArguments = CefListValue::Create();
+    pArguments->SetBool(0, aLoading);
+    pArguments->SetDouble(1, aProgress);
+    pArguments->SetBool(2, aMenu);
+    m_pOverlay->ExecuteAsync("lobbyState", pArguments);
+}
+
+void OverlayService::SendLobbyPlaylist()
+{
+    if (!m_pOverlay)
+        return;
+    auto titles = CefListValue::Create();
+    auto enabled = CefListValue::Create();
+    int index = 0;
+    for (const auto& [title, on] : AudioPreview::LobbyPlaylistTitles())
+    {
+        titles->SetString(index, title);
+        enabled->SetBool(index, on);
+        ++index;
+    }
+    auto pArguments = CefListValue::Create();
+    pArguments->SetList(0, titles);
+    pArguments->SetList(1, enabled);
+    m_pOverlay->ExecuteAsync("lobbyPlaylist", pArguments);
+}
+
+void OverlayService::SetLobbyMusic(const std::string& acTitle)
+{
+    if (!m_pOverlay)
+        return;
+    auto pArguments = CefListValue::Create();
+    pArguments->SetString(0, acTitle);
+    m_pOverlay->ExecuteAsync("lobbyMusic", pArguments);
+}
+
 void OverlayService::SetCreatorView(const bool aVisible, const int aPlayer, const int aPlayerCount, const bool aReady, const bool aLocalReady, const bool aGamepad)
 {
     if (!m_pOverlay)
@@ -590,6 +659,25 @@ void OverlayService::PushDialogueListen(const DialogueListenState* aState, uint3
     arguments->SetInt(8, aState ? static_cast<int>(aState->DurationMs) : 0);
     arguments->SetString(9, aState ? std::to_string(aState->LineSerial) : "0");
     m_pOverlay->ExecuteAsync("dialogueListen", arguments);
+}
+
+void OverlayService::PushRevive(int aMode, const std::string& acName, const std::string& acKey, double aProgress,
+    const std::string& acHint, const std::string& acNote, const std::string& acButton, const std::string& acModel, bool aGamepad,
+    float aBleed)
+{
+    if (!m_pOverlay) return;
+    auto arguments = CefListValue::Create();
+    arguments->SetInt(0, aMode);
+    arguments->SetString(1, acName.c_str());
+    arguments->SetString(2, acKey.c_str());
+    arguments->SetDouble(3, aProgress);
+    arguments->SetString(4, acHint.c_str());
+    arguments->SetString(5, acNote.c_str());
+    arguments->SetString(6, acButton.c_str());
+    arguments->SetString(7, acModel.c_str());
+    arguments->SetBool(8, aGamepad);
+    arguments->SetDouble(9, static_cast<double>(aBleed));
+    m_pOverlay->ExecuteAsync("revive", arguments);
 }
 
 void OverlayService::ShowDebugPrompt(const std::string& acMessage, bool aNoteOnly)

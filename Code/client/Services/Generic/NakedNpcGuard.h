@@ -24,6 +24,7 @@ struct NakedNpcGuard
     void UpdateNative() noexcept;
     void Reset() noexcept;
     void WornSnapshot(uint32_t, uint32_t, const Inventory&) noexcept;
+    void MarkDirty(uint32_t aFormId) noexcept;
     // Route remote NPC deltas through one ordered main-thread queue, before
     // quest-item interception. Returns false for players and local inventory.
     bool Defer(const NotifyInventoryChanges&) noexcept;
@@ -47,6 +48,10 @@ private:
         Inventory OwnerStock;
         Inventory FailedSupply; // Stop repeating an addition the native reader could not identify.
         Vector<GameId> FormOnly;
+        // Weapons the owner's worn list holds in a hand (ExtraWorn right, ExtraWornLeft left). Equipped only from
+        // this copy's own stock, like armor; never minted.
+        Inventory Weapons;
+        uint64_t WeaponLoggedSequence{};
         Vector<Change> Changes;
         bool Complete{}, StockKnown{}, Unmapped{}, Observe{}, Held{}, LoggedWait{};
         uint8_t Life{0xff};
@@ -66,6 +71,7 @@ private:
     // Only value transfer uses this lock. Never held across native calls.
     std::mutex m_lock;
     Vector<Input> m_input;
+    Vector<uint32_t> m_dirty;
     Vector<Target> m_targets;
     bool m_active{};
     uint64_t m_session{}, m_nextTargets{};
@@ -74,6 +80,7 @@ private:
     uint64_t m_nativeGeneration{}, m_nextHeartbeat{};
     uint32_t m_checkedActors{};
     size_t m_cursor{};
+    Vector<uint32_t> m_nativeDirty;
     std::unordered_map<uint32_t, State> m_states;
     entt::scoped_connection m_assign, m_spawn, m_worn, m_transfer;
     entt::scoped_connection m_disconnect;

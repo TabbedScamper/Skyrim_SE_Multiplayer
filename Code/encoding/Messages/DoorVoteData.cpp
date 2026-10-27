@@ -56,7 +56,7 @@ void DoorVoteData::SerializeData(TiltedPhoques::Buffer::Writer& aWriter) const n
 void DoorVoteData::DeserializeData(TiltedPhoques::Buffer::Reader& aReader)
 {
     const auto action = CheckedRead::VarInt(aReader);
-    if (action > static_cast<uint8_t>(DoorVoteAction::Release))
+    if (action > static_cast<uint8_t>(DoorVoteAction::TestCell))
         throw std::runtime_error("invalid door vote action");
     Action = static_cast<DoorVoteAction>(action);
     Epoch = CheckedRead::VarInt(aReader);

@@ -6,6 +6,8 @@ target("TPTests")
         ".", "../encoding")
     add_headerfiles("**.h")
     add_files("*.cpp")
+    -- weather_sky.cpp runs the shared clock (DateTime::Update); it is self-contained.
+    add_files("../common/DateTime.cpp")
     add_deps("SkyrimEncoding")
     add_packages(
         "tiltedcore",

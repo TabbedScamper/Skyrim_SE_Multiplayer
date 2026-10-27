@@ -117,7 +117,7 @@ void CameraService::ApplyScriptedControls(const ScriptedCameraState& acState) no
     if (!pMap || !pControls || !pControls->pLookHandler || !pControls->togglePOVHandler)
         return;
     // ControlMap::ToggleControls, ID 68545, VA 140CEFAA0: +120 is live,
-    // +124 is a saved native snapshot. Never change the saved snapshot.
+    // +124 is a saved native snapshot. Acquiring this temporary lock must not rewrite it.
     const uint32_t current = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pMap) + 0x120) &
         ScriptedCameraState::kCameraControls;
     const bool look = pControls->pLookHandler->isEnabled;
@@ -195,9 +195,9 @@ void CameraService::ReleaseScriptedCamera() noexcept
             const uint32_t current = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(pMap) + 0x120);
             const uint32_t owned = ~(current ^ m_appliedCameraControls) & ScriptedCameraState::kCameraControls;
             if (const auto disable = owned & ~m_savedCameraControls & current)
-                pMap->EnableOtherEvent(disable, false, false);
+                pMap->EnableOtherEvent(disable, false, true);
             if (const auto enable = owned & m_savedCameraControls & ~current)
-                pMap->EnableOtherEvent(enable, true, false);
+                pMap->EnableOtherEvent(enable, true, true);
         }
         if (pControls)
         {

@@ -21,7 +21,7 @@ struct RequestEquipmentChanges final : ClientMessage
     bool operator==(const RequestEquipmentChanges& acRhs) const noexcept
     {
         return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && OwnershipEpoch == acRhs.OwnershipEpoch && ItemId == acRhs.ItemId && EquipSlotId == acRhs.EquipSlotId && Count == acRhs.Count && Unequip == acRhs.Unequip && IsSpell == acRhs.IsSpell && IsShout == acRhs.IsShout && IsAmmo == acRhs.IsAmmo &&
-               CurrentInventory == acRhs.CurrentInventory;
+               CurrentInventory == acRhs.CurrentInventory && HasStack == acRhs.HasStack && (!HasStack || Stack == acRhs.Stack);
     }
 
     uint32_t ServerId{};
@@ -33,6 +33,8 @@ struct RequestEquipmentChanges final : ClientMessage
     bool IsSpell = false;
     bool IsShout = false;
     bool IsAmmo = false;
+    bool HasStack = false;
+    Inventory::Entry Stack{};
 
     Inventory CurrentInventory{};
 };

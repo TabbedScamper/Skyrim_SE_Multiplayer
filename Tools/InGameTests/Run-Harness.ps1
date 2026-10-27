@@ -5,7 +5,7 @@ param(
     [string]$Scenario = 'helgen-intro',
     [int]$TimeoutMinutes = 35,
     [string]$Worktree = 'C:\Users\mwalt\SkyrimSeamlessCoop-ui',
-    [string]$CaptureRoot = 'C:\Users\mwalt\.claude\jobs\77da3be6\tmp\round6\capture'
+    [string]$CaptureRoot = (Join-Path $env:LOCALAPPDATA 'SkyrimCoopHarness\capture')
 )
 $ErrorActionPreference = 'Stop'
 if ($ContinueSession -and $Deploy) { throw 'Diagnostic continuation cannot deploy or restart the games' }

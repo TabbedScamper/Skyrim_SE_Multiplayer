@@ -3,6 +3,8 @@ import { ScrollingModule } from '@angular/cdk/scrolling';
 import { HttpClientModule } from '@angular/common/http';
 import { NgModule } from '@angular/core';
 import { DialogueListenComponent } from './components/dialogue-listen/dialogue-listen.component';
+import { RevivePromptComponent } from './components/revive-prompt/revive-prompt.component';
+import { LobbyScreenComponent } from './components/lobby-screen/lobby-screen.component';
 import { FormsModule, ReactiveFormsModule } from '@angular/forms';
 import { BrowserModule } from '@angular/platform-browser';
 import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
@@ -87,6 +89,8 @@ import { TranslocoRootModule } from './transloco-root.module';
   ],
   imports: [
     DialogueListenComponent,
+    RevivePromptComponent,
+    LobbyScreenComponent,
     BrowserAnimationsModule,
     BrowserModule,
     FontAwesomeModule,

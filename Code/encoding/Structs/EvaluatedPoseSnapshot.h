@@ -29,6 +29,13 @@ struct EvaluatedPoseSnapshot
     uint64_t GraphDescriptor{};
     uint64_t SourceTick{};
     std::vector<Bone> Bones{};
+    // World transform of bone 0's frame when the pose was copied. The first bone is
+    // local to it; a receiver rebases it onto its own parent, so the owner's reference turning at death (Lokir
+    // 97 -> 330 deg) cannot turn the drawn body (2026-09-30).
+    bool HasParent{};
+    std::array<float, 3> ParentTranslation{};
+    std::array<float, 9> ParentRotation{}; // NiMatrix3 entries, row major
+    float ParentScale{1.f};
 
     bool operator==(const EvaluatedPoseSnapshot&) const noexcept = default;
 
@@ -132,6 +139,15 @@ struct EvaluatedPoseSnapshot
                 for (float value : bone.Scale)
                     aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
         }
+        aWriter.WriteBits(HasParent ? 1 : 0, 1);
+        if (HasParent)
+        {
+            for (float value : ParentTranslation)
+                aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
+            for (float value : ParentRotation)
+                aWriter.WriteBits(std::bit_cast<uint32_t>(value), 32);
+            aWriter.WriteBits(std::bit_cast<uint32_t>(ParentScale), 32);
+        }
     }
 
     void Deserialize(TiltedPhoques::Buffer::Reader& aReader)
@@ -143,6 +159,7 @@ struct EvaluatedPoseSnapshot
         Bones.clear();
         GraphDescriptor = 0;
         SourceTick = 0;
+        HasParent = false;
         if (count == 0)
             return;
         CheckedRead::Bits(aReader, GraphDescriptor, 64);
@@ -193,6 +210,31 @@ struct EvaluatedPoseSnapshot
                     CheckedRead::Bits(aReader, bits, 32);
                     value = std::bit_cast<float>(static_cast<uint32_t>(bits));
                 }
+        }
+        uint64_t hasParent{};
+        CheckedRead::Bits(aReader, hasParent, 1);
+        HasParent = hasParent != 0;
+        if (HasParent)
+        {
+            const auto readFloat = [&aReader]
+            {
+                uint64_t bits{};
+                CheckedRead::Bits(aReader, bits, 32);
+                return std::bit_cast<float>(static_cast<uint32_t>(bits));
+            };
+            for (float& value : ParentTranslation)
+                value = readFloat();
+            for (float& value : ParentRotation)
+                value = readFloat();
+            ParentScale = readFloat();
+            for (float value : ParentTranslation)
+                if (!std::isfinite(value) || std::abs(value) > 1.0e8f)
+                    throw std::runtime_error("invalid evaluated pose parent");
+            for (float value : ParentRotation)
+                if (!std::isfinite(value) || std::abs(value) > 2.f)
+                    throw std::runtime_error("invalid evaluated pose parent");
+            if (!std::isfinite(ParentScale) || ParentScale <= 0.f || ParentScale > 100.f)
+                throw std::runtime_error("invalid evaluated pose parent");
         }
         if (!IsValid())
             throw std::runtime_error("invalid evaluated pose transform");

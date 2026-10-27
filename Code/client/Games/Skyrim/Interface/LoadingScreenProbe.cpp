@@ -8,7 +8,8 @@
 
 namespace
 {
-constexpr uintptr_t cLoadingMenuLoadScreensOffset = 0x58;
+constexpr uintptr_t cLoadingMenuRemainingTipsOffset = 0x58;
+constexpr uintptr_t cLoadingMenuSelectedTipOffset = 0x78;
 constexpr uintptr_t cMistMenuCameraPathOffset = 0xC8;
 constexpr uintptr_t cMistMenuLoadScreenModelOffset = 0xF0;
 constexpr uintptr_t cMistMenuCameraFovOffset = 0x100;
@@ -90,8 +91,8 @@ const LoadingScreenProbeSnapshot& LoadingScreenProbe::Sample() noexcept
 
     m_snapshot.LoadingMenuPresent = pLoadingMenu != nullptr;
     m_snapshot.MistMenuPresent = pMistMenu != nullptr;
-    m_snapshot.CandidateListReadable = false;
-    m_snapshot.EligibleFormIds.clear();
+    m_snapshot.RemainingTipsReadable = false;
+    m_snapshot.RemainingTipFormIds.clear();
     m_snapshot.MistStateReadable = false;
     m_snapshot.ShowMist = false;
     m_snapshot.ShowLoadScreen = false;
@@ -112,11 +113,11 @@ const LoadingScreenProbeSnapshot& LoadingScreenProbe::Sample() noexcept
     if (pLoadingMenu)
     {
         CandidateArrayView candidates{};
-        if (ReadAt(pLoadingMenu, cLoadingMenuLoadScreensOffset, candidates) && candidates.Length <= candidates.Capacity && candidates.Length <= cMaxEligibleLoadScreens &&
+        if (ReadAt(pLoadingMenu, cLoadingMenuRemainingTipsOffset, candidates) && candidates.Length <= candidates.Capacity && candidates.Length <= cMaxEligibleLoadScreens &&
             (candidates.Length == 0 || (candidates.Data && IsReadable(candidates.Data, sizeof(TESForm*) * candidates.Length))))
         {
-            m_snapshot.CandidateListReadable = true;
-            m_snapshot.EligibleFormIds.reserve(candidates.Length);
+            m_snapshot.RemainingTipsReadable = true;
+            m_snapshot.RemainingTipFormIds.reserve(candidates.Length);
             for (uint32_t i = 0; i < candidates.Length; ++i)
             {
                 TESForm* pForm{};
@@ -124,9 +125,15 @@ const LoadingScreenProbeSnapshot& LoadingScreenProbe::Sample() noexcept
                 uint32_t formId{};
                 uint8_t formType{};
                 if (ReadAt(pForm, offsetof(TESForm, formID), formId) && ReadAt(pForm, offsetof(TESForm, formType), formType) && formType == cLoadScreenFormType)
-                    m_snapshot.EligibleFormIds.push_back(formId);
+                    m_snapshot.RemainingTipFormIds.push_back(formId);
             }
         }
+        TESForm* pSelected{};
+        uint8_t formType{};
+        if (ReadAt(pLoadingMenu, cLoadingMenuSelectedTipOffset, pSelected) && pSelected &&
+            ReadAt(pSelected, offsetof(TESForm, formType), formType) && formType == cLoadScreenFormType &&
+            ReadAt(pSelected, offsetof(TESForm, formID), m_snapshot.SelectedFormId))
+            m_snapshot.SelectedIdentityResolved = true;
     }
 
     if (pMistMenu)
@@ -155,14 +162,14 @@ const LoadingScreenProbeSnapshot& LoadingScreenProbe::Sample() noexcept
         }
     }
 
-    const auto signature = HashCandidates(m_snapshot.EligibleFormIds);
+    const auto signature = HashCandidates(m_snapshot.RemainingTipFormIds) ^ m_snapshot.SelectedFormId;
     if (m_snapshot.LoadingMenuPresent && (!m_wasLoadingMenuPresent || signature != m_candidateSignature))
     {
         spdlog::info(
-            "Loading-screen probe epoch {}: candidatesReadable={}, eligibleLSCRs={}, mistPresent={}, "
-            "mistReadable={}, modelPresent={}, cameraPathPresent={}, selectedIdentityResolved=false",
-            m_snapshot.Epoch, m_snapshot.CandidateListReadable, m_snapshot.EligibleFormIds.size(), m_snapshot.MistMenuPresent, m_snapshot.MistStateReadable,
-            m_snapshot.LoadScreenModelPresent, m_snapshot.CameraPathPresent);
+            "Loading-screen probe epoch {}: remainingTipsReadable={}, remainingTips={}, mistPresent={}, "
+            "mistReadable={}, modelPresent={}, cameraPathPresent={}, selectedIdentityResolved={}, selectedFormId={}",
+            m_snapshot.Epoch, m_snapshot.RemainingTipsReadable, m_snapshot.RemainingTipFormIds.size(), m_snapshot.MistMenuPresent, m_snapshot.MistStateReadable,
+            m_snapshot.LoadScreenModelPresent, m_snapshot.CameraPathPresent, m_snapshot.SelectedIdentityResolved, m_snapshot.SelectedFormId);
     }
 
     m_candidateSignature = signature;

@@ -4,6 +4,7 @@
 void EnterInteriorCellRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
     CellId.Serialize(aWriter);
+    Serialization::WriteBool(aWriter, Heartbeat);
 }
 
 void EnterInteriorCellRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -11,4 +12,5 @@ void EnterInteriorCellRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRe
     ClientMessage::DeserializeRaw(aReader);
 
     CellId.Deserialize(aReader);
+    Heartbeat = Serialization::ReadBool(aReader);
 }

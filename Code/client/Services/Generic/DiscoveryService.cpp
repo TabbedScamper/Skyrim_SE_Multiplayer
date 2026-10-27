@@ -1,6 +1,7 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/DiscoveryService.h>
+#include <Services/RunnerService.h>
 #include <Services/CharacterService.h>
 #include <Games/TES.h>
 
@@ -27,7 +28,7 @@ bool IsDefaultModlist(GameList<Mod>& aCurrentModlist) noexcept
 {
     static const auto s_defaultModlist = std::to_array<TiltedPhoques::String>(
         {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", 
-        "Dragonborn.esm", "_ResourcePack.esl", "SkyrimTogether.esp", "SkyrimTogetherQuestPatches.esp"}
+        "Dragonborn.esm", "_ResourcePack.esl", "Interesting Locations.esp", "SkyrimSEMultiplayer.esp", "SkyrimSEMultiplayerQuestPatches.esp"}
     );
 
     if (aCurrentModlist.Size() != s_defaultModlist.size())
@@ -282,9 +283,9 @@ void DiscoveryService::VisitForms() noexcept
                 continue;
             }
             if (m_world.GetPartyService().IsInParty() && m_world.GetPartyService().IsLeader())
-                spdlog::info("Discovery removed actor {:X}: cell={:X} attached={} has3D={} dead={} remote={} reconciliation={}",
+                spdlog::info("Discovery removed actor {:X}: cell={:X} attached={} has3D={} disabled={} dead={} remote={} reconciliation={}",
                     formId, pCell ? pCell->formID : 0,
-                    pCell && pCell->IsAttached(), pActor->GetNiNode() != nullptr,
+                    pCell && pCell->IsAttached(), pActor->GetNiNode() != nullptr, pActor->IsDisabled(),
                     pActor->IsDead(), pActor->GetExtension()->IsRemote(),
                     static_cast<uint32_t>(cStage));
         }
@@ -340,6 +341,9 @@ BSTEventResult DiscoveryService::OnEvent(const TESLoadGameEvent*, const EventDis
 {
     spdlog::info("Finished loading, triggering visit cell");
 
+    RunnerService::NoteGameLoaded();
+    m_world.GetPartyService().NoteGameLoaded();
+    m_world.GetCharacterService().NoteGameLoaded();
     m_world.GetPartyService().ReachWorldReadyBarrier();
 
     if (!IsDefaultModlist(ModManager::Get()->mods))

@@ -416,6 +416,12 @@ template <class T, class THandle = BSUntypedPointerHandle<>> struct BSPointerHan
 
 struct BSReadWriteLock
 {
+    void LockForRead() noexcept;
+    void UnlockForRead() noexcept;
+    void LockForWrite() noexcept;
+    void UnlockForWrite() noexcept;
+    bool TryLockForRead() noexcept;
+
     uint32_t uiWriterThread;
     volatile uint32_t uiLock;
 };

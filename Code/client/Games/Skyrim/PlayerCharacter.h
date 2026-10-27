@@ -118,6 +118,7 @@ struct PlayerCharacter : Actor
     void RespawnPlayerAt(TESObjectCELL* apCell, const NiPoint3& aPosition) noexcept;
 
     void PayCrimeGoldToAllFactions() noexcept;
+    static void DrainQueuedCrimePayments() noexcept;
 
     void SetWaypoint(NiPoint3* apPosition, TESWorldSpace* apWorldSpace) noexcept;
     void RemoveWaypoint() noexcept;

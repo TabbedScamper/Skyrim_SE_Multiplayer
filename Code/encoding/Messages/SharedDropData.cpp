@@ -99,7 +99,7 @@ void SharedDropData::SerializeData(Writer& w) const noexcept
 {
     w.WriteBits(static_cast<uint8_t>(Action), 8);
     w.WriteBits(Epoch, 64); w.WriteBits(Token, 64); w.WriteBits(OriginToken, 64); w.WriteBits(Tick, 64);
-    for (auto v : {Id, Generation, Owner, Creator, Replicas}) w.WriteBits(v, 32);
+    for (auto v : {Id, Generation, Owner, Creator, Replicas, Source}) w.WriteBits(v, 32);
     WriteString(w, Winner);
     if (HasPhysics()) Physics.Serialize(w);
     if (!HasItem()) return;
@@ -127,6 +127,7 @@ void SharedDropData::DeserializeData(Reader& r)
     CheckedRead::Bits(r, Epoch, 64); CheckedRead::Bits(r, Token, 64);
     CheckedRead::Bits(r, OriginToken, 64); CheckedRead::Bits(r, Tick, 64);
     Id = Read32(r); Generation = Read32(r); Owner = Read32(r); Creator = Read32(r); Replicas = Read32(r);
+    Source = Read32(r);
     Winner = ReadString(r);
     if (HasPhysics()) Physics.Deserialize(r);
     if (HasItem())

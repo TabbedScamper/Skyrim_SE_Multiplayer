@@ -14,6 +14,7 @@ import { PlayerListService } from 'src/app/services/player-list.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class PartyMenuComponent {
+  confirmingLeave = false;
   isLoading$ = this.loadingService.getLoading();
   members$ = this.groupService.selectMembers();
   memberCount$ = this.groupService.selectMembersLength(true);
@@ -52,6 +53,10 @@ export class PartyMenuComponent {
   }
 
   public leave() {
+    if (!this.confirmingLeave) {
+      this.confirmingLeave = true;
+      return;
+    }
     this.groupService.leave();
   }
 

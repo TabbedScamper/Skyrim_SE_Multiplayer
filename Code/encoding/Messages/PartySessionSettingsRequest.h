@@ -18,4 +18,5 @@ struct PartySessionSettingsRequest final : ClientMessage
 
     bool Open{};
     String Password{};
+    bool KeepPassword{};
 };

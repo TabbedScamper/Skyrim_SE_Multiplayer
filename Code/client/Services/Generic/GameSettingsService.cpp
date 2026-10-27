@@ -776,8 +776,27 @@ void GameSettingsService::OnWindowSizeChanged(WPARAM aSizeType) noexcept
     WriteInt(path, L"Display", L"iSize W", width);
     WriteInt(path, L"Display", L"iSize H", height);
     spdlog::info("Accepted Windows window resize/snap at {}x{}", width, height);
-    RefreshMainMenuLayout();
+    // Refreshing the menus here read the swap chain before anything resized it, so every Scaleform movie (fades,
+    // HUD, loading screen) stayed at the old size while the world followed the window (session 2026-09-29). Run
+    // the same deferred target rebuild the display settings use, then refresh the menus from the rebuilt chain.
+    m_rebuildAfterDrag = true;
+    if (!m_inSizeMove)
+        ScheduleWindowRebuild();
     SendSettings(m_preview);
+}
+
+void GameSettingsService::ScheduleWindowRebuild() noexcept
+{
+    auto* pWindow = BSGraphics::GetMainWindow();
+    if (!m_rebuildAfterDrag || !pWindow || !pWindow->hWnd)
+        return;
+    m_rebuildAfterDrag = false;
+    m_programmaticDisplayChange = true; // the rebuild's own WM_SIZE is not another player resize
+    m_pendingEngineModeTransition = false;
+    m_pendingFullResize = true;
+    m_pendingResizeUpdates = 1;
+    m_resizeEventGuardUpdates = 0;
+    SetTimer(pWindow->hWnd, cGameSettingsTimerId, 50, nullptr);
 }
 
 GameSettingsSnapshot GameSettingsService::ReadSettings() const noexcept
@@ -1065,6 +1084,13 @@ void GameSettingsService::OnWindowPlacementChanged(UINT aMessage) noexcept
         m_inSizeMove = true;
         return;
     }
+    // A resize made during the drag rebuilds once it ends, after the position below is remembered.
+    struct RebuildAtExit
+    {
+        GameSettingsService* Service;
+        bool Active;
+        ~RebuildAtExit() { if (Active) Service->ScheduleWindowRebuild(); }
+    } rebuildAtExit{this, aMessage == WM_EXITSIZEMOVE};
     if (aMessage == WM_EXITSIZEMOVE)
         m_inSizeMove = false;
     else if (m_inSizeMove)

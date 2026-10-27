@@ -1,5 +1,6 @@
 #include <BranchInfo.h>
 #include "CrashHandler.h"
+#include <Utils/ExpectedFault.h>
 #include <DbgHelp.h>
 #include <Windows.h>
 #include <chrono>
@@ -29,6 +30,10 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
     // Serialize 
     static std::mutex singleThreaded;
     const std::lock_guard lock{singleThreaded};
+
+    // A probe under its own __except (ExpectedFault::Scope) handles this fault itself.
+    if (ExpectedFault::Active())
+        return EXCEPTION_CONTINUE_SEARCH;
 
     // Check for severe, not continuable and not software-originated exception
     if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&

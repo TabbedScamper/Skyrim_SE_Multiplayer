@@ -82,16 +82,27 @@ def main():
         source = source.replace("// INSERT OBSERVER SNAPSHOT", block("Code/client/Games/Skyrim/Combat/PlayerCombat.cpp", "// BEGIN OBSERVER SNAPSHOT", "// END OBSERVER SNAPSHOT"))
         old_player_combat = subprocess.check_output(["git", "show", "25fa030d:Code/client/Games/Skyrim/Combat/PlayerCombat.cpp"], cwd=ROOT, text=True)
         source = source.replace("// INSERT OLD OBSERVERS", extract_function(old_player_combat, "std::vector<Actor*> Observers()").replace("Observers()", "OldObservers()"))
-        # The revision withdraws only scale1's new native-hook lookup indexes.
+        # Generic lookup stays baseline. b1 publishes native ownership tokens;
+        # compare its behavior to baseline instead of requiring identical text.
         old_utils = subprocess.check_output(["git", "show", "25fa030d:Code/client/Utils.cpp"], cwd=ROOT, text=True)
-        for name in ["std::optional<entt::entity> FindEntityByServerId(", "std::optional<ActorOwnershipToken> GetLocalOwnershipToken(", "std::optional<ActorOwnershipToken> GetRemoteOwnershipToken("]:
-            assert function("Code/client/Utils.cpp", name) == extract_function(old_utils, name)
+        name = "std::optional<entt::entity> FindEntityByServerId("
+        assert function("Code/client/Utils.cpp", name) == extract_function(old_utils, name)
+        for role, variable in [("Local", "token"), ("Remote", "remoteToken")]:
+            helper = f"Get{role}OwnershipToken"
+            baseline = extract_function(old_utils, "std::optional<ActorOwnershipToken> " + helper + "(").replace(helper, "Baseline" + helper)
+            # The index has already been inserted; put the baseline beside it.
+            index_end = block("Code/client/Utils.cpp", "// BEGIN ENTITY LOOKUP INDEX", "void ShowHudMessage")
+            assert source.count(index_end) == 1
+            source = source.replace(index_end, index_end + "\n" + baseline)
+            anchor = f"const auto {variable} = {helper}(id);"
+            assert source.count(anchor) == 1
+            source = source.replace(anchor, anchor + f"\n            const auto baseline{role} = Baseline{helper}(id);\n            assert(bool({variable}) == bool(baseline{role}));\n            if ({variable}) assert({variable}->ServerId == baseline{role}->ServerId && {variable}->OwnershipEpoch == baseline{role}->OwnershipEpoch);")
         combat_path = "Code/client/Services/Generic/CombatService.cpp"
         old_combat = subprocess.check_output(["git", "show", "25fa030d:" + combat_path], cwd=ROOT, text=True)
         new_combat = re.sub(r"// BEGIN SCALE COMBAT TIMING.*?// END SCALE COMBAT TIMING", "", function(combat_path, "void CombatService::RunTargetUpdates("), flags=re.S)
         new_combat = new_combat.replace("const PlayerCombat::ObserverSnapshot observerSnapshot;\n    const auto& observers = observerSnapshot.Get();", "const auto observers = PlayerCombat::Observers();")
         assert re.sub(r"\s+", "", new_combat) == re.sub(r"\s+", "", extract_function(old_combat, "void CombatService::RunTargetUpdates("))
-        print("25fa030d comparisons passed: generic/native Utils helpers; combat body normalized for timing and snapshot storage. Discovery and observer baselines loaded for differential execution.", flush=True)
+        print("25fa030d comparisons passed: generic Utils helper; combat body normalized for timing and snapshot storage. Ownership, discovery and observer baselines loaded for differential execution.", flush=True)
         cpp = out / "scale.cpp"
         cpp.write_text(source)
         obj, exe = out / "scale.obj", out / "scale.exe"

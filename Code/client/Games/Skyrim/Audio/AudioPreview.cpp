@@ -6,6 +6,10 @@
 #include <Forms/TESForm.h>
 
 #include <random>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <set>
 #include <vector>
 
 namespace
@@ -87,6 +91,26 @@ TTrackFn s_realTrackStop = nullptr;
 void* s_currentTrack = nullptr;
 float s_musicLevelAtTrackStart = 1.f;
 bool s_musicMutedForPreview = false;
+bool s_worldMusicMuted = false; // the live lobby keeps the title theme alone
+
+struct LobbyTrack
+{
+    const char* Title;
+    const char* Path; // under Data\Music
+    uint32_t Seconds;
+};
+constexpr LobbyTrack kLobbyTracks[] = {
+#include "LobbyPlaylist.inl"
+};
+
+struct LobbyPlayer
+{
+    std::vector<size_t> Order;
+    size_t Position = 0;
+    SoundHandle Handle{};
+    Clock::time_point Started{};
+    bool Active = false;
+} s_lobby;
 
 float MusicUserLevel() noexcept
 {
@@ -372,18 +396,233 @@ void SyncMusicVolume() noexcept
     static VersionDbPtr<SoundHandle> s_titleMusic(383021);
     if (auto* pTitle = s_titleMusic.Get(); pTitle && reinterpret_cast<TIsValid>(s_isValid.GetPtr())(pTitle))
         reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(pTitle, s_musicMutedForPreview ? 0.f : MusicUserLevel());
+    // The lobby soundtrack has no category either.
+    if (s_lobby.Active && reinterpret_cast<TIsValid>(s_isValid.GetPtr())(&s_lobby.Handle))
+        reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(&s_lobby.Handle, s_musicMutedForPreview ? 0.f : MusicUserLevel());
 
     if (!s_currentTrack)
         return;
     // The category already applied the start-of-track level; scale by the change since.
     const float start = std::max(0.01f, s_musicLevelAtTrackStart);
-    const float gain = s_musicMutedForPreview ? 0.f : std::clamp(MusicUserLevel() / start, 0.f, 1.f / start);
+    const float gain = s_musicMutedForPreview || s_worldMusicMuted ? 0.f : std::clamp(MusicUserLevel() / start, 0.f, 1.f / start);
     for (const size_t offset : {kTrackHandleA, kTrackHandleB})
     {
         auto* pHandle = reinterpret_cast<SoundHandle*>(static_cast<uint8_t*>(s_currentTrack) + offset);
         if (reinterpret_cast<TIsValid>(s_isValid.GetPtr())(pHandle))
             reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(pHandle, gain);
     }
+}
+
+void EnsureTitleTheme() noexcept
+{
+    using TIsValid = bool (*)(const SoundHandle*);
+    using TStart = void (*)();
+    static VersionDbPtr<void> s_isValid(67621);     // BSSoundHandle::IsValid
+    static VersionDbPtr<SoundHandle> s_title(383021); // the Main Menu's theme handle
+    static VersionDbPtr<void> s_start(52185);       // Main Menu music start (the hook below syncs its volume)
+    auto* pTitle = s_title.Get();
+    if (!pTitle || reinterpret_cast<TIsValid>(s_isValid.GetPtr())(pTitle))
+        return;
+    reinterpret_cast<TStart>(s_start.GetPtr())();
+    spdlog::info("Audio: title theme (re)started for the lobby");
+}
+
+void FadeOutTitleTheme(uint16_t aMilliseconds) noexcept
+{
+    using TIsValid = bool (*)(const SoundHandle*);
+    using TFade = bool (*)(SoundHandle*, uint16_t);
+    static VersionDbPtr<void> s_isValid(67621);
+    static VersionDbPtr<void> s_fade(67646); // BSSoundHandle::FadeOutAndRelease
+    static VersionDbPtr<SoundHandle> s_title(383021);
+    if (auto* pTitle = s_title.Get(); pTitle && reinterpret_cast<TIsValid>(s_isValid.GetPtr())(pTitle))
+        reinterpret_cast<TFade>(s_fade.GetPtr())(pTitle, aMilliseconds);
+}
+
+// As the Main Menu plays its theme (FUN_14095ea10, ID 52185): the path under "\Data\Music\" normalised under
+// "music\" (ID 69822), its BSResource::ID (ID 69971), BSAudioManager::GetSoundHandleByFile (ID 67664) with flags
+// 0x30 / priority 0x80, the menu music attenuation (uMainMenuMusicAttnmB, value at ID 383004) through ID 67629,
+// then Play. No sound category, so the handle volume carries the Music slider (as SyncMusicVolume does for the theme).
+static bool PlayLobbyTrack(const LobbyTrack& acTrack) noexcept
+{
+    using TNormalize = const char* (*)(char*, uint32_t, const char*, const char*);
+    using TMakeId = void (*)(void*, const char*);
+    using TGetSingleton = void* (*)();
+    using TGetByFile = void (*)(void*, SoundHandle&, const void*, uint32_t, uint32_t, const char*);
+    using TSetAttenuation = bool (*)(SoundHandle*, uint16_t);
+    using TSetVolume = bool (*)(SoundHandle*, float);
+    using TPlay = bool (*)(SoundHandle*);
+    static VersionDbPtr<void> s_normalize(69822);
+    static VersionDbPtr<void> s_makeId(69971);
+    static VersionDbPtr<void> s_getSingleton(67652);
+    static VersionDbPtr<void> s_getByFile(67664);
+    static VersionDbPtr<void> s_setAttenuation(67629);
+    static VersionDbPtr<uint32_t> s_attenuation(383004);
+    static VersionDbPtr<void> s_setVolume(67626);
+    static VersionDbPtr<void> s_play(67616);
+
+    auto* pManager = reinterpret_cast<TGetSingleton>(s_getSingleton.GetPtr())();
+    if (!pManager)
+        return false;
+    char path[0x104]{};
+    snprintf(path, sizeof(path), "\\Data\\Music\\%s", acTrack.Path);
+    char normalized[0x104]{};
+    const char* pNormalized = reinterpret_cast<TNormalize>(s_normalize.GetPtr())(normalized, sizeof(normalized), path, "music\\");
+    alignas(8) uint8_t resourceId[0x10]{};
+    reinterpret_cast<TMakeId>(s_makeId.GetPtr())(resourceId, pNormalized ? pNormalized : normalized);
+
+    SoundHandle handle{};
+    reinterpret_cast<TGetByFile>(s_getByFile.GetPtr())(pManager, handle, resourceId, 0x30, 0x80, path);
+    if (handle.SoundId == 0xFFFFFFFF)
+    {
+        spdlog::warn("Lobby music: {} not found", path);
+        return false;
+    }
+    if (const auto* pAttenuation = s_attenuation.Get())
+        reinterpret_cast<TSetAttenuation>(s_setAttenuation.GetPtr())(&handle, static_cast<uint16_t>(*pAttenuation));
+    reinterpret_cast<TPlay>(s_play.GetPtr())(&handle);
+    reinterpret_cast<TSetVolume>(s_setVolume.GetPtr())(&handle, s_musicMutedForPreview ? 0.f : MusicUserLevel());
+    s_lobby.Handle = handle;
+    s_lobby.Started = Clock::now();
+    spdlog::info("Lobby music: {} ({})", acTrack.Title, acTrack.Path);
+    return true;
+}
+
+static void FadeLobbyHandle(uint16_t aMilliseconds) noexcept
+{
+    using TIsValid = bool (*)(const SoundHandle*);
+    using TFade = bool (*)(SoundHandle*, uint16_t);
+    static VersionDbPtr<void> s_isValid(67621);
+    static VersionDbPtr<void> s_fade(67646);
+    if (reinterpret_cast<TIsValid>(s_isValid.GetPtr())(&s_lobby.Handle))
+        reinterpret_cast<TFade>(s_fade.GetPtr())(&s_lobby.Handle, aMilliseconds);
+    s_lobby.Handle = {};
+}
+
+// Plays the next track in the order that exists, skipping missing files (at most one pass).
+static void PlayNextLobbyTrack() noexcept
+{
+    for (size_t attempt = 0; attempt < s_lobby.Order.size(); ++attempt)
+    {
+        s_lobby.Position = (s_lobby.Position + 1) % s_lobby.Order.size();
+        if (PlayLobbyTrack(kLobbyTracks[s_lobby.Order[s_lobby.Position]]))
+            return;
+    }
+}
+
+// Off titles (Options > Audio > Lobby music), shared with the UI thread.
+static std::mutex s_lobbyOffLock;
+static std::set<std::string> s_lobbyOff;
+static bool s_lobbyOffLoaded = false;
+
+static std::filesystem::path LobbyMusicPath() noexcept
+{
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return std::filesystem::path(path).parent_path() / "Data" / "SkyrimTogetherReborn" / "lobby_music.txt";
+}
+
+// Caller holds s_lobbyOffLock.
+static void LoadLobbyOff() noexcept
+{
+    if (s_lobbyOffLoaded)
+        return;
+    s_lobbyOffLoaded = true;
+    std::ifstream in(LobbyMusicPath());
+    if (!in)
+    {
+        s_lobbyOff = {"Blood and Steel"}; // owner 2026-10-01: off by default
+        return;
+    }
+    std::string line;
+    while (std::getline(in, line))
+        if (!line.empty() && line[0] != '#' && line.size() < 128)
+            s_lobbyOff.insert(line);
+}
+
+std::vector<std::pair<std::string, bool>> LobbyPlaylistTitles() noexcept
+{
+    std::lock_guard lock(s_lobbyOffLock);
+    LoadLobbyOff();
+    std::vector<std::pair<std::string, bool>> titles;
+    for (const auto& track : kLobbyTracks)
+        if (std::none_of(titles.begin(), titles.end(), [&](const auto& t) { return t.first == track.Title; }))
+            titles.emplace_back(track.Title, !s_lobbyOff.contains(track.Title));
+    return titles;
+}
+
+void SetLobbyTrackEnabled(const std::string& acTitle, bool aEnabled) noexcept
+{
+    std::lock_guard lock(s_lobbyOffLock);
+    LoadLobbyOff();
+    if (std::none_of(std::begin(kLobbyTracks), std::end(kLobbyTracks), [&](const LobbyTrack& t) { return acTitle == t.Title; }))
+        return;
+    if (aEnabled)
+        s_lobbyOff.erase(acTitle);
+    else
+        s_lobbyOff.insert(acTitle);
+    std::ofstream out(LobbyMusicPath(), std::ios::trunc);
+    out << "# Lobby soundtrack tracks switched off (Options > Audio > Lobby music)\n";
+    for (const auto& title : s_lobbyOff)
+        out << title << "\n";
+}
+
+void StartLobbyPlaylist() noexcept
+{
+    if (s_lobby.Active)
+        return;
+    s_lobby.Order.clear();
+    {
+        std::lock_guard lock(s_lobbyOffLock);
+        LoadLobbyOff();
+        for (size_t i = 0; i < std::size(kLobbyTracks); ++i)
+            if (!s_lobbyOff.contains(kLobbyTracks[i].Title))
+                s_lobby.Order.push_back(i);
+    }
+    if (s_lobby.Order.empty())
+        return; // every track switched off: a quiet lobby
+    std::shuffle(s_lobby.Order.begin(), s_lobby.Order.end(), Rng());
+    s_lobby.Position = s_lobby.Order.size() - 1; // PlayNext advances to 0
+    s_lobby.Active = true;
+    PlayNextLobbyTrack();
+}
+
+std::string TickLobbyPlaylist() noexcept
+{
+    using TIsValid = bool (*)(const SoundHandle*);
+    static VersionDbPtr<void> s_isValid(67621);
+    if (!s_lobby.Active || s_lobby.Order.empty())
+        return {};
+    const auto& track = kLobbyTracks[s_lobby.Order[s_lobby.Position]];
+    const auto elapsed = Clock::now() - s_lobby.Started;
+    // Next at the track's length, or early when the sound is gone (ended, or released across a load).
+    const bool gone = elapsed > 5s && !reinterpret_cast<TIsValid>(s_isValid.GetPtr())(&s_lobby.Handle);
+    if (gone || elapsed > std::chrono::seconds(track.Seconds) + 1500ms)
+    {
+        FadeLobbyHandle(800);
+        PlayNextLobbyTrack();
+    }
+    return kLobbyTracks[s_lobby.Order[s_lobby.Position]].Title;
+}
+
+bool LobbyPlaylistActive() noexcept
+{
+    return s_lobby.Active;
+}
+
+void StopLobbyPlaylist(uint16_t aFadeMilliseconds) noexcept
+{
+    if (!s_lobby.Active)
+        return;
+    s_lobby.Active = false;
+    FadeLobbyHandle(aFadeMilliseconds);
+}
+
+void SetWorldMusicMuted(bool aMuted) noexcept
+{
+    if (s_worldMusicMuted == aMuted)
+        return;
+    s_worldMusicMuted = aMuted;
+    SyncMusicVolume();
 }
 
 void NotifyCategoryVolumesChanged() noexcept
@@ -429,6 +668,9 @@ using TTitleMusic = void (*)(void*, void*, void*, void*);
 static TTitleMusic RealTitleMusic = nullptr;
 static void HookTitleMusic(void* a1, void* a2, void* a3, void* a4)
 {
+    // The lobby opens the real Main Menu over its scene; its own theme would play over the lobby soundtrack.
+    if (AudioPreview::LobbyPlaylistActive())
+        return;
     RealTitleMusic(a1, a2, a3, a4);
     AudioPreview::SyncMusicVolume();
 }

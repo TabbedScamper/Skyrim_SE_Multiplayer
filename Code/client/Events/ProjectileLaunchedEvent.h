@@ -26,4 +26,5 @@ struct ProjectileLaunchedEvent
     bool ForceConeOfFire;
     bool UnkBool1;
     bool UnkBool2;
+    bool IsDualCasting{};
 };

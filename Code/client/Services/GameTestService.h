@@ -170,7 +170,7 @@ private:
         std::array<float, 2> CartViewAngle{-1.f, -1.f};
         std::array<float, 2> HorseViewAngle{-1.f, -1.f};
         float CameraFov{};
-        // Horse character controller (Muse diag-horsez stage 1): proxy position z (vslot 02, game units), fall
+        // Horse character controller (diag-horsez stage 1): proxy position z (vslot 02, game units), fall
         // timer +0x244, fall start +0x240, step delta z +0x188. Frozen together = controller not stepped.
         std::array<float, 2> CtrlZ{};
         std::array<float, 2> CtrlFallTime{};

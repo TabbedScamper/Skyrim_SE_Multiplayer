@@ -40,6 +40,18 @@ struct InventoryService
      * @brief Sends out equipment changes made by the local client.
      */
     void OnEquipmentChangeEvent(const EquipmentChangeEvent& acEvent) noexcept;
+    /**
+     * @brief Sends every item this player wears as an equip, so the others' copy wears it too (the lobby dresses the
+     * character after it joined the session, by adding worn stacks, which raises no equip events).
+     */
+    void AnnounceWorn() noexcept;
+    void WatchLocalWorn() noexcept;
+    uint64_t m_nextWornCheck{};
+    uint64_t m_lastWornSignature{};
+    uint64_t m_lastWornAnnounce{};
+    uint32_t m_lastCopyCount{};
+    bool m_copiesChangedPending{};
+    std::vector<std::pair<GameId, bool>> m_lastAnnouncedWorn;
 
     /**
      * @brief Applies inventory changes sent by the server.
@@ -66,4 +78,14 @@ private:
     entt::scoped_connection m_equipmentConnection;
     entt::scoped_connection m_inventoryChangeConnection;
     entt::scoped_connection m_equipmentChangeConnection;
+    // Net item deltas sent in the last few seconds for NPCs this PC owns, per (actor form, item): an outfit
+    // re-applied by the engine re-adds its items without an inventory event, so only the removals were sent.
+    struct RecentNpcDelta
+    {
+        int64_t Net{};
+        uint64_t AtMs{};
+        uint32_t ServerId{}, OwnershipEpoch{};
+        Inventory::Entry Item{};
+    };
+    std::unordered_map<uint64_t, RecentNpcDelta> m_recentNpcDeltas;
 };

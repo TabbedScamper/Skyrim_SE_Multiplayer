@@ -12,7 +12,7 @@ void ReviveRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexc
     {
         ClientMessage::DeserializeRaw(aReader);
         DeserializeData(aReader);
-        m_valid = Action != ReviveAction::Grant;
+        m_valid = Action != ReviveAction::Grant && Action != ReviveAction::Wipe;
     }
     catch (...) {}
 }

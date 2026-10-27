@@ -11,6 +11,10 @@ declare namespace SkyrimTogetherTypes {
     highlighted: number, chosen: number, choiceSerial: string, chosenText: string,
     subtitle: string, durationMs: number, lineSerial: string,
   ) => void;
+  /** Revive prompt/meter: mode (0 hidden, 1 prompt, 2 reviving, 3 down), name, keyboard key, progress 0-1, hint,
+   *  note (e.g. in combat), controller button (a/b/x/y/lb/rb/lt/rt), controller model, controller used last. */
+  type ReviveCallback = (mode: number, name: string, key: string, progress: number, hint: string, note: string,
+    button: string, model: string, gamepad: boolean, bleed: number) => void;
   /** Client initialization callback */
   type InitCallback = () => void;
 
@@ -97,6 +101,7 @@ declare namespace SkyrimTogetherTypes {
   type CoopLobbyStateCallback = (
     playerIds: Array<number>, leaderId: number, readyPlayerIds: Array<number>, campaignMode: number,
     sessionState: number, startEpoch: string, checkpointId: string, lobbyOpen: boolean, passwordProtected: boolean,
+    localPlayerId?: number,
   ) => void;
   type CoopGameplaySettingsCallback = (difficulty: number, pvpEnabled: boolean, deathSystemEnabled: boolean, greetingsEnabled: boolean) => void;
   type SteamLobbyStateCallback = (
@@ -125,6 +130,7 @@ declare const skyrimtogether: SkyrimTogether;
 interface SkyrimTogether {
   /** Add listener to when the UI is first initialized. */
   on(event: 'dialogueListen', callback: SkyrimTogetherTypes.DialogueListenCallback): void;
+  on(event: 'revive', callback: SkyrimTogetherTypes.ReviveCallback): void;
   on(event: 'init', callback: SkyrimTogetherTypes.InitCallback): void;
 
   on(event: 'debugPrompt', callback: SkyrimTogetherTypes.DebugPromptCallback): void;
@@ -200,6 +206,19 @@ interface SkyrimTogether {
     callback: SkyrimTogetherTypes.PlayerConnectedCallback,
   ): void;
 
+  /** Add listener to when a player's character is renamed (character creator). */
+  on(event: 'playerNameChanged', callback: (playerId: number, name: string) => void): void;
+
+  /** The checkpoint picker's list: a JSON array (id, player, level, location, gameDate, savedMs, image). */
+  on(event: 'checkpointList', callback: (json: string) => void): void;
+
+  /** Characters this PC can join a running session with: a JSON array (path, name, level, location, savedMs, image). */
+  on(event: 'characterList', callback: (json: string) => void): void;
+
+  /** Progress of joining a running session. */
+  on(event: 'dropInStatus', callback: (status: string) => void): void;
+  on(event: 'updateState', callback: (state: string) => void): void;
+
   /** Add listener to when one player disconnect in server. */
   on(
     event: 'playerDisconnected',
@@ -268,10 +287,14 @@ interface SkyrimTogether {
   on(event: 'gamepadScroll', callback: (amount: number) => void): void;
 
   /** Character creation together: whose character the creator shows (player k of n) and whether it is ready. */
+  on(event: 'lobbyPlaylist', callback: (titles: string[], enabled: boolean[]) => void): void;
+  on(event: 'lobbyMusic', callback: (title: string) => void): void;
+  on(event: 'lobbyState', callback: (loading: boolean, progress: number, menu: boolean) => void): void;
   on(event: 'creatorView', callback: (visible: boolean, player: number, count: number, ready: boolean, localReady: boolean, gamepad: boolean) => void): void;
 
   /** Remove listener from when the application is first initialized. */
   off(event: 'dialogueListen', callback?: SkyrimTogetherTypes.DialogueListenCallback): void;
+  off(event: 'revive', callback?: SkyrimTogetherTypes.ReviveCallback): void;
   off(event: 'init', callback?: SkyrimTogetherTypes.InitCallback): void;
 
   /** Remove listener from when the UI is activated. */
@@ -341,6 +364,15 @@ interface SkyrimTogether {
     event: 'playerConnected',
     callback?: SkyrimTogetherTypes.PlayerConnectedCallback,
   ): void;
+
+  off(event: 'playerNameChanged', callback?: (playerId: number, name: string) => void): void;
+
+  off(event: 'checkpointList', callback?: (json: string) => void): void;
+
+  off(event: 'characterList', callback?: (json: string) => void): void;
+
+  off(event: 'dropInStatus', callback?: (status: string) => void): void;
+  off(event: 'updateState', callback?: (state: string) => void): void;
 
   /** Add listener to when one player disconnect in server. */
   off(
@@ -419,6 +451,9 @@ interface SkyrimTogether {
   off(event: 'gameSettingsApplied', callback?: SkyrimTogetherTypes.VoidCallback): void;
   off(event: 'gamepadInput', callback?: (action: string, repeat: boolean) => void): void;
   off(event: 'gamepadScroll', callback?: (amount: number) => void): void;
+  off(event: 'lobbyPlaylist', callback?: (titles: string[], enabled: boolean[]) => void): void;
+  off(event: 'lobbyMusic', callback?: (title: string) => void): void;
+  off(event: 'lobbyState', callback?: (loading: boolean, progress: number, menu: boolean) => void): void;
   off(event: 'creatorView', callback?: (visible: boolean, player: number, count: number, ready: boolean, localReady: boolean, gamepad: boolean) => void): void;
 
   /**
@@ -478,6 +513,21 @@ interface SkyrimTogether {
 
   startTogether(mode: number, checkpointId: string): void;
 
+  /** Asks for the checkpoint picker's list; it arrives as 'checkpointList'. */
+  listCheckpoints(): void;
+
+  /** Asks for the joinable characters; they arrive as 'characterList'. */
+  listCharacters(): void;
+
+  /** Joins the running session as the character in a .snap file. */
+  joinRunningSession(path: string): void;
+
+  /** Checks the GitHub latest release now; the answer arrives as 'updateState'. */
+  checkUpdates(): void;
+
+  /** Downloads and verifies the available update; the starter applies it at the next launch. */
+  downloadUpdate(): void;
+
   hostSteamSession(): void;
 
   joinSteamSession(lobbyId: string): void;
@@ -515,6 +565,9 @@ interface SkyrimTogether {
   resetGameSettings(section?: string): void;
 
   openTitleOptions(): void;
+  lobbyAction(name: string): void;
+  requestLobbyPlaylist(): void;
+  setLobbyTrack(title: string, enabled: boolean): void;
 
   openTitleLobby(): void;
 

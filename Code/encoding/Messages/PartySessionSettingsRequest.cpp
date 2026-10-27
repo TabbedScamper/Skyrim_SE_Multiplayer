@@ -5,10 +5,12 @@ void PartySessionSettingsRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aW
 {
     Serialization::WriteBool(aWriter, Open);
     Serialization::WriteString(aWriter, Password);
+    Serialization::WriteBool(aWriter, KeepPassword);
 }
 
 void PartySessionSettingsRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
 {
     Open = Serialization::ReadBool(aReader);
     Password = Serialization::ReadString(aReader);
+    KeepPassword = Serialization::ReadBool(aReader);
 }

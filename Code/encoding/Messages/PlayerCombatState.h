@@ -6,7 +6,13 @@
 // One player per snapshot. IDs are server character IDs, never local form IDs.
 struct PlayerCombatState
 {
-    enum Kind : uint8_t { Stealth, Detection, Damage, Threat };
+    enum Kind : uint8_t { Stealth, Detection, Damage, Threat, Crime };
+    struct Witness
+    {
+        uint32_t Id{};
+        uint32_t OwnershipEpoch{};
+        bool operator==(const Witness&) const noexcept = default;
+    };
     struct Perk
     {
         GameId Id{};
@@ -14,6 +20,7 @@ struct PlayerCombatState
         bool operator==(const Perk&) const noexcept = default;
     };
     static constexpr size_t MaxPerks = 512;
+    static constexpr size_t MaxWitnesses = 512;
     static constexpr std::array<uint32_t, 5> ActorValues{15, 54, 92, 105, 144};
 
     uint8_t Type{Stealth};
@@ -36,6 +43,11 @@ struct PlayerCombatState
     uint8_t MeterLevel{};
     uint32_t LOSCount{};
     float RawDamage{};
+    uint32_t CrimeId{};
+    uint8_t CrimeType{};
+    uint32_t CrimeGold{};
+    GameId CrimeFaction{};
+    TiltedPhoques::Vector<Witness> Witnesses;
 
     void Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noexcept;
     bool Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept;

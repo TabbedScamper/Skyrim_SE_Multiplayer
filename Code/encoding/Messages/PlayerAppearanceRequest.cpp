@@ -8,6 +8,7 @@ void PlayerAppearanceRequest::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
     Serialization::WriteString(aWriter, AppearanceBuffer);
     FaceTints.Serialize(aWriter);
     Serialization::WriteBool(aWriter, InCreator);
+    Serialization::WriteString(aWriter, Name);
 }
 
 void PlayerAppearanceRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -20,4 +21,5 @@ void PlayerAppearanceRequest::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
     AppearanceBuffer = Serialization::ReadString(aReader);
     FaceTints.Deserialize(aReader);
     InCreator = Serialization::ReadBool(aReader);
+    Name = Serialization::ReadString(aReader);
 }
